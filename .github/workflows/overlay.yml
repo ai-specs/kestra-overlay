@@ -8,14 +8,14 @@ permissions:
   packages: write
 jobs:
   patch-verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: Verify and apply thin patches (upstream pinned BASE)
         run: ./scripts/build.sh --apply-only
   build-push:
     needs: patch-verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: Log in to GHCR
