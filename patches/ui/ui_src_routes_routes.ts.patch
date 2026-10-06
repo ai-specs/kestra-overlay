@@ -1,0 +1,61 @@
+diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
+index e243b3442b..e35241f5e4 100644
+--- a/ui/src/routes/routes.ts
++++ b/ui/src/routes/routes.ts
+@@ -16,6 +16,11 @@ const routes: KestraRouteRecord[] = [
+ 
+     {name: "ai",path: "/:tenant?/ai", component: () => import("../components/ai/copilot/CopilotPage.vue")},
+ 
++    //dsh Apps (Amis-powered declarative apps, one flow = one app)
++    //The 应用程序 list is a SPA view; app pages themselves live at the standalone
++    ///apps/{app}/{page} URLs (UiAppController + apps.html entry), never under /ui/.
++    {name: "apps/list", path: "/:tenant?/apps", component: () => import("../components/dsh/apps/AppList.vue")},
++
+     //Dashboards
+     {
+         name: "home",
+@@ -65,6 +70,24 @@ const routes: KestraRouteRecord[] = [
+ 
+     //Namespaces
+     {name: "namespaces/list", path: "/:tenant?/namespaces", component: () => import("override/components/namespaces/Namespaces.vue")},
++
++    // dsh employees (fork: Resources→employee 员工命名空间浏览)
++    {name: "employees/list", path: "/:tenant?/employee", component: () => import("../components/dsh/employee/Employees.vue")},
++    {
++        name: "employees/update",
++        path: "/:tenant?/employee/edit/:namespace",
++        component: () => import("../components/dsh/employee/Employee.vue"),
++        // Same no-component child records as createNamespaceTabRoutes: tabs render through
++        // Tabs.vue's TabBody (vertical sidebar), children only give each tab a real URL.
++        redirect: (to) => {
++            const tab = (to.params.tab as string) || "sessions"
++            return {name: `employees/update/${tab}`, params: to.params, query: to.query}
++        },
++        children: [
++            {name: "employees/update/sessions", path: "sessions", meta: {tab: "sessions"}},
++            {name: "employees/update/files", path: "files", meta: {tab: "files"}},
++        ] as unknown as KestraRouteRecord[],
++    },
+     {
+         name: NAMESPACE_PARENT_ROUTE,
+         path: "/:tenant?/namespaces/edit/:id",
+@@ -99,6 +122,10 @@ const routes: KestraRouteRecord[] = [
+     {name: "admin/mcp-servers",        path: "/:tenant?/admin/mcp-servers",                         component: () => import("../components/admin/McpServerList.vue")},
+     {name: "admin/mcp-servers/update", path: "/:tenant?/admin/mcp-servers/edit/:id/:tab?",            component: () => import("../components/admin/McpServer.vue")},
+     {name: "admin/mcp-servers/create", path: "/:tenant?/admin/mcp-servers/new/:tab?",                 component: () => import("../components/admin/McpServer.vue")},
++    {name: "admin/users", path: "/:tenant?/admin/users", component: () => import("../components/dsh/users/Users.vue")},
++    {name: "admin/users/update", path: "/:tenant?/admin/users/:id", component: () => import("../components/dsh/users/Users.vue")},
++    {name: "admin/project", path: "/:tenant?/admin/project", component: () => import("../components/dsh/project/ProjectList.vue")},
++    {name: "admin/project/detail", path: "/:tenant?/admin/project/:id", component: () => import("../components/dsh/project/ProjectDetail.vue")},
+ 
+     //Setup
+     // ossOnly: posts to /api/v1/{tenant}/basicAuth, which EE does not implement.
+@@ -112,7 +139,7 @@ const routes: KestraRouteRecord[] = [
+     //Demo Pages
+     {name: "dashboards/create", path: "/:tenant?/dashboards/new", component: () => import("../components/demo/Dashboards.vue")},
+     {name: "dashboards/update", path: "/:tenant?/dashboards/:dashboard/edit", component: () => import("../components/demo/Dashboards.vue")},
+-    {name: "apps/list", path: "/:tenant?/apps", component: () => import("../components/demo/Apps.vue")},
++    // apps list replaced by dsh AppList.vue (declared in the dsh Apps block above); upstream demo page removed
+     {name: "tests/list", path: "/:tenant?/tests", component: () => import("../components/demo/Tests.vue")},
+     {name: "assets/list", path: "/:tenant?/assets", component: () => import("../components/demo/Assets.vue")},
+     {name: "cases/list", path: "/:tenant?/cases", component: () => import("../components/demo/Cases.vue")},

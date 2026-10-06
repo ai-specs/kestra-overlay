@@ -1,0 +1,33 @@
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
+index a7b26348e9..3f7625964b 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
+@@ -155,12 +155,27 @@ public class ErrorController {
+         return this.problems.responseWithoutMessage(request, reported);
+     }
+ 
+-    /** A request that matched no route at all, and so carries no exception. */
++    /** Upstream behavior preserved: problem+json for every unmatched-route 404 (kestra UI surfaces the detail). */
+     @Error(global = true, status = HttpStatus.NOT_FOUND)
+     public HttpResponse<ProblemDetail> notFound(HttpRequest<?> request) {
+         return this.problems.response(request, null, ProblemTypes.NOT_FOUND, List.of());
+     }
+ 
++    /**
++     * dsh empty-body 404 marker (PageTrigger/ApiTrigger surface only: AppRouterController,
++     * AppsFileController, UiAppController): rendered through the standard error pipeline —
++     * framework error handling is OOM-safe for unconsumed streaming bodies (Kestra#17633),
++     * unlike an early raw 404 return inside the controller. The X-Dsh-Empty-404 header lets
++     * ProblemResponseFilter tell this deliberate empty 404 apart from upstream bare 404s
++     * (which carry no body either and must still get a problem document — upstream behavior);
++     * the filter consumes and strips the header before the response leaves.
++     */
++    @Error(global = true, exception = io.kestra.webserver.controllers.api.NotFoundResponseException.class)
++    public HttpResponse<?> notFoundResponse(HttpRequest<?> request, io.kestra.webserver.controllers.api.NotFoundResponseException e) {
++        return HttpResponse.status(HttpStatus.NOT_FOUND)
++            .header("X-Dsh-Empty-404", "1");
++    }
++
+     /**
+      * The document path Jackson recorded, e.g. {@code tasks[0].type}. Uses the public reference chain rather
+      * than the private field the previous implementation reflected into.

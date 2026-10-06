@@ -1,0 +1,124 @@
+diff --git a/ui/src/override/components/useLeftMenu.ts b/ui/src/override/components/useLeftMenu.ts
+index 391274eb2f..08269355a3 100644
+--- a/ui/src/override/components/useLeftMenu.ts
++++ b/ui/src/override/components/useLeftMenu.ts
+@@ -20,6 +20,7 @@ import FlaskOutline from "vue-material-design-icons/FlaskOutline.vue"
+ import PackageVariantClosed from "vue-material-design-icons/PackageVariantClosed.vue"
+ import AlertCircleOutline from "vue-material-design-icons/AlertCircleOutline.vue"
+ import FolderOpenOutline from "vue-material-design-icons/FolderOpenOutline.vue"
++import AccountGroupOutline from "vue-material-design-icons/AccountGroupOutline.vue"
+ import PuzzleOutline from "vue-material-design-icons/PuzzleOutline.vue"
+ import ShapePlusOutline from "vue-material-design-icons/ShapePlusOutline.vue"
+ 
+@@ -32,6 +33,7 @@ import Battery40 from "vue-material-design-icons/Battery40.vue"
+ import Gauge from "vue-material-design-icons/Gauge.vue"
+ import ShieldAccount from "vue-material-design-icons/ShieldAccount.vue"
+ import ShieldCheckOutline from "vue-material-design-icons/ShieldCheckOutline.vue"
++import FolderAccountOutline from "vue-material-design-icons/FolderAccountOutline.vue"
+ import RocketLaunchOutline from "vue-material-design-icons/RocketLaunchOutline.vue"
+ import McpIcon from "../../components/McpIcon.vue"
+ 
+@@ -161,9 +163,8 @@ export function useLeftMenu() {
+                         icon: {
+                             element: LayersTripleOutline,
+                         },
+-                        attributes: {
+-                            locked: true,
+-                        },
++                        // dsh fork: apps is a real dsh feature (declarative Amis apps, plugin-dsh-apps),
++                        // not an EE upsell — no locked attribute so the menu renders like any normal item.
+                     },
+                     {
+                         id: "tests",
+@@ -196,6 +197,18 @@ export function useLeftMenu() {
+                             element: FolderOpenOutline,
+                         },
+                     },
++                    {
++                        // dsh fork：员工命名空间（云电脑模式，只有文件无 flow 的命名空间）
++                        id: "employees",
++                        title: t("dsh.employee.label"),
++                        routes: routeStartWith("employees"),
++                        href: {
++                            name: "employees/list",
++                        },
++                        icon: {
++                            element: AccountGroupOutline,
++                        },
++                    },
+                     {
+                         id: "assets",
+                         title: t("demos.assets.label"),
+@@ -378,6 +391,28 @@ export function useLeftMenu() {
+                             element: Battery40,
+                         },
+                     },
++                    {
++                        id: "dsh-users",
++                        title: t("dsh.users.title"),
++                        routes: routeStartWith("admin/users"),
++                        href: {
++                            name: "admin/users",
++                        },
++                        icon: {
++                            element: ShieldAccount,
++                        },
++                    },
++                    {
++                        id: "dsh-project",
++                        title: t("dsh.project.title"),
++                        routes: routeStartWith("admin/project"),
++                        href: {
++                            name: "admin/project",
++                        },
++                        icon: {
++                            element: FolderAccountOutline,
++                        },
++                    },
+                     {
+                         id: "iam",
+                         title: t("iam"),
+@@ -419,8 +454,39 @@ export function useLeftMenu() {
+             }
+         })
+ 
+-        return generated
++        return hideLockedMenu(generated)
+     })
+ 
+     return {menu}
+-}
+\ No newline at end of file
++}
++
++// ── dsh fork: 隐藏企业版（EE）锁定菜单 ────────────────────────────────────────
++// 上游 Kestra 开源版会在侧边栏/顶部导航/全局搜索中展示企业版菜单项，标记
++// `attributes.locked: true`，点击后跳转到「联系销售」宣传页。dsh 部署不使用这些
++// EE 功能，统一在展示层过滤掉。
++//
++// 过滤条件跟随上游的 locked 标记，而非硬编码 id 白名单：
++//   - 上游新增 EE 菜单（带 locked=true）→ 自动隐藏，无需维护列表
++//   - 上游把某菜单改为 unlocked → 自动显示
++//   - dsh 自定义菜单（dsh-users/dsh-roles）不带 locked → 不受影响
++//
++// 开放分组（2026-09-09，用户定向）：Workspace / Resources 两个分组下的
++// locked 菜单（apps/tests/assets/cases）一并显示，分组内递归不过滤；
++// 其余分组（Tenant）维持隐藏 locked（policies/audit-logs/promote/quotas/iam）。
++// 若未来需要再开放某分组，在 OPEN_GROUPS 数组追加分组 id 即可。
++const OPEN_GROUPS = new Set(["workspace", "resources"])
++
++const hideLockedMenu = (items: MenuItem[], keepLocked = false): MenuItem[] =>
++    items
++        .filter((item) => keepLocked || !item.attributes?.locked)
++        .map((item) =>
++            item.child
++                ? {
++                      ...item,
++                      child: hideLockedMenu(
++                          item.child,
++                          keepLocked || (item.id !== undefined && OPEN_GROUPS.has(item.id)),
++                      ),
++                  }
++                : item,
++        )
+\ No newline at end of file

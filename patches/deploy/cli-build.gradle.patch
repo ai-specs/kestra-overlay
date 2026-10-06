@@ -1,0 +1,12 @@
+diff --git a/cli/build.gradle b/cli/build.gradle
+index 0d5f0fc5bb..73981282b5 100644
+--- a/cli/build.gradle
++++ b/cli/build.gradle
+@@ -65,6 +65,7 @@ dependencies {
+     implementation project(":executor")
+     implementation project(":scheduler")
+     implementation project(":webserver")
++    implementation project(":oidc-provider")
+     implementation project(":worker")
+     implementation project(":worker-controller")
+     implementation project(":indexer")

@@ -1,0 +1,145 @@
+diff --git a/ui/src/utils/kestraHttp.ts b/ui/src/utils/kestraHttp.ts
+index 9342921054..0129bef330 100644
+--- a/ui/src/utils/kestraHttp.ts
++++ b/ui/src/utils/kestraHttp.ts
+@@ -3,6 +3,8 @@ import type {Router} from "vue-router"
+ import {configureClient, useClient, asProblem, type ProblemDetail} from "@kestra-io/kestra-sdk"
+ import {markServerReachable, markServerUnreachable} from "../composables/useServerReachability"
+ import {isReauthOpen, recheckReauth} from "../composables/useReauthDialog"
++import {idpLogin, isOidcAuthEnabled, refreshSession} from "./basicAuth"
++import {getCsrfToken} from "./csrf"
+ 
+ let pendingRoute = false
+ let requestsTotal = 0
+@@ -152,6 +154,13 @@ export function setupKestraHttp(
+     } = options
+ 
+     function navigateToLogin() {
++        // OIDC: the SPA login route is a dead end (no Basic Auth endpoint behind it) — the
++        // IdP login is the only entry, and it must be a full-page navigation so the server
++        // re-issues the session cookies. Deep link carries the current path.
++        if (isOidcAuthEnabled()) {
++            idpLogin(window.location.pathname + window.location.search)
++            return
++        }
+         if (!router) return
+         const currentPath = window.location.pathname
+         router.push({
+@@ -174,23 +183,45 @@ export function setupKestraHttp(
+     }
+ 
+     function withAuthRetry<F extends (...args: any[]) => Promise<any>>(fn: F): F {
+-        return (async (...args: Parameters<F>) => {
++        // `retried` bounds each request chain to ONE refresh-retry — combined with the
++        // refresh in-flight dedup this makes the 401 → refresh → retry cycle terminate even
++        // when several raced requests 401 back-to-back during a boot.
++        const run = async (retried: boolean, ...args: Parameters<F>) => {
+             const wasLoggedIn = isLoggedIn()
+             try {
+                 return await fn(...args)
+             } catch (error) {
+                 const kestraError = error as KestraHttpError
+-                if (kestraError.status === 401) {
+-                    if (!isLoggedIn()) {
+-                        const shouldRetry = await onUnauthorized(navigateToLogin, kestraError)
+-                        if (shouldRetry) return fn(...args)
+-                    } else if (!wasLoggedIn) {
+-                        return fn(...args)
++                if (kestraError.status !== 401) throw error
++                if (isOidcAuthEnabled()) {
++                    // OIDC single-credential model: a 401 first tries one sliding refresh
++                    // (rotated JWT) and retries the request — an actively-used session is
++                    // renewed transparently. A login that completed mid-flight (the request
++                    // left signed-out but the session is now valid) replays once without the
++                    // login redirect, mirroring upstream OSS semantics. Only a refresh that
++                    // fails on an already-expired session falls through to the login redirect.
++                    if (!retried && await refreshSession()) {
++                        return run(true, ...args)
++                    }
++                    if (!wasLoggedIn && isLoggedIn()) {
++                        return run(true, ...args)
+                     }
++                    const shouldRetry = await onUnauthorized(navigateToLogin, kestraError)
++                    if (shouldRetry) return run(true, ...args)
++                    throw error
++                }
++                // OSS upstream semantics: redirect only when the flag cookie is gone.
++                if (!isLoggedIn()) {
++                    const shouldRetry = await onUnauthorized(navigateToLogin, kestraError)
++                    if (shouldRetry) return run(true, ...args)
++                } else if (!wasLoggedIn) {
++                    // upstream: a login completed mid-flight — retry once on the now-valid session.
++                    return run(true, ...args)
+                 }
+                 throw error
+             }
+-        }) as F
++        }
++        return ((...args: Parameters<F>) => run(false, ...args)) as F
+     }
+ 
+     const client = configureClient(clientConfig)
+@@ -203,13 +234,26 @@ export function setupKestraHttp(
+ 
+     client.interceptors.request.use((request, opts: unknown) => {
+         if (typeof document !== "undefined" && !skipProgress(opts)) initProgress()
+-        if (!isSameOrigin(request)) return request
+-        const headers = new Headers(request.headers)
+-        headers.set("X-Requested-With", "XMLHttpRequest")
+-        return new Request(request, {headers})
++        // dsh: OIDC cookie 认证下，所有非安全写方法须携带后端签发的 CSRF token
++        // （页面 meta[name="csrf-token"]，与 csrfToken cookie 同值，后端 CsrfTokenFilter 校验）。
++        // 缺少该 header 时 cookie 认证的 POST/PATCH/DELETE 会被 403 拒绝。
++        if (isSameOrigin(request)) {
++            const headers = new Headers(request.headers)
++            headers.set("X-Requested-With", "XMLHttpRequest")
++            if (typeof document !== "undefined") {
++                const method = String(request?.method ?? "").toUpperCase()
++                if (method && !["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
++                    const csrf = getCsrfToken()
++                    if (csrf && !headers.has("X-CSRF-TOKEN")) headers.set("X-CSRF-TOKEN", csrf)
++                }
++            }
++            return new Request(request, {headers})
++        }
++        return request
+     })
+ 
+     client.interceptors.response.use((response, request, opts) => {
++        // dsh: 与 request 钩子一致——跳过 NProgress 的请求（stream/SSE 等）也不推进进度条
+         if (isKestraApiRequest(request)) {
+             markServerReachable()
+             if (isReauthOpen()) void recheckReauth()
+@@ -267,15 +311,24 @@ export function setupKestraHttp(
+     for (const target of [client, useClient()] as const) {
+         const targetAny = target as unknown as Record<string, (...args: any[]) => Promise<any>>
+         for (const method of ["get", "post", "put", "patch", "delete", "request", "stream"]) {
+-            if (typeof targetAny[method] !== "function") continue
+-            let fn = targetAny[method].bind(target)
+-            // stream() reads an open body (SSE and similar). Opt it out of the page loader, same as generated `sse` methods.
+-            if (method === "stream") {
+-                const inner = fn
+-                fn = (url: string, data?: unknown, config: Record<string, unknown> = {}) =>
+-                    inner(url, data, {...config, [SKIP_PROGRESS]: true})
++            if (typeof targetAny[method] === "function") {
++                const bound = targetAny[method].bind(target)
++                if (method === "stream") {
++                    // dsh: stream() 与 sse 方法一致，始终跳过 NProgress（长连接进度条无意义）
++                    targetAny[method] = withAuthRetry((...args: unknown[]) => {
++                        const lastIndex = args.length - 1
++                        const last = args[lastIndex]
++                        if (last !== undefined && typeof last === "object" && !Array.isArray(last)) {
++                            args[lastIndex] = {...last, [SKIP_PROGRESS]: true}
++                        } else {
++                            args.push({[SKIP_PROGRESS]: true})
++                        }
++                        return bound(...(args as never[]))
++                    })
++                } else {
++                    targetAny[method] = withAuthRetry(bound)
++                }
+             }
+-            targetAny[method] = withAuthRetry(fn)
+         }
+     }
+ 

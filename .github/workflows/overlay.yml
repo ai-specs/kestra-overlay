@@ -1,0 +1,17 @@
+name: overlay-build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and apply thin patches
+        run: ./scripts/build.sh --apply-only
+      - name: Build image (upstream + patches + extension jars)
+        run: ./scripts/build.sh
+      # ghcr push enabled after extension repos carry sources (avoid pushing partial images)
+      # - name: Push ghcr
+      #   run: echo "TODO enable ghcr push (ai-specs/kestra-overlay)"
