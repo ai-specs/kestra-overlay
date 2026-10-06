@@ -36,6 +36,11 @@ for p in patches/*/*.patch; do
   git -C "$WORK" apply "$PWD/$p"
 done
 
+if [ "${1:-}" = "--apply-only" ]; then
+  echo "OK: upstream + patches ready at $WORK (verify only, no compile)"
+  exit 0
+fi
+
 echo "== compile webserver executable jar (thin-patched upstream) =="
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
   export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || true)"
@@ -56,11 +61,6 @@ fi
 
 echo "== extension artifacts (requires extension repos with built artifacts) =="
 bash scripts/build-extensions.sh "$WORK"
-
-if [ "${1:-}" = "--apply-only" ]; then
-  echo "OK: upstream + patches + staged extensions ready at $WORK"
-  exit 0
-fi
 
 echo "== build image (upstream Dockerfile.base/Dockerfile unmodified) =="
 SHA="$(git rev-parse --short HEAD)"
