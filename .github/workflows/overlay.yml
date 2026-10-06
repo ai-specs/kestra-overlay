@@ -7,14 +7,14 @@ permissions:
   contents: read
   packages: write
 jobs:
-  patch-verify:
+  extensions-verify:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Verify and apply thin patches (upstream pinned BASE)
+      - name: Verify staged extension jars (upstream pinned BASE, plugins/ slot)
         run: ./scripts/build.sh --apply-only
   build-push:
-    needs: patch-verify
+    needs: extensions-verify
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

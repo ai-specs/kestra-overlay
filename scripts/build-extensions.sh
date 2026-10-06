@@ -6,8 +6,8 @@
 # the kestra-side four — extensions OF upstream kestra-io/kestra — participate
 # in the kestra image / image family as follows:
 #
-#   plugin-apps-harness   -> kestra plugin jar  -> $WORK/locals/plugins/   (Dsh* security surface 13/13)
-#   plugin-apps-amis      -> kestra plugin jar  -> $WORK/locals/plugins/   (declarative Amis apps triggers)
+#   plugin-apps-harness   -> kestra plugin jar  -> $WORK/plugins/   (Dsh* security surface 13/13)
+#   plugin-apps-amis      -> kestra plugin jar  -> $WORK/plugins/   (declarative Amis apps triggers)
 #   kestra-oidc-provider  -> standalone IdP app (separate image, own repo CI; not baked into kestra image)
 #   plugin-relay-dsh      -> standalone relay app (separate image, own repo CI; not baked into kestra image)
 #
@@ -20,15 +20,15 @@
 #   4) otherwise                                  -> skipped, reported NOT INJECTED
 #
 # The injection manifest is written to $WORK/.overlay-extensions.json; the
-# Dockerfile (patched to COPY locals/plugins -> /app/plugins) bakes whatever is
-# staged. Skeleton state: locals/plugins carries the bootstrap Dsh* jar from the
+# official Dockerfile (bind-mount COPY plugins/ -> /app/plugins) bakes whatever
+# is staged under $WORK/plugins/. Skeleton state: locals/plugins carries the bootstrap Dsh* jar from the
 # pilot repo (plugin-apps-harness), so the image already contains the security
 # surface while other extension repos are still migrating.
 set -euo pipefail
 
 WORK="${1:?worktree path required}"
 PWD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLUGINS_DIR="$WORK/locals/plugins"
+PLUGINS_DIR="$WORK/plugins"
 mkdir -p "$PLUGINS_DIR"
 
 # name -> jar-staged (1) or standalone-app (0)

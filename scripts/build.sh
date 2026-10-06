@@ -16,33 +16,26 @@ fi
 git -C "$WORK" checkout -q "$BASE"
 git -C "$WORK" checkout -q -b overlay
 
-echo "== apply thin patches (check first) =="
-# Skeleton holds exactly one source-level patch: the Dockerfile locals/plugins
-# injection point (overlay image = official kestra-base + extension jars; java/ui
-# sources are NOT compiled in this image, so webserver/ui/migration diffs from
-# the fork are out of skeleton scope — they belong to the extension repos).
-for p in patches/deploy/*.patch; do
-  git -C "$WORK" apply --check "$PWD/$p" || { echo "FAIL: $p"; exit 1; }
-done
-for p in patches/deploy/*.patch; do
-  git -C "$WORK" apply "$PWD/$p"
-done
+echo "== zero source patches (extension jars via upstream plugins/ slot) =="
+# Official Dockerfile copies /mnt/context/plugins/. -> /app/plugins (build
+# context bind mount); extension jars staged into $WORK/plugins/ are baked
+# natively — no Dockerfile modification needed.
 
-echo "== inject vendored extension artifacts (locals/plugins baseline) =="
-if [ -d "$PWD/locals" ]; then
-  mkdir -p "$WORK/locals"
-  cp -r "$PWD/locals/." "$WORK/locals/"
-  echo "vendored baseline: $(ls "$WORK/locals/plugins" 2>/dev/null | wc -l) plugin artifact(s)"
+echo "== stage vendored extension artifacts (plugins/ baseline) =="
+if [ -d "$PWD/locals/plugins" ]; then
+  mkdir -p "$WORK/plugins"
+  cp -r "$PWD/locals/plugins/." "$WORK/plugins/"
+  echo "vendored baseline: $(ls "$WORK/plugins" | wc -l) plugin artifact(s)"
 fi
 
 echo "== extension artifacts (requires extension repos with built artifacts) =="
 bash scripts/build-extensions.sh "$WORK"
 
 if [ "${1:-}" = "--apply-only" ]; then
-  echo "OK: upstream+patches ready at $WORK"
+  echo "OK: upstream + staged extensions ready at $WORK"
   exit 0
 fi
 
-echo "== build image (upstream base + patches + extension jars) =="
+echo "== build image (official base + staged extension jars) =="
 SHA="$(git rev-parse --short HEAD)"
 docker buildx build -f "$WORK/Dockerfile" -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"
