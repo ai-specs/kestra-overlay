@@ -3,12 +3,26 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+permissions:
+  contents: read
+  packages: write
 jobs:
-  overlay:
+  patch-verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Verify and apply thin patches (upstream pinned BASE)
         run: ./scripts/build.sh --apply-only
-      # build-image step enabled after extension repos carry buildable sources
-      # (see scripts/build-extensions.sh) — avoids failing CI on placeholder
+  build-push:
+    needs: patch-verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build overlay image and push to ghcr.io/ai-specs
+        run: ./scripts/build.sh

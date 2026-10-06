@@ -39,8 +39,13 @@ if [ "${1:-}" = "--apply-only" ]; then
   exit 0
 fi
 
-echo "== build image =="
-docker build -f "$WORK/docker/Dockerfile" -t "$IMAGE_TAG" "$WORK"
-if [ "$PUSH" = "1" ]; then
-  echo "PUSH ghcr.io/ai-specs/kestra-overlay:$(git rev-parse --short HEAD)"
+echo "== inject extension artifacts (locals/plugins) =="
+if [ -d "$PWD/locals" ]; then
+  mkdir -p "$WORK/locals"
+  cp -r "$PWD/locals/." "$WORK/locals/"
+  echo "injected: $(ls "$WORK/locals/plugins" 2>/dev/null | wc -l) plugin artifact(s)"
 fi
+
+echo "== build image (upstream base + patches + extension jars) =="
+SHA="$(git rev-parse --short HEAD)"
+docker buildx build -f "$WORK/Dockerfile" -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"
