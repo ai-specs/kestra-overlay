@@ -1,5 +1,0 @@
-A	webserver/src/main/java/io/kestra/webserver/migration/SqlScriptSplitter.java
-A	webserver/src/main/resources/migrations/2.0.29-dsh-schema-postgres.sql
-A	webserver/src/main/resources/migrations/2.0.30-dsh-drop-a-tables-postgres.sql
-A	webserver/src/main/resources/migrations/2.0.31-dsh-metrics-session-id-text-postgres.sql
-A	webserver/src/test/java/io/kestra/webserver/migration/SqlScriptSplitterTest.java

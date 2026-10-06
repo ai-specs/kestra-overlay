@@ -5,10 +5,15 @@ overlay CI 先 checkout 该 SHA，再 `git apply`，避免上游演进破坏 pat
 
 | 目录 | 面 | 性质 |
 |---|---|---|
-| webserver/ | 9 个上游 M 文件 + webserver/build.gradle | 扩展点激活/注册/占位（ErrorController 注册 NotFoundResponseException 全局错误、UiIndexService 挂 apps shell、AiServiceManager 挂 Dsh provider 等） |
-| ui/ | routes/i18n/main/override/kestraHttp/basicAuth | ui 集成点：路由注册、命名空间挂载、覆盖点（业务逻辑在扩展前端包） |
-| deploy/ | Dockerfile/compose/entrypoint/cli.build.gradle/OutputValues | 部署与构建集成 |
-| migration/ | V2_0_29~31 Dsh* sql + SqlScriptSplitter（A 类新增，挂上游 Flyway 链） | 见 A-FILES.txt；apply 脚本待生成 |
+| deploy/Dockerfile.patch | 官方插件 COPY 路径 `plugins/.` → `locals/plugins/.` | **镜像中唯一生效的源码级修改**：扩展 jar 注入点（overlay 镜像 = 官方 kestra-base + locals/plugins） |
 
-> 已知待精简项：UiIndexService 等个别 patch 内含少量业务逻辑（apps shell 渲染）。
-> 按 §3.3 归属原则，后续演进为"委托钩子（占位）+ 外部 jar 实现"，把业务逻辑移出 patch。
+## 已剔除（fork 残留，不属于骨架）
+
+| 原目录 | 内容 | 理由与去向 |
+|---|---|---|
+| webserver/ | ErrorController、McpServerController、MiscController、NotFoundHeadersFilter、ProblemResponseFilter、ApiMcpServer、TenantAliasingRooter、UiIndexService、AiServiceManager 等 11 个 patch | 镜像不编译 java 源码（死代码）；业务面归扩展仓（plugin-apps-harness 等） |
+| ui/ | routes/main/override/auth/basicAuth/kestraHttp 等 9 个 patch | 镜像不编译 ui 源码（死代码）；且引用 fork 自产组件（UserItem.vue / AppList.vue / csrf.ts，不在 patch 中）——UI 定制面由扩展仓以预编译产物/独立扩展承载 |
+| migration/ | 2.0.29~31 dsh-* sql + SqlScriptSplitter（A 类新增） | dsh 业务面（employee/metrics/approval 持久化）→ 扩展仓 jar 内 migration 资源承载 |
+| deploy/（部分） | cli/build.gradle（`:oidc-provider` 依赖）、core OutputValues.java、docker-compose.yml、docker-entrypoint.sh | 非扩展点 / fork 构建形态 / 装配归 kestra-oidc-provider 扩展仓 |
+
+> 原则：java/ui 源码在本镜像中不编译 → 源码 diff 一律不进入骨架；真正生效的是扩展仓 jar（`locals/plugins` → `/app/plugins`）。
