@@ -18,12 +18,23 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Cache gradle (upstream BASE keyed)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ github.repository }}-${{ hashFiles('patches/BASE') }}
+          restore-keys: gradle-${{ github.repository }}-
       - name: Set up JDK 25 (webserver toolchain)
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-          cache: gradle
+        # NOTE: no `cache: gradle` here — the overlay repo (checked-out
+        # workspace) contains no gradle files; gradle lives in the upstream
+        # clone ($WORK). setup-java's cache:gradle would fail its key lookup.
+        # Gradle cache is handled by actions/cache keyed on upstream BASE.
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Apply patches, compile webserver, stage extension jars, build and push
