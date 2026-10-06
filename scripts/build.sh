@@ -4,14 +4,14 @@
 set -euo pipefail
 
 BASE="$(cat patches/BASE)"
-UPSTREAM_REPO="${KESTRA_UPSTREAM_REPO:-git@github.com:kestra-io/kestra.git}"
+UPSTREAM_REPO="${KESTRA_UPSTREAM_REPO:-https://github.com/kestra-io/kestra.git}"
 WORK="${WORK:-$(mktemp -d)}"
 IMAGE_TAG="${IMAGE_TAG:-kestra-overlay:dev}"
 PUSH="${PUSH:-0}"
 
 echo "== kestra-overlay: upstream=$UPSTREAM_REPO base=$BASE =="
 if [ ! -d "$WORK/.git" ]; then
-  git clone --no-checkout "$UPSTREAM_REPO" "$WORK"
+  git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$WORK"
 fi
 git -C "$WORK" checkout -q "$BASE"
 git -C "$WORK" checkout -q -b overlay
