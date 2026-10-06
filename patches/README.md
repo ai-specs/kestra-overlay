@@ -1,7 +1,7 @@
 # patches
 
-`BASE` 记录 overlay 所基于的上游固定 commit（kestra-io/kestra，develop）。
-overlay CI checkout 该 SHA 构建，保证可复现。
+`BASE` 记录 overlay 所基于的**上游 release**（两行：第一行 release tag，第二行该 release 的 commit sha）。
+overlay CI checkout 该 commit 构建，保证可复现；镜像主 tag 即 release 版本（镜像归属该上游 release）。
 
 **为什么薄 patch 而不是零 patch（实证）**：fork 镜像 = 运行时 base（temurin JRE25，
 `Dockerfile.base` 实证不编译源码）+ **宿主编译 webserver executableJar**

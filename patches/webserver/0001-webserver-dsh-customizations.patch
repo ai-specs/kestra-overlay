@@ -1,9 +1,78 @@
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
-index a7b26348e9..3f7625964b 100644
+index 08ed21799e..3f7625964b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
-@@ -155,12 +155,27 @@ public class ErrorController {
-         return this.problems.responseWithoutMessage(request, reported);
+@@ -25,6 +25,7 @@ import io.micronaut.http.annotation.Error;
+ import io.micronaut.http.server.exceptions.NotAllowedException;
+ import jakarta.inject.Inject;
+ import jakarta.validation.ConstraintViolationException;
++import tools.jackson.core.JacksonException;
+ 
+ /**
+  * Translates every exception reaching the HTTP layer into an RFC 9457 problem document.
+@@ -91,12 +92,37 @@ public class ErrorController {
+      */
+     @Error(global = true)
+     public HttpResponse<ProblemDetail> error(HttpRequest<?> request, ConversionErrorException e) {
+-        Throwable cause = e.getConversionError().getCause();
++        return jacksonBodyError(request, e, e.getConversionError().getCause());
++    }
+ 
++    /**
++     * Some Jackson 3 body-binding failures — e.g. a plain JSON string posted where an object DTO is expected —
++     * reach here directly rather than wrapped in a {@link ConversionErrorException} as their Jackson 2
++     * equivalent is. Handled the same way: never echo the raw message, which names the internal DTO class.
++     */
++    @Error(global = true)
++    public HttpResponse<ProblemDetail> error(HttpRequest<?> request, JacksonException e) {
++        return jacksonBodyError(request, e, e);
++    }
++
++    private HttpResponse<ProblemDetail> jacksonBodyError(HttpRequest<?> request, Throwable reported, Throwable cause) {
+         if (cause instanceof InvalidTypeIdException invalidTypeId) {
+             return this.problems.response(
+                 request,
+-                e,
++                reported,
++                ProblemTypes.INVALID_PLUGIN_TYPE,
++                List.of(ProblemError.of(
++                    "Unknown type '%s'.".formatted(invalidTypeId.getTypeId()),
++                    null,
++                    pathOf(invalidTypeId)
++                ))
++            );
++        }
++
++        if (cause instanceof tools.jackson.databind.exc.InvalidTypeIdException invalidTypeId) {
++            return this.problems.response(
++                request,
++                reported,
+                 ProblemTypes.INVALID_PLUGIN_TYPE,
+                 List.of(ProblemError.of(
+                     "Unknown type '%s'.".formatted(invalidTypeId.getTypeId()),
+@@ -110,21 +136,46 @@ public class ErrorController {
+             String path = pathOf(mappingException);
+             return this.problems.responseWithoutMessage(
+                 request,
+-                e,
++                reported,
+                 ProblemTypes.INVALID_JSON,
+                 path.isEmpty() ? List.of() : List.of(ProblemError.of(null, null, path))
+             );
+         }
+ 
+-        return this.problems.responseWithoutMessage(request, e);
++        if (cause instanceof JacksonException jacksonException) {
++            String path = pathOf(jacksonException);
++            return this.problems.responseWithoutMessage(
++                request,
++                reported,
++                ProblemTypes.INVALID_JSON,
++                path.isEmpty() ? List.of() : List.of(ProblemError.of(null, null, path))
++            );
++        }
++
++        return this.problems.responseWithoutMessage(request, reported);
      }
  
 -    /** A request that matched no route at all, and so carries no exception. */
@@ -31,6 +100,22 @@ index a7b26348e9..3f7625964b 100644
      /**
       * The document path Jackson recorded, e.g. {@code tasks[0].type}. Uses the public reference chain rather
       * than the private field the previous implementation reflected into.
+@@ -138,4 +189,15 @@ public class ErrorController {
+             .collect(Collectors.joining("."))
+             .replace(".[", "[");
+     }
++
++    /** Jackson 3 equivalent of {@link #pathOf(JsonMappingException)}, for exceptions Micronaut's body binder throws. */
++    private static String pathOf(final JacksonException e) {
++        return e.getPath()
++            .stream()
++            .map(reference -> reference.getPropertyName() != null
++                ? reference.getPropertyName()
++                : "[" + reference.getIndex() + "]")
++            .collect(Collectors.joining("."))
++            .replace(".[", "[");
++    }
+ }
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
 index 03dd1706f6..9b03ad7c03 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
@@ -191,10 +276,18 @@ index 03dd1706f6..9b03ad7c03 100644
  
      @ExecuteOn(TaskExecutors.IO)
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-index 9863def4ba..3179870131 100644
+index 160c2ab560..3179870131 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-@@ -73,6 +73,16 @@ public class MiscController {
+@@ -23,6 +23,7 @@ import io.kestra.core.services.InstanceService;
+ import io.kestra.core.services.VersionService;
+ import io.kestra.core.utils.EditionProvider;
+ import io.kestra.core.utils.VersionProvider;
++import io.kestra.webserver.configuration.CookiesConfiguration;
+ import io.kestra.webserver.services.BasicAuthCredentials;
+ import io.kestra.webserver.services.BasicAuthService;
+ import io.kestra.webserver.services.ai.AiServiceManager;
+@@ -72,12 +73,25 @@ public class MiscController {
      @Inject
      Optional<BasicAuthService> basicAuthService = Optional.empty();
  
@@ -211,7 +304,27 @@ index 9863def4ba..3179870131 100644
      @Inject
      Optional<AiServiceManager> aiServiceManager = Optional.empty();
  
-@@ -187,11 +197,14 @@ public class MiscController {
+     @Inject
+     SystemFlowsConfiguration systemFlowsConfiguration;
+ 
++    @Inject
++    CookiesConfiguration cookiesConfiguration;
++
+     @io.micronaut.context.annotation.Value("${kestra.ui.charts.default-duration:PT24H}")
+     private String chartDefaultDuration;
+ 
+@@ -152,8 +166,10 @@ public class MiscController {
+                     .build()
+             )
+             .isAiEnabled(applicationContext.containsBean(AiController.class))
++            .isPluginEndpointsEnabled(applicationContext.containsBean(PluginEndpointController.class))
+             .isAiApiKeyConfigured(aiServiceManager.map(AiServiceManager::hasConfiguredProvider).orElse(false))
+             .isBasicAuthInitialized(isBasicAuthInitialized())
++            .isBasicAuthManagedByConfig(basicAuthService.map(BasicAuthService::isManagedByConfig).orElse(false))
+             .systemNamespace(systemFlowsConfiguration.namespace())
+             .hiddenLabelsPrefixes(hiddenLabelsPrefixes)
+             .url(kestraUrl)
+@@ -181,11 +197,14 @@ public class MiscController {
          description = "Public endpoint available to unauthenticated users; exposes only what the login/setup UI needs."
      )
      public LoginConfiguration getLoginConfiguration() {
@@ -228,7 +341,29 @@ index 9863def4ba..3179870131 100644
      }
  
      /**
-@@ -254,9 +267,12 @@ public class MiscController {
+@@ -212,7 +231,7 @@ public class MiscController {
+     @ExecuteOn(TaskExecutors.IO)
+     @Operation(
+         tags = { "Misc" }, summary = "Configure basic authentication for the instance.",
+-        description = "Sets up basic authentication credentials. Once credentials already exist, the request must also carry the current password."
++        description = "Sets up basic authentication credentials. Once credentials already exist, the request must also carry the current password. Rejected when the credentials are set in the configuration file."
+     )
+     public MutableHttpResponse<?> createBasicAuth(
+         HttpRequest<?> request,
+@@ -220,6 +239,12 @@ public class MiscController {
+         BasicAuthService service = basicAuthService
+             .orElseThrow(() -> new IllegalStateException("basicAuthService bean is required in OSS"));
+ 
++        if (service.isManagedByConfig()) {
++            throw new ValidationErrorException(List.of(
++                "Basic Authentication credentials are managed in the configuration file and cannot be changed from the API."
++            ));
++        }
++
+         // Being authenticated is not enough to prove the caller still knows the *current*
+         // password: isAuthenticated() caches verified tokens, so a password already rotated on
+         // another webserver node sharing this settings store can still pass it here. Re-checking
+@@ -242,9 +267,12 @@ public class MiscController {
      @ExecuteOn(TaskExecutors.IO)
      @Operation(tags = { "Misc" }, summary = "Retrieve the instance configuration.", description = "Global endpoint available to all users.")
      public List<String> getBasicAuthConfigErrors() {
@@ -244,7 +379,67 @@ index 9863def4ba..3179870131 100644
      }
  
      @Post("/login")
-@@ -413,7 +429,15 @@ public class MiscController {
+@@ -270,35 +298,39 @@ public class MiscController {
+     @Post("/logout")
+     @ExecuteOn(TaskExecutors.IO)
+     @Operation(tags = { "Misc" }, summary = "Clear the basic auth session cookie.")
+-    public MutableHttpResponse<?> logout() {
++    public MutableHttpResponse<?> logout(HttpRequest<?> request) {
++        boolean secure = cookiesConfiguration.isSecure(request);
++
+         Cookie cookie = Cookie.of(BasicAuthService.BASIC_AUTH_COOKIE_NAME, "")
+             .path("/")
+             .httpOnly(true)
++            .secure(secure)
+             .sameSite(SameSite.Strict)
+             .maxAge(0);
+ 
+         Cookie flagCookie = Cookie.of(BasicAuthService.BASIC_AUTH_FLAG_COOKIE_NAME, "")
+             .path("/")
+             .httpOnly(false)
++            .secure(secure)
+             .sameSite(SameSite.Strict)
+             .maxAge(0);
+ 
+         return HttpResponse.noContent().cookie(cookie).cookie(flagCookie);
+     }
+ 
+-    private static Cookie authCookie(HttpRequest<?> request, String username, String password) {
++    private Cookie authCookie(HttpRequest<?> request, String username, String password) {
+         return Cookie.of(BasicAuthService.BASIC_AUTH_COOKIE_NAME, BasicAuthService.encodeToken(username, password))
+             .path("/")
+             .httpOnly(true)
+-            .secure(request.isSecure())
++            .secure(cookiesConfiguration.isSecure(request))
+             .sameSite(SameSite.Strict);
+     }
+ 
+-    private static Cookie authFlagCookie(HttpRequest<?> request) {
++    private Cookie authFlagCookie(HttpRequest<?> request) {
+         return Cookie.of(BasicAuthService.BASIC_AUTH_FLAG_COOKIE_NAME, "true")
+             .path("/")
+             .httpOnly(false)
+-            .secure(request.isSecure())
++            .secure(cookiesConfiguration.isSecure(request))
+             .sameSite(SameSite.Strict);
+     }
+ 
+@@ -364,9 +396,14 @@ public class MiscController {
+ 
+         Boolean isBasicAuthInitialized;
+ 
++        Boolean isBasicAuthManagedByConfig;
++
+         Long pluginsHash;
+ 
+         Boolean isPluginAutoInstallEnabled;
++
++        @JsonInclude
++        Boolean isPluginEndpointsEnabled;
+     }
+ 
+     @Value
+@@ -392,7 +429,15 @@ public class MiscController {
  
      /**
       * Minimal configuration exposed to unauthenticated callers for the login/setup UI.
@@ -262,14 +457,73 @@ index 9863def4ba..3179870131 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
-index ddc68a9ff1..d08fdfdd97 100644
---- a/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
+new file mode 100644
+index 0000000000..d08fdfdd97
+--- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
-@@ -60,7 +60,21 @@ public class NotFoundHeadersFilter implements Ordered {
-      */
-     @RequestFilter
-     public void rememberRouteMatch(@NonNull HttpRequest<?> request) {
--        request.setAttribute(ROUTE_MATCHED_ATTRIBUTE, BasicHttpAttributes.getRouteMatchInfo(request).isPresent());
+@@ -0,0 +1,112 @@
++package io.kestra.webserver.filter;
++
++import java.util.Objects;
++
++import io.kestra.core.utils.EditionProvider;
++
++import io.micronaut.core.annotation.NonNull;
++import io.micronaut.core.order.Ordered;
++import io.micronaut.http.BasicHttpAttributes;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.RequestFilter;
++import io.micronaut.http.annotation.ResponseFilter;
++import io.micronaut.http.annotation.ServerFilter;
++import io.micronaut.http.filter.ServerFilterPhase;
++
++/**
++ * Stamps {@code X-Kestra-Edition} and {@code X-Kestra-Route-Matched} headers on every 404 response.
++ * Runs at {@link ServerFilterPhase#FIRST}, like {@link SecurityHeadersFilter}, so it still applies to
++ * short-circuited or bare 404 responses.
++ * <p>
++ * {@code X-Kestra-Route-Matched} tells a client whether this 404 came from a route that exists on this
++ * server (a genuine not-found from application code) or from no route matching at all (the route/feature
++ * doesn't exist on this server). It is derived from the router's own match result, so no 404-producing call
++ * site has to opt into tagging itself.
++ * <p>
++ * The match result has to be captured on the way <em>in</em>, not read on the way out: when an
++ * {@code @Error} handler such as {@link io.kestra.webserver.controllers.ErrorController} takes over,
++ * Micronaut overwrites the {@code ROUTE_MATCH} request attribute with the error route
++ * ({@code RequestLifecycle#handleErrorRoute} calls {@code RouteExecutor#setRouteAttributes}), and an
++ * {@code ErrorRouteMatch} is not a {@link io.micronaut.http.uri.UriMatchInfo} — so by the time response
++ * filters run, {@link BasicHttpAttributes#getRouteMatchInfo} is empty even though a route did match. The
++ * request filter below therefore records the verdict while it is still truthful; the response filter reads
++ * that, and only falls back to the live attribute when the request filter never ran (an unmatched route
++ * short-circuits before route filters, where an empty attribute is the correct answer anyway).
++ * <p>
++ * Note this makes edition and route existence readable by unauthenticated callers. Both are already public:
++ * the edition via {@code /api/v1/configs}, and route existence via the published OpenAPI spec.
++ */
++@ServerFilter("/**")
++public class NotFoundHeadersFilter implements Ordered {
++    public static final String EDITION_HEADER = "X-Kestra-Edition";
++    public static final String ROUTE_MATCHED_HEADER = "X-Kestra-Route-Matched";
++
++    /** Internal request attribute holding the router's verdict, captured before any error route replaces it. */
++    static final String ROUTE_MATCHED_ATTRIBUTE = "io.kestra.routeMatched";
++
++    private final EditionProvider editionProvider;
++
++    public NotFoundHeadersFilter(EditionProvider editionProvider) {
++        this.editionProvider = Objects.requireNonNull(editionProvider);
++    }
++
++    /**
++     * Records whether the router matched a route for this request. This filter is not pre-matching, so it runs
++     * after the router has matched and before any {@code @Error} handler can replace the match attribute.
++     *
++     * @param request the incoming request
++     */
++    @RequestFilter
++    public void rememberRouteMatch(@NonNull HttpRequest<?> request) {
 +        // dsh fork: the UiAppController catch-all ({namespace}/{path:.*}) matches every
 +        // /api/v1/... request that no real route owns, then short-circuits into a 404.
 +        // That is a route-miss semantically, not a genuine application 404, so exclude it
@@ -285,9 +539,41 @@ index ddc68a9ff1..d08fdfdd97 100644
 +            })
 +            .isPresent();
 +        request.setAttribute(ROUTE_MATCHED_ATTRIBUTE, matched);
-     }
- 
-     /**
++    }
++
++    /**
++     * Adds the 404-disambiguation headers, leaving any header a controller or another filter already set.
++     *
++     * @param request  the request that produced this response
++     * @param response the outgoing response
++     */
++    @ResponseFilter
++    public void addNotFoundHeaders(@NonNull HttpRequest<?> request, @NonNull MutableHttpResponse<?> response) {
++        if (HttpStatus.NOT_FOUND != response.getStatus()) {
++            return;
++        }
++
++        setIfAbsent(response, EDITION_HEADER, editionProvider.get().name());
++        setIfAbsent(response, ROUTE_MATCHED_HEADER, String.valueOf(hasMatchedRoute(request)));
++    }
++
++    private static boolean hasMatchedRoute(HttpRequest<?> request) {
++        return request.getAttribute(ROUTE_MATCHED_ATTRIBUTE, Boolean.class)
++            .orElseGet(() -> BasicHttpAttributes.getRouteMatchInfo(request).isPresent());
++    }
++
++    /** Leaves an already-set header untouched, so a controller or another filter can still override it. */
++    private static void setIfAbsent(MutableHttpResponse<?> response, String name, String value) {
++        if (!response.getHeaders().contains(name)) {
++            response.getHeaders().set(name, value);
++        }
++    }
++
++    @Override
++    public int getOrder() {
++        return ServerFilterPhase.FIRST.order();
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
 index dff794ca9c..1f9d9c42a3 100644
 --- a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
@@ -386,10 +672,38 @@ index 453742c280..f47d06355d 100644
      @Schema(description = "Whether this is the default MCP server, auto-provisioned per tenant.", accessMode = Schema.AccessMode.READ_ONLY) boolean isDefault,
  
 diff --git a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
-index b78b5755b3..80b466b5ed 100644
+index 5c7932d861..80b466b5ed 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
-@@ -46,19 +46,54 @@ public class TenantAliasingRooter extends DefaultRouter {
+@@ -5,8 +5,11 @@ import java.util.Collection;
+ import java.util.List;
+ import java.util.regex.Pattern;
+ 
++import io.kestra.webserver.utils.RequestUtils;
++
+ import io.micronaut.context.annotation.Replaces;
+ import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.annotation.Value;
+ import io.micronaut.http.HttpRequest;
+ import io.micronaut.web.router.DefaultRouter;
+ import io.micronaut.web.router.RouteBuilder;
+@@ -26,9 +29,14 @@ public class TenantAliasingRooter extends DefaultRouter {
+         Pattern.compile("/api/v1/configs/login")
+     );
+ 
++    private final String contextPath;
++
+     @Inject
+-    public TenantAliasingRooter(Collection<RouteBuilder> builders) {
++    public TenantAliasingRooter(
++        Collection<RouteBuilder> builders,
++        @Value("${micronaut.server.context-path:}") String contextPath) {
+         super(builders);
++        this.contextPath = RequestUtils.normalizeContextPath(contextPath);
+     }
+ 
+     @SneakyThrows
+@@ -38,17 +46,54 @@ public class TenantAliasingRooter extends DefaultRouter {
          // a raw-path miss upstream in AuthenticationFilter stays a 404 here too (GHSA-rjhm-qm6w-m7x9).
          String rawPath = request.getPath();
          UriRouteMatch<T, R> closest = super.findClosest(request);
@@ -410,9 +724,12 @@ index b78b5755b3..80b466b5ed 100644
 +            }
 +        }
  
-         String apiPath = RequestUtils.stripContextPath(contextPath, rawPath);
-         boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(apiPath).matches());
-         if (apiPath.startsWith("/api/v1/") && !excluded) {
+-        boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(rawPath).matches());
+-        if (rawPath.startsWith("/api/v1/") && !excluded) {
+-            String rewrittenRawPath = rawPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
++        String apiPath = RequestUtils.stripContextPath(contextPath, rawPath);
++        boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(apiPath).matches());
++        if (apiPath.startsWith("/api/v1/") && !excluded) {
 +            // dsh: the tenant-less /api/v1/{a}/{b}[/{c}] form must resolve to the upstream tenant
 +            // routes (rewritten with the tenant segment) — the dsh catch-all controllers
 +            // (UiAppController /{namespace} and AppRouterController /api/v1/{ns}/{app}/{page})
@@ -420,8 +737,8 @@ index b78b5755b3..80b466b5ed 100644
 +            // the upstream routes only (dsh catch-alls excluded — the rewritten URI still starts
 +            // with /api/v1, so they would match it too); on a miss fall back to the raw closest
 +            // match, which is how the dsh apps API (/api/v1/dsh.apps/hello/index) keeps resolving.
-             String strippedContextPath = rawPath.substring(0, rawPath.length() - apiPath.length());
-             String rewrittenRawPath = strippedContextPath + apiPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
++            String strippedContextPath = rawPath.substring(0, rawPath.length() - apiPath.length());
++            String rewrittenRawPath = strippedContextPath + apiPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
              URI updatedUri = new URI(rebuildRawUri(request, rewrittenRawPath));
 -            return super.findClosest(request.toMutableRequest().uri(updatedUri));
 +            UriRouteMatch<T, R> rewritten = findClosestUpstreamOnly(request.toMutableRequest().uri(updatedUri));
@@ -448,10 +765,18 @@ index b78b5755b3..80b466b5ed 100644
  
      // Assembled as a raw string rather than via the scheme/userInfo/host/port/path/query/fragment
 diff --git a/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java b/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
-index af92cb1534..a315ec8504 100644
+index e9913a5448..a315ec8504 100644
 --- a/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
-@@ -27,8 +27,9 @@ import jakarta.inject.Inject;
+@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
+ import java.util.Objects;
+ import java.util.Optional;
+ 
++import io.kestra.webserver.configuration.CookiesConfiguration;
+ import io.kestra.webserver.configuration.WebserverConfiguration;
+ 
+ import io.micronaut.context.annotation.Requires;
+@@ -26,8 +27,9 @@ import jakarta.inject.Inject;
  import jakarta.inject.Singleton;
  
  /**
@@ -463,7 +788,7 @@ index af92cb1534..a315ec8504 100644
   * <p>
   * The response carries the user's CSRF token, so it is never cacheable and gets no entity tag.
   */
-@@ -36,6 +37,8 @@ import jakarta.inject.Singleton;
+@@ -35,6 +37,8 @@ import jakarta.inject.Singleton;
  @Requires(property = "kestra.webserver.ui.enabled", notEquals = "false", defaultValue = "true")
  public class UiIndexService {
      private static final String INDEX_RESOURCE = "ui/index.html";
@@ -472,7 +797,14 @@ index af92cb1534..a315ec8504 100644
      private static final String HEAD_TAG = "<head>";
      // 'private' keeps a shared cache from ever storing another user's token; 'no-store' would also
      // disqualify the page from the browser back/forward cache.
-@@ -50,6 +53,8 @@ public class UiIndexService {
+@@ -42,27 +46,34 @@ public class UiIndexService {
+ 
+     private final String basePath;
+     private final WebserverConfiguration webserverConfiguration;
++    private final CookiesConfiguration cookiesConfiguration;
+     private final Optional<CsrfConfiguration> csrfConfiguration;
+     private final Optional<CsrfTokenGenerator<HttpRequest<?>>> csrfTokenGenerator;
+     private final Optional<CsrfTokenValidator<HttpRequest<?>>> csrfTokenValidator;
  
      // Empty when the UI is not packaged on the classpath (backend-only builds).
      private final Optional<String> template;
@@ -481,7 +813,16 @@ index af92cb1534..a315ec8504 100644
  
      @Inject
      public UiIndexService(
-@@ -66,7 +71,9 @@ public class UiIndexService {
+         @Nullable @Value("${micronaut.server.context-path}") String basePath,
+         WebserverConfiguration webserverConfiguration,
++        CookiesConfiguration cookiesConfiguration,
+         Optional<CsrfConfiguration> csrfConfiguration,
+         Optional<CsrfTokenGenerator<HttpRequest<?>>> csrfTokenGenerator,
+         Optional<CsrfTokenValidator<HttpRequest<?>>> csrfTokenValidator
+     ) {
+         this.basePath = basePath;
+         this.webserverConfiguration = Objects.requireNonNull(webserverConfiguration);
++        this.cookiesConfiguration = Objects.requireNonNull(cookiesConfiguration);
          this.csrfConfiguration = Objects.requireNonNull(csrfConfiguration);
          this.csrfTokenGenerator = Objects.requireNonNull(csrfTokenGenerator);
          this.csrfTokenValidator = Objects.requireNonNull(csrfTokenValidator);
@@ -492,7 +833,7 @@ index af92cb1534..a315ec8504 100644
      }
  
      /**
-@@ -77,6 +84,23 @@ public class UiIndexService {
+@@ -73,6 +84,23 @@ public class UiIndexService {
          return template.map(html -> render(request, html));
      }
  
@@ -516,7 +857,16 @@ index af92cb1534..a315ec8504 100644
      private MutableHttpResponse<byte[]> render(HttpRequest<?> request, String template) {
          String html = template;
          Cookie csrfCookie = null;
-@@ -134,8 +158,8 @@ public class UiIndexService {
+@@ -96,7 +124,7 @@ public class UiIndexService {
+                 html = withCsrfMeta(template, "<meta name=\"csrf-token\" content=\"" + escaped + "\">");
+                 csrfCookie = Cookie.of(csrfConfiguration.get().getCookieName(), csrfToken)
+                     .httpOnly(true)
+-                    .secure(request.isSecure())
++                    .secure(cookiesConfiguration.isSecure(request))
+                     .sameSite(SameSite.Strict)
+                     .path("/");
+             }
+@@ -130,8 +158,8 @@ public class UiIndexService {
          return html.substring(0, insertionPoint) + "\n" + metaTag + html.substring(insertionPoint);
      }
  
@@ -527,7 +877,7 @@ index af92cb1534..a315ec8504 100644
              if (is == null) {
                  return Optional.empty();
              }
-@@ -146,12 +170,15 @@ public class UiIndexService {
+@@ -142,12 +170,15 @@ public class UiIndexService {
      }
  
      private String replace(String line) {

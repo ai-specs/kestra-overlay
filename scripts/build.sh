@@ -11,7 +11,8 @@
 # are used unmodified from upstream.
 set -euo pipefail
 
-BASE="$(cat patches/BASE)"
+RELEASE="$(sed -n 1p patches/BASE)"
+BASE="$(sed -n 2p patches/BASE)"
 UPSTREAM_REPO="${KESTRA_UPSTREAM_REPO:-https://github.com/kestra-io/kestra.git}"
 WORK="${WORK:-$(mktemp -d)}"
 IMAGE_TAG="${IMAGE_TAG:-kestra-overlay:dev}"
@@ -64,4 +65,9 @@ bash scripts/build-extensions.sh "$WORK"
 
 echo "== build image (upstream Dockerfile.base/Dockerfile unmodified) =="
 SHA="$(git rev-parse --short HEAD)"
-docker buildx build -f "$WORK/Dockerfile" -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"
+# Image version follows the upstream RELEASE (patches/BASE line 1); the overlay
+# commit tag keeps traceability to this repo, latest is the rolling convenience.
+docker buildx build -f "$WORK/Dockerfile" \
+  -t "ghcr.io/ai-specs/kestra-overlay:${RELEASE}" \
+  -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" \
+  -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"

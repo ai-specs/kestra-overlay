@@ -128,9 +128,23 @@ index 7254b09067..f5b52b5102 100755
 +
  exec /app/kestra "$@"
 diff --git a/settings.gradle b/settings.gradle
-index 49650e6b12..bc848c2fb5 100644
+index d41a033fe6..bc848c2fb5 100644
 --- a/settings.gradle
 +++ b/settings.gradle
+@@ -1,9 +1,9 @@
+ plugins {
+-    id("io.kestra.gradle.develocity-conventions") version "1.2.6"
++    id("io.kestra.gradle.develocity-conventions") version '1.2.11'
+     id("com.gradle.common-custom-user-data-gradle-plugin") version "2.8.0"
+-    id("io.github.ben-manes.versions.settings") version "0.61.0"
+-    id 'io.kestra.gradle.test-scheduling' version '1.2.10'
+-    id 'io.kestra.gradle.logger' version '1.2.10'
++    id("io.github.ben-manes.versions.settings") version "0.64.0"
++    id 'io.kestra.gradle.test-scheduling' version '1.2.11'
++    id 'io.kestra.gradle.logger' version '1.2.11'
+ }
+ 
+ // Longest test modules first, measured with dev-tools/analyze-test-heap.sh. Gradle's scheduler has
 @@ -36,6 +36,8 @@ include 'queue'
  include 'queue-jdbc'
  
