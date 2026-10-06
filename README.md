@@ -4,18 +4,21 @@
 
 Kestra 侧**薄 overlay 构建仓**（浅层兼容层核心）：CI 时克隆上游 kestra-io/kestra（pin 固定 commit）→ apply 薄 patch → 注入扩展仓 jar 产物 → 构建镜像 → push `ghcr.io/ai-specs`。**不携带上游全量代码，不跑上游全量 CI**（只测定制扩展点）。
 
-骨架原则：**基于上游某一版本全新建立，不是 fork 版本的搬运，且零源码 patch**。镜像形态 = 官方 `kestra-base`（预编译 jar/UI）+ 扩展仓 jar——**java/ui 源码在本镜像中不编译**，因此 fork 的 webserver/ui/migration 源码 diff 不属于骨架（归各扩展仓承载）；官方 Dockerfile 原生从构建上下文 `plugins/` bind-mount 拷贝到 `/app/plugins`，**扩展 jar 直接 stage 进 `$WORK/plugins/` 即被烘焙，无需修改 Dockerfile**。
+骨架原则：**基于上游某一版本全新建立，不是 fork 版本的搬运**。fork 栈形态（实证于 app-kestra）：base 镜像只是运行时环境，**webserver 二进制是宿主编译的 executableJar（含全部 webserver M 文件/migration 定制）并拷入镜像 docker/app/kestra**；因此本仓 = **薄源码 patch**（改写上游源码、编译进 webserver jar 的面）+ 扩展 jar 注入（`plugins/` 槽）。**Dockerfile / Dockerfile.base 用上游原样**（不 patch 构建文件）。
 
 ## 上游扩展对象（Upstream Extension Target）
 
 - **上游仓库**：kestra-io/kestra（BASE pin 见 `patches/BASE`，upstream/develop 固定 commit）
-- **扩展对象**（对上游文件的修改）：**零**——官方 Dockerfile 原生支持 `plugins/`（构建上下文）→ `/app/plugins` 的扩展 jar 注入，无需修改
-- fork 源码面（webserver 控制器/filter/migration、ui 集成点、cli/build.gradle、core OutputValues、docker-compose、docker-entrypoint）→ **不在骨架**：镜像不编译它们，且它们属于扩展仓业务面（见下）
+- **扩展对象**（对上游源码的改写，压到最小）：薄 patch 三类（过渡期 = fork 当前定制原样，行为等价；随扩展仓出仓逐步收窄为激活/注册/占位）：
+  - `patches/webserver/`：9 个核心 M 文件（ErrorController、McpServerController、MiscController、NotFoundHeadersFilter、ProblemResponseFilter、ApiMcpServer、TenantAliasingRooter、UiIndexService、AiServiceManager）
+  - `patches/migration/`：3 个 dsh migration（2.0.29/2.0.30/2.0.31 新增 sql，挂上游 schema 链）
+  - `patches/build/`：settings.gradle（oidc-provider 模块）、cli/build.gradle、core OutputValues.java、docker-entrypoint.sh
+- **ui M 文件**（routes/main/i18n/translations/override）→ **本轮不收**：fork 镜像不编译 ui（官方/上游预编译资源），收 patch 不生效；其集成点归扩展仓前端包 + 后续 ui 加载机制决策（目标文档 §3.1 的 ui M → overlay 薄 patch 映射在正式实施阶段处理）
 
 ## 骨架设计（overlay 只做三件事）
 
 1. **克隆上游 pin 版本** → `git apply --check` 全部 patch 一次成功（`--apply-only` 门）。
-2. **零源码 patch**：不改上游任何文件（扩展 jar 经官方 `plugins/` 上下文 slot 注入）。
+2. **apply 薄 patch**：三组 patch（webserver 9 / migration 3 / build 4），`--check` 先行。
 3. **注入扩展仓产物**（`scripts/build-extensions.sh`，bash 3.2 兼容）：
    - 9 个扩展仓（排除两个 overlay 仓）中，**kestra 侧 4 个**参与 kestra 镜像/镜像族：
      - `plugin-apps-harness` → kestra 插件 jar → `$WORK/plugins/`（Dsh* 安全面 13/13）
@@ -24,7 +27,8 @@ Kestra 侧**薄 overlay 构建仓**（浅层兼容层核心）：CI 时克隆上
      - `plugin-relay-dsh` → **独立联动转发镜像**（同上）
    - jar 源优先级：`EXT_JAR_<NAME>` 环境变量 → `extensions/<name>/`（仓内 checkout）→ `locals/plugins/<name>/`（vendored）
    - 注入清单 `$WORK/.overlay-extensions.json`；骨架状态：`locals/plugins` 携带试点 bootstrap Dsh* jar（plugin-apps-harness 基座），镜像已含安全面
-4. **构建镜像**：`docker buildx` 用**官方上游 Dockerfile**（构建上下文 `$WORK` 含 `plugins/`，原生 bind-mount COPY）→ push `ghcr.io/ai-specs/kestra-overlay:{sha|latest}`
+4. **编译 webserver**：`./gradlew executableJar`（薄 patch 后的上游源码，Java 25 toolchain）→ 拷入 `$WORK/docker/app/kestra`（镜像运行时二进制）
+5. **构建镜像**：`docker buildx` 用**上游 Dockerfile.base/Dockerfile 原样**（FROM temurin-jre25 base + COPY docker/ + plugins bind-mount）→ push `ghcr.io/ai-specs/kestra-overlay:{sha|latest}`
 
 ## 明确不属于本仓的内容（fork 残留已剔除）
 

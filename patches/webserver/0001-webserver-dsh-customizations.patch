@@ -1,0 +1,596 @@
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
+index a7b26348e9..3f7625964b 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
+@@ -155,12 +155,27 @@ public class ErrorController {
+         return this.problems.responseWithoutMessage(request, reported);
+     }
+ 
+-    /** A request that matched no route at all, and so carries no exception. */
++    /** Upstream behavior preserved: problem+json for every unmatched-route 404 (kestra UI surfaces the detail). */
+     @Error(global = true, status = HttpStatus.NOT_FOUND)
+     public HttpResponse<ProblemDetail> notFound(HttpRequest<?> request) {
+         return this.problems.response(request, null, ProblemTypes.NOT_FOUND, List.of());
+     }
+ 
++    /**
++     * dsh empty-body 404 marker (PageTrigger/ApiTrigger surface only: AppRouterController,
++     * AppsFileController, UiAppController): rendered through the standard error pipeline —
++     * framework error handling is OOM-safe for unconsumed streaming bodies (Kestra#17633),
++     * unlike an early raw 404 return inside the controller. The X-Dsh-Empty-404 header lets
++     * ProblemResponseFilter tell this deliberate empty 404 apart from upstream bare 404s
++     * (which carry no body either and must still get a problem document — upstream behavior);
++     * the filter consumes and strips the header before the response leaves.
++     */
++    @Error(global = true, exception = io.kestra.webserver.controllers.api.NotFoundResponseException.class)
++    public HttpResponse<?> notFoundResponse(HttpRequest<?> request, io.kestra.webserver.controllers.api.NotFoundResponseException e) {
++        return HttpResponse.status(HttpStatus.NOT_FOUND)
++            .header("X-Dsh-Empty-404", "1");
++    }
++
+     /**
+      * The document path Jackson recorded, e.g. {@code tasks[0].type}. Uses the public reference chain rather
+      * than the private field the previous implementation reflected into.
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
+index 03dd1706f6..9b03ad7c03 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
+@@ -90,18 +90,18 @@ public class McpServerController {
+             throw new InvalidException(mcpServer, "MCP id '" + McpServer.DEFAULT_ID + "' is reserved");
+         }
+ 
+-        validateMcp(mcpServer);
+-
+         if (mcpServerRepository.get(tenantId, mcpServer.id()).isPresent()) {
+             throw new ConflictException("MCP server already exists with id: '" + mcpServer.id() + "'");
+         }
+ 
++        ApiMcpServer validated = validateMcp(mcpServer);
++
+         McpServer toSave = new McpServer(
+             tenantId,
+-            mcpServer.id(), mcpServer.description(), mcpServer.instructions(),
+-            mcpServer.serverType(), mcpServer.authType(), mcpServer.oauthProvider(),
+-            mcpServer.oauthScopesSupported(),
+-            mcpServer.disabled(), false, false, null, null
++            validated.id(), validated.description(), validated.instructions(),
++            validated.serverType(), validated.authType(), validated.oauthProvider(),
++            validated.oauthScopesSupported(),
++            validated.disabled(), false, false, null, null
+         );
+ 
+         return HttpResponse.ok(ApiMcpServer.from(mcpServerRepository.save(null, toSave)));
+@@ -124,47 +124,105 @@ public class McpServerController {
+             throw new InvalidException(mcpServer, "MCP id '" + McpServer.DEFAULT_ID + "' is reserved");
+         }
+ 
+-        validateMcp(mcpServer);
++        // dsh：合并语义 —— 请求体缺省（null）的字段保留原值，避免部分字段 PUT 清空其余字段。
++        // 显式清空字符串字段请传 ""，清空 scope 列表请传 []。
++        ApiMcpServer merged = new ApiMcpServer(
++            id,
++            mcpServer.description() != null ? mcpServer.description() : existing.get().description(),
++            mcpServer.instructions() != null ? mcpServer.instructions() : existing.get().instructions(),
++            mcpServer.serverType() != null ? mcpServer.serverType() : existing.get().serverType(),
++            mcpServer.authType() != null ? mcpServer.authType() : existing.get().authType(),
++            mcpServer.oauthProvider() != null ? mcpServer.oauthProvider() : existing.get().oauthProvider(),
++            mcpServer.oauthScopesSupported() != null ? mcpServer.oauthScopesSupported() : existing.get().oauthScopesSupported(),
++            mcpServer.disabled() != null ? mcpServer.disabled() : existing.get().disabled(),
++            existing.get().isDefault(), existing.get().created(), existing.get().updated()
++        );
++
++        ApiMcpServer validated = validateMcp(merged);
+ 
+         McpServer toSave = new McpServer(
+             tenantId, id,
+-            mcpServer.description(), mcpServer.instructions(),
+-            mcpServer.serverType(), mcpServer.authType(), mcpServer.oauthProvider(),
+-            mcpServer.oauthScopesSupported(),
+-            mcpServer.disabled(), false, false, null, null
++            validated.description(), validated.instructions(),
++            validated.serverType(), validated.authType(), validated.oauthProvider(),
++            validated.oauthScopesSupported(),
++            validated.disabled(), false, false, null, null
+         );
+ 
+         return HttpResponse.ok(ApiMcpServer.from(mcpServerRepository.save(existing.get(), toSave)));
+     }
+ 
+-    protected void validateMcp(ApiMcpServer mcpServer) {
+-        McpServer.AuthType authType = mcpServer.authType();
++    /**
++     * dsh 默认值：内置 kestra-oidc 是唯一 OAuth 提供商；缺省时由服务器落库，
++     * UI 只负责展示（docs/mcp-oauth.md）。
++     */
++    private static final String DEFAULT_OAUTH_PROVIDER = "kestra-oidc";
++    private static final java.util.List<String> DEFAULT_OAUTH_SCOPES =
++        java.util.List.of("openid", "profile", "email", "mcp");
++
++    /** Rebuilds the DTO with OAuth default fields filled in (OAUTH authType only). */
++    private static ApiMcpServer withOAuthDefaults(ApiMcpServer s, String provider, java.util.List<String> scopes) {
++        return new ApiMcpServer(
++            s.id(), s.description(), s.instructions(), s.serverType(), s.authType(),
++            provider, scopes, s.disabled(), s.isDefault(), s.created(), s.updated()
++        );
++    }
++
++    /** Rebuilds the DTO with a forced serverType (dsh：PUBLIC 已移除，统一 PRIVATE). */
++    private static ApiMcpServer withServerType(ApiMcpServer s, McpServer.ServerType serverType) {
++        return new ApiMcpServer(
++            s.id(), s.description(), s.instructions(), serverType, s.authType(),
++            s.oauthProvider(), s.oauthScopesSupported(), s.disabled(), s.isDefault(), s.created(), s.updated()
++        );
++    }
++
++    protected ApiMcpServer validateMcp(ApiMcpServer mcpServer) {
++        // dsh：缺省字段归一为项目默认（PRIVATE + OAUTH + 启用）；PUBLIC 已移除，一律转 PRIVATE。
++        ApiMcpServer normalized = new ApiMcpServer(
++            mcpServer.id(),
++            mcpServer.description(),
++            mcpServer.instructions(),
++            mcpServer.serverType() == null ? McpServer.ServerType.PRIVATE : mcpServer.serverType(),
++            mcpServer.authType() == null ? McpServer.AuthType.OAUTH : mcpServer.authType(),
++            mcpServer.oauthProvider(),
++            mcpServer.oauthScopesSupported(),
++            mcpServer.disabled() == null ? false : mcpServer.disabled(),
++            mcpServer.isDefault(), mcpServer.created(), mcpServer.updated()
++        );
++        if (normalized.serverType() == McpServer.ServerType.PUBLIC) {
++            normalized = withServerType(normalized, McpServer.ServerType.PRIVATE);
++        }
++
++        McpServer.AuthType authType = normalized.authType();
+ 
+         if (
+             editionProvider.get() == EditionProvider.Edition.OSS
+-                && (authType == McpServer.AuthType.API_TOKEN || authType == McpServer.AuthType.OAUTH)
++                && authType == McpServer.AuthType.API_TOKEN
+         ) {
+-            throw new HttpStatusException(HttpStatus.FORBIDDEN, "Auth type '" + authType + "' requires Enterprise Edition");
++            throw new HttpStatusException(HttpStatus.FORBIDDEN, "Auth type 'API_TOKEN' requires Enterprise Edition");
+         }
++        // OAUTH 在本 fork 的 OSS 上可用：MCP 客户端以内置 kestra-oidc 为授权服务器
++        // （RFC 8414 发现 + RFC 7591 动态注册，OidcMcpOAuthController / OidcMcpBearerAuthFilter，
++        // docs/mcp-oauth.md），与上游 EE 的"接入第三方 OAuth Provider"语义一致但实现不同。
+ 
+-        boolean hasOauthProvider = mcpServer.oauthProvider() != null && !mcpServer.oauthProvider().isBlank();
+-        boolean hasScopes = !ListUtils.isEmpty(mcpServer.oauthScopesSupported());
++        boolean hasOauthProvider = normalized.oauthProvider() != null && !normalized.oauthProvider().isBlank();
++        boolean hasScopes = !ListUtils.isEmpty(normalized.oauthScopesSupported());
+ 
+         if (authType == McpServer.AuthType.OAUTH) {
+-            if (!hasOauthProvider) {
+-                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthProvider is required when authType is OAUTH");
+-            }
+-            if (!hasScopes) {
+-                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthScopesSupported is required when authType is OAUTH");
+-            }
+-        } else {
+-            if (hasOauthProvider) {
+-                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthProvider must not be set when authType is not OAUTH");
+-            }
+-            if (hasScopes) {
+-                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthScopesSupported must not be set when authType is not OAUTH");
+-            }
++            // dsh：缺省字段由服务器落默认值（唯一提供商 + 内置 scope 集），不再要求客户端必填
++            return withOAuthDefaults(
++                normalized,
++                hasOauthProvider ? normalized.oauthProvider() : DEFAULT_OAUTH_PROVIDER,
++                hasScopes ? normalized.oauthScopesSupported() : DEFAULT_OAUTH_SCOPES
++            );
++        }
++
++        if (hasOauthProvider) {
++            throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthProvider must not be set when authType is not OAUTH");
++        }
++        if (hasScopes) {
++            throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthScopesSupported must not be set when authType is not OAUTH");
+         }
++        return normalized;
+     }
+ 
+     @ExecuteOn(TaskExecutors.IO)
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+index 9863def4ba..3179870131 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+@@ -73,6 +73,16 @@ public class MiscController {
+     @Inject
+     Optional<BasicAuthService> basicAuthService = Optional.empty();
+ 
++    /**
++     * Whether an authentication method is configured for the instance. Under the dsh OIDC
++     * deployment {@code micronaut.security.enabled=true} and {@link BasicAuthService} is
++     * deliberately absent (Basic Auth is banned there), yet the UI's OSS boot guard routes to
++     * the basic-auth setup wizard unless it reads {@code isBasicAuthInitialized=true} from
++     * /configs and /configs/login — so a security-enabled server reports itself as configured.
++     */
++    @io.micronaut.context.annotation.Value("${micronaut.security.enabled:false}")
++    protected boolean securityEnabled;
++
+     @Inject
+     Optional<AiServiceManager> aiServiceManager = Optional.empty();
+ 
+@@ -187,11 +197,14 @@ public class MiscController {
+         description = "Public endpoint available to unauthenticated users; exposes only what the login/setup UI needs."
+     )
+     public LoginConfiguration getLoginConfiguration() {
+-        return new LoginConfiguration(isBasicAuthInitialized());
++        // oidcAuthEnabled = Micronaut Security enabled (the dsh OIDC deployment); under a plain
++        // OSS Basic Auth deployment the flag is false and the UI keeps its SPA login page.
++        return new LoginConfiguration(isBasicAuthInitialized(), securityEnabled);
+     }
+ 
+     private boolean isBasicAuthInitialized() {
+-        return basicAuthService.map(BasicAuthService::isBasicAuthInitialized).orElse(false);
++        // OIDC deployment (security enabled, BasicAuthService absent) counts as configured auth.
++        return basicAuthService.map(BasicAuthService::isBasicAuthInitialized).orElse(securityEnabled);
+     }
+ 
+     /**
+@@ -254,9 +267,12 @@ public class MiscController {
+     @ExecuteOn(TaskExecutors.IO)
+     @Operation(tags = { "Misc" }, summary = "Retrieve the instance configuration.", description = "Global endpoint available to all users.")
+     public List<String> getBasicAuthConfigErrors() {
+-        return basicAuthService
+-            .orElseThrow(() -> new IllegalStateException("basicAuthService bean is required in OSS"))
+-            .validationErrors();
++        // Under the OIDC deployment there is no Basic Auth to validate: report no errors
++        // instead of failing — the UI's boot guard probes this endpoint best-effort.
++        if (basicAuthService.isEmpty()) {
++            return List.of();
++        }
++        return basicAuthService.get().validationErrors();
+     }
+ 
+     @Post("/login")
+@@ -413,7 +429,15 @@ public class MiscController {
+ 
+     /**
+      * Minimal configuration exposed to unauthenticated callers for the login/setup UI.
++     *
++     * @param isBasicAuthInitialized whether an authentication method is configured (under the
++     *                               OIDC deployment this is the Micronaut Security flag).
++     * @param oidcAuthEnabled        whether the instance authenticates through the OIDC provider
++     *                               instead of Basic Auth. The UI uses it to send not-logged-in
++     *                               browsers to the IdP login rather than the Basic Auth login
++     *                               page (which has no backing bean under OIDC).
+      */
+-    public record LoginConfiguration(@JsonInclude Boolean isBasicAuthInitialized) {
++    public record LoginConfiguration(@JsonInclude Boolean isBasicAuthInitialized,
++                                     @JsonInclude Boolean oidcAuthEnabled) {
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
+index ddc68a9ff1..d08fdfdd97 100644
+--- a/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
+@@ -60,7 +60,21 @@ public class NotFoundHeadersFilter implements Ordered {
+      */
+     @RequestFilter
+     public void rememberRouteMatch(@NonNull HttpRequest<?> request) {
+-        request.setAttribute(ROUTE_MATCHED_ATTRIBUTE, BasicHttpAttributes.getRouteMatchInfo(request).isPresent());
++        // dsh fork: the UiAppController catch-all ({namespace}/{path:.*}) matches every
++        // /api/v1/... request that no real route owns, then short-circuits into a 404.
++        // That is a route-miss semantically, not a genuine application 404, so exclude it
++        // from the route-matched verdict (keeps upstream NotFoundHeadersFilter semantics).
++        boolean matched = BasicHttpAttributes.getRouteMatchInfo(request)
++            .filter(match -> {
++                if (!(match instanceof io.micronaut.web.router.UriRouteMatch<?, ?> routeMatch)) {
++                    return true;
++                }
++                io.micronaut.web.router.UriRouteInfo<?, ?> routeInfo = routeMatch.getRouteInfo();
++                return routeInfo == null
++                    || routeInfo.getDeclaringType() != io.kestra.webserver.controllers.api.UiAppController.class;
++            })
++            .isPresent();
++        request.setAttribute(ROUTE_MATCHED_ATTRIBUTE, matched);
+     }
+ 
+     /**
+diff --git a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
+index dff794ca9c..1f9d9c42a3 100644
+--- a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
+@@ -3,6 +3,7 @@ package io.kestra.webserver.filter;
+ import java.util.List;
+ import java.util.Objects;
+ 
++import io.kestra.webserver.controllers.api.UiAppController;
+ import io.kestra.webserver.errors.ProblemDetail;
+ import io.kestra.webserver.errors.ProblemFormatExclusion;
+ import io.kestra.webserver.errors.ProblemFactory;
+@@ -13,10 +14,12 @@ import io.micronaut.core.order.Ordered;
+ import io.micronaut.http.HttpMethod;
+ import io.micronaut.http.HttpRequest;
+ import io.micronaut.http.MediaType;
++import io.micronaut.http.HttpStatus;
+ import io.micronaut.http.MutableHttpResponse;
+ import io.micronaut.http.annotation.ResponseFilter;
+ import io.micronaut.http.annotation.ServerFilter;
+ import io.micronaut.http.filter.ServerFilterPhase;
++import io.micronaut.web.router.Router;
+ 
+ /**
+  * Gives a problem document to any failed response that reached the client without one.
+@@ -38,19 +41,57 @@ import io.micronaut.http.filter.ServerFilterPhase;
+  */
+ @ServerFilter("/**")
+ public class ProblemResponseFilter implements Ordered {
++    /** Set by ErrorController's NotFoundResponseException handler: this 404 deliberately has no body (dsh apps anti-probing). */
++    private static final String EMPTY_404_MARKER = "X-Dsh-Empty-404";
++
+     private final ProblemFactory problems;
+     private final List<ProblemFormatExclusion> exclusions;
++    private final Router router;
+ 
+-    public ProblemResponseFilter(final ProblemFactory problems, final List<ProblemFormatExclusion> exclusions) {
++    public ProblemResponseFilter(final ProblemFactory problems, final List<ProblemFormatExclusion> exclusions,
++                                 final Router router) {
+         this.problems = Objects.requireNonNull(problems, "problems must not be null");
+         this.exclusions = Objects.requireNonNull(exclusions, "exclusions must not be null");
++        this.router = Objects.requireNonNull(router, "router must not be null");
+     }
+ 
+     @ResponseFilter
+     public void fillProblemBody(@NonNull HttpRequest<?> request, @NonNull MutableHttpResponse<?> response) {
++        // dsh: a non-GET request whose URI shape matches only the apps GET wildcard
++        // (UiAppController /{namespace}/{path:.*}) gets a Micronaut 405 — upstream semantics
++        // for those paths is a route-miss 404 problem+json (upstream tests
++        // TriggerControllerTest/WebhookRoutingTest assert it). Translate ONLY when the
++        // wildcard is the sole route claiming the URI; a genuine wrong-method hit on a real
++        // endpoint keeps its 405 problem (Allow header intact, ErrorControllerTest).
++        if (response.status().getCode() == HttpStatus.METHOD_NOT_ALLOWED.getCode()
++            && router.find(request.getMethod(), request.getPath(), request).findAny().isEmpty()
++            && router.findAny(request.getPath(), request)
++                .allMatch(match -> match.getRouteInfo().getDeclaringType() == UiAppController.class)) {
++            response.status(HttpStatus.NOT_FOUND);
++            ProblemDetail problem = this.problems.detailForStatus(
++                request,
++                null,
++                HttpStatus.NOT_FOUND.getCode(),
++                null,
++                List.of()
++            );
++            writeProblem(response, problem);
++            return;
++        }
+         if (400 > response.status().getCode()) {
+             return;
+         }
++        // dsh: only the 404s thrown as NotFoundResponseException keep their empty body
++        // (anti-probing on the apps surface) — their @Error handler marks the response
++        // with EMPTY_404_MARKER, consumed and stripped here. Upstream bare 404s (no body,
++        // no marker — e.g. PluginController install-job lookup, ExecutionController
++        // delete/kill) DO need a problem document and fall through to get one below;
++        // a previous body==null-only skip wrongly emptied them.
++        if (response.status().getCode() == HttpStatus.NOT_FOUND.getCode() && response.body() == null
++            && response.getHeaders().contains(EMPTY_404_MARKER)) {
++            response.getHeaders().remove(EMPTY_404_MARKER);
++            return;
++        }
+         if (HttpMethod.HEAD == request.getMethod() || this.isExcluded(request.getPath())) {
+             return;
+         }
+diff --git a/webserver/src/main/java/io/kestra/webserver/models/api/ApiMcpServer.java b/webserver/src/main/java/io/kestra/webserver/models/api/ApiMcpServer.java
+index 453742c280..f47d06355d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/models/api/ApiMcpServer.java
++++ b/webserver/src/main/java/io/kestra/webserver/models/api/ApiMcpServer.java
+@@ -35,7 +35,7 @@ public record ApiMcpServer(
+         description = "Scopes advertised in the server's RFC 9728 Protected Resource Metadata document. Only meaningful when authType is OAUTH. When null or empty the field is omitted from the PRM document."
+     ) List<String> oauthScopesSupported,
+ 
+-    @Schema(description = "Whether the MCP server is disabled.") boolean disabled,
++    @Schema(description = "Whether the MCP server is disabled.") Boolean disabled,
+ 
+     @Schema(description = "Whether this is the default MCP server, auto-provisioned per tenant.", accessMode = Schema.AccessMode.READ_ONLY) boolean isDefault,
+ 
+diff --git a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
+index b78b5755b3..80b466b5ed 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
+@@ -46,19 +46,54 @@ public class TenantAliasingRooter extends DefaultRouter {
+         // a raw-path miss upstream in AuthenticationFilter stays a 404 here too (GHSA-rjhm-qm6w-m7x9).
+         String rawPath = request.getPath();
+         UriRouteMatch<T, R> closest = super.findClosest(request);
+-        if (closest != null || bypassRooting()) {
++        if (bypassRooting()) {
+             return closest;
+         }
++        // dsh: keep the upstream short-circuit — a genuine route hit returns immediately.
++        // Only when the closest hit is one of the dsh catch-all controllers (which would
++        // swallow tenant-less /api/v1 requests into an apps-route 404) do we continue into
++        // the tenant-rewrite probe below.
++        if (closest != null) {
++            Class<?> declaring = closest.getRouteInfo().getDeclaringType();
++            boolean dshCatchAll = declaring == io.kestra.webserver.controllers.api.UiAppController.class
++                || declaring == io.kestra.webserver.controllers.api.AppRouterController.class;
++            if (!dshCatchAll) {
++                return closest;
++            }
++        }
+ 
+         String apiPath = RequestUtils.stripContextPath(contextPath, rawPath);
+         boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(apiPath).matches());
+         if (apiPath.startsWith("/api/v1/") && !excluded) {
++            // dsh: the tenant-less /api/v1/{a}/{b}[/{c}] form must resolve to the upstream tenant
++            // routes (rewritten with the tenant segment) — the dsh catch-all controllers
++            // (UiAppController /{namespace} and AppRouterController /api/v1/{ns}/{app}/{page})
++            // would otherwise swallow it into an apps-route 404. Probe the rewritten form against
++            // the upstream routes only (dsh catch-alls excluded — the rewritten URI still starts
++            // with /api/v1, so they would match it too); on a miss fall back to the raw closest
++            // match, which is how the dsh apps API (/api/v1/dsh.apps/hello/index) keeps resolving.
+             String strippedContextPath = rawPath.substring(0, rawPath.length() - apiPath.length());
+             String rewrittenRawPath = strippedContextPath + apiPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
+             URI updatedUri = new URI(rebuildRawUri(request, rewrittenRawPath));
+-            return super.findClosest(request.toMutableRequest().uri(updatedUri));
++            UriRouteMatch<T, R> rewritten = findClosestUpstreamOnly(request.toMutableRequest().uri(updatedUri));
++            if (rewritten != null) {
++                return rewritten;
++            }
+         }
+-        return null;
++        return closest;
++    }
++
++    /** Closest match excluding the dsh catch-all controllers (probe isolation for the tenant rewrite). */
++    @SuppressWarnings("unchecked")
++    private <T, R> UriRouteMatch<T, R> findClosestUpstreamOnly(HttpRequest<?> probe) {
++        return (UriRouteMatch<T, R>) this.<T, R>find(probe)
++            .filter(match -> {
++                Class<?> declaring = match.getRouteInfo().getDeclaringType();
++                return declaring != io.kestra.webserver.controllers.api.UiAppController.class
++                    && declaring != io.kestra.webserver.controllers.api.AppRouterController.class;
++            })
++            .findFirst()
++            .orElse(null);
+     }
+ 
+     // Assembled as a raw string rather than via the scheme/userInfo/host/port/path/query/fragment
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java b/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
+index af92cb1534..a315ec8504 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
+@@ -27,8 +27,9 @@ import jakarta.inject.Inject;
+ import jakarta.inject.Singleton;
+ 
+ /**
+- * Serves the UI {@code index.html}: the file is read from the classpath and rewritten (base path, analytics,
+- * title, custom head) only once into an immutable template; per request only the CSRF meta tag is inserted.
++ * Serves the UI {@code index.html} and the standalone dsh Apps shell {@code apps.html}: each file is
++ * read from the classpath and rewritten (base path, analytics, title, custom head) only once into an
++ * immutable template; per request only the CSRF meta tag is inserted.
+  * <p>
+  * The response carries the user's CSRF token, so it is never cacheable and gets no entity tag.
+  */
+@@ -36,6 +37,8 @@ import jakarta.inject.Singleton;
+ @Requires(property = "kestra.webserver.ui.enabled", notEquals = "false", defaultValue = "true")
+ public class UiIndexService {
+     private static final String INDEX_RESOURCE = "ui/index.html";
++    private static final String APPS_RESOURCE = "ui/apps.html";
++    private static final String APPS_EDITOR_RESOURCE = "ui/apps-editor.html";
+     private static final String HEAD_TAG = "<head>";
+     // 'private' keeps a shared cache from ever storing another user's token; 'no-store' would also
+     // disqualify the page from the browser back/forward cache.
+@@ -50,6 +53,8 @@ public class UiIndexService {
+ 
+     // Empty when the UI is not packaged on the classpath (backend-only builds).
+     private final Optional<String> template;
++    private final Optional<String> appsTemplate;
++    private final Optional<String> appsEditorTemplate;
+ 
+     @Inject
+     public UiIndexService(
+@@ -66,7 +71,9 @@ public class UiIndexService {
+         this.csrfConfiguration = Objects.requireNonNull(csrfConfiguration);
+         this.csrfTokenGenerator = Objects.requireNonNull(csrfTokenGenerator);
+         this.csrfTokenValidator = Objects.requireNonNull(csrfTokenValidator);
+-        this.template = load();
++        this.template = load(INDEX_RESOURCE);
++        this.appsTemplate = load(APPS_RESOURCE);
++        this.appsEditorTemplate = load(APPS_EDITOR_RESOURCE);
+     }
+ 
+     /**
+@@ -77,6 +84,23 @@ public class UiIndexService {
+         return template.map(html -> render(request, html));
+     }
+ 
++    /**
++     * Renders the standalone dsh Apps shell ({@code apps.html}) for the given request, or empty when
++     * the UI is not packaged on the classpath.
++     */
++    public Optional<MutableHttpResponse<byte[]>> renderApps(HttpRequest<?> request) {
++        return appsTemplate.map(html -> render(request, html));
++    }
++
++    /**
++     * Renders the standalone dsh Apps editor shell ({@code apps-editor.html}) for the given request,
++     * or empty when the UI is not packaged on the classpath. Same per-request CSRF meta injection as
++     * {@link #renderApps} (lessons-learned #1: the meta must match the login session cookie).
++     */
++    public Optional<MutableHttpResponse<byte[]>> renderAppEditor(HttpRequest<?> request) {
++        return appsEditorTemplate.map(html -> render(request, html));
++    }
++
+     private MutableHttpResponse<byte[]> render(HttpRequest<?> request, String template) {
+         String html = template;
+         Cookie csrfCookie = null;
+@@ -134,8 +158,8 @@ public class UiIndexService {
+         return html.substring(0, insertionPoint) + "\n" + metaTag + html.substring(insertionPoint);
+     }
+ 
+-    private Optional<String> load() {
+-        try (InputStream is = UiIndexService.class.getClassLoader().getResourceAsStream(INDEX_RESOURCE)) {
++    private Optional<String> load(String resource) {
++        try (InputStream is = UiIndexService.class.getClassLoader().getResourceAsStream(resource)) {
+             if (is == null) {
+                 return Optional.empty();
+             }
+@@ -146,12 +170,15 @@ public class UiIndexService {
+     }
+ 
+     private String replace(String line) {
++        // Vite emits relative asset references (base: ""); both index.html and apps.html need them
++        // rewritten to the absolute /ui/ mount so they resolve from any depth (a standalone app
++        // page lives at /apps/... and must not resolve assets relative to it).
++        line = line.replace("./", (basePath != null ? basePath : "") + "/ui/");
++
+         if (!line.contains("KESTRA_UI_PATH")) {
+             return line;
+         }
+ 
+-        line = line.replace("./", (basePath != null ? basePath : "") + "/ui/");
+-
+         if (webserverConfiguration.googleAnalytics() != null) {
+             line = line.replace("KESTRA_GOOGLE_ANALYTICS = null;", "KESTRA_GOOGLE_ANALYTICS = '" + webserverConfiguration.googleAnalytics() + "';");
+         }
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java b/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java
+index 23afff17db..70e5e3580d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java
+@@ -14,6 +14,8 @@ import io.kestra.core.services.InstanceService;
+ import io.kestra.core.utils.VersionProvider;
+ import io.kestra.webserver.services.ai.gemini.GeminiAiService;
+ import io.kestra.webserver.services.ai.gemini.GeminiConfiguration;
++import io.kestra.webserver.services.ai.openai.OpenAiAiService;
++import io.kestra.webserver.services.ai.openai.OpenAiConfiguration;
+ import io.kestra.webserver.services.posthog.PosthogService;
+ 
+ import io.micronaut.context.annotation.Requires;
+@@ -128,10 +130,13 @@ public class AiServiceManager {
+             return null;
+         }
+ 
+-        if (!"gemini".equals(type)) {
++        // dsh: openai-compatible is unlocked as a product decision — upstream's OSS/EE split
++        // is a commercial gate, not a technical one (docs/merge-upstream-review-20260912.md
++        // 三.1/风险 #1). Upstream will never take this; guard this branch on every merge.
++        if (!"gemini".equals(type) && !"openai".equals(type)) {
+             throw new IllegalArgumentException(
+-                "Unsupported AI provider type '" + type + "' for Kestra OSS. Only 'gemini' is supported. " +
+-                    "Other providers (openai, anthropic, ollama, etc.) require Kestra Enterprise Edition."
++                "Unsupported AI provider type '" + type + "' for Kestra OSS. Only 'gemini' and 'openai' (any OpenAI-compatible endpoint via 'base-url') are supported. " +
++                    "Other providers (anthropic, ollama, etc.) require Kestra Enterprise Edition."
+             );
+         }
+ 
+@@ -139,6 +144,18 @@ public class AiServiceManager {
+             ObjectMapper mapper = JacksonMapper.ofJson().copy()
+                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+ 
++            if ("openai".equals(type)) {
++                OpenAiConfiguration openAiConfig = mapper.convertValue(configMap, OpenAiConfiguration.class);
++                AiService<?> service = new OpenAiAiService(
++                    pluginRegistry, jsonSchemaGenerator, versionProvider, instanceService, posthogService, this.namespaceContextTool, provider.displayName(), listeners, openAiConfig,
++                    expressionContextService, flowParsingService
++                );
++                if (this.kestraDocsContextTool != null) {
++                    service.setKestraDocsContextTool(this.kestraDocsContextTool);
++                }
++                return service;
++            }
++
+             GeminiConfiguration geminiConfig = mapper.convertValue(configMap, GeminiConfiguration.class);
+             AiService<?> service = new GeminiAiService(
+                 pluginRegistry, jsonSchemaGenerator, versionProvider, instanceService, posthogService, this.namespaceContextTool, provider.displayName(), listeners, geminiConfig,

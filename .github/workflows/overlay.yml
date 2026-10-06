@@ -7,18 +7,24 @@ permissions:
   contents: read
   packages: write
 jobs:
-  extensions-verify:
+  patch-verify:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Verify staged extension jars (upstream pinned BASE, plugins/ slot)
+      - name: Verify thin patches apply cleanly on pinned BASE (no compile)
         run: ./scripts/build.sh --apply-only
   build-push:
-    needs: extensions-verify
+    needs: patch-verify
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Set up JDK 25 (webserver toolchain)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build overlay image and push to ghcr.io/ai-specs
+      - name: Apply patches, compile webserver, stage extension jars, build and push
         run: ./scripts/build.sh
