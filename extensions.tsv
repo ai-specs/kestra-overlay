@@ -6,8 +6,7 @@
 #   classpath  → 通道②：jar 须进应用 classpath（bean 进 Micronaut 上下文）——
 #                承载依赖 R-CLASSPATH-MERGE（未落地前本仓不注入，报 PENDING）
 #   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）
-# 首批客户（dsh 扩展仓，2026-10-07 立项）：
-plugin-apps-harness	classpath	Dsh* 安全面/控制器 jar（@Controller 不走插件体系——机制 F3，plugins/ 槽承载不了）
-plugin-apps-amis	plugin	amis 声明式 apps 触发器（PageTrigger/ApiTrigger）
-kestra-oidc-provider	standalone	独立 IdP 进程（webserver 侧认证链 jar 的承载另行随 R-CLASSPATH-MERGE 立案）
-plugin-relay-dsh	standalone	独立 relay 进程
+# 2026-10-07 范围收窄（维护者裁定）：活跃范围 = kestra-oidc-provider（不含 MCP 面）+ R-EE-RBAC；
+# plugin-apps-harness / plugin-apps-amis / plugin-relay-dsh 行已删除（git 历史即归档），
+# 重启按 AGENTS.md §2 入口重新接收。
+kestra-oidc-provider	standalone	独立 IdP 进程（webserver 侧认证链 jar 的镜像承载 = R-CLASSPATH-MERGE；实施时为本体 jar 另加 classpath 数据行）

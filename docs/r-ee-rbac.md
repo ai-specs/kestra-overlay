@@ -78,7 +78,7 @@ micronaut-security-csrf，差异表 §1-S6）。⇒ EE 的 IAM **不是「OSS �
 | 审计日志 | EE 产品功能（差异表 §2-E 不补足） |
 | impersonation | EE 产品功能 |
 | EE 式 API token 签发/管理 | 机器身份走 OIDC JWT（§2-A-3 已裁定） |
-| UI 按钮/菜单按权限隐藏 | ui 面（禁收；归 R-UI-EDITION-GATE 按需，扩展仓前端包路线） |
+| UI 按钮/菜单按权限隐藏 | ui 面（禁收；若未来需要按 AGENTS.md §2 入口另立，走扩展仓前端包路线） |
 | 照抄 EE 五内置角色/binding 不可变/级联语义 | 业务语义归扩展仓设计 |
 
 ## 5. 交付分层与归属（EE 同构三通道）
@@ -101,7 +101,8 @@ micronaut-security-csrf，差异表 §1-S6）。⇒ EE 的 IAM **不是「OSS �
 ## 7. 前置与触发条件（形态绑定，非客户阶段绑定——AGENTS.md §3-6）
 
 - 前置：R-CLASSPATH-MERGE 落地（jar 承载）；
-- 触发（开工要件）：① 指名消费扩展仓（plugin-apps-harness 或 kestra-oidc-provider）；
+- 触发（开工要件）：① 指名消费扩展仓（kestra-oidc-provider 侧或未来授权扩展仓——
+  2026-10-07 范围收窄后 apps 仓已出活跃范围）；
   ② 行为证据（缺授权时哪个端点/页面/流程暴露）；③ 最小面声明；④ 差异表 §2-B 行
   （已存在，本文即其展开）。
 
@@ -124,10 +125,8 @@ namespace 边界：低权限对 {ns-allowed} 可写、对 {ns-denied} 403（由�
 - **OQ-RBAC-2**：过滤器链死角清单（webhook/SSE/MCP 流）未扫——开工前以 BASE 源码
   `@Filter/@Controller` 路由盘点补齐。
 - **OQ-RBAC-3**：与 CSRF/SecurityFilter 顺序（micronaut SecurityFilterPhase）协同未实证。
-- **OQ-RBAC-4**（2026-10-07 补记）：TenantAliasingRooter（REQ-0020）把 tenant-less
-  `/api/v1/{a}/{b}` 改写后探测路由，而 `intercept-url-map` 按**原始请求路径**匹配——
-  安全门模式与路由改写的先后关系需开工时实证（预期：门匹配原始路径、先于改写生效，
-  方向有利；属现有 overlay patch 与安全链的唯一交互面）。
+  （原 OQ-RBAC-4「TenantAliasingRooter×intercept-url-map」已随 REQ-0020 删除而失效——
+  2026-10-07 范围收窄，vanilla rooter 无 catch-all 改写，交互面不存在。）
 - EE 未来 release 的 RBAC 语义变化不影响本需求（我们不复刻其语义）；BASE 升级复扫
   仅核对 §1 的「OSS 零钩子」事实是否仍成立（差异表 §5 命令集覆盖）。
 

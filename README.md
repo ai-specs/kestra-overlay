@@ -18,6 +18,10 @@ kestra OSS 相对 EE 故意阉割的架构扩展能力**（能力差异与补足
 原理定「怎么生效」，服务任何想以 EE 同构方式扩展 OSS 的下游；dsh 扩展仓是首批客户，
 dsh fork 只是证据库、不是路线图（全文见 `AGENTS.md` §0·长远目标）。
 
+**当前范围（2026-10-07 收窄裁定）**：活跃范围仅 **kestra-oidc-provider**（不含 MCP 面）
+与 **R-EE-RBAC**（`docs/r-ee-rbac.md`）；apps/AI/UI 域的 patch 与 reserved 已删除
+（git 历史即归档，重启按 `AGENTS.md` §2 入口重新接收）。
+
 ## 快速命令
 
 | 命令 | 用途 |
@@ -28,18 +32,21 @@ dsh fork 只是证据库、不是路线图（全文见 `AGENTS.md` §0·长远�
 | `./scripts/build.sh` | 全量：apply → 编译 webserver → 镜像 → push ghcr |
 | `./scripts/build-extensions.sh <WORK>` | 扩展仓 jar 收集注入（注册表 `extensions.tsv`；env > extensions/ > 跳过；classpath 槽报 PENDING） |
 
-## patch 集（2026-10-07 审计重整后）
+## patch 集（2026-10-07 范围收窄后）
 
-阶段一范围 = 支撑 **plugin-apps-amis** 与 **kestra-oidc-provider** 两个扩展仓；
-总账与 reserved 待激活点见 `patches/manifest.tsv`（check-patches.sh 强校验一致性）：
+当前范围 = **kestra-oidc-provider**（不含 MCP 面）+ **R-EE-RBAC**（`docs/r-ee-rbac.md`）；
+总账与 reserved 见 `patches/manifest.tsv`（check-patches.sh 强校验一致性）：
 
 | patch | 需求 | 消费扩展仓 | 状态 |
 |---|---|---|---|
-| 0010-mcp-oauth-on-oss | MCP OAUTH 在 OSS 解禁 + 默认值 + PUT null-合并 | kestra-oidc-provider | core |
 | 0011-oidc-login-boot | /configs OIDC 登录引导激活点 | kestra-oidc-provider | core |
-| 0020-apps-namespace-catchall | apps 命名空间 catch-all 承载（控制器+路由索引+rooter 探测+405 归一） | plugin-apps-amis | transition |
-| 0021-apps-antiprobe-empty404 | apps 防探测空 body 404（标记异常+handler+filter 消费） | plugin-apps-amis | transition |
-| 0022-apps-shell-templates | apps.html/apps-editor.html 模板加载渲染 | plugin-apps-amis | core |
+
+reserved 两条：**R-CLASSPATH-MERGE**（通道② jar 承载，认证链与 RBAC 的共同前置，选型 b
+已裁定）与 **R-EE-RBAC**（外部细粒度授权，预期零 patch）。
+
+> 2026-10-07 审计结论：原 3 个粗粒度 patch（0001/0002/0003）中约 2/3 是**上游 develop
+> 内容的回移**，已剔除（归因方法见 `AGENTS.md` §5.2/§8-6）；同日**范围收窄**又删除
+> 0010/0020/0021/0022（MCP 与 apps 域，git 历史即归档）。
 
 > 2026-10-07 审计结论：原 3 个粗粒度 patch（0001/0002/0003）中约 2/3 是**上游 develop
 > 内容的回移**（BasicAuthService/RequestUtils/CookiesConfiguration/NotFoundHeadersFilter
@@ -59,5 +66,7 @@ dsh fork 只是证据库、不是路线图（全文见 `AGENTS.md` §0·长远�
 
 ## 关联项目
 
-- kestra 侧扩展仓：plugin-apps-amis / plugin-apps-harness / kestra-oidc-provider / plugin-relay-dsh
-- harness 侧对应构建仓：harness-overlay
+- 当前活跃客户：kestra-oidc-provider（不含 MCP 面）
+- 需求文档：`docs/r-ee-rbac.md`（R-EE-RBAC，外部细粒度授权）
+- 已出范围（2026-10-07 收窄，git 历史即归档）：plugin-apps-amis / plugin-apps-harness /
+  plugin-relay-dsh 及 harness-overlay

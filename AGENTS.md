@@ -33,6 +33,18 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 | 业务逻辑实现（控制器、服务、触发器、前端包） | 扩展仓（jar 出仓：plugins/ 槽或外部 classpath jar） |
 | 上游自身内容（含未来 release 会包含的东西） | **本仓永不回移**（见 §5 归因法） |
 
+### 当前范围（2026-10-07 收窄裁定，维护者）
+
+北极星使命不变（服务任何下游），但**活跃范围**收缩为两件事：
+
+1. **kestra-oidc-provider**（不含 MCP 面——REQ-0010 与差异表 MCP 域行已删）；
+2. **R-EE-RBAC**（`docs/r-ee-rbac.md`，外部细粒度授权能力）。
+
+apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
+（R-APP-ROUTER/R-NFH-ANCHOR/R-AI-PROVIDERS/R-UI-EDITION-GATE，含更早收回的 R-MIG-DSH）
+已删除，git 历史即归档；重启任一域须按 §2 入口**重新接收**（先补差异表行 + 客户证据），
+不引用已删内容作为立项理由（可作 `[dsh]`/历史证据引用）。
+
 ## 1. 仓库结构与事实源
 
 | 路径 | 是什么 | 约束 |
@@ -137,8 +149,8 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
    - **上游已吸收/文件消失** → 删除 patch，manifest 记 `absorbed@vX.Y.Z`，commit 说明证据；
    - **冲突** → 按该 patch 头部 `来源` 字段重推导（fork 定制回到 §5.2 求法），**收窄优先**，
      禁止趁机扩面。
-3. 复扫 `docs/oss-ee-gap.md`：重跑 §5 复现命令更新 §1/§2；逐行复审 §3 判定；**逐条检查
-   §4 reserved 触发条件**（如 R-NFH-ANCHOR：release 含 NotFoundHeadersFilter 时须评估回锚）。
+3. 复扫 `docs/oss-ee-gap.md`：重跑 §5 复现命令更新 §1/§2；逐行复审 §3 与 **逐条检查
+   §4 reserved 触发条件**（如 R-CLASSPATH-MERGE 实施状态、R-EE-RBAC 前置是否变化）。
 4. 更新 `patches/BASE` 两行（tag + sha）。
 5. 本地 `check-patches.sh --apply-check`（新树）→ commit → push → **CI 必须全绿**（升级属
    「大改后跟踪一次」例外，允许用 `gh run list -R ai-specs/kestra-overlay` 确认）。
@@ -162,8 +174,8 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 | 4 | `git apply` 容忍 patch 首部 `#` 注释行 → 头部注释由此合法（但 diff 之后不允许散文） | 本轮树级验证 |
 | 5 | `--filter=blob:none` 克隆的 lazy checkout 中途断流（HTTP/2 reset） | 用完整浅克隆 + `proxy_on` |
 | 6 | **fork↔release 全量 diff ≠ 定制面**（上游回移误判案：BasicAuthService/RequestUtils/CookiesConfiguration/NotFoundHeadersFilter 纯回移 + ErrorController/MiscController/UiIndexService 大半回移，占原 patch 集 2/3） | 2026-10-07 审计，§5.2 已固化求法 |
-| 7 | TenantAliasingRooter 不得用路由级负向前瞻 regex（Micronaut UriTemplateMatcher 直接抛异常起不来） | fork 注释保留于 REQ-0020 |
-| 8 | 需求对齐 patch 可能有**先后坐标依赖**（0021 的 filter hunk 基于 0020 应用后的状态）：apply 必须**逐 patch「check→apply」交替**，不能先对干净树全量 --check 再统一 apply（旧独立 patch 集的习惯，2026-10-07 CI 实证挂法） | build.sh 修复提交 + check-patches.sh [8] 一贯正确 |
+| 7 | TenantAliasingRooter 不得用路由级负向前瞻 regex（Micronaut UriTemplateMatcher 直接抛异常起不来） | fork 实证（原注记随 REQ-0020 删除，教训保留） |
+| 8 | 需求对齐 patch 可能有**先后坐标依赖**（历史实例：0021 的 filter hunk 基于 0020 应用后的状态，该对 patch 已随范围收窄删除）：apply 必须**逐 patch「check→apply」交替**，不能先对干净树全量 --check 再统一 apply（旧独立 patch 集的习惯，2026-10-07 CI 实证挂法） | build.sh 修复提交 + check-patches.sh [8] 一贯正确 |
 
 ## 9. 变更纪律
 

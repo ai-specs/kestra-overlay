@@ -3,15 +3,10 @@
 # reserved 行：patch文件列必须为 `-`，对应 docs/oss-ee-gap.md §4 登记簿。
 # 归因基线：2026-10-07 审计（fork merge-base f6dbbb49 定制 diff 为唯一事实源；见 AGENTS.md §5.2）。
 # 移除条件/触发条件一律形态绑定（禁止只写客户阶段号——AGENTS.md §3-6）；零 overlay 动作可补足的
-# 缝隙不入 reserved（登记收回规则见 docs/oss-ee-gap.md §4；R-MIG-DSH 已据此收回，git 历史即归档）。
-0010	0010-mcp-oauth-on-oss.patch	core	kestra-oidc-provider	MCP OAUTH 在 OSS 解禁+服务器侧默认值+PUT null-合并	2	fork 定制移植(verbatim)	上游向 OSS 开放 OAUTH authType
+# 缝隙不入 reserved（登记收回规则见 docs/oss-ee-gap.md §4）。
+# 2026-10-07 范围收窄（维护者裁定）：活跃范围 = kestra-oidc-provider（不含 MCP 面）+ R-EE-RBAC；
+# 删除 0010/0020/0021/0022 与 R-APP-ROUTER/R-NFH-ANCHOR/R-AI-PROVIDERS/R-UI-EDITION-GATE
+# （含更早收回的 R-MIG-DSH）——git 历史即归档，重启任一域须按 AGENTS.md §2 入口重新接收。
 0011	0011-oidc-login-boot.patch	core	kestra-oidc-provider	/configs+/configs/login OIDC 登录引导激活(securityEnabled/oidcAuthEnabled/兜底)	1	fork 定制移植(verbatim)	上游 /configs 原生支持第三方 OIDC 部署
-0020	0020-apps-namespace-catchall.patch	transition	plugin-apps-amis	apps 命名空间 catch-all 承载(UiAppController+AppRouteRegistry+rooter 探测+405 归一)	4	fork 定制移植(手工适配:剥离 AppRouterController 引用与 context-path)	R-CLASSPATH-MERGE 落地后新增文件部分移出扩展仓 jar,收窄为 rooter+filter 两 M 面
-0021	0021-apps-antiprobe-empty404.patch	transition	plugin-apps-amis	apps 防探测空 body 404(标记异常+@Error handler+filter 消费)	3	fork 定制移植(手工适配:ErrorController 仅移植 handler,Jackson 面为上游内容不回移)	R-CLASSPATH-MERGE 落地后异常类移出扩展仓 jar,收窄为两 M 面
-0022	0022-apps-shell-templates.patch	core	plugin-apps-amis	apps.html/apps-editor.html 模板加载+渲染激活点(含 CSRF 注入与 ./ 重写)	1	fork 定制移植(verbatim)	上游提供独立页面外壳机制
-R-CLASSPATH-MERGE	-	reserved	plugin-apps-harness / kestra-oidc-provider	通道②镜像承载(EE 同构交付核心缺口):manifest Class-Path 注入(选型b已裁定2026-10-07;jar可烤进或运行时挂载,缺席=静默休眠)——已立案待实施,实证/收窄设计约束见 docs/extension-mechanisms.md §4	-	docs/oss-ee-gap.md §3/§4	实施指令(不绑客户阶段);实施时闭环 OQ2 剩余项(bean 索引可见性)
-R-EE-RBAC	-	reserved	plugin-apps-harness	授权面:扩展仓 jar 提供 SecurityRule/Authorizer bean(预期零 overlay patch——OSS 无授权钩子,2026-10-07 复扫)	-	docs/oss-ee-gap.md §2-B/§4	客户实施并给行为证据时实证(含 R-CLASSPATH-MERGE 落地前置)
-R-APP-ROUTER	-	reserved	plugin-apps-harness	apps API 面(AppRouterController/AppsFileController/AppsService)与 rooter/filter 的对应排除逻辑回归	-	docs/oss-ee-gap.md §4	客户实施并给行为证据+R-CLASSPATH-MERGE 落地
-R-NFH-ANCHOR	-	reserved	(升级触发)	NotFoundHeadersFilter 上游已有文件,fork 有 UiAppController 排除定制块;BASE 升至含该文件的 release 后评估回锚	-	docs/oss-ee-gap.md §4	下一次 BASE 升级时强制评估(升级 SOP §6-3)
-R-AI-PROVIDERS	-	reserved	plugin-apps-harness	AI 提供商门控解禁(patch 改条件或 jar 子类覆写 S9 二择一);适配器实现归扩展仓	-	docs/oss-ee-gap.md §2-H/§4	客户实施并给行为证据;实施时先验证覆写路径
-R-UI-EDITION-GATE	-	reserved	(按需)	OSS UI 按 edition 隐藏的能力面(MCP OAUTH 表单等 3 处+dashboard);仅扩展仓前端包或后端 /configs 字段面两路(ui 面 patch 禁收,2026-10-07 删该选项)	-	docs/oss-ee-gap.md §4	按需(不预设)
+R-CLASSPATH-MERGE	-	reserved	kestra-oidc-provider	通道②镜像承载:manifest Class-Path 注入(选型b已裁定2026-10-07;jar可烤进或运行时挂载,缺席=静默休眠)——认证链 jar 与 R-EE-RBAC SecurityRule jar 的共同前置;实证/设计约束见 docs/extension-mechanisms.md §4	-	docs/oss-ee-gap.md §3/§4	实施指令;实施时闭环 OQ2 剩余项(bean 索引可见性)
+R-EE-RBAC	-	reserved	(待指名:kestra-oidc-provider 侧或未来授权扩展仓)	授权面:扩展仓 jar 提供 SecurityRule/Authorizer bean(预期零 overlay patch——OSS 无授权钩子,vanilla 实测 IAM API 全 404);展开文档 docs/r-ee-rbac.md	-	docs/oss-ee-gap.md §2-B/§4 + docs/r-ee-rbac.md	消费仓指名+行为证据+R-CLASSPATH-MERGE 落地
