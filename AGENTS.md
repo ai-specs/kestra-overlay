@@ -89,7 +89,9 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
 - ❌ 无消费扩展仓的「顺手优化/对齐上游」——patch 面只增不减的根源；
 - ❌ 把上游 develop/未来 release 的内容回移到 BASE（「fork 有而 BASE 没有」≠ 定制，见 §5）；
 - ❌ patch 携带业务逻辑（应出仓为扩展仓 jar）；A 类新增文件进 patch 仅限「M 面激活点的编译锚」（manifest 标 `transition` + 移除条件）；
-- ❌ 动 build 面（settings.gradle/docker-entrypoint 等：CI 实证 `Configuring project ':x' without an existing directory` 必挂）、ui 面（本仓镜像不编译 ui，收了不生效）、migration 面（归扩展仓：`MigrationRunner` 注入 `Collection<MigrationScript>` 收集上下文**全部** bean、classpath jar 的也收（`core/migration/MigrationRunner.java:47-56`）——扩展仓 jar 自带 bean+SQL 即生效，overlay patch 无承载点；SQL-only patch 无 bean 注册从未生效，§8-2）；
+- ❌ build 面 patch：settings.gradle/docker-entrypoint 等。CI 实证必挂（`Configuring project ':x' without an existing directory`）；
+- ❌ ui 面 patch：本仓镜像不编译 ui，收了不生效；
+- ❌ migration 面 patch：migration 归扩展仓。`MigrationRunner` 注入 `Collection<MigrationScript>` 收集上下文全部 bean，classpath jar 的也收（`core/migration/MigrationRunner.java:47-56`）——扩展仓 jar 自带 bean+SQL 即生效，overlay patch 无承载点。SQL-only patch 缺 bean 注册，从未生效（§8-2）；
 - ❌ 复刻 EE 产品功能（审计日志、Kafka 队列等）——本仓只补**架构扩展能力**（见差异表 §0 定位）。
 
 ## 3. patch 质量法
