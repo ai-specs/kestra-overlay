@@ -51,7 +51,7 @@ kestra OSS 相对 EE 故意阉割的架构扩展能力**（能力差异与补足
 
 上游升级（用户只需一句「升级到 vX.Y.Z」）、新需求接收标准、实施流水线、质量法全部在
 **`AGENTS.md`**（本仓自治，不依赖外部仓库文件）。OSS↔EE 能力差异与补足决策：
-`docs/oss-ee-gap.md`。
+`docs/oss-ee-gap.md`；扩展机制原理（编译/重启/外部 jar）：`docs/extension-mechanisms.md`。
 
 ## 关联项目
 

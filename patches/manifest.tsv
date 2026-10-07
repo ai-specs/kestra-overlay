@@ -13,3 +13,4 @@ R-NFH-ANCHOR	-	reserved	(升级触发)	NotFoundHeadersFilter 上游已有文件,
 R-MIG-DSH	-	reserved	harness-kestra-app	dsh_metrics migration(bean+SQL 成对收)	-	docs/oss-ee-gap.md §4	harness-kestra-app 实施时(阶段四)
 R-AI-DASHSCOPE	-	reserved	plugin-apps-harness	AiServiceManager(DashScope/OpenAI 启用)	-	docs/oss-ee-gap.md §4	harness 实施时(阶段二)
 R-UI-EDITION-GATE	-	reserved	(按需)	OSS UI 按 edition 隐藏的能力面(MCP OAUTH 表单等 3 处+dashboard);官方 UI 表单形态需要时再裁	-	docs/oss-ee-gap.md §4	按需(不预设)
+R-CLASSPATH-MERGE	-	reserved	plugin-apps-harness	S5 扩展 jar 进官方镜像机制(fat jar 合并 vs manifest Class-Path)——阶段二出仓前置实证	-	docs/extension-mechanisms.md §4-OQ1	harness 实施时(阶段二)先实证再定

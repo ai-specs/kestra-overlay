@@ -13,6 +13,7 @@
 
 ## 1. EE 的交付机制 = overlay 可用的架构缝隙（穷尽列举）
 
+> 各缝隙的**生效原理**（要不要编译/重启/外部 jar）见 `docs/extension-mechanisms.md`（结论矩阵）。
 > 结论先行：**EE 与 OSS 同 codebase，EE 以「classpath jar + license key」叠加交付**
 > （`[docs]`「加 license 重启即升级」）。OSS 源码里处处是「为 EE 预留的挂接点」——
 > 这些挂接点就是本仓与扩展仓的合法通道（上游商业利益保证其稳定：动了它们 EE 自己就挂）。
@@ -130,6 +131,7 @@ plugin-apps-amis   需要：命名空间承载面（I1：REQ-0020 catch-all + RE
 | R-MIG-DSH | dsh_metrics migration（**bean + SQL 成对收**——fork 原 SQL-only patch 因缺 Java 注册 bean 从未生效） | harness-kestra-app 实施时（阶段四） | migration patch |
 | R-AI-DASHSCOPE | AiServiceManager（DashScope/OpenAI 启用）；注意 H 域 UI copilot 的 edition 分叉 | plugin-apps-harness 实施时（阶段二） | M patch |
 | R-UI-EDITION-GATE | OSS UI 按 edition 隐藏的能力面（C3：MCP OAUTH 表单等 3 处 + dashboard/EE-only schema）；若 kestra-oidc-provider 需要官方 UI 表单形态再裁 | 按需（不预设） | ui 面 patch 或扩展仓前端包 |
+| R-CLASSPATH-MERGE | S5 扩展 jar 进官方镜像的机制（fat jar 构建期合并 vs manifest Class-Path 注入 vs 自定义 entrypoint）——OQ1/OQ2 待实证 | plugin-apps-harness 实施时（阶段二）先实证再定 | 构建机制决策 + 实证记录（见 docs/extension-mechanisms.md §4） |
 
 ## 5. 复现命令（证据纪律：结论必须可复现；BASE 树内执行）
 

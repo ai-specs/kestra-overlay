@@ -30,6 +30,7 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 | `scripts/build-extensions.sh` | 扩展仓 jar 收集注入（env > extensions/ > 跳过） | 本仓不 vendored 任何 jar 二进制 |
 | `scripts/check-patches.sh` | 本仓质量门（结构校验 + 可选 apply-check） | 改 patches 后必须本地跑；CI patch-verify 第一步 |
 | `docs/oss-ee-gap.md` | OSS↔EE 能力差异表 + reserved 登记簿 | 补足决策的唯一依据；BASE 升级后必须复扫 |
+| `docs/extension-mechanisms.md` | 扩展机制原理（编译/重启/外部 jar 三问的调查记录） | 「怎么生效」的事实源；含 OQ 开放问题清单（实施前必须闭环） |
 | `.github/workflows/overlay.yml` | CI：结构检查 → apply 门 → 编译+镜像 | CI 全绿是唯一通过标志 |
 
 ## 2. 需求接收（什么时候收需求、收到什么程度才算合格）
