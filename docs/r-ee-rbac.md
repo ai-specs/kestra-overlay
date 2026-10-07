@@ -125,6 +125,10 @@ namespace 边界：低权限对 {ns-allowed} 可写、对 {ns-denied} 403（由�
 - **OQ-RBAC-2**：过滤器链死角清单（webhook/SSE/MCP 流）未扫。开工前以 BASE 源码
   `@Filter/@Controller` 路由盘点补齐。
 - **OQ-RBAC-3**：与 CSRF/SecurityFilter 顺序（micronaut SecurityFilterPhase）协同未实证。
+- **OQ-RBAC-4**（2026-10-07 充分性审查新增）：deny 的 403 是否被上游
+  `ProblemResponseFilter` 自动 problem 化未实证（该 filter 对 ≥400 且无 body 的响应补
+  problem 文档；安全链 403 的 body 形态取决于 micronaut-security 渲染）。若不自动，
+  由 ③ 层扩展仓渲染——不影响占位具备性，只影响 §8 验收细节。
 
 EE 未来 release 的 RBAC 语义变化不影响本需求（不复刻其语义）。BASE 升级复扫仅核对
 §1 的「OSS 零钩子」事实是否仍成立（差异表 §5 命令集覆盖）。

@@ -37,7 +37,7 @@
 
 ## 2. 能力差异总表（活跃范围：认证/身份 + 授权）
 
-### A. 认证与身份（kestra-oidc-provider 主场）
+### A. 认证与身份（认证线）
 
 | 能力 | OSS 行为 | EE 行为 | 补足方式 | 状态 |
 |---|---|---|---|---|
@@ -46,7 +46,7 @@
 | SCIM | 无（`ProblemFormatExclusion.java` javadoc 明言归 EE） | 有 `[src+docs]` | —（EE 产品功能） | 不补足 |
 | 服务账号/API token | 无 | 有 `[docs]` | 机器身份走 OIDC JWT（R-EE-RBAC §3） | 不补足 |
 
-### B. 授权与访问控制（R-EE-RBAC 主场）
+### B. 授权与访问控制（授权线）
 
 | 能力 | OSS 行为 | EE 行为 | 补足方式 | 状态 |
 |---|---|---|---|---|
@@ -58,15 +58,19 @@
 「阶段」只是优先级注记（AGENTS.md §0-3）。一切移除/触发条件形态绑定。
 
 ```
-kestra-oidc-provider（不含 MCP 面）：
+认证线（OIDC 部署形态；范围裁定：MCP 面除外）：
     认证链（A1 ← S6 jar，承载 = R-CLASSPATH-MERGE）
   + 登录引导（A2 = REQ-0011，唯一 patch）
   + 最小端点门（B1 = 部署面 intercept-url-map，前提 = 认证链 jar 进镜像）
 
-R-EE-RBAC（docs/r-ee-rbac.md）：
+授权线（R-EE-RBAC，docs/r-ee-rbac.md）：
     在认证层之上叠加 (资源, 动作, namespace) 每请求判定
     交付分层与验收判据见该文档 §5/§8
 ```
+
+**扩展点充分性审查（2026-10-07，按基本原则）**：两线占位**具备**，无占位缺失级缺口。
+缺口均为实施/实证级——R-CLASSPATH-MERGE 实施（承载，两线共同前置）与
+OQ-RBAC 1-4（r-ee-rbac.md §9）。
 
 ## 4. reserved 登记簿（manifest.tsv 同步登记）
 

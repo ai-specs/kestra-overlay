@@ -18,8 +18,9 @@ kestra 侧**薄 overlay 构建仓**。CI 流程：
   （`docs/oss-ee-gap.md`），机制原理定「怎么生效」（`docs/extension-mechanisms.md`）。
 - **基本原则**：只对上游架构与扩展机制负责——交付足够的扩展点/占位；外部如何实现
   不在本仓视野（`AGENTS.md` §0·基本原则）。
-- **当前范围**（2026-10-07 收窄裁定）：仅 kestra-oidc-provider（MCP 面除外）与
-  R-EE-RBAC（`docs/r-ee-rbac.md`）。裁定与重启规则见 `AGENTS.md` §0。
+- **当前范围**（2026-10-07 收窄裁定）：两条能力线——**认证线**（OIDC 部署形态，
+  MCP 面除外）与**授权线**（R-EE-RBAC，`docs/r-ee-rbac.md`）。裁定与重启规则见
+  `AGENTS.md` §0。
 - **镜像定位**（2026-10-07 裁定）：加固形态（no-plugins 谱系）。构建期零外部扩展 jar；
   扩展 jar 一律部署侧挂载 + 重启；classpath 承载仅注入 manifest 条目元数据。
   主 tag = release + `-no-plugins`。auto-install 无法镜像内烤关，部署基线应显式关闭
