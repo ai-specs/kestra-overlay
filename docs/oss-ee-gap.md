@@ -139,7 +139,7 @@ plugin-apps-amis   需要：命名空间承载面（I1：REQ-0020 catch-all + RE
 
 | rid | 扩展点 | 触发条件（形态绑定） | 预期形态 |
 |---|---|---|---|
-| R-CLASSPATH-MERGE | 通道②的镜像承载机制（EE 同构交付的核心缺口，S6）——**已立案待实施**（2026-10-07 使命审查升级；可行性与最小面方案见 `docs/extension-mechanisms.md` §4） | 实施指令（不绑客户阶段；是 R-EE-RBAC/R-APP-ROUTER 与 0020/0021 收窄的共同前置） | build.sh 构建产物后处理（manifest Class-Path 注入，候选 b）+ OQ1/OQ2 实证；零 patch 文件 |
+| R-CLASSPATH-MERGE | 通道②的镜像承载机制（EE 同构交付的核心缺口，S6）——**已立案待实施，选型 b 已裁定（2026-10-07 维护者确认）**；JVM 语义三组实证（缺席静默休眠/`.class` 字面量懒解析/主 jar 优先）与收窄设计约束见 `docs/extension-mechanisms.md` §4 | 实施指令（不绑客户阶段；是 R-EE-RBAC/R-APP-ROUTER 与 0020/0021 收窄的共同前置） | build.sh 构建产物 manifest Class-Path 注入（jar 可烤进镜像或运行时挂载，manifest 条目=镜像↔部署契约）+ OQ2 剩余实证（bean 索引可见性）；零 patch 文件 |
 | R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 micronaut-security SecurityRule/Authorizer bean | 客户实施并提供行为证据（§2-B 接收标准） | 外部 classpath jar（S6）；**预期零 overlay patch**（OSS 无授权钩子可激活，2026-10-07 复扫 + vanilla 实测 IAM API 全 404）；实证含 SecurityRule 从 jar 注册。**展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md)** |
 | R-APP-ROUTER | apps API 面（AppRouterController/AppsFileController/AppsService）；TenantAliasingRooter/ProblemResponseFilter 的 AppRouterController 排除逻辑届时回归 | 客户实施并提供行为证据 + R-CLASSPATH-MERGE 落地（jar 承载前置） | 外部 classpath jar（S6）+ 排除逻辑回归 patch |
 | R-NFH-ANCHOR | NotFoundHeadersFilter（上游 develop 已有该文件，fork 有 UiAppController 排除一小块定制）：BASE 升到含该文件的 release 后**必须**评估回锚 | 下一次 BASE 升级（升级 SOP §6-3 强制项） | M patch |

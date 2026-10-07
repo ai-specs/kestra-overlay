@@ -9,7 +9,7 @@
 0020	0020-apps-namespace-catchall.patch	transition	plugin-apps-amis	apps 命名空间 catch-all 承载(UiAppController+AppRouteRegistry+rooter 探测+405 归一)	4	fork 定制移植(手工适配:剥离 AppRouterController 引用与 context-path)	R-CLASSPATH-MERGE 落地后新增文件部分移出扩展仓 jar,收窄为 rooter+filter 两 M 面
 0021	0021-apps-antiprobe-empty404.patch	transition	plugin-apps-amis	apps 防探测空 body 404(标记异常+@Error handler+filter 消费)	3	fork 定制移植(手工适配:ErrorController 仅移植 handler,Jackson 面为上游内容不回移)	R-CLASSPATH-MERGE 落地后异常类移出扩展仓 jar,收窄为两 M 面
 0022	0022-apps-shell-templates.patch	core	plugin-apps-amis	apps.html/apps-editor.html 模板加载+渲染激活点(含 CSRF 注入与 ./ 重写)	1	fork 定制移植(verbatim)	上游提供独立页面外壳机制
-R-CLASSPATH-MERGE	-	reserved	plugin-apps-harness / kestra-oidc-provider	通道②镜像承载(EE 同构交付核心缺口):build.sh 构建产物 manifest Class-Path 注入——已立案待实施,方案与可行性证据见 docs/extension-mechanisms.md §4	-	docs/oss-ee-gap.md §3/§4	实施指令(不绑客户阶段);实施时闭环 OQ2
+R-CLASSPATH-MERGE	-	reserved	plugin-apps-harness / kestra-oidc-provider	通道②镜像承载(EE 同构交付核心缺口):manifest Class-Path 注入(选型b已裁定2026-10-07;jar可烤进或运行时挂载,缺席=静默休眠)——已立案待实施,实证/收窄设计约束见 docs/extension-mechanisms.md §4	-	docs/oss-ee-gap.md §3/§4	实施指令(不绑客户阶段);实施时闭环 OQ2 剩余项(bean 索引可见性)
 R-EE-RBAC	-	reserved	plugin-apps-harness	授权面:扩展仓 jar 提供 SecurityRule/Authorizer bean(预期零 overlay patch——OSS 无授权钩子,2026-10-07 复扫)	-	docs/oss-ee-gap.md §2-B/§4	客户实施并给行为证据时实证(含 R-CLASSPATH-MERGE 落地前置)
 R-APP-ROUTER	-	reserved	plugin-apps-harness	apps API 面(AppRouterController/AppsFileController/AppsService)与 rooter/filter 的对应排除逻辑回归	-	docs/oss-ee-gap.md §4	客户实施并给行为证据+R-CLASSPATH-MERGE 落地
 R-NFH-ANCHOR	-	reserved	(升级触发)	NotFoundHeadersFilter 上游已有文件,fork 有 UiAppController 排除定制块;BASE 升至含该文件的 release 后评估回锚	-	docs/oss-ee-gap.md §4	下一次 BASE 升级时强制评估(升级 SOP §6-3)

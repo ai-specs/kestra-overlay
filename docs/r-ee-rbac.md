@@ -124,6 +124,10 @@ namespace 边界：低权限对 {ns-allowed} 可写、对 {ns-denied} 403（由�
 - **OQ-RBAC-2**：过滤器链死角清单（webhook/SSE/MCP 流）未扫——开工前以 BASE 源码
   `@Filter/@Controller` 路由盘点补齐。
 - **OQ-RBAC-3**：与 CSRF/SecurityFilter 顺序（micronaut SecurityFilterPhase）协同未实证。
+- **OQ-RBAC-4**（2026-10-07 补记）：TenantAliasingRooter（REQ-0020）把 tenant-less
+  `/api/v1/{a}/{b}` 改写后探测路由，而 `intercept-url-map` 按**原始请求路径**匹配——
+  安全门模式与路由改写的先后关系需开工时实证（预期：门匹配原始路径、先于改写生效，
+  方向有利；属现有 overlay patch 与安全链的唯一交互面）。
 - EE 未来 release 的 RBAC 语义变化不影响本需求（我们不复刻其语义）；BASE 升级复扫
   仅核对 §1 的「OSS 零钩子」事实是否仍成立（差异表 §5 命令集覆盖）。
 

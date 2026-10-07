@@ -9,7 +9,7 @@
 | 通道 | 是什么 | 重新编译 kestra？ | 需要外部 jar？ | 需要重启？ | 生效时机 | 本仓/扩展仓对应 |
 |---|---|---|---|---|---|---|
 | ① 源码 patch | 改上游源码（webserver M 面） | **要**（overlay CI 重编 executableJar + 重建镜像） | 否 | **要**（镜像重建+容器重启） | 构建期 | 本仓 5 个 patch |
-| ② classpath 合并 jar | 扩展 jar 与 fat jar 同 classpath（bean 进 Micronaut 上下文） | **否**（扩展仓独立编译，micronaut 注解处理产 bean 索引） | **要**（官方镜像**无** libs 约定，须构建期并入——承载机制已立案 **R-CLASSPATH-MERGE**，见 §4） | **要**（bean 发现在启动期，F2） | 启动期 | plugin-apps-harness 控制器 jar、kestra-oidc-provider 的 webserver 侧认证链 jar（该仓 IdP 进程独立成镜像，不受此通道影响） |
+| ② classpath 合并 jar | 扩展 jar 与 fat jar 同 classpath（bean 进 Micronaut 上下文） | **否**（扩展仓独立编译，micronaut 注解处理产 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体可烤进镜像或运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b 已裁定，见 §4） | **要**（bean 发现在启动期，F2） | 启动期 | plugin-apps-harness 控制器 jar、kestra-oidc-provider 的 webserver 侧认证链 jar（该仓 IdP 进程独立成镜像，不受此通道影响） |
 | ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开启（OSS+local 存储**默认开**，dsh 栈即此形态）→ **否**（API 安装即时注册）；关闭形态 → 要（重启扫描） | 启动期；auto-install 开启时即时 | plugin-apps-amis（build-extensions.sh 注入） |
 | ④ 部署配置 | yml/env（`KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`）：micronaut.security.enabled、intercept-url-map 等 | 否 | 否 | **要**（@Value/配置绑定在 bean 创建期） | 启动期 | kestra-oidc-provider 部署面（最小端点门；intercept-url-map 属 micronaut-security 配置面，生效前提=认证链 jar 进镜像，R-CLASSPATH-MERGE 前置） |
 | ⑤ 运行时 settings | settings 存储（API 写入的键值，如 Basic Auth 凭据） | 否 | 否 | **否**（服务按调用读库） | 即时 | REQ-0011 兜底语义依赖（settings 缺席→fallback） |
@@ -19,11 +19,17 @@
 
 **F1 进程形态：selfrun fat jar，classpath 只有它自己。**
 `/app/kestra` = shadowJar 字节 + selfrun 脚本前缀拼进 zip（`build.gradle:626` writeExecutableJar）；
-selfrun 末行 `exec java … -jar "$0"`（`gradle/jar/selfrun.sh`）——**`-jar` 模式，JVM classpath =
-fat jar 自身**；官方 Dockerfile 唯一注入点是 `COPY docker /` + `plugins/`（`Dockerfile:9-11`），
-无 `/app/libs` 约定、无 `-cp`。⇒ 官方镜像形态下，**外部 jar 要进应用 classpath 只能在构建期
-并入 fat jar**（EE 正是这么做——EE 类名出现在 OSS 的 logback/base.xml:21-23 与
-cli/BaseCommand.java:45，证明 EE bean 运行期从已并入的 jar 装载）。
+selfrun 末行 `exec java … -jar "$0"`（`gradle/jar/selfrun.sh:35`）——**`-jar` 模式，JVM classpath =
+fat jar 自身，`-cp`/`CLASSPATH` 一律被忽略**（java 工具文档：the JAR file is the source of
+all user classes and other class path settings are ignored）；官方 Dockerfile 唯一注入点是
+`COPY docker /` + `plugins/`（`Dockerfile:9-13`），无 `/app/libs` 约定、无 `-cp`
+（docker-entrypoint 仅 `exec /app/kestra "$@"`，`docker/usr/local/bin/docker-entrypoint.sh`）。
+⇒ 官方镜像形态下，**外部 jar 进应用 classpath 的唯一入口在构建期**：并入 fat jar（EE 的
+做法——EE 类名出现在 OSS 的 logback/base.xml:21-23 与 cli/BaseCommand.java:45，证明 EE bean
+运行期从已并入的 jar 装载）或注入 manifest `Class-Path` 条目（选型 b：jar 本体可运行时挂载，
+见 §4）。`plugins/` 目录不是 classpath 入口——那是插件体系自己的 `PluginClassLoader`
+（`extends URLClassLoader`，`PluginClassLoader.java:19`）+ 反射，不进应用类加载器与 Micronaut
+上下文（F3），故 bean jar（@Controller/@Filter/SecurityRule）装不进 plugins/。
 
 **F2 bean 定型于启动期，无运行期增删。**
 Micronaut ApplicationContext 启动时从 classpath 的 bean 索引（注解处理器生成的
@@ -89,36 +95,67 @@ OSS 源码为 EE 预留的挂接点（@Requires(missingClasses)、桩 bean+@Repl
 classpath jar 补 micronaut-security 链）复用的是同一架构事实：OSS webserver 构建里只有
 `micronaut-security-csrf`（webserver/build.gradle:25），认证过滤器链本来就靠 jar 带入。
 
-## 4. 对 overlay 的结论与 R-CLASSPATH-MERGE 立案（2026-10-07 使命审查升级）
+## 4. 对 overlay 的结论与 R-CLASSPATH-MERGE 立案（**选型 b 已裁定，2026-10-07 维护者确认**）
 
 - 当前已落地通道：**①（5 patch）+ ③（amis 插件 jar→plugins/ 槽）+ ④（部署配置）**；
   通道② 的镜像承载是本仓「EE 同构交付」的**核心缺口**（kestra-oidc-provider 认证链 jar、
   plugin-apps-harness 控制器 jar 都卡在这里，差异表 §1-S6 统一口径），已立案为正式提案
-  **R-CLASSPATH-MERGE：实施待指令，实施前下列两问必须闭环**。
+  **R-CLASSPATH-MERGE：实施待指令**。
 
-**最小面方案（已选型，候选 b）**：build.sh 对**构建产物**做 zip 级后处理，向 executable
-jar 的 manifest 注入 `Class-Path: libs/xxx.jar …`，扩展 jar 经 `docker/app/libs/` 暂存
-（`COPY docker /` 通道已存在，`docker/app/kestra` 暂存有先例）落 `/app/libs/`；manifest
-Class-Path 相对 jar 自身位置（/app/kestra → /app/libs/*）解析，`java -jar` 模式尊重该属性。
-**零 patch 文件、不动上游 build 面（settings.gradle/docker-entrypoint 均不触）、不改
-Dockerfile。** 2026-10-07 证据级可行性核验：selfrun 末行 `exec java … -jar "$0"`
-（gradle/jar/selfrun.sh）；executable 为合法 zip——selfrun 以 `ZipPrefixer.applyPrefixBytesToZip`
-作**前缀**字节拼入、不改 zip central directory（build.gradle:626-651）；官方 Dockerfile
-`COPY --chown=kestra:kestra docker /`（Dockerfile:9）+ plugins 装载 RUN 块（:11-13）证明
-`docker/` 子目录是既有注入通道。
+**方案（选型 b）**：build.sh 对**构建产物**做 zip 级后处理，向 executable jar 的 manifest
+注入 `Class-Path: libs/x.jar …`。**零 patch 文件、不动上游 build 面
+（settings.gradle/docker-entrypoint 均不触）、不改 Dockerfile。** 构建期可行性证据：
+selfrun `exec java … -jar "$0"`（selfrun.sh:35）；executable 为合法 zip——selfrun 以
+`ZipPrefixer.applyPrefixBytesToZip` 作**前缀**字节拼入、不改 zip central directory
+（build.gradle:626-651）；官方 Dockerfile `COPY --chown=kestra:kestra docker /`（Dockerfile:9）
++ plugins 装载 RUN 块（:11-13）证明 `docker/` 子目录是既有注入通道（`docker/app/kestra`
+暂存先例 ⇒ `docker/app/libs/` 落 `/app/libs/`，manifest 条目相对 /app/kestra 解析）。
 
-落选记录：(a) fat jar 解包合并（需验证 mergeServiceFiles 等价性，产物不可与上游构建
-逐字节对照，侵入最深）；(c) 自定义 entrypoint `-cp`（触碰 build 面，AGENTS.md §2 禁收，最次选）。
+**交付形态（双模式；manifest 条目 = 镜像 ↔ 部署的唯一契约）**：
+- **烤进镜像**：build-extensions.sh 把 classpath 槽 jar 暂存 `docker/app/libs/`（可复现默认）；
+- **运行时挂载**：部署侧 `-v $PWD/libs:/app/libs`，镜像保持 vanilla+patch、零扩展 jar 字节
+  （约束：挂载 jar 文件名须与 manifest 条目一致；**两种模式都需重启生效**——F2）。
 
-**实施步骤（两步，先本地后 CI）**：
-1. 本地机制验证（不跑 gradle）：对合成 fat jar（含 bean 索引 service 文件 + selfrun 前缀）
-   做 manifest 注入 + `java -jar` 启动冒烟，确认 Class-Path 生效与前缀完整性；
-2. CI 端到端：build.sh 注入一个探针 jar（含 `@Context` 生命周期 bean，启动打日志），
-   验证启动期 bean 装载（F2 面），并一并闭环 OQ2。
+落选记录：(a) fat jar 解包合并（需复刻 mergeServiceFiles 语义、产物不可与上游逐字节对照、
+jar 不可运行时换挂；EE 实际即此形态）；(c) 自定义 entrypoint `-cp`（`-jar` 下被忽略须绕过
+selfrun，丢 `KESTRA_PLUGINS_PATH`/`KESTRA_CONFIGURATION→MICRONAUT_CONFIG_FILES` 管线，
+触碰 build 面，最次选）。
 
-- **OQ2（认知边界，随步骤 2 闭环）**：② 的 jar 与 fat jar 内同包同名类的遮蔽规则
-  （classpath 顺序）未实证；出仓 jar 保持 `io.kestra.webserver.*` 同包（差异表 §1-S6
-  依据）时需一并验证。
+### JVM 语义实证（2026-10-07，JDK 25 三组最小实验）
+
+```
+复现骨架（详见本轮 git 历史/对话记录）：
+  printf 'Main-Class: Demo\nClass-Path: libs/ext.jar\n' > mf.txt
+  jar --create --file main.jar --manifest mf.txt -C out_main .
+  java -jar main.jar        # A: 无 libs/ → STARTUP-OK、exit 0、无警告；B: 有 → EXT-INIT
+```
+
+1. **jar 缺席 = 静默休眠**：manifest 引用不存在的 jar → 启动成功、exit 0、无任何警告
+   （JVM 对 Class-Path 缺席条目的规范行为，「可选扩展」语义）；主 jar 自身类/资源/功能
+   完全不受影响。⇒ manifest 条目可**无条件**烤入：缺席=休眠激活点，挂载=开关，重启=生效
+   ——与 EE「license 写进配置、重启激活」同构。副作用仅「静默」：检测靠功能面探测
+   （认证链未挂 → /oidc/login 404）或部署侧自检。
+2. **`.class` 字面量懒解析**：主 jar 代码以 `X.class` 字面量引用仅存在于扩展 jar 的类
+   （编译期见过、运行时缺席）→ **首次执行**抛 NoClassDefFoundError。⇒ **收窄设计硬约束**：
+   0020/0021 未来把 UiAppController/NotFoundResponseException 移出到扩展 jar 时，留下的
+   M 面必须改为**类名字符串比较**（`declaring.getName().equals(...)`，不触发加载）或把
+   标记类留作 fat jar 编译锚；`@Error(exception = X.class)` 注解引用同理（启动期注解
+   读取即可能失败）。
+3. **同 FQN 主 jar 优先**：Class-Path 扩展 jar 中的同名类**结构性无法覆盖** fat jar 内的
+   上游/patch 类——「意外遮蔽上游」整类风险排除；代价是「用扩展 jar 替换同名类」走不通
+   （S6 同包策略只加新类名，不受影响）。
+
+### 实施步骤（两步，先本地后 CI）
+
+1. 本地机制验证（不跑 gradle）：JVM 语义部分**已实证**（上三组）；剩余 = 对真实 webserver
+   executable jar 做 zip 级 manifest 注入冒烟 + selfrun 前缀完整性核对；
+2. CI 端到端：build.sh 注入探针 jar（含 `@Context` 生命周期 bean，启动打日志），验证启动期
+   bean 装载（F2 面），并闭环 OQ2 剩余项。
+
+- **OQ2（认知边界）——半闭环（2026-10-07）**：同包同名类遮蔽方向**已实证**（实验 3：主 jar
+  赢，良性）；**剩余** = bean 索引（`META-INF/services` 的 micronaut
+  BeanDefinitionReference 条目）经 Class-Path 的可见性端到端——`ClassLoader.getResources`
+  对多 jar 同名 service 条目并列返回，预期成立，随实施步骤 2 确认。
 
 ## 5. 复现命令（BASE 树内执行）
 
