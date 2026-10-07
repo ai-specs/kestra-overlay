@@ -16,6 +16,8 @@ kestra 侧**薄 overlay 构建仓**。CI 流程：
 
 - **使命（北极星）**：OSS→EE 方向的架构能力扩展层。差异表定「补什么」
   （`docs/oss-ee-gap.md`），机制原理定「怎么生效」（`docs/extension-mechanisms.md`）。
+- **基本原则**：只对上游架构与扩展机制负责——交付足够的扩展点/占位；外部如何实现
+  不在本仓视野（`AGENTS.md` §0·基本原则）。
 - **当前范围**（2026-10-07 收窄裁定）：仅 kestra-oidc-provider（MCP 面除外）与
   R-EE-RBAC（`docs/r-ee-rbac.md`）。裁定与重启规则见 `AGENTS.md` §0。
 - **镜像定位**（2026-10-07 裁定）：加固形态（no-plugins 谱系）。构建期零外部扩展 jar；

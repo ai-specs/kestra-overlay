@@ -15,6 +15,8 @@
 > 1. kestra-oidc-provider，MCP 面除外；
 > 2. R-EE-RBAC（docs/r-ee-rbac.md）。
 >
+> **基本原则**：扩展点/占位的充分性由上游架构与机制推导，不依赖外部实现时序
+> （AGENTS.md §0·基本原则）。
 > 裁定全文与重启规则见 `AGENTS.md` §0。其余域的历史调查存 git 历史。
 
 ## 1. EE 的交付机制 = overlay 可用的架构缝隙（穷尽列举）
