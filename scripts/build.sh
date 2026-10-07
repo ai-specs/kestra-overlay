@@ -17,7 +17,6 @@ BASE="$(sed -n 2p patches/BASE)"
 UPSTREAM_REPO="${KESTRA_UPSTREAM_REPO:-https://github.com/kestra-io/kestra.git}"
 WORK="${WORK:-$(mktemp -d)}"
 IMAGE_TAG="${IMAGE_TAG:-kestra-overlay:dev}"
-PUSH="${PUSH:-0}"
 
 echo "== kestra-overlay: upstream=$UPSTREAM_REPO base=$BASE =="
 if [ ! -d "$WORK/.git" ]; then
@@ -26,11 +25,11 @@ fi
 git -C "$WORK" checkout -q "$BASE"
 git -C "$WORK" checkout -q -b overlay
 
-echo "== apply thin patches (check first) =="
-# Transition: patches carry the fork's current customizations verbatim
-# (behavior parity with the fork stack). As each surface moves into an
-# extension repo, the corresponding patch narrows to an activation/
-# registration placeholder (target doc §3.3 principle 1).
+echo "== apply requirement-aligned patches (check first, lexical order) =="
+# One patch = one requirement (header comments carry the requirement
+# record; manifest.tsv is the ledger — both enforced by check-patches.sh).
+# Apply order = lexical filename order; per-patch provenance/status/removal
+# conditions live in patches/manifest.tsv, see AGENTS.md §3.
 for p in patches/*/*.patch; do
   git -C "$WORK" apply --check "$PWD/$p" || { echo "FAIL: $p"; exit 1; }
 done

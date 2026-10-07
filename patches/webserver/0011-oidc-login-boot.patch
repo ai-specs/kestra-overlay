@@ -1,0 +1,84 @@
+# ══ 需求 REQ-0011：OIDC 登录引导激活点 ══════════════════════════════════════
+# 需求：dsh OIDC 部署形态（micronaut.security.enabled=true、BasicAuthService bean
+#   刻意缺席）下，UI 的 OSS boot guard 需要从 /configs 与 /configs/login 读到
+#   「已配置认证 + oidcAuthEnabled」才能把未登录浏览器送去 IdP 登录，而不是掉进
+#   Basic Auth 向导。四块激活：securityEnabled 字段、LoginConfiguration 增
+#   oidcAuthEnabled 字段、isBasicAuthInitialized 在 security 启用时返回 true、
+#   getBasicAuthConfigErrors 在 BasicAuthService 缺席时返回空列表（兜底探测）。
+# 消费扩展仓：kestra-oidc-provider（阶段一已实施范围）
+# 状态：core（上游 OSS 只认 Basic Auth 形态，此为 OIDC 部署必需激活点）
+# 来源：fork app-kestra 定制移植（fork-custom diff 可直接干净应用于 v2.0.5，零适配）
+# 触达上游文件（1）：webserver controllers/api/MiscController.java（M）
+# 移除条件：上游 /configs 原生支持第三方 OIDC 部署形态（预期不会发生）
+
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+index 160c2ab..5fd488c 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+@@ -72,6 +72,16 @@ public class MiscController {
+     @Inject
+     Optional<BasicAuthService> basicAuthService = Optional.empty();
+ 
++    /**
++     * Whether an authentication method is configured for the instance. Under the dsh OIDC
++     * deployment {@code micronaut.security.enabled=true} and {@link BasicAuthService} is
++     * deliberately absent (Basic Auth is banned there), yet the UI's OSS boot guard routes to
++     * the basic-auth setup wizard unless it reads {@code isBasicAuthInitialized=true} from
++     * /configs and /configs/login — so a security-enabled server reports itself as configured.
++     */
++    @io.micronaut.context.annotation.Value("${micronaut.security.enabled:false}")
++    protected boolean securityEnabled;
++
+     @Inject
+     Optional<AiServiceManager> aiServiceManager = Optional.empty();
+ 
+@@ -181,11 +191,14 @@ public class MiscController {
+         description = "Public endpoint available to unauthenticated users; exposes only what the login/setup UI needs."
+     )
+     public LoginConfiguration getLoginConfiguration() {
+-        return new LoginConfiguration(isBasicAuthInitialized());
++        // oidcAuthEnabled = Micronaut Security enabled (the dsh OIDC deployment); under a plain
++        // OSS Basic Auth deployment the flag is false and the UI keeps its SPA login page.
++        return new LoginConfiguration(isBasicAuthInitialized(), securityEnabled);
+     }
+ 
+     private boolean isBasicAuthInitialized() {
+-        return basicAuthService.map(BasicAuthService::isBasicAuthInitialized).orElse(false);
++        // OIDC deployment (security enabled, BasicAuthService absent) counts as configured auth.
++        return basicAuthService.map(BasicAuthService::isBasicAuthInitialized).orElse(securityEnabled);
+     }
+ 
+     /**
+@@ -242,9 +255,12 @@ public class MiscController {
+     @ExecuteOn(TaskExecutors.IO)
+     @Operation(tags = { "Misc" }, summary = "Retrieve the instance configuration.", description = "Global endpoint available to all users.")
+     public List<String> getBasicAuthConfigErrors() {
+-        return basicAuthService
+-            .orElseThrow(() -> new IllegalStateException("basicAuthService bean is required in OSS"))
+-            .validationErrors();
++        // Under the OIDC deployment there is no Basic Auth to validate: report no errors
++        // instead of failing — the UI's boot guard probes this endpoint best-effort.
++        if (basicAuthService.isEmpty()) {
++            return List.of();
++        }
++        return basicAuthService.get().validationErrors();
+     }
+ 
+     @Post("/login")
+@@ -392,7 +408,15 @@ public class MiscController {
+ 
+     /**
+      * Minimal configuration exposed to unauthenticated callers for the login/setup UI.
++     *
++     * @param isBasicAuthInitialized whether an authentication method is configured (under the
++     *                               OIDC deployment this is the Micronaut Security flag).
++     * @param oidcAuthEnabled        whether the instance authenticates through the OIDC provider
++     *                               instead of Basic Auth. The UI uses it to send not-logged-in
++     *                               browsers to the IdP login rather than the Basic Auth login
++     *                               page (which has no backing bean under OIDC).
+      */
+-    public record LoginConfiguration(@JsonInclude Boolean isBasicAuthInitialized) {
++    public record LoginConfiguration(@JsonInclude Boolean isBasicAuthInitialized,
++                                     @JsonInclude Boolean oidcAuthEnabled) {
+     }
+ }

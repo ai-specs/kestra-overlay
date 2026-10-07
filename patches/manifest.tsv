@@ -1,0 +1,14 @@
+# patches/manifest.tsv — patch 总账（与 patches/*/*.patch 一一对应；check-patches.sh 强校验）
+# 列：id | patch文件 | status(core|transition|reserved) | 消费扩展仓 | 摘要 | 触达上游文件数 | 来源 | 移除条件
+# reserved 行：patch文件列必须为 `-`，对应 docs/oss-ee-gap.md §4 登记簿。
+# 归因基线：2026-10-07 审计（fork merge-base f6dbbb49 定制 diff 为唯一事实源；见 AGENTS.md §5.2）
+0010	0010-mcp-oauth-on-oss.patch	core	kestra-oidc-provider	MCP OAUTH 在 OSS 解禁+服务器侧默认值+PUT null-合并	2	fork 定制移植(verbatim)	上游向 OSS 开放 OAUTH authType
+0011	0011-oidc-login-boot.patch	core	kestra-oidc-provider	/configs+/configs/login OIDC 登录引导激活(securityEnabled/oidcAuthEnabled/兜底)	1	fork 定制移植(verbatim)	上游 /configs 原生支持第三方 OIDC 部署
+0020	0020-apps-namespace-catchall.patch	transition	plugin-apps-amis	apps 命名空间 catch-all 承载(UiAppController+AppRouteRegistry+rooter 探测+405 归一)	4	fork 定制移植(手工适配:剥离 AppRouterController 引用与 context-path)	plugin-apps-harness 出仓(阶段二)后新增文件部分移出,收窄为 rooter+filter 两 M 面
+0021	0021-apps-antiprobe-empty404.patch	transition	plugin-apps-amis	apps 防探测空 body 404(标记异常+@Error handler+filter 消费)	3	fork 定制移植(手工适配:ErrorController 仅移植 handler,Jackson 面为上游内容不回移)	plugin-apps-harness 出仓(阶段二)后异常类移出,收窄为两 M 面
+0022	0022-apps-shell-templates.patch	core	plugin-apps-amis	apps.html/apps-editor.html 模板加载+渲染激活点(含 CSRF 注入与 ./ 重写)	1	fork 定制移植(verbatim)	上游提供独立页面外壳机制
+R-EE-RBAC	-	reserved	plugin-apps-harness	DshAdminAuthorizer/DshNativeEndpointGuard RBAC 面出仓+激活	-	docs/oss-ee-gap.md §3/§4	harness 实施时(阶段二)转 patch/jar
+R-APP-ROUTER	-	reserved	plugin-apps-harness	apps API 面(AppRouterController/AppsFileController/AppsService)与 rooter/filter 的对应排除逻辑回归	-	docs/oss-ee-gap.md §4	harness 实施时(阶段二)
+R-NFH-ANCHOR	-	reserved	(升级触发)	NotFoundHeadersFilter 上游已有文件,fork 有 UiAppController 排除定制块;BASE 升至含该文件的 release 后评估回锚	-	docs/oss-ee-gap.md §4	下一次 BASE 升级时强制评估
+R-MIG-DSH	-	reserved	harness-kestra-app	dsh_metrics migration(bean+SQL 成对收)	-	docs/oss-ee-gap.md §4	harness-kestra-app 实施时(阶段四)
+R-AI-DASHSCOPE	-	reserved	plugin-apps-harness	AiServiceManager(DashScope/OpenAI 启用)	-	docs/oss-ee-gap.md §4	harness 实施时(阶段二)

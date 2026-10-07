@@ -1,54 +1,26 @@
-diff --git a/webserver/src/main/java/io/kestra/webserver/configuration/CookiesConfiguration.java b/webserver/src/main/java/io/kestra/webserver/configuration/CookiesConfiguration.java
-new file mode 100644
-index 0000000000..971753bb77
---- /dev/null
-+++ b/webserver/src/main/java/io/kestra/webserver/configuration/CookiesConfiguration.java
-@@ -0,0 +1,21 @@
-+package io.kestra.webserver.configuration;
-+
-+import io.kestra.webserver.utils.RequestUtils;
-+import io.micronaut.context.annotation.ConfigurationProperties;
-+import io.micronaut.core.annotation.Nullable;
-+import io.micronaut.http.HttpRequest;
-+
-+/**
-+ * Configuration for the {@code Secure} attribute of the cookies Kestra issues (auth, CSRF, and, in the
-+ * Enterprise Edition, the JWT/OIDC session cookies).
-+ *
-+ * @param secure forces the {@code Secure} attribute on or off; left unset, it is derived per request from
-+ *        {@link RequestUtils#isSecure(HttpRequest)}, which also trusts a TLS-terminating reverse proxy's
-+ *        {@code Forwarded}/{@code X-Forwarded-Proto} header.
-+ */
-+@ConfigurationProperties("kestra.webserver.cookies")
-+public record CookiesConfiguration(@Nullable Boolean secure) {
-+    public boolean isSecure(HttpRequest<?> request) {
-+        return secure != null ? secure : RequestUtils.isSecure(request);
-+    }
-+}
-diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java
-new file mode 100644
-index 0000000000..85961f436f
---- /dev/null
-+++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java
-@@ -0,0 +1,15 @@
-+package io.kestra.webserver.controllers.api;
-+
-+/**
-+ * dsh marker exception for HTTP-standard empty-body 404s (anti-probing: no problem document,
-+ * no detail). Thrown by the apps controllers on any not-found/invalid path; rendered by
-+ * {@code ErrorController#error(HttpRequest, NotFoundResponseException)} through the standard
-+ * Micronaut error pipeline.
-+ *
-+ * <p>It MUST be thrown (never converted to a raw {@code HttpResponse.status(NOT_FOUND)}
-+ * return inside the controller): an early raw 404 returned while a streaming request body is
-+ * still unconsumed triggers the Micronaut drain loop OOM (Kestra#17620; fixed upstream by
-+ * Kestra#17633 by routing error responses through the framework error processor).
-+ */
-+public class NotFoundResponseException extends RuntimeException {
-+}
+# ══ 需求 REQ-0020：apps 命名空间 catch-all 承载面 ═══════════════════════════
+# 需求：plugin-apps-amis 的页面（/{namespace}/{app}/{page}）需要 webserver 提供
+#   命名空间级 catch-all 路由（UiAppController）+ 页面路由索引（AppRouteRegistry，
+#   从 Flow 触发器解析 PageTrigger/ApiTrigger 建内存索引）；并修正两个路由语义：
+#   ① TenantAliasingRooter：tenant-less /api/v1/{a}/{b} 不能被 catch-all 吞成
+#      apps 404，改写后仅对上游路由探测（catch-all 除外），未命中回退原 closest；
+#   ② ProblemResponseFilter：仅命中 apps GET 通配的非 GET 请求把 405 归一为
+#      route-miss 404 problem+json（真实端点的方法错误保留 405 + Allow 头）。
+#   注意：不认领上游已占用前缀 api/ui/app；路由级负向前瞻 regex 不可用（Micronaut
+#   UriTemplateMatcher 直接抛异常，实测）。
+# 消费扩展仓：plugin-apps-amis（阶段一已实施范围）
+# 状态：transition（UiAppController/AppRouteRegistry 最终归属 plugin-apps-harness
+#   外部 classpath jar——阶段二出仓后本 patch 收窄为仅 TenantAliasingRooter +
+#   ProblemResponseFilter 两个 M 面；类引用跨 jar 同包可见，出仓无需改 hunk）
+# 来源：fork app-kestra 定制移植；相对 fork 剥离两项：AppRouterController 引用
+#   （属阶段二 harness 面）与 context-path 处理（上游 develop 专属，v2.0.5 无此概念）
+# 触达上游文件（4）：UiAppController.java（新增）、services/AppRouteRegistry.java
+#   （新增）、rooting/TenantAliasingRooter.java（M）、filter/ProblemResponseFilter.java（M·本需求部分）
+# 移除条件：plugin-apps-harness 出仓（阶段二）；届时新增文件部分移出本 patch
+
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java
 new file mode 100644
-index 0000000000..600853ee7d
+index 0000000..600853e
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java
 @@ -0,0 +1,159 @@
@@ -211,9 +183,132 @@ index 0000000000..600853ee7d
 +        return index.isPresent() ? index.get() : HttpResponse.notFound();
 +    }
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
+index dff794c..10d3d87 100644
+--- a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
+@@ -3,6 +3,7 @@ package io.kestra.webserver.filter;
+ import java.util.List;
+ import java.util.Objects;
+ 
++import io.kestra.webserver.controllers.api.UiAppController;
+ import io.kestra.webserver.errors.ProblemDetail;
+ import io.kestra.webserver.errors.ProblemFormatExclusion;
+ import io.kestra.webserver.errors.ProblemFactory;
+@@ -13,10 +14,12 @@ import io.micronaut.core.order.Ordered;
+ import io.micronaut.http.HttpMethod;
+ import io.micronaut.http.HttpRequest;
+ import io.micronaut.http.MediaType;
++import io.micronaut.http.HttpStatus;
+ import io.micronaut.http.MutableHttpResponse;
+ import io.micronaut.http.annotation.ResponseFilter;
+ import io.micronaut.http.annotation.ServerFilter;
+ import io.micronaut.http.filter.ServerFilterPhase;
++import io.micronaut.web.router.Router;
+ 
+ /**
+  * Gives a problem document to any failed response that reached the client without one.
+@@ -40,14 +43,38 @@ import io.micronaut.http.filter.ServerFilterPhase;
+ public class ProblemResponseFilter implements Ordered {
+     private final ProblemFactory problems;
+     private final List<ProblemFormatExclusion> exclusions;
++    private final Router router;
+ 
+-    public ProblemResponseFilter(final ProblemFactory problems, final List<ProblemFormatExclusion> exclusions) {
++    public ProblemResponseFilter(final ProblemFactory problems, final List<ProblemFormatExclusion> exclusions,
++                                 final Router router) {
+         this.problems = Objects.requireNonNull(problems, "problems must not be null");
+         this.exclusions = Objects.requireNonNull(exclusions, "exclusions must not be null");
++        this.router = Objects.requireNonNull(router, "router must not be null");
+     }
+ 
+     @ResponseFilter
+     public void fillProblemBody(@NonNull HttpRequest<?> request, @NonNull MutableHttpResponse<?> response) {
++        // dsh: a non-GET request whose URI shape matches only the apps GET wildcard
++        // (UiAppController /{namespace}/{path:.*}) gets a Micronaut 405 — upstream semantics
++        // for those paths is a route-miss 404 problem+json (upstream tests
++        // TriggerControllerTest/WebhookRoutingTest assert it). Translate ONLY when the
++        // wildcard is the sole route claiming the URI; a genuine wrong-method hit on a real
++        // endpoint keeps its 405 problem (Allow header intact, ErrorControllerTest).
++        if (response.status().getCode() == HttpStatus.METHOD_NOT_ALLOWED.getCode()
++            && router.find(request.getMethod(), request.getPath(), request).findAny().isEmpty()
++            && router.findAny(request.getPath(), request)
++                .allMatch(match -> match.getRouteInfo().getDeclaringType() == UiAppController.class)) {
++            response.status(HttpStatus.NOT_FOUND);
++            ProblemDetail problem = this.problems.detailForStatus(
++                request,
++                null,
++                HttpStatus.NOT_FOUND.getCode(),
++                null,
++                List.of()
++            );
++            writeProblem(response, problem);
++            return;
++        }
+         if (400 > response.status().getCode()) {
+             return;
+         }
+diff --git a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
+index 5c7932d..815e322 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
+@@ -38,17 +38,50 @@ public class TenantAliasingRooter extends DefaultRouter {
+         // a raw-path miss upstream in AuthenticationFilter stays a 404 here too (GHSA-rjhm-qm6w-m7x9).
+         String rawPath = request.getPath();
+         UriRouteMatch<T, R> closest = super.findClosest(request);
+-        if (closest != null || bypassRooting()) {
++        if (bypassRooting()) {
+             return closest;
+         }
++        // dsh: keep the upstream short-circuit — a genuine route hit returns immediately.
++        // Only when the closest hit is one of the dsh catch-all controllers (which would
++        // swallow tenant-less /api/v1 requests into an apps-route 404) do we continue into
++        // the tenant-rewrite probe below.
++        if (closest != null) {
++            Class<?> declaring = closest.getRouteInfo().getDeclaringType();
++            boolean dshCatchAll = declaring == io.kestra.webserver.controllers.api.UiAppController.class;
++            if (!dshCatchAll) {
++                return closest;
++            }
++        }
+ 
+         boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(rawPath).matches());
+         if (rawPath.startsWith("/api/v1/") && !excluded) {
++            // dsh: the tenant-less /api/v1/{a}/{b}[/{c}] form must resolve to the upstream tenant
++            // routes (rewritten with the tenant segment) — the dsh catch-all controller
++            // (UiAppController /{namespace} catch-all) would otherwise swallow it into an
++            // apps-route 404. Probe the rewritten form against the upstream routes only
++            // (dsh catch-alls excluded — the rewritten URI still starts with /api/v1, so they
++            // would match it too); on a miss fall back to the raw closest match, which is how
++            // the dsh apps API (/api/v1/dsh.apps/hello/index) keeps resolving.
+             String rewrittenRawPath = rawPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
+             URI updatedUri = new URI(rebuildRawUri(request, rewrittenRawPath));
+-            return super.findClosest(request.toMutableRequest().uri(updatedUri));
++            UriRouteMatch<T, R> rewritten = findClosestUpstreamOnly(request.toMutableRequest().uri(updatedUri));
++            if (rewritten != null) {
++                return rewritten;
++            }
+         }
+-        return null;
++        return closest;
++    }
++
++    /** Closest match excluding the dsh catch-all controllers (probe isolation for the tenant rewrite). */
++    @SuppressWarnings("unchecked")
++    private <T, R> UriRouteMatch<T, R> findClosestUpstreamOnly(HttpRequest<?> probe) {
++        return (UriRouteMatch<T, R>) this.<T, R>find(probe)
++            .filter(match -> {
++                Class<?> declaring = match.getRouteInfo().getDeclaringType();
++                return declaring != io.kestra.webserver.controllers.api.UiAppController.class;
++            })
++            .findFirst()
++            .orElse(null);
+     }
+ 
+     // Assembled as a raw string rather than via the scheme/userInfo/host/port/path/query/fragment
 diff --git a/webserver/src/main/java/io/kestra/webserver/services/AppRouteRegistry.java b/webserver/src/main/java/io/kestra/webserver/services/AppRouteRegistry.java
 new file mode 100644
-index 0000000000..a52c699ff7
+index 0000000..a52c699
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/services/AppRouteRegistry.java
 @@ -0,0 +1,242 @@

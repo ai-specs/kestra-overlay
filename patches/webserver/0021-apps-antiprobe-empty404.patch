@@ -1,0 +1,103 @@
+# ══ 需求 REQ-0021：apps 防探测空 body 404 ═══════════════════════════════════
+# 需求：apps 面的未知路径必须返回 HTTP 标准 404 空 body（不下发 problem 文档、
+#   不泄露任何形态信息）。机制：NotFoundResponseException 标记异常（必须走异常
+#   管线——controller 内 raw 404 提前返回会在流式 body 未消费时触发 drain OOM，
+#   Kestra#17620/#17633）→ ErrorController @Error handler 产出带 X-Dsh-Empty-404
+#   头的 404 → ProblemResponseFilter 识别该头：保留空 body 并剥掉头；上游裸 404
+#   （无标记、无 body）仍照旧补 problem 文档。
+# 消费扩展仓：plugin-apps-amis（阶段一已实施范围）
+# 状态：transition（NotFoundResponseException 最终归 plugin-apps-harness jar；
+#   阶段二出仓后本 patch 收窄为仅 ErrorController + ProblemResponseFilter 的 M 面）
+# 来源：fork app-kestra 定制移植（ErrorController 部分对 v2.0.5 手工移植——
+#   fork-custom 上下文含上游 develop 的 Jackson 3 演进，v2.0.5 仍为 Jackson 2，
+#   仅移植 NotFoundResponseException handler，Jackson 部分为上游内容不回移）
+# 触达上游文件（3）：controllers/api/NotFoundResponseException.java（新增）、
+#   controllers/ErrorController.java（M）、filter/ProblemResponseFilter.java（M·本需求部分）
+# 移除条件：plugin-apps-harness 出仓（阶段二）；异常类移出后 patch 收窄
+
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
+index 08ed217..334ed8e 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
+@@ -119,12 +119,27 @@ public class ErrorController {
+         return this.problems.responseWithoutMessage(request, e);
+     }
+ 
+-    /** A request that matched no route at all, and so carries no exception. */
++    /** Upstream behavior preserved: problem+json for every unmatched-route 404 (kestra UI surfaces the detail). */
+     @Error(global = true, status = HttpStatus.NOT_FOUND)
+     public HttpResponse<ProblemDetail> notFound(HttpRequest<?> request) {
+         return this.problems.response(request, null, ProblemTypes.NOT_FOUND, List.of());
+     }
+ 
++    /**
++     * dsh empty-body 404 marker (PageTrigger/ApiTrigger surface only: AppRouterController,
++     * AppsFileController, UiAppController): rendered through the standard error pipeline —
++     * framework error handling is OOM-safe for unconsumed streaming bodies (Kestra#17633),
++     * unlike an early raw 404 return inside the controller. The X-Dsh-Empty-404 header lets
++     * ProblemResponseFilter tell this deliberate empty 404 apart from upstream bare 404s
++     * (which carry no body either and must still get a problem document — upstream behavior);
++     * the filter consumes and strips the header before the response leaves.
++     */
++    @Error(global = true, exception = io.kestra.webserver.controllers.api.NotFoundResponseException.class)
++    public HttpResponse<?> notFoundResponse(HttpRequest<?> request, io.kestra.webserver.controllers.api.NotFoundResponseException e) {
++        return HttpResponse.status(HttpStatus.NOT_FOUND)
++            .header("X-Dsh-Empty-404", "1");
++    }
++
+     /**
+      * The document path Jackson recorded, e.g. {@code tasks[0].type}. Uses the public reference chain rather
+      * than the private field the previous implementation reflected into.
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java
+new file mode 100644
+index 0000000..85961f4
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java
+@@ -0,0 +1,15 @@
++package io.kestra.webserver.controllers.api;
++
++/**
++ * dsh marker exception for HTTP-standard empty-body 404s (anti-probing: no problem document,
++ * no detail). Thrown by the apps controllers on any not-found/invalid path; rendered by
++ * {@code ErrorController#error(HttpRequest, NotFoundResponseException)} through the standard
++ * Micronaut error pipeline.
++ *
++ * <p>It MUST be thrown (never converted to a raw {@code HttpResponse.status(NOT_FOUND)}
++ * return inside the controller): an early raw 404 returned while a streaming request body is
++ * still unconsumed triggers the Micronaut drain loop OOM (Kestra#17620; fixed upstream by
++ * Kestra#17633 by routing error responses through the framework error processor).
++ */
++public class NotFoundResponseException extends RuntimeException {
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
+index 10d3d87..1f9d9c4 100644
+--- a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
+@@ -41,6 +41,9 @@ import io.micronaut.web.router.Router;
+  */
+ @ServerFilter("/**")
+ public class ProblemResponseFilter implements Ordered {
++    /** Set by ErrorController's NotFoundResponseException handler: this 404 deliberately has no body (dsh apps anti-probing). */
++    private static final String EMPTY_404_MARKER = "X-Dsh-Empty-404";
++
+     private final ProblemFactory problems;
+     private final List<ProblemFormatExclusion> exclusions;
+     private final Router router;
+@@ -78,6 +81,17 @@ public class ProblemResponseFilter implements Ordered {
+         if (400 > response.status().getCode()) {
+             return;
+         }
++        // dsh: only the 404s thrown as NotFoundResponseException keep their empty body
++        // (anti-probing on the apps surface) — their @Error handler marks the response
++        // with EMPTY_404_MARKER, consumed and stripped here. Upstream bare 404s (no body,
++        // no marker — e.g. PluginController install-job lookup, ExecutionController
++        // delete/kill) DO need a problem document and fall through to get one below;
++        // a previous body==null-only skip wrongly emptied them.
++        if (response.status().getCode() == HttpStatus.NOT_FOUND.getCode() && response.body() == null
++            && response.getHeaders().contains(EMPTY_404_MARKER)) {
++            response.getHeaders().remove(EMPTY_404_MARKER);
++            return;
++        }
+         if (HttpMethod.HEAD == request.getMethod() || this.isExcluded(request.getPath())) {
+             return;
+         }

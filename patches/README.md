@@ -1,21 +1,32 @@
 # patches
 
-`BASE` 记录 overlay 所基于的**上游 release**（两行：第一行 release tag，第二行该 release 的 commit sha）。
-overlay CI checkout 该 commit 构建，保证可复现；镜像主 tag 即 release 版本（镜像归属该上游 release）。
+`BASE` 记录 overlay 所基于的**上游 release**（两行：第一行 release tag，第二行该 release
+的 commit sha）。CI checkout 该 commit 构建，保证可复现；镜像主 tag = release 版本。
+升级流程（用户指令「升级到 vX.Y.Z」→ 逐 patch 三分支判定 → 复扫 oss-ee-gap → 更新
+BASE → CI 全绿）见 `AGENTS.md` §6。
 
-**为什么薄 patch 而不是零 patch（实证）**：fork 镜像 = 运行时 base（temurin JRE25，
-`Dockerfile.base` 实证不编译源码）+ **宿主编译 webserver executableJar**
-（`build:kestra` → `gradlew executableJar` → `docker/app/kestra`，jar 内实证含
-`DshEmployeeController` micronaut bean 索引）+ 插件 jar。webserver M 文件/migration
-定制只能存在于**编译后的 webserver jar**——官方预编译 base 无法承载 → 必须 patch
-源码并重新编译该 jar。Dockerfile/Dockerfile.base 本身用上游原样（无需 patch 构建文件）。
+## 为什么是薄 patch 而不是零 patch（实证）
 
-| 组 | 覆盖 | 阶段 |
-|---|---|---|
-| webserver | 9 核心 M 文件（控制器/filter/rooter/services） | 过渡期=fork 原样；出仓后收窄占位 |
-| migration | 2.0.29/2.0.30/2.0.31 dsh sql（新增，挂上游 schema 链） | 同上 |
-| build | settings.gradle（oidc 模块）、cli/build.gradle、OutputValues、docker-entrypoint | 同上 |
+fork 栈形态（实证于 dsh fork app-kestra）：base 镜像只是运行环境（temurin JRE25，不编译
+源码）；**webserver 二进制是宿主 `gradlew executableJar` 编译并拷入镜像的**。webserver
+M 文件定制只能存在于重新编译的 webserver jar——官方预编译 base 无法承载 → 必须改源码。
+但 patch 面**必须最小**：每一行 patch 都是下一次上游升级的成本（升级全流程由 AI 执行，
+AGENTS.md §6 的固定 SOP 就是为此设计）。
 
-**已删除的零 patch 版本**（c2ae8d8）经复核撤销：当时只验证了"镜像可构建"，
-未验证定制面（M 文件/migration）在官方预编译 base 形态下是否成立——结论不成立。
-ui M 文件本轮不收（fork 镜像不编译 ui），见根 README。
+## patch 粒度与形态（AGENTS.md §3 的摘要）
+
+- **一个 patch = 一个需求**（可跨文件）；同一文件被多个需求触达时拆多个 patch，
+  改动行不得冲突（check-patches.sh 坐标归一化后强制检测）。
+- **头部注释**（diff 之前的 `#` 行，git apply 容忍）必填：需求 / 消费扩展仓 / 状态 /
+  来源 / 触达上游文件 / 移除条件。
+- **状态**：`core`（上游不会提供的长期面）；`transition`（随扩展仓出仓收窄，须写明
+  收窄后剩什么）；`reserved`（仅 manifest，待激活点，对应 docs/oss-ee-gap.md §4）。
+- **总账** `manifest.tsv` 与 patch 文件一一对应，check-patches.sh 强校验。
+- 目录白名单：仅 `webserver/` 组（build 面 CI 必挂已实证 / ui 面不编译 / migration 面归
+  阶段四扩展仓——理由见 AGENTS.md §2 拒绝清单与 §8 陷阱表）。
+
+## 归因纪律（2026-10-07 审计教训）
+
+**「fork 有而 BASE 没有」≠ dsh 定制**。fork 基于上游 develop，fork↔release 全量差异里
+混着上游自研演进；本轮审计实测原 patch 集 2/3 是上游内容回移（下一版 release 会自然
+包含，白背升级成本）。求定制面的唯一正确方法（fork merge-base diff）见 AGENTS.md §5.2。

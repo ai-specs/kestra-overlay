@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Structural gate (manifest/patch consistency, no overlap, headers)
+        run: ./scripts/check-patches.sh
       - name: Verify thin patches apply cleanly on pinned BASE (no compile)
         run: ./scripts/build.sh --apply-only
   build-push:
