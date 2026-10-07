@@ -84,7 +84,7 @@
 
 | 能力 | OSS 行为 `[src]` | EE 行为 | 阶段一 | 状态 |
 |---|---|---|---|---|
-| 插件自动安装 | `PluginAutoInstallService.java:89`（`!=OSS` 才启用，OSS 强制关） | 启用（Plugin Versioning） | 不需要（overlay 烤 jar） | 不补足 |
+| 插件自动安装（运行期 API 装插件，无需重启） | **支持**：显式 `kestra.plugins.auto-install.enabled` 优先；缺省在 `storage.type=local` 单机形态**默认开启**（`PluginAutoInstallService.java:89-99`，dsh 栈即此形态） | **强制关闭**（改用 Plugin Versioning） | 能力已具备（部署面即可用，非 patch 面）；默认仍烤 jar 进镜像（可复现、CI 验证） | **能力澄清**（初版方向读反已修正，AGENTS.md §8-9） |
 | EE 分发可见性 | `PluginController.java:388,400,696`（`io.kestra.ee.*` 过滤 + `PluginDistribution.EE` 白名单） | 可见 | 不需要 | 不补足 |
 | PluginManager 存储 | `cli/AbstractCommand.java:116`、`NoDatabaseCommandInterface.java:10`（EE 经 repository 管理） | 有 `[src]` | 不需要 | 不补足 |
 
