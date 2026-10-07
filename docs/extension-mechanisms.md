@@ -1,7 +1,8 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
 > 回答三个根本问题：**改一个架构能力，要不要重新编译？要不要重启？要不要外部 jar？**
-> 证据基于 BASE（v2.0.5 @ 172dd0f37）源码 + dsh 项目实证 + kestra.io 文档；复现命令见 §5。
+> 证据基于 BASE（v2.0.5 @ 172dd0f37）源码（含上游自述 docs/architecture/）+ dsh 项目实证
+> + kestra.io 文档 + vanilla 实例实测（v2.0.5-no-plugins）；复现命令见 §5。
 > 与 `docs/oss-ee-gap.md` 的分工：差异表回答「补什么」；本文回答「怎么生效」。
 
 ## 0. 结论矩阵（一页答案）
@@ -10,12 +11,12 @@
 |---|---|---|---|---|---|---|
 | ① 源码 patch | 改上游源码（webserver M 面） | **要**（overlay CI 重编 executableJar + 重建镜像） | 否 | **要**（镜像重建+容器重启） | 构建期 | 本仓 1 个 patch（REQ-0011） |
 | ② classpath 合并 jar | 扩展 jar 与 fat jar 同 classpath（bean 进 Micronaut 上下文） | **否**（扩展仓独立编译，micronaut 注解处理产 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体可烤进镜像或运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b 已裁定，见 §4） | **要**（bean 发现在启动期，F2） | 启动期 | kestra-oidc-provider 的 webserver 侧认证链 jar、R-EE-RBAC 的 SecurityRule/Authorizer jar（IdP 进程独立成镜像，不受此通道影响） |
-| ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开启（OSS+local 存储**默认开**，dsh 栈即此形态）→ **否**（API 安装即时注册）；关闭形态 → 要（重启扫描） | 启动期；auto-install 开启时即时 | 无活跃插件客户（注册表 `extensions.tsv`） |
+| ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins；部署注入 = `-v ./plugins:/app/plugins` 或 `-e KESTRA_PLUGINS_PATH=/挂载点`，重启生效——F4 启动链 ①） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开启 → **否**（API 安装即时注册）；关闭 → 要（重启扫描）。开关三层：源码级 OSS+local 默认开（computeEnabled:89-99）→ **镜像变体覆盖**（slim=开、no-plugins=烤配置关，F4）→ 部署显式配置最终覆盖（④ 通道） | 启动期；auto-install 开启时即时 | 无活跃插件客户（注册表 `extensions.tsv`） |
 | ④ 部署配置 | yml/env（`KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`）：micronaut.security.enabled、intercept-url-map 等 | 否 | 否 | **要**（@Value/配置绑定在 bean 创建期） | 启动期 | kestra-oidc-provider 部署面（最小端点门；intercept-url-map 属 micronaut-security 配置面，生效前提=认证链 jar 进镜像，R-CLASSPATH-MERGE 前置） |
 | ⑤ 运行时 settings | settings 存储（API 写入的键值，如 Basic Auth 凭据） | 否 | 否 | **否**（服务按调用读库） | 即时 | REQ-0011 兜底语义依赖（settings 缺席→fallback） |
 | ⑥ 运行时数据 | flows/triggers（BroadcastQueue 事件） | 否 | 否 | **否**（队列订阅重索引） | 即时 | 无（通道语义留档：BroadcastQueue 事件驱动的内存索引即时更新，重启后重建） |
 
-## 1. 三条底层事实（一切结论的根）
+## 1. 四条底层事实（一切结论的根；F4 = 官方镜像启动链实录）
 
 **F1 进程形态：selfrun fat jar，classpath 只有它自己。**
 `/app/kestra` = shadowJar 字节 + selfrun 脚本前缀拼进 zip（`build.gradle:626` writeExecutableJar）；
@@ -73,6 +74,48 @@ request"）。端点受 `pluginAutoInstallService.isEnabled()` 门控，而 **au
    EE 卖治理/可复现——所以此处的阉割方向与多数门控相反：不是给 EE 加功能，
    而是把 OSS 便利从 EE 拿掉。dsh 栈恰在 local persona 安全区内；一旦多节点/
    共享存储，同样的一致性风险回归（届时回归烤 jar 或自建受管机制）。
+   〔镜像变体覆盖该缺省开关：slim=开、no-plugins=烤配置关——见 F4〕
+
+**F4 官方镜像启动链实录（v2.0.5，含 no-plugins 变体；从容器入口到 8080 监听）**
+
+```
+docker run kestra/kestra[:v2.0.5|-no-plugins] server standalone   # 典型命令（官方 docker-compose.yml:30）
+└─ ENTRYPOINT ["docker-entrypoint.sh"]（Dockerfile:15；无命令时 CMD 默认 ["--help"]，:17）
+   └─ docker/usr/local/bin/docker-entrypoint.sh（全文 3 行，零加工）：exec /app/kestra "$@"
+      └─ /app/kestra = selfrun 脚本前缀 + fat jar zip（build.gradle:626-651）
+         selfrun（gradle/jar/selfrun.sh，35 行）依次：
+           ① KESTRA_PLUGINS_PATH 缺省 = $(dirname $0)/plugins = /app/plugins，导出（:2-3）
+           ② KESTRA_CONFIGURATION → 写 <confs>/application.yml → MICRONAUT_CONFIG_FILES（:6-10）
+           ③ Java 版本门（<25 拒启，:12-19）；固定 add-opens×3 + unsafe-memory-access=allow
+             + MaxRAMPercentage=50 + --enable-native-access（:21-32，可被 JAVA_OPTS 覆盖）
+           ④ exec java … -jar "$0" "$@"（:35）—— F1：classpath = fat jar + manifest Class-Path
+         JVM 内：Main-Class = io.kestra.cli.Kestra（build.gradle:49，manifest 注入 :598）
+         → picocli 子命令 server standalone：单 JVM 起 webserver/executor/worker/indexer
+           （cli/commands/servers/StandAloneCommand.java）
+         → Micronaut 上下文启动（F2：bean 定型于此时，classpath 全量索引）
+         → @Context MigrationStartupRunner 先于仓储/服务 bean 查库执行
+           MigrationRunner.autoRun()（core/migration/MigrationRunner.java javadoc）
+         → Netty 监听 8080（Micronaut 缺省端口，源码未显式设置；官方 compose 映射
+           8080:8080，docker-compose.yml:60-61）
+```
+
+端口面：主 HTTP **8080**（全部 API/UI）；management 端点 **8081**（`endpoints.all.port`，
+`cli/src/main/resources/application.yml:138`——compose 注释明言缺省不暴露、无鉴权、仅开发
+用途）；gRPC server **缺省 disabled**（同文件 :130-133）。
+
+**镜像变体差异**（上游自述 `docs/architecture/PLUGIN_AUTO_DOWNLOAD.md:63-75`）：full /
+slim / no-plugins 三变体**同一 Dockerfile、同一 base 镜像**（实际构建在 kestra-io/actions
+仓），差异只有两处——烤进镜像的 Kestra 配置与 /app/plugins 内容：
+
+- `:<version>`（full）：全部插件预装；
+- `:-slim`：核心引擎、**auto-install 默认开**（靠运行期按需装维持可用）；
+- `:-no-plugins`：无预装插件、**auto-install 烤配置关**（「want to control the exact
+  plugin set on hardened environments」）。
+
+⇒ 修正 ③ 通道的开关口径：源码级「OSS + storage.type=local 默认开」
+（`PluginAutoInstallService.computeEnabled:89-99`）会被**镜像烤配置压掉**——在
+`v2.0.5-no-plugins` 上（当前调研所用实例形态），运行期 API 装插件默认不可用；需开启时
+在部署配置显式 `kestra.plugins.auto-install.enabled: true`（④ 通道，重启生效）。
 
 ## 2. 各通道证据细则
 
@@ -80,7 +123,7 @@ request"）。端点受 `pluginAutoInstallService.isEnabled()` 门控，而 **au
 |---|---|---|
 | ① | `build.gradle:626-651`（writeExecutableJar=shadowJar+selfrun 前缀）；overlay `scripts/build.sh`（patch→executableJar→镜像） | 每 patch 一行都是升级成本（AGENTS.md §3 质量法的动因） |
 | ② | `gradle/jar/selfrun.sh` 末行 `-jar "$0"`；`Dockerfile:9-13`（COPY docker / + plugins RUN）；EE 痕迹 logback/base.xml:21-23、BaseCommand.java:45；dsh 试点 13/13 `[dsh]`；聚合面实证 `MigrationRunner.java:47-56`（Collection 注入收全量 bean） | 承载机制已立案 R-CLASSPATH-MERGE（§4，候选 b：manifest Class-Path 注入）；同包同名类遮蔽待 OQ2 实证 |
-| ③ | selfrun.sh 头部 `KESTRA_PLUGINS_PATH` 导出；`DefaultPluginRegistry.getOrCreate():57`（启动 `scanner.scan()` 注册）；PluginController:152 安装端点 + `computeEnabled`:89-99 门控（OSS+local 默认开；EE 强制关） | 只承载任务/触发器/Runner 等插件面（F3）；新任务类型对**新** flow 生效，已解析 flow 不追溯；安装的 jar 落 local repo（LocalPluginManager），集群传播是 EE（单机 OSS 无此面） |
+| ③ | `PluginScanner.scan(Path)`:62-88（`PluginResolver` 枚举目录 → 逐插件组建 `PluginClassLoader.of(location, resources, parent)` → `scanClassLoader` 读类字节识别插件标记类型）；`DefaultPluginRegistry.getOrCreate():57` 启动注册；`PluginController:152` 安装端点 + `computeEnabled`:89-99 门控（源码级 OSS+local 默认开、EE 强制关；镜像变体覆盖见 F4） | 只承载任务/触发器/Runner 等插件面（F3）；新任务类型对**新** flow 生效，已解析 flow 不追溯；安装的 jar 落 local repo（LocalPluginManager），集群传播是 EE（单机 OSS 无此面） |
 | ④ | selfrun.sh `KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`；MiscController `@Value("${micronaut.security.enabled:false}")`（REQ-0011 patch 面）= bean 创建期绑定 | 配置改了不重启=不生效（常见误判源） |
 | ⑤ | `BasicAuthService.credentials():205-210`（每次调用 `settingRepository.findByKey` 查库） | 仅 settings 存储面；yml 键不在此列（属④） |
 | ⑥ | BroadcastQueue 订阅 + `@PostConstruct` 全量索引（内存索引形态） | 事件驱动即时更新；重启后重建 |
@@ -159,8 +202,10 @@ selfrun，丢 `KESTRA_PLUGINS_PATH`/`KESTRA_CONFIGURATION→MICRONAUT_CONFIG_FIL
 ## 5. 复现命令（BASE 树内执行）
 
 ```bash
-git show "$(sed -n 2p patches/BASE):gradle/jar/selfrun.sh"          # F1：-jar "$0"、KESTRA_PLUGINS_PATH、KESTRA_CONFIGURATION
-git show "$(sed -n 2p patches/BASE):Dockerfile"                     # F1：唯一注入点 plugins/
+git show "$(sed -n 2p patches/BASE):gradle/jar/selfrun.sh" | cat -n      # F1/F4：启动链 35 行全文（-jar、PLUGINS_PATH、CONFIGURATION）
+git show "$(sed -n 2p patches/BASE):Dockerfile" | cat -n                 # F1/F4：ENTRYPOINT/CMD/plugins 注入通道
+git show "$(sed -n 2p patches/BASE):docker/usr/local/bin/docker-entrypoint.sh"  # F4：入口 3 行（exec /app/kestra "$@"）
+git show "$(sed -n 2p patches/BASE):docs/architecture/PLUGIN_AUTO_DOWNLOAD.md" | sed -n '63,75p'  # F4：镜像变体自述（no-plugins=auto-install 关）
 git grep -n "registerBean\|DynamicBean" -- '*.java' | grep -v test  # F2：空=无运行期 bean 注册
 git grep -n "micronaut\|ApplicationContext" -- 'core/src/main/java/io/kestra/core/plugins/DefaultPluginRegistry.java' 'core/src/main/java/io/kestra/core/plugins/PluginScanner.java'  # F3：空=插件不走 Micronaut
 sed -n '150,170p' webserver/src/main/java/io/kestra/webserver/controllers/api/PluginController.java  # ③：安装端点+门控
