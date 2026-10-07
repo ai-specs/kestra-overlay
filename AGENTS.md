@@ -41,7 +41,8 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 | `patches/webserver/NNNN-slug.patch` | 需求对齐薄 patch（头部注释 + 统一 diff） | 命名 `^\d{4}-[a-z0-9-]+$`；编号即应用顺序（字典序） |
 | `patches/manifest.tsv` | patch 总账（含 reserved 待激活点） | 与 patch 文件一一对应，`check-patches.sh` 强校验 |
 | `scripts/build.sh` | 克隆上游→apply→编译 webserver→镜像→push | `--apply-only` = 验证门 |
-| `scripts/build-extensions.sh` | 扩展仓 jar 收集注入（env > extensions/ > 跳过） | 本仓不 vendored 任何 jar 二进制 |
+| `extensions.tsv` | 扩展仓注入注册表（name \| slot \| 说明；slot=plugin/classpath/standalone） | 骨架客户中立：下游是数据不是代码；与机制通道矩阵对应 |
+| `scripts/build-extensions.sh` | 按 extensions.tsv 收集注入（env > extensions/ > 跳过；classpath 槽未落地报 PENDING） | 本仓不 vendored 任何 jar 二进制 |
 | `scripts/check-patches.sh` | 本仓质量门（结构校验 + 可选 apply-check） | 改 patches 后必须本地跑；CI patch-verify 第一步 |
 | `docs/oss-ee-gap.md` | OSS↔EE 能力差异表 + reserved 登记簿 | 补足决策的唯一依据；BASE 升级后必须复扫 |
 | `docs/extension-mechanisms.md` | 扩展机制原理（编译/重启/外部 jar 三问的调查记录） | 「怎么生效」的事实源；含 OQ 开放问题清单（实施前必须闭环） |
@@ -62,7 +63,7 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 - ❌ 无消费扩展仓的「顺手优化/对齐上游」——patch 面只增不减的根源；
 - ❌ 把上游 develop/未来 release 的内容回移到 BASE（「fork 有而 BASE 没有」≠ 定制，见 §5）；
 - ❌ patch 携带业务逻辑（应出仓为扩展仓 jar）；A 类新增文件进 patch 仅限「M 面激活点的编译锚」（manifest 标 `transition` + 移除条件）；
-- ❌ 动 build 面（settings.gradle/docker-entrypoint 等：CI 实证 `Configuring project ':x' without an existing directory` 必挂）、ui 面（本仓镜像不编译 ui，收了不生效）、migration 面（属阶段四扩展仓，且 SQL 无 bean 不生效）；
+- ❌ 动 build 面（settings.gradle/docker-entrypoint 等：CI 实证 `Configuring project ':x' without an existing directory` 必挂）、ui 面（本仓镜像不编译 ui，收了不生效）、migration 面（归扩展仓：`MigrationRunner` 注入 `Collection<MigrationScript>` 收集上下文**全部** bean、classpath jar 的也收（`core/migration/MigrationRunner.java:47-56`）——扩展仓 jar 自带 bean+SQL 即生效，overlay patch 无承载点；SQL-only patch 无 bean 注册从未生效，§8-2）；
 - ❌ 复刻 EE 产品功能（审计日志、Kafka 队列等）——本仓只补**架构扩展能力**（见差异表 §0 定位）。
 
 ## 3. patch 质量法
@@ -78,6 +79,10 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
    对应 `docs/oss-ee-gap.md` §4，无 patch 文件）。
 4. **manifest 同步**：增/删/改 patch 必须同步 `patches/manifest.tsv`；两处不一致 = FAIL。
 5. patch 只含统一 diff 与头部注释；禁止冲突标记、尾随垃圾、二进制。
+6. **形态绑定**（2026-10-07 增补）：manifest、patch 头部、差异表 §4 的一切移除条件/触发
+   条件必须绑定**可观察的形态事件**（如「R-CLASSPATH-MERGE 落地」「上游向 OSS 开放 X」），
+   禁止只写客户阶段号——客户阶段只影响优先级（§0-3），不是形态依据。零 overlay 动作即可
+   补足的缝隙不入 reserved（登记收回规则见差异表 §4）。
 
 ## 4. 验证分层（本地快检 vs CI）
 
@@ -152,7 +157,7 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 | # | 陷阱 | 证据/轮次 |
 |---|---|---|
 | 1 | build 面 patch 必挂 CI：settings.gradle `include` 本仓不注入的模块目录 → `Configuring project ':relay' without an existing directory`（gradle configure 期失败） | 2026-10-07 CI 实证，build 组已整组删除 |
-| 2 | migration SQL-only patch 从未生效：MigrationScript 是 DI bean，SQL 单独进 patch 漏注册 | fork 实证；R-MIG-DSH 登记「bean+SQL 成对收」 |
+| 2 | migration SQL-only patch 从未生效：MigrationScript 是 DI bean，SQL 单独进 patch 漏注册 | fork 实证；2026-10-07 机制结论（升级）：MigrationRunner 收全量 bean（含 classpath jar），扩展仓 jar 自带 bean+SQL 即生效——migration 面**零 overlay patch**，R-MIG-DSH 登记已收回（差异表 §4） |
 | 3 | 管道 `… | tail` 吞退出码（tail 恒 0） | 用规范脚本，失败必须中断 |
 | 4 | `git apply` 容忍 patch 首部 `#` 注释行 → 头部注释由此合法（但 diff 之后不允许散文） | 本轮树级验证 |
 | 5 | `--filter=blob:none` 克隆的 lazy checkout 中途断流（HTTP/2 reset） | 用完整浅克隆 + `proxy_on` |

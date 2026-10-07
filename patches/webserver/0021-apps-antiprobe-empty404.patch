@@ -7,13 +7,14 @@
 #   （无标记、无 body）仍照旧补 problem 文档。
 # 消费扩展仓：plugin-apps-amis（阶段一已实施范围）
 # 状态：transition（NotFoundResponseException 最终归 plugin-apps-harness jar；
-#   阶段二出仓后本 patch 收窄为仅 ErrorController + ProblemResponseFilter 的 M 面）
+#   R-CLASSPATH-MERGE 落地并出仓后本 patch 收窄为仅 ErrorController +
+#   ProblemResponseFilter 的 M 面〔移除条件形态绑定——AGENTS.md §3-6〕）
 # 来源：fork app-kestra 定制移植（ErrorController 部分对 v2.0.5 手工移植——
 #   fork-custom 上下文含上游 develop 的 Jackson 3 演进，v2.0.5 仍为 Jackson 2，
 #   仅移植 NotFoundResponseException handler，Jackson 部分为上游内容不回移）
 # 触达上游文件（3）：controllers/api/NotFoundResponseException.java（新增）、
 #   controllers/ErrorController.java（M）、filter/ProblemResponseFilter.java（M·本需求部分）
-# 移除条件：plugin-apps-harness 出仓（阶段二）；异常类移出后 patch 收窄
+# 移除条件：R-CLASSPATH-MERGE 落地且扩展仓以 classpath jar 提供该异常类；移出后 patch 收窄
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java b/webserver/src/main/java/io/kestra/webserver/controllers/ErrorController.java
 index 08ed217..334ed8e 100644

@@ -10,13 +10,15 @@
 #   UriTemplateMatcher 直接抛异常，实测）。
 # 消费扩展仓：plugin-apps-amis（阶段一已实施范围）
 # 状态：transition（UiAppController/AppRouteRegistry 最终归属 plugin-apps-harness
-#   外部 classpath jar——阶段二出仓后本 patch 收窄为仅 TenantAliasingRooter +
-#   ProblemResponseFilter 两个 M 面；类引用跨 jar 同包可见，出仓无需改 hunk）
+#   外部 classpath jar——R-CLASSPATH-MERGE 落地并出仓后本 patch 收窄为仅
+#   TenantAliasingRooter + ProblemResponseFilter 两个 M 面；类引用跨 jar 同包可见，
+#   出仓无需改 hunk〔移除条件形态绑定，客户阶段仅优先级注记——AGENTS.md §3-6〕）
 # 来源：fork app-kestra 定制移植；相对 fork 剥离两项：AppRouterController 引用
-#   （属阶段二 harness 面）与 context-path 处理（上游 develop 专属，v2.0.5 无此概念）
+#   （属 harness API 面，reserved R-APP-ROUTER）与 context-path 处理（上游 develop 专属，
+#   v2.0.5 无此概念）
 # 触达上游文件（4）：UiAppController.java（新增）、services/AppRouteRegistry.java
 #   （新增）、rooting/TenantAliasingRooter.java（M）、filter/ProblemResponseFilter.java（M·本需求部分）
-# 移除条件：plugin-apps-harness 出仓（阶段二）；届时新增文件部分移出本 patch
+# 移除条件：R-CLASSPATH-MERGE 落地且扩展仓以 classpath jar 提供上述两文件；届时新增文件部分移出本 patch
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java
 new file mode 100644

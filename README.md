@@ -26,7 +26,7 @@ dsh fork 只是证据库、不是路线图（全文见 `AGENTS.md` §0·长远�
 | `./scripts/check-patches.sh --apply-check <上游BASE树>` | 追加顺序应用验证 |
 | `./scripts/build.sh --apply-only` | 克隆上游 + apply 全部 patch（apply 门） |
 | `./scripts/build.sh` | 全量：apply → 编译 webserver → 镜像 → push ghcr |
-| `./scripts/build-extensions.sh <WORK>` | 扩展仓 jar 收集注入（env > extensions/ > 跳过） |
+| `./scripts/build-extensions.sh <WORK>` | 扩展仓 jar 收集注入（注册表 `extensions.tsv`；env > extensions/ > 跳过；classpath 槽报 PENDING） |
 
 ## patch 集（2026-10-07 审计重整后）
 
