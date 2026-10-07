@@ -20,8 +20,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      # NOTE(v6 bump): upstream compiles with `-Xlint:all` (build.gradle:568 at
+      # BASE), so the build-push log carries ~10 javac lint annotations
+      # ([serial]/[rawtypes]/[this-escape]/...). They are upstream source
+      # noise, not actionable here (fixing them = touching the upstream build
+      # face, banned by AGENTS.md §2) — expected, do not chase.
       - name: Cache gradle (upstream BASE keyed)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.gradle/caches
