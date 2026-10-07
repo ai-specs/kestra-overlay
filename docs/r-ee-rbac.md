@@ -101,8 +101,7 @@ micronaut-security-csrf，差异表 §1-S6）。⇒ EE 的 IAM **不是「OSS �
 ## 7. 前置与触发条件（形态绑定，非客户阶段绑定——AGENTS.md §3-6）
 
 - 前置：R-CLASSPATH-MERGE 落地（jar 承载）；
-- 触发（开工要件）：① 指名消费扩展仓（kestra-oidc-provider 侧或未来授权扩展仓——
-  2026-10-07 范围收窄后 apps 仓已出活跃范围）；
+- 触发（开工要件）：① 指名消费扩展仓（kestra-oidc-provider 侧或未来授权扩展仓）；
   ② 行为证据（缺授权时哪个端点/页面/流程暴露）；③ 最小面声明；④ 差异表 §2-B 行
   （已存在，本文即其展开）。
 
@@ -125,8 +124,6 @@ namespace 边界：低权限对 {ns-allowed} 可写、对 {ns-denied} 403（由�
 - **OQ-RBAC-2**：过滤器链死角清单（webhook/SSE/MCP 流）未扫——开工前以 BASE 源码
   `@Filter/@Controller` 路由盘点补齐。
 - **OQ-RBAC-3**：与 CSRF/SecurityFilter 顺序（micronaut SecurityFilterPhase）协同未实证。
-  （原 OQ-RBAC-4「TenantAliasingRooter×intercept-url-map」已随 REQ-0020 删除而失效——
-  2026-10-07 范围收窄，vanilla rooter 无 catch-all 改写，交互面不存在。）
 - EE 未来 release 的 RBAC 语义变化不影响本需求（我们不复刻其语义）；BASE 升级复扫
   仅核对 §1 的「OSS 零钩子」事实是否仍成立（差异表 §5 命令集覆盖）。
 

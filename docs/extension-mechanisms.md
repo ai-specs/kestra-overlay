@@ -10,10 +10,10 @@
 |---|---|---|---|---|---|---|
 | ① 源码 patch | 改上游源码（webserver M 面） | **要**（overlay CI 重编 executableJar + 重建镜像） | 否 | **要**（镜像重建+容器重启） | 构建期 | 本仓 1 个 patch（REQ-0011） |
 | ② classpath 合并 jar | 扩展 jar 与 fat jar 同 classpath（bean 进 Micronaut 上下文） | **否**（扩展仓独立编译，micronaut 注解处理产 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体可烤进镜像或运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b 已裁定，见 §4） | **要**（bean 发现在启动期，F2） | 启动期 | kestra-oidc-provider 的 webserver 侧认证链 jar、R-EE-RBAC 的 SecurityRule/Authorizer jar（IdP 进程独立成镜像，不受此通道影响） |
-| ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开启（OSS+local 存储**默认开**，dsh 栈即此形态）→ **否**（API 安装即时注册）；关闭形态 → 要（重启扫描） | 启动期；auto-install 开启时即时 | 无活跃插件客户（注册表 `extensions.tsv`；2026-10-07 范围收窄后 apps 插件行已删） |
+| ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开启（OSS+local 存储**默认开**，dsh 栈即此形态）→ **否**（API 安装即时注册）；关闭形态 → 要（重启扫描） | 启动期；auto-install 开启时即时 | 无活跃插件客户（注册表 `extensions.tsv`） |
 | ④ 部署配置 | yml/env（`KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`）：micronaut.security.enabled、intercept-url-map 等 | 否 | 否 | **要**（@Value/配置绑定在 bean 创建期） | 启动期 | kestra-oidc-provider 部署面（最小端点门；intercept-url-map 属 micronaut-security 配置面，生效前提=认证链 jar 进镜像，R-CLASSPATH-MERGE 前置） |
 | ⑤ 运行时 settings | settings 存储（API 写入的键值，如 Basic Auth 凭据） | 否 | 否 | **否**（服务按调用读库） | 即时 | REQ-0011 兜底语义依赖（settings 缺席→fallback） |
-| ⑥ 运行时数据 | flows/triggers（BroadcastQueue 事件） | 否 | 否 | **否**（队列订阅重索引） | 即时 | 历史示例 REQ-0020 AppRouteRegistry（已随 apps 范围收窄删除，2026-10-07；通道语义仍成立：队列事件驱动的内存索引即时更新） |
+| ⑥ 运行时数据 | flows/triggers（BroadcastQueue 事件） | 否 | 否 | **否**（队列订阅重索引） | 即时 | 无（通道语义留档：BroadcastQueue 事件驱动的内存索引即时更新，重启后重建） |
 
 ## 1. 三条底层事实（一切结论的根）
 
@@ -83,7 +83,7 @@ request"）。端点受 `pluginAutoInstallService.isEnabled()` 门控，而 **au
 | ③ | selfrun.sh 头部 `KESTRA_PLUGINS_PATH` 导出；`DefaultPluginRegistry.getOrCreate():57`（启动 `scanner.scan()` 注册）；PluginController:152 安装端点 + `computeEnabled`:89-99 门控（OSS+local 默认开；EE 强制关） | 只承载任务/触发器/Runner 等插件面（F3）；新任务类型对**新** flow 生效，已解析 flow 不追溯；安装的 jar 落 local repo（LocalPluginManager），集群传播是 EE（单机 OSS 无此面） |
 | ④ | selfrun.sh `KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`；MiscController `@Value("${micronaut.security.enabled:false}")`（REQ-0011 patch 面）= bean 创建期绑定 | 配置改了不重启=不生效（常见误判源） |
 | ⑤ | `BasicAuthService.credentials():205-210`（每次调用 `settingRepository.findByKey` 查库） | 仅 settings 存储面；yml 键不在此列（属④） |
-| ⑥ | `AppRouteRegistry`〔REQ-0020 patch，已随 apps 范围收窄删除——机制范例留档〕：`@PostConstruct` 全量索引 + BroadcastQueue 订阅增量 | 队列事件驱动的内存索引；重启后重建 |
+| ⑥ | BroadcastQueue 订阅 + `@PostConstruct` 全量索引（内存索引形态） | 事件驱动即时更新；重启后重建 |
 
 ## 3. EE 交付形态的印证（为什么 ② 是「官方通道」）
 
@@ -100,8 +100,7 @@ classpath jar 补 micronaut-security 链）复用的是同一架构事实：OSS 
 - 当前已落地通道：**①（REQ-0011 单 patch）+ ④（部署配置）**；③ 无活跃客户；
   通道② 的镜像承载是本仓「EE 同构交付」的**核心缺口**（kestra-oidc-provider 认证链 jar、
   R-EE-RBAC 的 SecurityRule jar 都卡在这里，差异表 §1-S6 统一口径），已立案为正式提案
-  **R-CLASSPATH-MERGE：实施待指令**（2026-10-07 范围收窄后，apps/harness 消费面已删，
-  剩余两个消费方均为保留事项）。
+  **R-CLASSPATH-MERGE：实施待指令**。
 
 **方案（选型 b）**：build.sh 对**构建产物**做 zip 级后处理，向 executable jar 的 manifest
 注入 `Class-Path: libs/x.jar …`。**零 patch 文件、不动上游 build 面
@@ -141,7 +140,6 @@ selfrun，丢 `KESTRA_PLUGINS_PATH`/`KESTRA_CONFIGURATION→MICRONAUT_CONFIG_FIL
    适用于任何未来 patch）**：fat jar 内代码不得以 `.class` 字面量或注解（含
    `@Error(exception = X.class)`）引用仅存在于扩展 jar 的类——若必须引用，用**类名字符串
    比较**（`declaring.getName().equals(...)`，不触发加载）或把标记类留作 fat jar 编译锚。
-   〔该约束的原始场景（apps patch 收窄）已随范围收窄删除，教训保留〕
 3. **同 FQN 主 jar 优先**：Class-Path 扩展 jar 中的同名类**结构性无法覆盖** fat jar 内的
    上游/patch 类——「意外遮蔽上游」整类风险排除；代价是「用扩展 jar 替换同名类」走不通
    （S6 同包策略只加新类名，不受影响）。

@@ -19,8 +19,8 @@ kestra OSS 相对 EE 故意阉割的架构扩展能力**（能力差异与补足
 dsh fork 只是证据库、不是路线图（全文见 `AGENTS.md` §0·长远目标）。
 
 **当前范围（2026-10-07 收窄裁定）**：活跃范围仅 **kestra-oidc-provider**（不含 MCP 面）
-与 **R-EE-RBAC**（`docs/r-ee-rbac.md`）；apps/AI/UI 域的 patch 与 reserved 已删除
-（git 历史即归档，重启按 `AGENTS.md` §2 入口重新接收）。
+与 **R-EE-RBAC**（`docs/r-ee-rbac.md`）；其余域已出范围（git 历史即归档，重启按
+`AGENTS.md` §2 入口重新接收）。
 
 ## 快速命令
 
@@ -44,15 +44,6 @@ dsh fork 只是证据库、不是路线图（全文见 `AGENTS.md` §0·长远�
 reserved 两条：**R-CLASSPATH-MERGE**（通道② jar 承载，认证链与 RBAC 的共同前置，选型 b
 已裁定）与 **R-EE-RBAC**（外部细粒度授权，预期零 patch）。
 
-> 2026-10-07 审计结论：原 3 个粗粒度 patch（0001/0002/0003）中约 2/3 是**上游 develop
-> 内容的回移**，已剔除（归因方法见 `AGENTS.md` §5.2/§8-6）；同日**范围收窄**又删除
-> 0010/0020/0021/0022（MCP 与 apps 域，git 历史即归档）。
-
-> 2026-10-07 审计结论：原 3 个粗粒度 patch（0001/0002/0003）中约 2/3 是**上游 develop
-> 内容的回移**（BasicAuthService/RequestUtils/CookiesConfiguration/NotFoundHeadersFilter
-> 纯回移，ErrorController/MiscController/UiIndexService 大半回移），已全部剔除——归因
-> 方法与教训见 `AGENTS.md` §5.2/§8-6。patch 粒度由文件对齐改为**需求对齐**（维护者裁定）。
-
 ## CI（overlay-build）
 
 `patch-verify`（check-patches.sh 结构门 → 上游克隆 → apply 门）→ `build-push`
@@ -68,5 +59,4 @@ reserved 两条：**R-CLASSPATH-MERGE**（通道② jar 承载，认证链与 RB
 
 - 当前活跃客户：kestra-oidc-provider（不含 MCP 面）
 - 需求文档：`docs/r-ee-rbac.md`（R-EE-RBAC，外部细粒度授权）
-- 已出范围（2026-10-07 收窄，git 历史即归档）：plugin-apps-amis / plugin-apps-harness /
-  plugin-relay-dsh 及 harness-overlay
+- 范围裁定与重启规则：`AGENTS.md` §0「当前范围」（历史增删 git 历史即归档）

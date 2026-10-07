@@ -9,13 +9,9 @@
 > 证据分级：`[src]` = BASE（v2.0.5 @ 172dd0f37）源码证据（file:line）；
 > `[docs]` = kestra.io 公开文档宣称（无源码证据）；`[dsh]` = dsh 项目实证；
 > `[live]` = 本地 vanilla 实例实测。
-> 本表 2026-10-07 由穷尽扫描生成（范围：全仓 24 个模块非测试源码 + ui/src edition 消费点
-> + kestra.io/docs/oss-vs-paid），同日使命复审一轮（S9 缝隙类增补等）。
-> **同日范围收窄（维护者裁定）：活跃范围仅 ① kestra-oidc-provider（不含 MCP 面）
-> ② R-EE-RBAC（docs/r-ee-rbac.md）**。C~I 域（MCP/多租户/治理/运行面/插件治理/AI/产品
-> 功能）的行、patch 0010/0020/0021/0022 与 4 条 reserved 已删除——全量调查与删除理由存
-> git 历史（收窄前最后全量版本：commit 47b9d98）。重启任一域须按 AGENTS.md §2 入口
-> 重新接收（先补本表行 + 客户证据）。
+> **当前范围（2026-10-07 收窄裁定，维护者）**：仅 ① kestra-oidc-provider（不含 MCP 面）
+> ② R-EE-RBAC（docs/r-ee-rbac.md）——范围裁定全文与重启规则见 `AGENTS.md` §0「当前范围」；
+> 其余域的历史调查存 git 历史。
 
 ## 1. EE 的交付机制 = overlay 可用的架构缝隙（穷尽列举）
 
@@ -23,19 +19,19 @@
 > 结论先行：**EE 与 OSS 同 codebase，EE 以「classpath jar + license key」叠加交付**
 > （`[docs]`「加 license 重启即升级」）。OSS 源码里处处是「为 EE 预留的挂接点」——
 > 这些挂接点就是本仓与扩展仓的合法通道（上游商业利益保证其稳定：动了它们 EE 自己就挂）。
-> 此表是**机制事实**（收窄后整体保留）：当前两个活跃事项都踩在 S6/S8/S9 上。
+> 此表是**机制事实/缝隙分类学**（穷尽列举，与域无关）：当前两个活跃事项踩在 S6/S8 上。
 
 | # | 缝隙机制 | v2.0.5 源码证据 `[src]` | 当前使用 |
 |---|---|---|---|
-| S1 | `@Requires(missingClasses="io.kestra.ee.…")`：EE jar 在 classpath 时其 bean 顶替 OSS bean（全仓唯一注解实例） | `webserver/rooting/TenantAliasingRooter.java:19`（`TenantAliasingRooterEE`） | 无（多租户域已出范围；机制留档） |
-| S2 | **OSS 桩 bean + EE `@Replaces`**（上游源码内显式文档化的「桩—替换」对）：① `core/tenant/TenantService.java:9` ② `core/runners/DisabledReusableInputsExpander.java:11` ③ `webserver/services/ai/agent/DefaultSystemPromptResolver.java:11` ④ `core/services/ConcurrencyLimitResolver.java:17` ⑤ `core/services/MaintenanceService.java:89`（Noop 桩 :91）⑥ `core/services/NamespaceService.java:22` | 同构通道实证：外部 jar 可 `@Replaces` 桩 bean（`[dsh]` 13/13 安全面全绿即此类） | 无活跃使用（各域已出范围；R-EE-RBAC 若走 Authorizer bean 亦属此类形态） |
-| S3 | `EditionProvider` 判定注入（功能按 Edition 分叉） | `KestraContext.java:150`、`PluginAutoInstallService.java:89`、`McpServerController.java:144`、`ProblemFactory.java:39` 等（全部调用点见 §5 命令） | 无（REQ-0010 已随 MCP 面收窄删除，2026-10-07） |
+| S1 | `@Requires(missingClasses="io.kestra.ee.…")`：EE jar 在 classpath 时其 bean 顶替 OSS bean（全仓唯一注解实例） | `webserver/rooting/TenantAliasingRooter.java:19`（`TenantAliasingRooterEE`） | 无（机制留档） |
+| S2 | **OSS 桩 bean + EE `@Replaces`**（上游源码内显式文档化的「桩—替换」对）：① `core/tenant/TenantService.java:9` ② `core/runners/DisabledReusableInputsExpander.java:11` ③ `webserver/services/ai/agent/DefaultSystemPromptResolver.java:11` ④ `core/services/ConcurrencyLimitResolver.java:17` ⑤ `core/services/MaintenanceService.java:89`（Noop 桩 :91）⑥ `core/services/NamespaceService.java:22` | 同构通道实证：外部 jar 可 `@Replaces` 桩 bean（`[dsh]` 13/13 安全面全绿即此类） | 无活跃使用（R-EE-RBAC 若走 Authorizer bean 亦属此类形态） |
+| S3 | `EditionProvider` 判定注入（功能按 Edition 分叉） | `KestraContext.java:150`、`PluginAutoInstallService.java:89`、`McpServerController.java:144`、`ProblemFactory.java:39` 等（全部调用点见 §5 命令） | 无（当前无 in-scope 使用） |
 | S4 | **按 distribution 声明的接口 bean**（OSS 明文「各发行版声明自己拥有的路径」） | `webserver/errors/ProblemFormatExclusion.java:12`（"the Model Context Protocol endpoints are Open Source, SCIM is Enterprise"） | 无活跃使用（distribution 声明缝隙的现成范例，留档） |
 | S5 | `io.kestra.ee.*` 包名空间与分发过滤 | `PluginController.java:388,400,696`、`Makefile:85`、`core/models/ui/PluginDistribution.java:8` | 不使用（不分发 EE 插件） |
 | S6 | **classpath jar 补 bean/过滤器链**（EE 的交付形态本身；框架级能力） | **安全链实证**：`webserver/build.gradle:25` 仅有 `micronaut-security-csrf`——认证过滤器链不在 OSS 构建中，OSS 的认证=自研 `BasicAuthService` cookie；EE 以 jar 补 micronaut-security 链 `[docs]`；dsh fork 的 webserver/build.gradle 对此**零定制**（安全依赖全在其自建 oidc-provider 模块）`[dsh]`；外部 jar 同包 `@Controller`/`@Filter` 可被扫描注册（fork 13/13 安全测试全绿）`[dsh]` | **当前两个活跃事项的主通道**：kestra-oidc-provider 的 webserver 侧认证链 jar + R-EE-RBAC 的 SecurityRule/Authorizer jar。**承载现状**：官方镜像 selfrun `-jar` 模式下外部 jar 只能构建期进 manifest（F1）——承载机制 = R-CLASSPATH-MERGE（§4，选型 b 已裁定，jar 可烤进或运行时挂载、缺席静默休眠）；IdP 进程部分独立成镜像不受影响 |
 | S7 | 插件体系（`plugins/` 自动扫描、外部 jar 插件） | `core/plugins/`（RegistryScanner 等）；`PluginClassLoader extends URLClassLoader`（`PluginClassLoader.java:19`）——反射实例化、不进 Micronaut（F3），故 bean jar 装不进此槽 | 无活跃插件客户（注册表 `extensions.tsv`） |
 | S8 | `Optional`/`BeanProvider` 注入缺席容忍（EE bean 缺席→OSS 默认行为） | `MiscController.java:72`（`Optional<BasicAuthService>`）、`DefaultStartupHook.java:25-39`、`KestraContext.java:149` | **REQ-0011 依赖此模式**（OIDC 部署下 BasicAuthService 缺席） |
-| S9 | **protected 方法覆写点**（OSS javadoc 自述「EE 覆写此方法放行」的显式覆写缝） | ① `core/contexts/KestraBeansFactory.java:112-118` `ensureLogDataStoreAllowed()`（外部日志库门）② `webserver/services/ai/AiServiceManager.java:115-137` `createAiService()`（非 gemini 提供商即抛）③ `core/validations/validator/FlowValidator.java:204`（EE-only inputs；同款 `core/docs/JsonSchemaGenerator.java:170`） | 无活跃使用（日志库/AI 域已出范围；机制留档——同构通道：扩展仓子类 bean `@Replaces` 覆写，经 classpath jar） |
+| S9 | **protected 方法覆写点**（OSS javadoc 自述「EE 覆写此方法放行」的显式覆写缝） | ① `core/contexts/KestraBeansFactory.java:112-118` `ensureLogDataStoreAllowed()`（外部日志库门）② `webserver/services/ai/AiServiceManager.java:115-137` `createAiService()`（非 gemini 提供商即抛）③ `core/validations/validator/FlowValidator.java:204`（EE-only inputs；同款 `core/docs/JsonSchemaGenerator.java:170`） | 无活跃使用（机制留档——同构通道：扩展仓子类 bean `@Replaces` 覆写，经 classpath jar） |
 
 ## 2. 能力差异总表（当前活跃范围：认证/身份 + 授权）
 
@@ -54,12 +50,6 @@
 |---|---|---|---|---|
 | 端点级认证门 | 无过滤器链（见 A）；OSS 主源码零授权钩子（webserver/core 无 SecurityRule/intercept-url-map 类，2026-10-07 复扫） | intercept-url-map/规则链 `[docs]` | **部署面**：compose 的 micronaut-security `intercept-url-map`（`/**→isAuthenticated()`）——配置级缝隙，非 patch（fork 同形态 `[dsh]`）；**生效前提 = 认证链 jar 进镜像**（R-CLASSPATH-MERGE 前置） | 部署面（kestra-oidc-provider 侧） |
 | RBAC（资源:动作、namespace 级） | **OSS 零授权钩子** + **EE IAM API 面（users/roles/permissions/groups/service-accounts/me）在 vanilla 实例全部 route-miss 404**`[live]`——判定面整体在 EE jar，OSS 无可解禁开关 | 有 `[docs]`（模型：资源×动作×namespace 绑定，五内置角色，三类主体——详见 r-ee-rbac.md §2 参照面） | 扩展仓 jar 提供 micronaut-security 的 SecurityRule/Authorizer bean（S6 通道），**预期零 overlay patch**。**需求已细化立案：[docs/r-ee-rbac.md](r-ee-rbac.md)**（目标能力/非目标/交付分层/验收判据/OQ 清单） | **reserved** R-EE-RBAC |
-
-> **范围收窄移除的域（2026-10-07，墓碑注记）**：C MCP（含 UI edition 门控行）、D 多租户、
-> E 治理与合规（policies/assets/可复用输入/审计）、F 可扩展性与运行面（Kafka 队列/维护模式/
-> 并发分级/Quota/外部日志库等，含「缝隙开放」改口行）、G 插件治理（auto-install 澄清行）、
-> H AI、I 产品功能（Apps/Dashboards/密钥/500 详情）。各域的判定、源码证据与「缝隙开放/
-> 不补足」结论存 git 历史（47b9d98 及此前版本）；重启任一域按 AGENTS.md §2 入口重新接收。
 
 ## 3. 当前闭环视图（整体考虑）
 
@@ -88,15 +78,6 @@ R-EE-RBAC（docs/r-ee-rbac.md）需要：
 | R-CLASSPATH-MERGE | 通道②的镜像承载机制（EE 同构交付的核心缺口，S6）——**已立案待实施，选型 b 已裁定（2026-10-07 维护者确认）**；JVM 语义三组实证（缺席静默休眠/`.class` 字面量懒解析/主 jar 优先）与设计约束见 `docs/extension-mechanisms.md` §4 | 实施指令（是认证链 jar 与 R-EE-RBAC 的共同前置） | build.sh 构建产物 manifest Class-Path 注入（jar 可烤进镜像或运行时挂载，manifest 条目=镜像↔部署契约）+ OQ2 剩余实证（bean 索引可见性）；零 patch 文件 |
 | R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 micronaut-security SecurityRule/Authorizer bean | 消费扩展仓指名（kestra-oidc-provider 侧或未来授权扩展仓）+ 行为证据（§2-B 接收标准）+ R-CLASSPATH-MERGE 落地 | 外部 classpath jar（S6）；**预期零 overlay patch**（OSS 无授权钩子可激活，2026-10-07 复扫 + vanilla 实测 IAM API 全 404）；实证含 SecurityRule 从 jar 注册。**展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md)** |
 
-**已收回/移除的登记**（防重新立案，git 历史即归档）：
-- `R-MIG-DSH`（2026-10-07 机制收回）：`MigrationRunner` 注入 `Collection<MigrationScript>`
-  收集上下文**全部** bean（`core/migration/MigrationRunner.java:47-56`，INIT_SCRIPT_IDS 预留
-  `0-init-ee`），扩展仓 classpath jar 自带 bean 即自动注册执行，**overlay 零动作**（机制结论
-  见 extension-mechanisms F2）。
-- `R-APP-ROUTER`、`R-NFH-ANCHOR`、`R-AI-PROVIDERS`、`R-UI-EDITION-GATE`（2026-10-07
-  范围收窄）：apps/AI/UI 域出活跃范围，相应 patch 0010/0020/0021/0022 一并删除。其中
-  R-NFH-ANCHOR 的触发对象（UiAppController 排除定制）随 0020 删除而消失。
-
 ## 5. 复现命令（证据纪律：结论必须可复现；BASE 树内执行）
 
 ```bash
@@ -104,7 +85,7 @@ R-EE-RBAC（docs/r-ee-rbac.md）需要：
 git grep -n "EditionProvider" -- '*.java' | grep -v /src/test/            # §1-S3 全部调用点
 git grep -n "io\.kestra\.ee" | grep -v /src/test/                          # §1-S1/S5 + EE 交付痕迹
 git grep -n "missingClasses" -- '*.java' | grep -v /src/test/              # §1-S1 注解实例
-git grep -in "enterprise\|EE feature" -- '*.java' | grep -v /src/test/     # §2 源码文档化阉割清单（全量，含已收窄域）
+git grep -in "enterprise\|EE feature" -- '*.java' | grep -v /src/test/     # §2 源码文档化阉割清单（全仓扫描）
 git grep -n "overrides this\|overridden by\|Enterprise.*override" -- '*.java' | grep -v /src/test/  # §1-S9 protected 覆写缝
 grep -n "micronaut-security" webserver/build.gradle                        # §1-S6 安全链缺席证据
 # [live] vanilla 实例（Basic Auth admin 会话）：

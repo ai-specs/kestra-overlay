@@ -169,7 +169,7 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 | # | 陷阱 | 证据/轮次 |
 |---|---|---|
 | 1 | build 面 patch 必挂 CI：settings.gradle `include` 本仓不注入的模块目录 → `Configuring project ':relay' without an existing directory`（gradle configure 期失败） | 2026-10-07 CI 实证，build 组已整组删除 |
-| 2 | migration SQL-only patch 从未生效：MigrationScript 是 DI bean，SQL 单独进 patch 漏注册 | fork 实证；2026-10-07 机制结论（升级）：MigrationRunner 收全量 bean（含 classpath jar），扩展仓 jar 自带 bean+SQL 即生效——migration 面**零 overlay patch**，R-MIG-DSH 登记已收回（差异表 §4） |
+| 2 | migration SQL-only patch 从未生效：MigrationScript 是 DI bean，SQL 单独进 patch 漏注册 | fork 实证；2026-10-07 机制结论（升级）：MigrationRunner 收全量 bean（含 classpath jar），扩展仓 jar 自带 bean+SQL 即生效——migration 面**零 overlay patch**（机制结论见 docs/extension-mechanisms.md F2） |
 | 3 | 管道 `… | tail` 吞退出码（tail 恒 0） | 用规范脚本，失败必须中断 |
 | 4 | `git apply` 容忍 patch 首部 `#` 注释行 → 头部注释由此合法（但 diff 之后不允许散文） | 本轮树级验证 |
 | 5 | `--filter=blob:none` 克隆的 lazy checkout 中途断流（HTTP/2 reset） | 用完整浅克隆 + `proxy_on` |
