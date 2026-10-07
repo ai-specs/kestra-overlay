@@ -27,7 +27,11 @@ micronaut-security-csrf，差异表 §1-S6）。⇒ EE 的 IAM **不是「OSS �
 
 ## 2. EE 参照面（能力语义的对照基线；本需求**不照抄**其产品语义）
 
-`[docs]` kestra.io/docs/enterprise/auth/rbac（2026-10-07 抓取）：
+`[docs]` kestra.io/docs/enterprise/auth/rbac（2026-10-07 抓取；`[docs-rbac]` = 该页原文，
+`[docs-sa]` = …/auth/service-accounts 子页）。**2026-10-07 官网一致性审核**：资源清单、
+动作与无通配符、绑定级联/不可变/「角色须绑定」、五内置角色——四组论断与该页逐项一致；
+两处已按审核修正（服务账号细节改标 `[docs-sa]` 归属；管理 REST 与 deny→403 官方页
+未写明，已改注为本需求自定行为）。
 
 - **权限原子 = 资源 × 动作**。核心 namespace 级资源：FLOW、EXECUTION、TRIGGER、
   NAMESPACE、KVSTORE、SECRET、CREDENTIAL；tenant 级资源：DASHBOARD、BLUEPRINT、APP、
@@ -37,12 +41,21 @@ micronaut-security-csrf，差异表 §1-S6）。⇒ EE 的 IAM **不是「OSS �
   ACCESS_OUTPUTS、USER:IMPERSONATE）。**无通配符语法**。
 - **绑定（binding）= 角色 ↔ 主体（用户/服务账号/组），scoped 到 namespace 且向子级
   级联**（绑 `prod` 覆盖 `prod.engineering`）；绑定**不可变**（只能删除重建）。
-  「角色本身不授予任何东西——必须经绑定附着到主体」。
-- **内置角色 5 个**（可自定义）：Admin（全资源全动作）/ Developer / Editor / Launcher
-  （执行系动作，无 flow 写）/ Viewer（只读+EXPORT）。
-- **服务账号**：无密码、无 UI、仅 API token 认证的机器身份，与用户同等接收角色绑定。
-- 管理面：IAM UI/REST/SCIM/Terraform/流程内 IAM 任务；执行面：每端点判定，deny→403；
-  impersonation（USER:IMPERSONATE）用于验证生效权限。
+  「角色本身不授予任何东西——必须经绑定附着到主体」。组绑定把权限授予全部成员，
+  删组只剥权限、成员保留。
+- **内置角色 5 个**（Instance Owner 可另建自定义角色）：Admin（全资源全动作）/
+  Developer / Editor / Launcher（执行系动作，无 flow 写）/ Viewer（只读+EXPORT）。
+  Instance Owner 是**独立用户类型**（跨 tenant 管理，无 flow/execution 访问）——与
+  Admin（tenant 级角色）不是一回事。
+- **服务账号**：与用户同等接收角色绑定（「treated as users when binding role
+  assignments」`[docs-rbac]`）；「无密码、无 UI、仅 API token 认证」的细节出自
+  service-accounts 子页 `[docs-sa]`，非 RBAC 页。
+- **SSO 默认角色**：可为经 SSO 新加入的用户配置自动指派的默认角色 `[docs]`
+  （对本需求 ③ 层的角色映射设计是直接参照：OIDC claim → 角色可配置化）。
+- 管理面：IAM UI / SCIM / Terraform / 流程内 IAM 任务 `[docs-rbac]`（官方 RBAC 页另链
+  「Permissions reference」给出资源↔端点映射；**未写明管理 REST 与 deny 的 HTTP 语义**，
+  本需求 §3 的 403 problem+json 是自定目标行为，不归因于官方宣称）；
+  impersonation（USER:IMPERSONATE，Instance Owner 可对用户执行）用于验证生效权限。
 
 ## 3. 目标能力（需求本体）
 
