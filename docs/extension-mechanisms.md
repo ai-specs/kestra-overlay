@@ -48,6 +48,20 @@ request"）。端点受 `pluginAutoInstallService.isEnabled()` 门控，而 **au
 （docker-compose.yml:240）⇒ 运行期装插件（API）即时注册、**无需重启**。
 〔2026-10-07 方向修正：本文初版把该门控读反为「EE 特性、OSS 强制关」；条件谓词
 `!= OSS → 关` 必须连 warn 文案与返回值一起读（AGENTS.md §8-9 教训）〕
+   门控如此安排的**设计动因**（源码注释自述一半 + 商业模型推另一半）：
+   ① **爆炸半径**：运行期安装只注册**本机** registry（OSS core 无跨节点传播机制，
+   PluginInstallJob/Service 无 queue/broadcast——已 grep 证实），因此只在本机+本地盘
+   （"local persona"）形态下一致性安全；storage.type=local 被用作该形态的信号
+   （构造器注释原文："the storage type is the signal that distinguishes `server local`
+   from a generic standalone deployment on S3/GCS, which must stay inert"）。
+   ② **EE 有受管替代品**：Plugin Versioning（声明式固定版本、集群一致、可审计）。
+   同时放行 ad-hoc 运行期安装 = 两个插件状态事实源 → 漂移；故 EE 强制关并在 warn
+   里直接指路。集群传播是 EE 层能力（端点描述自述）。
+   ③ **商业分层**（对抗性上游）：OSS 给单机开发者体验类能力（贴 flow 自动装缺失
+   插件 installMissingPlugins(flowYaml):216、渲染器按需装）是拉新漏斗、单机零成本；
+   EE 卖治理/可复现——所以此处的阉割方向与多数门控相反：不是给 EE 加功能，
+   而是把 OSS 便利从 EE 拿掉。dsh 栈恰在 local persona 安全区内；一旦多节点/
+   共享存储，同样的一致性风险回归（届时回归烤 jar 或自建受管机制）。
 
 ## 2. 各通道证据细则
 
