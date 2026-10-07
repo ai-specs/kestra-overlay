@@ -117,6 +117,14 @@ slim / no-plugins 三变体**同一 Dockerfile、同一 base 镜像**（实际�
 `v2.0.5-no-plugins` 上（当前调研所用实例形态），运行期 API 装插件默认不可用；需开启时
 在部署配置显式 `kestra.plugins.auto-install.enabled: true`（④ 通道，重启生效）。
 
+**本仓镜像的变体谱系（2026-10-07 命名裁定）**：overlay 镜像 = 上游 Dockerfile 原样 +
+patch 后 webserver，**零插件/零扩展 jar** 烤入（内容同 slim/no-plugins 家族——`extensions.tsv`
+无活跃 plugin/classpath 行、`build-extensions.sh` 留空 `$WORK/plugins`），主 tag 采用
+`${RELEASE}-no-plugins`。与上游同名变体的**唯一行为差异**：本仓不烤任何 Kestra 配置 ⇒
+auto-install 保持源码缺省（OSS+local 开；上游 no-plugins 是烤关）——需加固的部署在
+`KESTRA_CONFIGURATION` 显式关闭（④ 通道，重启生效）。历史无后缀 tag（如 `v2.0.5`）随
+本裁定停止更新，registry 中旧副本为遗留。
+
 ## 2. 各通道证据细则
 
 | # | 关键证据（BASE file:line） | 限制/边界 |

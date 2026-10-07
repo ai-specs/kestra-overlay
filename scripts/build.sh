@@ -62,9 +62,16 @@ bash scripts/build-extensions.sh "$WORK"
 
 echo "== build image (upstream Dockerfile.base/Dockerfile unmodified) =="
 SHA="$(git rev-parse --short HEAD)"
-# Image version follows the upstream RELEASE (patches/BASE line 1); the overlay
-# commit tag keeps traceability to this repo, latest is the rolling convenience.
+# Image lineage: zero plugin/extension jars are baked (extensions.tsv has no
+# active plugin/classpath rows; build-extensions.sh leaves $WORK/plugins empty)
+# — the same content family as upstream's slim/no-plugins variants. Main tag
+# suffix "-no-plugins" (maintainer naming ruling 2026-10-07). One deliberate
+# difference from the upstream no-plugins variant: we bake NO Kestra config,
+# so auto-install keeps its source default (OSS + storage.type=local => on),
+# whereas upstream's no-plugins bakes it off. Deployments wanting the hardened
+# behavior set it explicitly via KESTRA_CONFIGURATION (channel ④, restart).
+# The overlay commit tag keeps traceability; latest is the rolling convenience.
 docker buildx build -f "$WORK/Dockerfile" \
-  -t "ghcr.io/ai-specs/kestra-overlay:${RELEASE}" \
+  -t "ghcr.io/ai-specs/kestra-overlay:${RELEASE}-no-plugins" \
   -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" \
   -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"

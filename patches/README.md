@@ -1,7 +1,8 @@
 # patches
 
 `BASE` 记录 overlay 所基于的**上游 release**（两行：第一行 release tag，第二行该 release
-的 commit sha）。CI checkout 该 commit 构建，保证可复现；镜像主 tag = release 版本。
+的 commit sha）。CI checkout 该 commit 构建，保证可复现；镜像主 tag = release 版本+
+`-no-plugins`（变体语义注记见 `docs/extension-mechanisms.md` F4）。
 升级流程（用户指令「升级到 vX.Y.Z」→ 逐 patch 三分支判定 → 复扫 oss-ee-gap → 更新
 BASE → CI 全绿）见 `AGENTS.md` §6。
 

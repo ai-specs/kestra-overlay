@@ -49,7 +49,7 @@ apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
 
 | 路径 | 是什么 | 约束 |
 |---|---|---|
-| `patches/BASE` | 两行：release tag + 该 tag 的 40 位 commit sha | 镜像主 tag = release 版本；升级必更新 |
+| `patches/BASE` | 两行：release tag + 该 tag 的 40 位 commit sha | 镜像主 tag = release 版本+`-no-plugins`（变体语义注记见机制文档 F4）；升级必更新 |
 | `patches/webserver/NNNN-slug.patch` | 需求对齐薄 patch（头部注释 + 统一 diff） | 命名 `^\d{4}-[a-z0-9-]+$`；编号即应用顺序（字典序） |
 | `patches/manifest.tsv` | patch 总账（含 reserved 待激活点） | 与 patch 文件一一对应，`check-patches.sh` 强校验 |
 | `scripts/build.sh` | 克隆上游→apply→编译 webserver→镜像→push | `--apply-only` = 验证门 |

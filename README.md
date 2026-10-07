@@ -47,7 +47,9 @@ reserved 两条：**R-CLASSPATH-MERGE**（通道② jar 承载，认证链与 RB
 ## CI（overlay-build）
 
 `patch-verify`（check-patches.sh 结构门 → 上游克隆 → apply 门）→ `build-push`
-（编译 webserver + 镜像 + ghcr，主 tag = BASE release 版本）。CI 全绿是唯一通过标志。
+（编译 webserver + 镜像 + ghcr，主 tag = BASE release 版本 + **`-no-plugins` 后缀**）。
+镜像谱系：零插件/零扩展 jar 烤入；auto-install 保持源码缺省（与上游同名变体的烤关不同，
+差异注记见 `docs/extension-mechanisms.md` F4）。CI 全绿是唯一通过标志。
 
 ## 维护与升级
 
