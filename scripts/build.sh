@@ -30,10 +30,12 @@ echo "== apply requirement-aligned patches (check first, lexical order) =="
 # record; manifest.tsv is the ledger — both enforced by check-patches.sh).
 # Apply order = lexical filename order; per-patch provenance/status/removal
 # conditions live in patches/manifest.tsv, see AGENTS.md §3.
+# Sequentially check-then-apply per patch: requirement-aligned patches may carry
+# coordinates relative to earlier patches' applied state (e.g. 0021 depends on
+# 0020's ProblemResponseFilter changes) — a check against the pristine tree
+# would wrongly fail them (AGENTS.md §3 requirement-aligned granularity).
 for p in patches/*/*.patch; do
   git -C "$WORK" apply --check "$PWD/$p" || { echo "FAIL: $p"; exit 1; }
-done
-for p in patches/*/*.patch; do
   git -C "$WORK" apply "$PWD/$p"
 done
 
