@@ -20,11 +20,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      # NOTE(v6 bump): upstream compiles with `-Xlint:all` (build.gradle:568 at
-      # BASE), so the build-push log carries ~10 javac lint annotations
-      # ([serial]/[rawtypes]/[this-escape]/...). They are upstream source
-      # noise, not actionable here (fixing them = touching the upstream build
-      # face, banned by AGENTS.md §2) — expected, do not chase.
+      # NOTE: upstream compiles with `-Xlint:all` (build.gradle:568 at BASE);
+      # scripts/overlay-init.gradle drops the -Xlint flags at build-harness
+      # level (bytecode-neutral, no upstream file touched) so the log stays
+      # clean of known upstream lint debt. If lint annotations reappear,
+      # check that init script is still wired in scripts/build.sh.
       - name: Cache gradle (upstream BASE keyed)
         uses: actions/cache@v6
         with:

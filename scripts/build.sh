@@ -13,6 +13,7 @@
 # (never vendored as binaries in this repo).
 set -euo pipefail
 
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE="$(sed -n 1p patches/BASE)"
 BASE="$(sed -n 2p patches/BASE)"
 UPSTREAM_REPO="${KESTRA_UPSTREAM_REPO:-https://github.com/kestra-io/kestra.git}"
@@ -47,10 +48,13 @@ if [ "${1:-}" = "--apply-only" ]; then
 fi
 
 echo "== compile webserver executable jar (thin-patched upstream) =="
+# -I overlay-init.gradle: build-harness level lint quieting (upstream builds
+# with -Xlint:all; flags are bytecode-neutral so dropping them only cleans
+# the CI log — no upstream file touched). See scripts/overlay-init.gradle.
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
   export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || true)"
 fi
-(cd "$WORK" && ./gradlew executableJar --console=plain -x test -x check)
+(cd "$WORK" && ./gradlew executableJar --console=plain -I "$REPO/scripts/overlay-init.gradle" -x test -x check)
 EXE="$(ls -t "$WORK"/build/executable/* | head -1)"
 mkdir -p "$WORK/docker/app"
 cp "$EXE" "$WORK/docker/app/kestra"
