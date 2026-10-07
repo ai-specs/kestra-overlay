@@ -1,0 +1,461 @@
+diff --git a/webserver/src/main/java/io/kestra/webserver/configuration/CookiesConfiguration.java b/webserver/src/main/java/io/kestra/webserver/configuration/CookiesConfiguration.java
+new file mode 100644
+index 0000000000..971753bb77
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/configuration/CookiesConfiguration.java
+@@ -0,0 +1,21 @@
++package io.kestra.webserver.configuration;
++
++import io.kestra.webserver.utils.RequestUtils;
++import io.micronaut.context.annotation.ConfigurationProperties;
++import io.micronaut.core.annotation.Nullable;
++import io.micronaut.http.HttpRequest;
++
++/**
++ * Configuration for the {@code Secure} attribute of the cookies Kestra issues (auth, CSRF, and, in the
++ * Enterprise Edition, the JWT/OIDC session cookies).
++ *
++ * @param secure forces the {@code Secure} attribute on or off; left unset, it is derived per request from
++ *        {@link RequestUtils#isSecure(HttpRequest)}, which also trusts a TLS-terminating reverse proxy's
++ *        {@code Forwarded}/{@code X-Forwarded-Proto} header.
++ */
++@ConfigurationProperties("kestra.webserver.cookies")
++public record CookiesConfiguration(@Nullable Boolean secure) {
++    public boolean isSecure(HttpRequest<?> request) {
++        return secure != null ? secure : RequestUtils.isSecure(request);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java
+new file mode 100644
+index 0000000000..85961f436f
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NotFoundResponseException.java
+@@ -0,0 +1,15 @@
++package io.kestra.webserver.controllers.api;
++
++/**
++ * dsh marker exception for HTTP-standard empty-body 404s (anti-probing: no problem document,
++ * no detail). Thrown by the apps controllers on any not-found/invalid path; rendered by
++ * {@code ErrorController#error(HttpRequest, NotFoundResponseException)} through the standard
++ * Micronaut error pipeline.
++ *
++ * <p>It MUST be thrown (never converted to a raw {@code HttpResponse.status(NOT_FOUND)}
++ * return inside the controller): an early raw 404 returned while a streaming request body is
++ * still unconsumed triggers the Micronaut drain loop OOM (Kestra#17620; fixed upstream by
++ * Kestra#17633 by routing error responses through the framework error processor).
++ */
++public class NotFoundResponseException extends RuntimeException {
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java
+new file mode 100644
+index 0000000000..600853ee7d
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiAppController.java
+@@ -0,0 +1,159 @@
++package io.kestra.webserver.controllers.api;
++
++import java.util.Objects;
++import java.util.Optional;
++
++import io.kestra.core.tenant.TenantService;
++import io.kestra.webserver.services.AppRouteRegistry;
++import io.kestra.webserver.services.UiIndexService;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.core.annotation.Nullable;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.http.annotation.PathVariable;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++import io.swagger.v3.oas.annotations.Hidden;
++import jakarta.inject.Inject;
++
++/**
++ * Serves the standalone dsh Apps shell at {@code /{namespace}/** } — outside the Kestra
++ * {@code /ui/} SPA. The URL carries the flow's namespace as its first segment:
++ * {@code /{namespace}/{app}/{page}} (e.g. {@code /dsh.apps/hello/index}). Every such path
++ * returns the same rewritten {@code apps.html}; the entry script reads namespace/app/page
++ * ids from the URL and renders the amis page against {@code /api/v1/{namespace}}.
++ * The {@code apps} segment is a namespace like any other (a flow declared in a namespace
++ * literally named {@code apps} resolves at {@code /apps/{app}/{page}}); there is no legacy
++ * mapping to the convention root. The editor shell
++ * {@code apps-editor.html} is served only for {@code /apps/pages-edit} — the query carries
++ * the editing target ({@code ?namespace=..&appName=..&pagefileName=*.json}); every other path renders
++ * {@code apps.html} (design docs/dsh-apps-amis-editor.md §6.2).
++ *
++ * <p>Page routing is backend-verified: a path that does not resolve to a registered page
++ * route ({@code PageTrigger}) returns an HTTP-standard 404 with an empty body, so probing
++ * unknown URLs never yields a 200 shell whose SPA then shows an error — the shell is served
++ * only for pages that actually exist.
++ *
++ * <p>The catch-all deliberately does NOT claim prefixes already occupied by upstream
++ * ({@code api}, {@code ui}, {@code app} — route regex below): unmatched paths under those
++ * prefixes fall through to upstream's own route-miss handling (problem+json via
++ * ErrorController), exactly as they would without this controller — never intercepted or
++ * probed here. {@code apps} stays claimable: it is a namespace like any other and carries
++ * the {@code /apps/pages-edit} editor entry.
++ *
++ * <p>Authentication is the deployment-wide SecurityFilter (docker-compose {@code intercept-url-map}
++ * {@code /** → isAuthenticated()}): every path served here matches no anonymous pattern, so an
++ * unauthenticated browser request is 307-redirected to {@code /oidc/login} by
++ * {@code OidcAuthorizationExceptionHandler} (Accept: text/html) and an API client gets 401 —
++ * the same OIDC gate as every page, asset and API. Authenticated requests carry the JWT cookie
++ * and pass through to this controller unchanged.
++ *
++ * <p>Static assets referenced by the shell resolve to {@code /ui/assets/...} (base-path rewrite in
++ * UiIndexService) and are served by {@link UiController}; nothing else is mounted here.
++ */
++// 命名空间通配不认领上游已占用前缀（api/ui/app）：serve() 首行短路，经上游异常管线
++// 产出 problem+json 404——与上游 route-miss 行为一致，不拦截、不防探测（维护者要求，
++// 2026-09-12）。注意不能用路由级负向前瞻 regex（{namespace:(?!...)...}）——Micronaut
++// UriTemplateMatcher 对其 Pattern.compile 直接抛异常、服务起不来（实测）。
++// apps 仍是可命中命名空间——它承载 /apps/pages-edit 编辑器入口。
++@Controller("/{namespace}")
++@Requires(property = "kestra.webserver.ui.enabled", notEquals = "false", defaultValue = "true")
++@Hidden
++public class UiAppController {
++
++    /** 页面编辑入口：/apps/pages-edit?namespace=..&appName=..&pagefileName=*.json —— 查询参数携带编辑目标。 */
++    static final String PAGES_EDIT_ENTRY = "pages-edit";
++
++    private final UiIndexService uiIndexService;
++
++    @Inject
++    private AppRouteRegistry routeRegistry;
++
++    @Inject
++    private TenantService tenantService;
++
++    public UiAppController(UiIndexService uiIndexService) {
++        this.uiIndexService = Objects.requireNonNull(uiIndexService);
++    }
++
++    /** 上游已占用的顶级前缀：其下未命中路径不经本控制器防探测，交回上游处理。 */
++    private static final java.util.Set<String> UPSTREAM_RESERVED_NAMESPACES = java.util.Set.of("api", "ui", "app");
++
++    @Get("/{path:.*}")
++    @ExecuteOn(TaskExecutors.IO)
++    public HttpResponse<?> serve(HttpRequest<?> request,
++                                 @PathVariable String namespace,
++                                 @PathVariable @Nullable String path) {
++        // 上游保留前缀短路：本通配在 Micronaut 路由解析中先于 route-miss 命中它们的
++        // 未命中路径——按维护者要求不认领，经上游异常管线返回 problem+json 404
++        // （与无本控制器时的 route-miss 行为等价）。
++        if (UPSTREAM_RESERVED_NAMESPACES.contains(namespace)) {
++            throw new io.micronaut.http.exceptions.HttpStatusException(HttpStatus.NOT_FOUND, "Not Found");
++        }
++        // 只有 /apps/pages-edit 返回编辑器（保留入口）；其余渲染页须能解析到注册的页面路由，
++        // 否则抛空 body 404（防探测）——必须走异常管线（Kestra#17633），controller 内
++        // raw-404 提前返回会在流式 body 未消费时触发 drain OOM（Kestra#17620）。
++        if ("apps".equals(namespace) && PAGES_EDIT_ENTRY.equals(path)) {
++            // 编辑目标 query 契约（?namespace&appName&pagefileName）：缺失/形态非法一律 404 空 body
++            // （防探测：不泄露正确格式，也不下发编辑器 shell——探测者拿不到任何可用信息）。
++            String ns = request.getParameters().get("namespace");
++            String app = request.getParameters().get("appName");
++            String page = request.getParameters().get("pagefileName");
++            boolean wellFormed = ns != null && !ns.isBlank()
++                && app != null && app.matches("[A-Za-z0-9_-]+")
++                && page != null && page.matches("[A-Za-z0-9_./-]+\\.json");
++            if (!wellFormed) {
++                throw new NotFoundResponseException();
++            }
++            return renderAppEditor(request);
++        }
++        // index.json 如 index.html：目录式（尾斜杠结尾）是规范地址，直接渲染 index 页；
++        // 其余形态——显式 /index 与无尾斜杠——一律 308 永久跳转到对应目录式。
++        // 必须用原始 URI 判定（@PathVariable 的 path 变量会被 Micronaut 剥掉尾斜杠，
++        // 依它判定会让规范形无限自跳）。
++        String rawPath = request.getUri().getPath();
++        if (!rawPath.endsWith("/") && !rawPath.equals("/apps/pages-edit")) {
++            String target = rawPath.endsWith("/index")
++                ? rawPath.substring(0, rawPath.length() - "index".length()) // /index → /（保留其前的 /）
++                : rawPath + "/"; // 无尾斜杠目录根
++            return HttpResponse.status(HttpStatus.PERMANENT_REDIRECT)
++                .header("Location", target);
++        }
++        if (!pageRouteExists(namespace, path)) {
++            throw new NotFoundResponseException();
++        }
++        return renderApps(request);
++    }
++
++    /**
++     * 页面路由存在性：path 形如 {appName}/{pageId} 或 {appName}（pageId 缺省 index）。
++     * 存在 = AppRouteRegistry 中有该 (namespace, appName, pageId) 的 PageTrigger 路由。
++     */
++    private boolean pageRouteExists(String namespace, @Nullable String path) {
++        if (path == null || path.isBlank()) {
++            return false;
++        }
++        String[] parts = path.split("/", 2);
++        if (parts.length > 1 && parts[1].contains("/")) {
++            return false;
++        }
++        String appName = parts[0];
++        String pageId = parts.length > 1 && !parts[1].isBlank() ? parts[1] : "index";
++        return !routeRegistry.pageRoutes(tenantService.resolveTenant(), namespace, appName, pageId).isEmpty();
++    }
++
++    private HttpResponse<?> renderApps(HttpRequest<?> request) {
++        Optional<? extends HttpResponse<?>> index = uiIndexService.renderApps(request);
++        return index.isPresent() ? index.get() : HttpResponse.notFound();
++    }
++
++    private HttpResponse<?> renderAppEditor(HttpRequest<?> request) {
++        Optional<? extends HttpResponse<?>> index = uiIndexService.renderAppEditor(request);
++        return index.isPresent() ? index.get() : HttpResponse.notFound();
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/AppRouteRegistry.java b/webserver/src/main/java/io/kestra/webserver/services/AppRouteRegistry.java
+new file mode 100644
+index 0000000000..a52c699ff7
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/services/AppRouteRegistry.java
+@@ -0,0 +1,242 @@
++package io.kestra.webserver.services;
++
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.models.flows.FlowInterface;
++import io.kestra.core.models.triggers.AbstractTrigger;
++import io.kestra.core.queues.BroadcastQueueInterface;
++import io.kestra.core.queues.QueueSubscriber;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.runners.FlowWithDefaultCache;
++import io.kestra.core.serializers.JacksonMapper;
++import io.kestra.core.services.FlowParsingService;
++import jakarta.annotation.PostConstruct;
++import jakarta.annotation.PreDestroy;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.time.Duration;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.CopyOnWriteArrayList;
++
++/**
++ * In-memory route index for dsh Apps: maps {@code (tenant, kind, appName, pageId|apiId)}
++ * to the declaring flow + trigger, so {@code /apps/{appName}/{...}} resolves without
++ * scanning the flow repository per request (design docs/dsh-apps-amis.md §5.7).
++ *
++ * <p>Built at startup from {@link FlowRepositoryInterface#findAllForAllTenants()} and
++ * kept in sync by subscribing to {@link BroadcastQueueInterface}{@code <FlowInterface>}
++ * (same mechanism as {@link io.kestra.core.runners.DefaultFlowMetaStore}). A key with
++ * more than one matching flow is ambiguous — callers must surface 409 with the conflict
++ * list (route lookup never throws).
++ *
++ * <p>The trigger classes live in the standalone plugin jar ({@code plugin-dsh-apps}),
++ * so the webserver only ever touches them through {@link AbstractTrigger} references
++ * (safe to hold) and Jackson field reads by class-name match — no compile-time plugin
++ * dependency, fields are resolved once at index time, not per request.
++ */
++@Singleton
++public class AppRouteRegistry {
++
++    private static final Logger LOG = LoggerFactory.getLogger(AppRouteRegistry.class);
++
++    public static final String PAGE_TRIGGER_CLASS = "io.kestra.plugin.dsh.apps.PageTrigger";
++    public static final String API_TRIGGER_CLASS = "io.kestra.plugin.dsh.apps.ApiTrigger";
++
++    public record PageRoute(Flow flow, AbstractTrigger trigger, String appName, String pageId, String amis) {
++    }
++
++    public record ApiRoute(Flow flow, AbstractTrigger trigger, String appName, String apiId,
++                           String responseMode, Duration timeout, String responseBody) {
++    }
++
++    private static final String KIND_PAGE = "page";
++    private static final String KIND_API = "api";
++
++    // CopyOnWriteArrayList: the queue thread re-indexes (add/removeIf) while HTTP threads
++    // iterate the same lists — a plain ArrayList risks ConcurrentModificationException.
++    private final Map<String, List<PageRoute>> pageRoutes = new ConcurrentHashMap<>();
++    private final Map<String, List<ApiRoute>> apiRoutes = new ConcurrentHashMap<>();
++
++    @Inject
++    private FlowRepositoryInterface flowRepository;
++
++    @Inject
++    private BroadcastQueueInterface<FlowInterface> flowQueue;
++
++    @Inject
++    private FlowParsingService flowParsingService;
++
++    @Inject
++    private FlowWithDefaultCache withDefaultCache;
++
++    private QueueSubscriber<FlowInterface> subscriber;
++
++    @PostConstruct
++    void init() {
++        flowRepository.findAllForAllTenants().forEach(this::index);
++        this.subscriber = this.flowQueue.subscriber().subscribe(either -> {
++            if (either.isRight()) {
++                LOG.error("Unable to deserialize a flow event for AppRouteRegistry: {}", either.getRight().getMessage());
++            } else {
++                FlowInterface flow = either.getLeft();
++                if (flow.isDeleted()) {
++                    remove(flow);
++                } else {
++                    index(flow);
++                }
++                try {
++                    this.withDefaultCache.invalidate(flow.uid());
++                } catch (Exception e) {
++                    LOG.debug("Unable to invalidate flow default cache for {}", flow.uid(), e);
++                }
++            }
++        });
++        LOG.info("AppRouteRegistry initialized: {} page routes, {} api routes",
++            pageRoutes.size(), apiRoutes.size());
++    }
++
++    @PreDestroy
++    void close() throws Exception {
++        if (this.subscriber != null) {
++            this.subscriber.close();
++        }
++    }
++
++    private Flow resolveFlow(FlowInterface flowInterface) {
++        if (flowInterface instanceof Flow flow) {
++            return flow;
++        }
++        try {
++            return flowParsingService.parse(flowInterface, false);
++        } catch (Exception e) {
++            LOG.warn("Unable to parse flow {} for AppRouteRegistry: {}", flowInterface.uid(), e.getMessage());
++            return null;
++        }
++    }
++
++    private void index(FlowInterface flowInterface) {
++        Flow flow = resolveFlow(flowInterface);
++        if (flow == null) {
++            return;
++        }
++        remove(flowInterface);
++        if (flow.getTriggers() == null) {
++            return;
++        }
++        for (AbstractTrigger trigger : flow.getTriggers()) {
++            String type = trigger.getType();
++            if (PAGE_TRIGGER_CLASS.equals(type)) {
++                Map<String, Object> fields = JacksonMapper.ofJson().convertValue(trigger, JacksonMapper.MAP_TYPE_REFERENCE);
++                String appName = str(fields.get("appName"));
++                String pageId = str(fields.get("pageId"));
++                String amis = str(fields.get("amis"));
++                if (appName == null || pageId == null || amis == null) {
++                    LOG.warn("PageTrigger {} in flow {}/{} misses appName/pageId/amis", trigger.getId(), flow.getNamespace(), flow.getId());
++                    continue;
++                }
++                pageRoutes.computeIfAbsent(key(KIND_PAGE, flow.getTenantId(), flow.getNamespace(), appName, pageId), k -> new CopyOnWriteArrayList<>())
++                    .add(new PageRoute(flow, trigger, appName, pageId, amis));
++            } else if (API_TRIGGER_CLASS.equals(type)) {
++                Map<String, Object> fields = JacksonMapper.ofJson().convertValue(trigger, JacksonMapper.MAP_TYPE_REFERENCE);
++                String appName = str(fields.get("appName"));
++                String apiId = str(fields.get("apiId"));
++                String responseMode = str(fields.get("responseMode"));
++                if (appName == null || apiId == null) {
++                    LOG.warn("ApiTrigger {} in flow {}/{} misses appName/apiId", trigger.getId(), flow.getNamespace(), flow.getId());
++                    continue;
++                }
++                Duration timeout = Duration.ofSeconds(30);
++                Object rawTimeout = fields.get("timeout");
++                if (rawTimeout instanceof String s) {
++                    try {
++                        timeout = Duration.parse(s);
++                    } catch (Exception ignored) {
++                    }
++                }
++                // responseMode/responseBody are required on ApiTrigger (schema validation
++                // rejects undeclared flows); the fallbacks here are defensive only, for
++                // flows indexed before the fields became mandatory.
++                String responseBody = str(fields.get("responseBody"));
++                if (responseBody == null || responseBody.isBlank()) {
++                    responseBody = "KESTRA";
++                }
++                apiRoutes.computeIfAbsent(key(KIND_API, flow.getTenantId(), flow.getNamespace(), appName, apiId), k -> new CopyOnWriteArrayList<>())
++                    .add(new ApiRoute(flow, trigger, appName, apiId, responseMode, timeout, responseBody));
++            }
++        }
++    }
++
++    private void remove(FlowInterface flowInterface) {
++        pageRoutes.values().forEach(list -> list.removeIf(r -> sameFlow(r.flow(), flowInterface)));
++        pageRoutes.entrySet().removeIf(e -> e.getValue().isEmpty());
++        apiRoutes.values().forEach(list -> list.removeIf(r -> sameFlow(r.flow(), flowInterface)));
++        apiRoutes.entrySet().removeIf(e -> e.getValue().isEmpty());
++    }
++
++    private static String str(Object o) {
++        return o == null ? null : o.toString();
++    }
++
++    private static boolean sameFlow(Flow flow, FlowInterface other) {
++        return Objects.equals(flow.getTenantId(), other.getTenantId())
++            && Objects.equals(flow.getNamespace(), other.getNamespace())
++            && Objects.equals(flow.getId(), other.getId());
++    }
++
++    private static String key(String kind, String tenant, String namespace, String appName, String id) {
++        // OSS stores flows without a tenant (null) while TenantService.resolveTenant() always
++        // returns "main" — normalize both sides to the same key or null-tenant flows become
++        // invisible to route lookups. The namespace is part of the key: two namespaces may
++        // declare the same appName/pageId without colliding.
++        return (tenant == null ? "main" : tenant) + "|" + kind + "|" + namespace + "|" + appName + "|" + id;
++    }
++
++    public List<PageRoute> pageRoutes(String tenant, String namespace, String appName, String pageId) {
++        return pageRoutes.getOrDefault(key(KIND_PAGE, tenant, namespace, appName, pageId), List.of());
++    }
++
++    public List<ApiRoute> apiRoutes(String tenant, String namespace, String appName, String apiId) {
++        return apiRoutes.getOrDefault(key(KIND_API, tenant, namespace, appName, apiId), List.of());
++    }
++
++    public record AppSummary(String appName, String namespace, String flowId, List<String> pages,
++                             List<String> apis) {
++    }
++
++    /**
++     * Aggregate the route index into per-app summaries (for the "应用程序" list page).
++     * Tenant comparison uses the same normalized key both sides (null tenant = "main").
++     * flowId is the declaring flow (an app flow declares Page/Api triggers in its own
++     * yaml; the list page links back to that flow's editor).
++     */
++    public List<AppSummary> apps(String tenant) {
++        // Key by namespace|appName: the same appName declared in different namespaces is
++        // two distinct apps (the URL carries the namespace), so they must not merge.
++        Map<String, AppSummary> byApp = new java.util.TreeMap<>();
++        pageRoutes.forEach((key, list) -> {
++            if (list.isEmpty()) return;
++            PageRoute r = list.get(0);
++            if (Objects.equals(tenant, r.flow().getTenantId() == null ? "main" : r.flow().getTenantId())) {
++                byApp.computeIfAbsent(r.flow().getNamespace() + "|" + r.appName(),
++                        k -> new AppSummary(r.appName(), r.flow().getNamespace(), r.flow().getId(), new ArrayList<>(), new ArrayList<>()))
++                    .pages().add(r.pageId());
++            }
++        });
++        apiRoutes.forEach((key, list) -> {
++            if (list.isEmpty()) return;
++            ApiRoute r = list.get(0);
++            if (Objects.equals(tenant, r.flow().getTenantId() == null ? "main" : r.flow().getTenantId())) {
++                byApp.computeIfAbsent(r.flow().getNamespace() + "|" + r.appName(),
++                        k -> new AppSummary(r.appName(), r.flow().getNamespace(), r.flow().getId(), new ArrayList<>(), new ArrayList<>()))
++                    .apis().add(r.apiId());
++            }
++        });
++        return new ArrayList<>(byApp.values());
++    }
++}

@@ -276,21 +276,26 @@ index 03dd1706f6..9b03ad7c03 100644
  
      @ExecuteOn(TaskExecutors.IO)
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-index 160c2ab560..3179870131 100644
+index 160c2ab560..dce91244d6 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-@@ -23,6 +23,7 @@ import io.kestra.core.services.InstanceService;
+@@ -23,9 +23,9 @@ import io.kestra.core.services.InstanceService;
  import io.kestra.core.services.VersionService;
  import io.kestra.core.utils.EditionProvider;
  import io.kestra.core.utils.VersionProvider;
 +import io.kestra.webserver.configuration.CookiesConfiguration;
  import io.kestra.webserver.services.BasicAuthCredentials;
  import io.kestra.webserver.services.BasicAuthService;
- import io.kestra.webserver.services.ai.AiServiceManager;
-@@ -72,12 +73,25 @@ public class MiscController {
+-import io.kestra.webserver.services.ai.AiServiceManager;
+ 
+ import io.micronaut.context.ApplicationContext;
+ import io.micronaut.core.annotation.Nullable;
+@@ -72,12 +72,22 @@ public class MiscController {
      @Inject
      Optional<BasicAuthService> basicAuthService = Optional.empty();
  
+-    @Inject
+-    Optional<AiServiceManager> aiServiceManager = Optional.empty();
 +    /**
 +     * Whether an authentication method is configured for the instance. Under the dsh OIDC
 +     * deployment {@code micronaut.security.enabled=true} and {@link BasicAuthService} is
@@ -300,9 +305,6 @@ index 160c2ab560..3179870131 100644
 +     */
 +    @io.micronaut.context.annotation.Value("${micronaut.security.enabled:false}")
 +    protected boolean securityEnabled;
-+
-     @Inject
-     Optional<AiServiceManager> aiServiceManager = Optional.empty();
  
      @Inject
      SystemFlowsConfiguration systemFlowsConfiguration;
@@ -313,18 +315,17 @@ index 160c2ab560..3179870131 100644
      @io.micronaut.context.annotation.Value("${kestra.ui.charts.default-duration:PT24H}")
      private String chartDefaultDuration;
  
-@@ -152,8 +166,10 @@ public class MiscController {
+@@ -152,8 +162,8 @@ public class MiscController {
                      .build()
              )
              .isAiEnabled(applicationContext.containsBean(AiController.class))
-+            .isPluginEndpointsEnabled(applicationContext.containsBean(PluginEndpointController.class))
-             .isAiApiKeyConfigured(aiServiceManager.map(AiServiceManager::hasConfiguredProvider).orElse(false))
+-            .isAiApiKeyConfigured(aiServiceManager.map(AiServiceManager::hasConfiguredProvider).orElse(false))
              .isBasicAuthInitialized(isBasicAuthInitialized())
 +            .isBasicAuthManagedByConfig(basicAuthService.map(BasicAuthService::isManagedByConfig).orElse(false))
              .systemNamespace(systemFlowsConfiguration.namespace())
              .hiddenLabelsPrefixes(hiddenLabelsPrefixes)
              .url(kestraUrl)
-@@ -181,11 +197,14 @@ public class MiscController {
+@@ -181,11 +191,14 @@ public class MiscController {
          description = "Public endpoint available to unauthenticated users; exposes only what the login/setup UI needs."
      )
      public LoginConfiguration getLoginConfiguration() {
@@ -341,7 +342,7 @@ index 160c2ab560..3179870131 100644
      }
  
      /**
-@@ -212,7 +231,7 @@ public class MiscController {
+@@ -212,7 +225,7 @@ public class MiscController {
      @ExecuteOn(TaskExecutors.IO)
      @Operation(
          tags = { "Misc" }, summary = "Configure basic authentication for the instance.",
@@ -350,7 +351,7 @@ index 160c2ab560..3179870131 100644
      )
      public MutableHttpResponse<?> createBasicAuth(
          HttpRequest<?> request,
-@@ -220,6 +239,12 @@ public class MiscController {
+@@ -220,6 +233,12 @@ public class MiscController {
          BasicAuthService service = basicAuthService
              .orElseThrow(() -> new IllegalStateException("basicAuthService bean is required in OSS"));
  
@@ -363,7 +364,7 @@ index 160c2ab560..3179870131 100644
          // Being authenticated is not enough to prove the caller still knows the *current*
          // password: isAuthenticated() caches verified tokens, so a password already rotated on
          // another webserver node sharing this settings store can still pass it here. Re-checking
-@@ -242,9 +267,12 @@ public class MiscController {
+@@ -242,9 +261,12 @@ public class MiscController {
      @ExecuteOn(TaskExecutors.IO)
      @Operation(tags = { "Misc" }, summary = "Retrieve the instance configuration.", description = "Global endpoint available to all users.")
      public List<String> getBasicAuthConfigErrors() {
@@ -379,7 +380,7 @@ index 160c2ab560..3179870131 100644
      }
  
      @Post("/login")
-@@ -270,35 +298,39 @@ public class MiscController {
+@@ -270,35 +292,39 @@ public class MiscController {
      @Post("/logout")
      @ExecuteOn(TaskExecutors.IO)
      @Operation(tags = { "Misc" }, summary = "Clear the basic auth session cookie.")
@@ -424,7 +425,11 @@ index 160c2ab560..3179870131 100644
              .sameSite(SameSite.Strict);
      }
  
-@@ -364,9 +396,14 @@ public class MiscController {
+@@ -360,10 +386,11 @@ public class MiscController {
+ 
+         Boolean isAiEnabled;
+ 
+-        Boolean isAiApiKeyConfigured;
  
          Boolean isBasicAuthInitialized;
  
@@ -433,13 +438,7 @@ index 160c2ab560..3179870131 100644
          Long pluginsHash;
  
          Boolean isPluginAutoInstallEnabled;
-+
-+        @JsonInclude
-+        Boolean isPluginEndpointsEnabled;
-     }
- 
-     @Value
-@@ -392,7 +429,15 @@ public class MiscController {
+@@ -392,7 +419,15 @@ public class MiscController {
  
      /**
       * Minimal configuration exposed to unauthenticated callers for the login/setup UI.
@@ -554,7 +553,7 @@ index 453742c280..f47d06355d 100644
      @Schema(description = "Whether this is the default MCP server, auto-provisioned per tenant.", accessMode = Schema.AccessMode.READ_ONLY) boolean isDefault,
  
 diff --git a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
-index 5c7932d861..779a4dd063 100644
+index 5c7932d861..151f2cc11b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
 @@ -5,6 +5,7 @@ import java.util.Collection;
@@ -565,18 +564,15 @@ index 5c7932d861..779a4dd063 100644
  import io.micronaut.context.annotation.Replaces;
  import io.micronaut.context.annotation.Requires;
  import io.micronaut.http.HttpRequest;
-@@ -26,7 +27,10 @@ public class TenantAliasingRooter extends DefaultRouter {
+@@ -26,6 +27,7 @@ public class TenantAliasingRooter extends DefaultRouter {
          Pattern.compile("/api/v1/configs/login")
      );
  
 +
      @Inject
-+    public TenantAliasingRooter(
-+        Collection<RouteBuilder> builders,
      public TenantAliasingRooter(Collection<RouteBuilder> builders) {
          super(builders);
-     }
-@@ -38,17 +42,54 @@ public class TenantAliasingRooter extends DefaultRouter {
+@@ -38,17 +40,54 @@ public class TenantAliasingRooter extends DefaultRouter {
          // a raw-path miss upstream in AuthenticationFilter stays a 404 here too (GHSA-rjhm-qm6w-m7x9).
          String rawPath = request.getPath();
          UriRouteMatch<T, R> closest = super.findClosest(request);
@@ -590,8 +586,8 @@ index 5c7932d861..779a4dd063 100644
 +        // the tenant-rewrite probe below.
 +        if (closest != null) {
 +            Class<?> declaring = closest.getRouteInfo().getDeclaringType();
-+            boolean dshCatchAll = declaring == io.kestra.webserver.controllers.api.UiAppController.class
-+                || declaring == io.kestra.webserver.controllers.api.AppRouterController.class;
++            boolean dshCatchAll = declaring == io.kestra.webserver.controllers.api.UiAppController.class;
++
 +            if (!dshCatchAll) {
 +                return closest;
 +            }
@@ -605,7 +601,7 @@ index 5c7932d861..779a4dd063 100644
 +        if (apiPath.startsWith("/api/v1/") && !excluded) {
 +            // dsh: the tenant-less /api/v1/{a}/{b}[/{c}] form must resolve to the upstream tenant
 +            // routes (rewritten with the tenant segment) — the dsh catch-all controllers
-+            // (UiAppController /{namespace} and AppRouterController /api/v1/{ns}/{app}/{page})
++            // (UiAppController /{namespace} catch-all)
 +            // would otherwise swallow it into an apps-route 404. Probe the rewritten form against
 +            // the upstream routes only (dsh catch-alls excluded — the rewritten URI still starts
 +            // with /api/v1, so they would match it too); on a miss fall back to the raw closest
@@ -629,14 +625,46 @@ index 5c7932d861..779a4dd063 100644
 +        return (UriRouteMatch<T, R>) this.<T, R>find(probe)
 +            .filter(match -> {
 +                Class<?> declaring = match.getRouteInfo().getDeclaringType();
-+                return declaring != io.kestra.webserver.controllers.api.UiAppController.class
-+                    && declaring != io.kestra.webserver.controllers.api.AppRouterController.class;
++                return declaring != io.kestra.webserver.controllers.api.UiAppController.class;
++
 +            })
 +            .findFirst()
 +            .orElse(null);
      }
  
      // Assembled as a raw string rather than via the scheme/userInfo/host/port/path/query/fragment
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/BasicAuthService.java b/webserver/src/main/java/io/kestra/webserver/services/BasicAuthService.java
+index 0fc813c848..369c114487 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/BasicAuthService.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/BasicAuthService.java
+@@ -94,10 +94,7 @@ public class BasicAuthService {
+     @VisibleForTesting
+     @PostConstruct
+     public void init() {
+-        if (
+-            basicAuthConfiguration == null ||
+-                (StringUtils.isBlank(basicAuthConfiguration.getUsername()) && StringUtils.isBlank(basicAuthConfiguration.getPassword()))
+-        ) {
++        if (!isManagedByConfig()) {
+             return;
+         }
+         try {
+@@ -217,6 +214,15 @@ public class BasicAuthService {
+             !StringUtils.isBlank(credentials.getPassword());
+     }
+ 
++    /**
++     * Returns {@code true} when credentials are set in the configuration file, which {@link #init()}
++     * re-applies at every startup, so any change made through the API would be silently reverted.
++     */
++    public boolean isManagedByConfig() {
++        return basicAuthConfiguration != null
++            && (StringUtils.isNotBlank(basicAuthConfiguration.getUsername()) || StringUtils.isNotBlank(basicAuthConfiguration.getPassword()));
++    }
++
+     /**
+      * Returns {@code true} if {@code username}/{@code password} match the configured credentials.
+      * Used by the login endpoint, which never needs to see the {@value BASIC_AUTH_COOKIE_NAME} token itself.
 diff --git a/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java b/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
 index e9913a5448..a315ec8504 100644
 --- a/webserver/src/main/java/io/kestra/webserver/services/UiIndexService.java
@@ -768,3 +796,35 @@ index e9913a5448..a315ec8504 100644
          if (webserverConfiguration.googleAnalytics() != null) {
              line = line.replace("KESTRA_GOOGLE_ANALYTICS = null;", "KESTRA_GOOGLE_ANALYTICS = '" + webserverConfiguration.googleAnalytics() + "';");
          }
+diff --git a/webserver/src/main/java/io/kestra/webserver/utils/RequestUtils.java b/webserver/src/main/java/io/kestra/webserver/utils/RequestUtils.java
+index a09478447f..005cba9cd4 100644
+--- a/webserver/src/main/java/io/kestra/webserver/utils/RequestUtils.java
++++ b/webserver/src/main/java/io/kestra/webserver/utils/RequestUtils.java
+@@ -7,8 +7,10 @@ import java.util.stream.Stream;
+ import io.kestra.core.models.flows.FlowScope;
+ import io.kestra.core.utils.TypeConverter;
+ 
++import io.micronaut.http.HttpRequest;
+ import io.micronaut.http.HttpStatus;
+ import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.http.server.util.ProxyHeaderParser;
+ 
+ public class RequestUtils {
+     private static final String QUERY_STRING_SEPARATOR = ":";
+@@ -67,4 +69,16 @@ public class RequestUtils {
+             .collect(Collectors.toList());
+     }
+ 
++
++    /**
++     * Returns {@code true} when the request is secure, directly or per a
++     * {@code Forwarded}/{@code X-Forwarded-Proto} header (proxy-aware).
++     *
++     * @param request the request
++     * @return {@code true} if the request is secure, directly or per a {@code Forwarded}/{@code X-Forwarded-Proto} header
++     */
++    public static boolean isSecure(HttpRequest<?> request) {
++        return request.isSecure() || "https".equalsIgnoreCase(new ProxyHeaderParser(request).getScheme());
++    }
++
+ }
