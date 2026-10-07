@@ -12,3 +12,4 @@ R-APP-ROUTER	-	reserved	plugin-apps-harness	apps API 面(AppRouterController/App
 R-NFH-ANCHOR	-	reserved	(升级触发)	NotFoundHeadersFilter 上游已有文件,fork 有 UiAppController 排除定制块;BASE 升至含该文件的 release 后评估回锚	-	docs/oss-ee-gap.md §4	下一次 BASE 升级时强制评估
 R-MIG-DSH	-	reserved	harness-kestra-app	dsh_metrics migration(bean+SQL 成对收)	-	docs/oss-ee-gap.md §4	harness-kestra-app 实施时(阶段四)
 R-AI-DASHSCOPE	-	reserved	plugin-apps-harness	AiServiceManager(DashScope/OpenAI 启用)	-	docs/oss-ee-gap.md §4	harness 实施时(阶段二)
+R-UI-EDITION-GATE	-	reserved	(按需)	OSS UI 按 edition 隐藏的能力面(MCP OAUTH 表单等 3 处+dashboard);官方 UI 表单形态需要时再裁	-	docs/oss-ee-gap.md §4	按需(不预设)
