@@ -25,8 +25,8 @@ Kestra 侧**薄 overlay 构建仓**（浅层兼容层核心）：CI 时克隆上
      - `plugin-apps-amis` → kestra 插件 jar → `$WORK/plugins/`（声明式 Amis apps 触发）
      - `kestra-oidc-provider` → **独立 IdP 镜像**（自己的扩展仓 CI 构建推送，不烤进 kestra 镜像）
      - `plugin-relay-dsh` → **独立联动转发镜像**（同上）
-   - jar 源优先级：`EXT_JAR_<NAME>` 环境变量 → `extensions/<name>/`（仓内 checkout）→ `locals/plugins/<name>/`（vendored）
-   - 注入清单 `$WORK/.overlay-extensions.json`；骨架状态：`locals/plugins` 携带试点 bootstrap Dsh* jar（plugin-apps-harness 基座），镜像已含安全面
+   - jar 源优先级：`EXT_JAR_<NAME>` 环境变量 → `extensions/<name>/`（仓内 checkout）→ 否则跳过（NOT INJECTED）
+   - 注入清单 `$WORK/.overlay-extensions.json`；**本仓不 vendored 任何扩展 jar 二进制**——扩展 jar 只来自扩展仓构建产物（env 或 extensions/ 目录），未迁移的扩展自动 NOT INJECTED
 4. **编译 webserver**：`./gradlew executableJar`（薄 patch 后的上游源码，Java 25 toolchain）→ 拷入 `$WORK/docker/app/kestra`（镜像运行时二进制）
 5. **构建镜像**：`docker buildx` 用**上游 Dockerfile.base/Dockerfile 原样**（FROM temurin-jre25 base + COPY docker/ + plugins bind-mount）→ push `ghcr.io/ai-specs/kestra-overlay:{sha|latest}`
 

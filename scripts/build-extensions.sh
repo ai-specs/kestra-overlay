@@ -16,14 +16,12 @@
 # per extension (first hit wins):
 #   1) EXT_JAR_<NAME_UPPER_UNDERSCORED> env var -> path to a jar file or a dir of jars
 #   2) $PWD/extensions/<name>/                    -> repo checkout; jars discovered under it
-#   3) $PWD/locals/plugins/<name>/                -> staged artifacts already vendored here
-#   4) otherwise                                  -> skipped, reported NOT INJECTED
+#   3) otherwise                                   -> skipped, reported NOT INJECTED
 #
 # The injection manifest is written to $WORK/.overlay-extensions.json; the
 # official Dockerfile (bind-mount COPY plugins/ -> /app/plugins) bakes whatever
-# is staged under $WORK/plugins/. Skeleton state: locals/plugins carries the bootstrap Dsh* jar from the
-# pilot repo (plugin-apps-harness), so the image already contains the security
-# surface while other extension repos are still migrating.
+# is staged under $WORK/plugins/. No binaries are vendored in this repo: jars
+# come only from extension-repo built artifacts (env var or extensions/ dir).
 set -euo pipefail
 
 WORK="${1:?worktree path required}"
@@ -59,8 +57,6 @@ for name in "${NAMES[@]}"; do
     jar_src="$src"
   elif [ -d "$PWD_DIR/extensions/$name" ]; then
     jar_src="$PWD_DIR/extensions/$name"
-  elif [ -d "$PWD_DIR/locals/plugins/$name" ]; then
-    jar_src="$PWD_DIR/locals/plugins/$name"
   fi
 
   if [ -z "$jar_src" ]; then
@@ -81,11 +77,6 @@ for name in "${NAMES[@]}"; do
         found=1
       fi
     done
-    # vendored staging (locals/plugins/<name>/*.jar already in place) -> keep as-is
-    if [ -d "$PWD_DIR/locals/plugins/$name" ] && [ "$found" = "0" ]; then
-      echo "  + $name: vendored staging dir kept ($PWD_DIR/locals/plugins/$name)"
-      found=1
-    fi
     if [ "$found" = "0" ]; then
       echo "  - $name: NO jars found under $jar_src (extension build pending)"
       continue

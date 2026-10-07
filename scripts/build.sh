@@ -6,9 +6,10 @@
 # Fork-stack shape (verified against app-kestra): the base image is a
 # runtime-only environment; the webserver binary is host-built via gradle
 # executableJar and copied into the image as docker/app/kestra. Patches touch
-# only sources that are compiled into that jar (webserver controllers/filters/
-# rooter/services + migrations + build/deploy wiring). Dockerfile/Dockerfile.base
-# are used unmodified from upstream.
+# only sources compiled into that jar (webserver controllers/filters/rooter/
+# services; §9 phase-1 scope). Dockerfile/Dockerfile.base are unmodified from
+# upstream. Extension jars are injected by build-extensions.sh from the
+# extension repos' built artifacts (never vendored as binaries in this repo).
 set -euo pipefail
 
 RELEASE="$(sed -n 1p patches/BASE)"
@@ -53,14 +54,7 @@ cp "$EXE" "$WORK/docker/app/kestra"
 chmod +x "$WORK/docker/app/kestra"
 echo "webserver jar staged: $(basename "$EXE") -> docker/app/kestra"
 
-echo "== stage vendored extension artifacts (plugins/ baseline) =="
-if [ -d "$PWD/locals/plugins" ]; then
-  mkdir -p "$WORK/plugins"
-  cp -r "$PWD/locals/plugins/." "$WORK/plugins/"
-  echo "vendored baseline: $(ls "$WORK/plugins" | wc -l) plugin artifact(s)"
-fi
-
-echo "== extension artifacts (requires extension repos with built artifacts) =="
+echo "== extension artifacts (from extension repos; see build-extensions.sh) =="
 bash scripts/build-extensions.sh "$WORK"
 
 echo "== build image (upstream Dockerfile.base/Dockerfile unmodified) =="
