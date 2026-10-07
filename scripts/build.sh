@@ -3,13 +3,14 @@
 # compile webserver (executableJar) -> stage extension jars -> build image.
 # Usage: ./scripts/build.sh [--apply-only]
 #
-# Fork-stack shape (verified against app-kestra): the base image is a
-# runtime-only environment; the webserver binary is host-built via gradle
-# executableJar and copied into the image as docker/app/kestra. Patches touch
-# only sources compiled into that jar (webserver controllers/filters/rooter/
-# services; §9 phase-1 scope). Dockerfile/Dockerfile.base are unmodified from
-# upstream. Extension jars are injected by build-extensions.sh from the
-# extension repos' built artifacts (never vendored as binaries in this repo).
+# Delivery shape (mechanism facts, docs/extension-mechanisms.md F1): upstream
+# ships a selfrun executable jar (exec java -jar) and a runtime-only base
+# image; the webserver binary must be host-built via gradle executableJar and
+# copied into the image as docker/app/kestra. Patches therefore touch only
+# sources compiled into that jar (webserver controllers/filters/rooter/
+# services). Dockerfile/Dockerfile.base are unmodified from upstream.
+# Extension jars are injected by build-extensions.sh per extensions.tsv
+# (never vendored as binaries in this repo).
 set -euo pipefail
 
 RELEASE="$(sed -n 1p patches/BASE)"

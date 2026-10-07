@@ -2,89 +2,97 @@
 # build-extensions.sh — extension-repo injection (kestra-overlay side)
 # bash 3.2 compatible (macOS default).
 #
-# Of the 9 extension repos (excluding the two overlay repos themselves),
-# the kestra-side four — extensions OF upstream kestra-io/kestra — participate
-# in the kestra image / image family as follows:
-#
-#   plugin-apps-harness   -> kestra plugin jar  -> $WORK/plugins/   (Dsh* security surface 13/13)
-#   plugin-apps-amis      -> kestra plugin jar  -> $WORK/plugins/   (declarative Amis apps triggers)
-#   kestra-oidc-provider  -> standalone IdP app (separate image, own repo CI; not baked into kestra image)
-#   plugin-relay-dsh      -> standalone relay app (separate image, own repo CI; not baked into kestra image)
+# The extension registry lives in extensions.tsv (name | slot | note) — this
+# script is client-neutral machinery; downstream repos are data, not code
+# (AGENTS.md §0 north star). Slot semantics map to the channel matrix in
+# docs/extension-mechanisms.md §0:
+#   plugin     -> channel ③: jar copied to $WORK/plugins/ (image /app/plugins,
+#                 picked up by the plugin system at startup)
+#   classpath  -> channel ②: jar must be on the application classpath (beans
+#                 join the Micronaut context). Delivery depends on
+#                 R-CLASSPATH-MERGE (docs/extension-mechanisms.md §4): until
+#                 it lands these are reported PENDING and NOT injected — the
+#                 plugins/ slot cannot carry @Controller/@Filter beans (F3).
+#   standalone -> separate process/image built by its own repo CI; not baked
+#                 into the kestra image.
 #
 # Jar sources are prebuilt artifacts from the extension repos (their CI builds
-# and publishes jars); this script only collects and stages them. Source priority
-# per extension (first hit wins):
+# and publishes jars); this script only collects and stages them. Source
+# priority per extension (first hit wins):
 #   1) EXT_JAR_<NAME_UPPER_UNDERSCORED> env var -> path to a jar file or a dir of jars
 #   2) $PWD/extensions/<name>/                    -> repo checkout; jars discovered under it
 #   3) otherwise                                   -> skipped, reported NOT INJECTED
 #
-# The injection manifest is written to $WORK/.overlay-extensions.json; the
-# official Dockerfile (bind-mount COPY plugins/ -> /app/plugins) bakes whatever
-# is staged under $WORK/plugins/. No binaries are vendored in this repo: jars
-# come only from extension-repo built artifacts (env var or extensions/ dir).
+# No binaries are vendored in this repo: jars come only from extension-repo
+# built artifacts (env var or extensions/ dir). The injection manifest is
+# written to $WORK/.overlay-extensions.json; the official Dockerfile bakes
+# whatever is staged under $WORK/plugins/.
 set -euo pipefail
 
 WORK="${1:?worktree path required}"
-PWD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGISTRY="$REPO/extensions.tsv"
 PLUGINS_DIR="$WORK/plugins"
 mkdir -p "$PLUGINS_DIR"
 
-# name -> jar-staged (1) or standalone-app (0)
-NAMES=(plugin-apps-harness plugin-apps-amis kestra-oidc-provider plugin-relay-dsh)
-IN_IMAGE=(1 1 0 0)
+[ -f "$REGISTRY" ] || { echo "FAIL: registry missing: $REGISTRY" >&2; exit 1; }
 
 MANIFEST_TMP="$WORK/.overlay-extensions.tmp"
 : > "$MANIFEST_TMP"
-INJECTED_COUNT=0
 
-echo "== extension injection (kestra-side extension repos) =="
-i=0
-for name in "${NAMES[@]}"; do
-  in_image="${IN_IMAGE[$i]}"
-  i=$((i+1))
-  envkey="EXT_JAR_$(echo "$name" | tr 'a-z' 'A-Z' | tr '-' '_')"
-  src="$(printenv "$envkey" 2>/dev/null || true)"
+echo "== extension injection (registry: extensions.tsv) =="
 
-  if [ "$in_image" = "0" ]; then
-    echo "  - $name: standalone image (own repo CI), not baked into kestra image"
-    echo "$name|standalone" >> "$MANIFEST_TMP"
-    continue
-  fi
-
-  # jar source resolution
-  jar_src=""
-  if [ -n "$src" ]; then
-    jar_src="$src"
-  elif [ -d "$PWD_DIR/extensions/$name" ]; then
-    jar_src="$PWD_DIR/extensions/$name"
-  fi
-
-  if [ -z "$jar_src" ]; then
-    echo "  - $name: NOT INJECTED (no artifacts; repo migration pending)"
-    continue
-  fi
-
-  if [ -f "$jar_src" ]; then
-    cp "$jar_src" "$PLUGINS_DIR/"
-    echo "  + $name: staged jar $(basename "$jar_src")"
-  else
-    # dir: copy jars (one level: dir/*.jar and dir/build/libs/*.jar)
-    found=0
-    for j in "$jar_src"/*.jar "$jar_src"/build/libs/*.jar; do
-      if [ -f "$j" ]; then
-        cp "$j" "$PLUGINS_DIR/"
-        echo "  + $name: staged $(basename "$j")"
-        found=1
+# registry rows: name | slot | note (comments/blank lines skipped)
+awk -F'\t' '/^#/ || /^$/ {next} {print $1 "\t" $2}' "$REGISTRY" | while IFS="$(printf '\t')" read -r name slot; do
+  case "$slot" in
+    standalone)
+      echo "  - $name: standalone image (own repo CI), not baked into kestra image"
+      echo "$name|standalone" >> "$MANIFEST_TMP"
+      ;;
+    classpath)
+      # Channel ② delivery is gated on R-CLASSPATH-MERGE; the plugins/ slot
+      # cannot carry controller/filter beans, so staging there would be a
+      # silent no-op — report PENDING instead (2026-10-07 cleanup).
+      echo "  - $name: PENDING R-CLASSPATH-MERGE (channel-2 jar not deliverable yet; plugins/ slot cannot carry @Controller/@Filter)"
+      echo "$name|classpath-pending" >> "$MANIFEST_TMP"
+      ;;
+    plugin)
+      src="$(printenv "EXT_JAR_$(echo "$name" | tr 'a-z' 'A-Z' | tr '-' '_')" 2>/dev/null || true)"
+      jar_src=""
+      if [ -n "$src" ]; then
+        jar_src="$src"
+      elif [ -d "$REPO/extensions/$name" ]; then
+        jar_src="$REPO/extensions/$name"
       fi
-    done
-    if [ "$found" = "0" ]; then
-      echo "  - $name: NO jars found under $jar_src (extension build pending)"
-      continue
-    fi
-  fi
-
-  echo "$name|$PLUGINS_DIR" >> "$MANIFEST_TMP"
-  INJECTED_COUNT=$((INJECTED_COUNT+1))
+      if [ -z "$jar_src" ]; then
+        echo "  - $name: NOT INJECTED (no artifacts; set EXT_JAR_* or extensions/$name)"
+        continue
+      fi
+      if [ -f "$jar_src" ]; then
+        cp "$jar_src" "$PLUGINS_DIR/"
+        echo "  + $name: staged jar $(basename "$jar_src")"
+      else
+        # dir: copy jars (one level: dir/*.jar and dir/build/libs/*.jar)
+        found=0
+        for j in "$jar_src"/*.jar "$jar_src"/build/libs/*.jar; do
+          if [ -f "$j" ]; then
+            cp "$j" "$PLUGINS_DIR/"
+            echo "  + $name: staged $(basename "$j")"
+            found=1
+          fi
+        done
+        if [ "$found" = "0" ]; then
+          echo "  - $name: NO jars found under $jar_src (extension build pending)"
+          continue
+        fi
+      fi
+      echo "$name|$PLUGINS_DIR" >> "$MANIFEST_TMP"
+      ;;
+    *)
+      echo "FAIL: unknown slot '$slot' for $name in extensions.tsv" >&2
+      exit 1
+      ;;
+  esac
 done
 
 python3 - "$WORK/.overlay-extensions.json" "$MANIFEST_TMP" <<'PYEOF'
@@ -105,5 +113,6 @@ print("  manifest: %s (%d entries)" % (manifest_path, len(entries)))
 PYEOF
 rm -f "$MANIFEST_TMP"
 
-echo "== extension injection done: $INJECTED_COUNT jar-injected, ${#NAMES[@]} extensions defined =="
-echo "== staged plugin jars: $(ls "$PLUGINS_DIR" | wc -l | tr -d ' ') =="
+total=$(awk -F'\t' '/^#/ || /^$/ {next} {n++} END {print n+0}' "$REGISTRY")
+staged=$(ls "$PLUGINS_DIR" | wc -l | tr -d ' ')
+echo "== extension injection done: registry ${total} entries, staged plugin jars: ${staged} =="

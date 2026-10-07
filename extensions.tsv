@@ -1,0 +1,13 @@
+# extensions.tsv — 扩展仓注入注册表（scripts/build-extensions.sh 的唯一数据源）
+# 本仓骨架客户中立：扩展仓名/角色是数据不是代码（AGENTS.md §0 北极星：服务任何下游）。
+# 列（TSV，# 开头为注释）：name | slot | 说明
+# slot 语义（与 docs/extension-mechanisms.md §0 通道矩阵对应）：
+#   plugin     → 通道③：jar 落 $WORK/plugins/（镜像 /app/plugins，插件体系自动扫描）
+#   classpath  → 通道②：jar 须进应用 classpath（bean 进 Micronaut 上下文）——
+#                承载依赖 R-CLASSPATH-MERGE（未落地前本仓不注入，报 PENDING）
+#   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）
+# 首批客户（dsh 扩展仓，2026-10-07 立项）：
+plugin-apps-harness	classpath	Dsh* 安全面/控制器 jar（@Controller 不走插件体系——机制 F3，plugins/ 槽承载不了）
+plugin-apps-amis	plugin	amis 声明式 apps 触发器（PageTrigger/ApiTrigger）
+kestra-oidc-provider	standalone	独立 IdP 进程（webserver 侧认证链 jar 的承载另行随 R-CLASSPATH-MERGE 立案）
+plugin-relay-dsh	standalone	独立 relay 进程
