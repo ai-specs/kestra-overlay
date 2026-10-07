@@ -47,7 +47,7 @@
 | 能力 | OSS 行为 | EE 行为 | 阶段一 | 补足方式 | 状态 |
 |---|---|---|---|---|---|
 | 端点级认证门 | 无过滤器链（见 A） | intercept-url-map/规则链 `[docs]` | **需要（最小形态）** | **部署面**：compose 的 micronaut-security `intercept-url-map`（`/**→isAuthenticated()`）——配置级缝隙，非 patch（fork 同形态 `[dsh]`）；**生效前提 = 认证链 jar 进镜像**（R-CLASSPATH-MERGE 前置，intercept-url-map 是 micronaut-security 的配置面） | 部署面（kestra-oidc-provider 侧） |
-| RBAC（资源:动作、namespace 级） | **OSS 主源码零授权钩子**（2026-10-07 复扫：webserver/core 无 SecurityRule/intercept-url-map 类）——OSS 无预留缝隙 | 有 `[docs]` | 完整 RBAC 阶段二需要 | 扩展仓 jar 提供 micronaut-security 的 SecurityRule/Authorizer bean（S6 通道），**预期零 overlay patch**（原「webserver M 面激活」无源码证据支撑，已修正） | **reserved** R-EE-RBAC（实证待客户实施） |
+| RBAC（资源:动作、namespace 级） | **OSS 主源码零授权钩子**（2026-10-07 复扫：webserver/core 无 SecurityRule/intercept-url-map 类）+ **EE IAM API 面（users/roles/permissions/groups/service-accounts/me）在 vanilla 实例全部 route-miss 404**`[live]`——OSS 无预留缝隙，判定面整体在 EE jar | 有 `[docs]` | 完整 RBAC 阶段二需要 | 扩展仓 jar 提供 micronaut-security 的 SecurityRule/Authorizer bean（S6 通道），**预期零 overlay patch**（原「webserver M 面激活」无源码证据支撑，已修正）。**需求已细化立案：[docs/r-ee-rbac.md](r-ee-rbac.md)**（目标能力/非目标/交付分层/验收判据/OQ 清单） | **reserved** R-EE-RBAC（实证待客户实施） |
 
 ### C. MCP（阶段一核心）
 
@@ -140,7 +140,7 @@ plugin-apps-amis   需要：命名空间承载面（I1：REQ-0020 catch-all + RE
 | rid | 扩展点 | 触发条件（形态绑定） | 预期形态 |
 |---|---|---|---|
 | R-CLASSPATH-MERGE | 通道②的镜像承载机制（EE 同构交付的核心缺口，S6）——**已立案待实施**（2026-10-07 使命审查升级；可行性与最小面方案见 `docs/extension-mechanisms.md` §4） | 实施指令（不绑客户阶段；是 R-EE-RBAC/R-APP-ROUTER 与 0020/0021 收窄的共同前置） | build.sh 构建产物后处理（manifest Class-Path 注入，候选 b）+ OQ1/OQ2 实证；零 patch 文件 |
-| R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 micronaut-security SecurityRule/Authorizer bean | 客户实施并提供行为证据（§2-B 接收标准） | 外部 classpath jar（S6）；**预期零 overlay patch**（OSS 无授权钩子可激活，2026-10-07 复扫）；实证含 SecurityRule 从 jar 注册 |
+| R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 micronaut-security SecurityRule/Authorizer bean | 客户实施并提供行为证据（§2-B 接收标准） | 外部 classpath jar（S6）；**预期零 overlay patch**（OSS 无授权钩子可激活，2026-10-07 复扫 + vanilla 实测 IAM API 全 404）；实证含 SecurityRule 从 jar 注册。**展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md)** |
 | R-APP-ROUTER | apps API 面（AppRouterController/AppsFileController/AppsService）；TenantAliasingRooter/ProblemResponseFilter 的 AppRouterController 排除逻辑届时回归 | 客户实施并提供行为证据 + R-CLASSPATH-MERGE 落地（jar 承载前置） | 外部 classpath jar（S6）+ 排除逻辑回归 patch |
 | R-NFH-ANCHOR | NotFoundHeadersFilter（上游 develop 已有该文件，fork 有 UiAppController 排除一小块定制）：BASE 升到含该文件的 release 后**必须**评估回锚 | 下一次 BASE 升级（升级 SOP §6-3 强制项） | M patch |
 | R-AI-PROVIDERS | AI 提供商门控解禁（§2-H：`AiServiceManager` 非 gemini 即抛）；适配器实现归扩展仓 | 客户实施并提供行为证据 | patch 解禁（M 面改条件）**或** jar 子类覆写（S9）二择一，实施时先验证覆写路径 |
