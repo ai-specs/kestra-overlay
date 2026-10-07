@@ -456,124 +456,6 @@ index 160c2ab560..3179870131 100644
 +                                     @JsonInclude Boolean oidcAuthEnabled) {
      }
  }
-diff --git a/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
-new file mode 100644
-index 0000000000..d08fdfdd97
---- /dev/null
-+++ b/webserver/src/main/java/io/kestra/webserver/filter/NotFoundHeadersFilter.java
-@@ -0,0 +1,112 @@
-+package io.kestra.webserver.filter;
-+
-+import java.util.Objects;
-+
-+import io.kestra.core.utils.EditionProvider;
-+
-+import io.micronaut.core.annotation.NonNull;
-+import io.micronaut.core.order.Ordered;
-+import io.micronaut.http.BasicHttpAttributes;
-+import io.micronaut.http.HttpRequest;
-+import io.micronaut.http.HttpStatus;
-+import io.micronaut.http.MutableHttpResponse;
-+import io.micronaut.http.annotation.RequestFilter;
-+import io.micronaut.http.annotation.ResponseFilter;
-+import io.micronaut.http.annotation.ServerFilter;
-+import io.micronaut.http.filter.ServerFilterPhase;
-+
-+/**
-+ * Stamps {@code X-Kestra-Edition} and {@code X-Kestra-Route-Matched} headers on every 404 response.
-+ * Runs at {@link ServerFilterPhase#FIRST}, like {@link SecurityHeadersFilter}, so it still applies to
-+ * short-circuited or bare 404 responses.
-+ * <p>
-+ * {@code X-Kestra-Route-Matched} tells a client whether this 404 came from a route that exists on this
-+ * server (a genuine not-found from application code) or from no route matching at all (the route/feature
-+ * doesn't exist on this server). It is derived from the router's own match result, so no 404-producing call
-+ * site has to opt into tagging itself.
-+ * <p>
-+ * The match result has to be captured on the way <em>in</em>, not read on the way out: when an
-+ * {@code @Error} handler such as {@link io.kestra.webserver.controllers.ErrorController} takes over,
-+ * Micronaut overwrites the {@code ROUTE_MATCH} request attribute with the error route
-+ * ({@code RequestLifecycle#handleErrorRoute} calls {@code RouteExecutor#setRouteAttributes}), and an
-+ * {@code ErrorRouteMatch} is not a {@link io.micronaut.http.uri.UriMatchInfo} — so by the time response
-+ * filters run, {@link BasicHttpAttributes#getRouteMatchInfo} is empty even though a route did match. The
-+ * request filter below therefore records the verdict while it is still truthful; the response filter reads
-+ * that, and only falls back to the live attribute when the request filter never ran (an unmatched route
-+ * short-circuits before route filters, where an empty attribute is the correct answer anyway).
-+ * <p>
-+ * Note this makes edition and route existence readable by unauthenticated callers. Both are already public:
-+ * the edition via {@code /api/v1/configs}, and route existence via the published OpenAPI spec.
-+ */
-+@ServerFilter("/**")
-+public class NotFoundHeadersFilter implements Ordered {
-+    public static final String EDITION_HEADER = "X-Kestra-Edition";
-+    public static final String ROUTE_MATCHED_HEADER = "X-Kestra-Route-Matched";
-+
-+    /** Internal request attribute holding the router's verdict, captured before any error route replaces it. */
-+    static final String ROUTE_MATCHED_ATTRIBUTE = "io.kestra.routeMatched";
-+
-+    private final EditionProvider editionProvider;
-+
-+    public NotFoundHeadersFilter(EditionProvider editionProvider) {
-+        this.editionProvider = Objects.requireNonNull(editionProvider);
-+    }
-+
-+    /**
-+     * Records whether the router matched a route for this request. This filter is not pre-matching, so it runs
-+     * after the router has matched and before any {@code @Error} handler can replace the match attribute.
-+     *
-+     * @param request the incoming request
-+     */
-+    @RequestFilter
-+    public void rememberRouteMatch(@NonNull HttpRequest<?> request) {
-+        // dsh fork: the UiAppController catch-all ({namespace}/{path:.*}) matches every
-+        // /api/v1/... request that no real route owns, then short-circuits into a 404.
-+        // That is a route-miss semantically, not a genuine application 404, so exclude it
-+        // from the route-matched verdict (keeps upstream NotFoundHeadersFilter semantics).
-+        boolean matched = BasicHttpAttributes.getRouteMatchInfo(request)
-+            .filter(match -> {
-+                if (!(match instanceof io.micronaut.web.router.UriRouteMatch<?, ?> routeMatch)) {
-+                    return true;
-+                }
-+                io.micronaut.web.router.UriRouteInfo<?, ?> routeInfo = routeMatch.getRouteInfo();
-+                return routeInfo == null
-+                    || routeInfo.getDeclaringType() != io.kestra.webserver.controllers.api.UiAppController.class;
-+            })
-+            .isPresent();
-+        request.setAttribute(ROUTE_MATCHED_ATTRIBUTE, matched);
-+    }
-+
-+    /**
-+     * Adds the 404-disambiguation headers, leaving any header a controller or another filter already set.
-+     *
-+     * @param request  the request that produced this response
-+     * @param response the outgoing response
-+     */
-+    @ResponseFilter
-+    public void addNotFoundHeaders(@NonNull HttpRequest<?> request, @NonNull MutableHttpResponse<?> response) {
-+        if (HttpStatus.NOT_FOUND != response.getStatus()) {
-+            return;
-+        }
-+
-+        setIfAbsent(response, EDITION_HEADER, editionProvider.get().name());
-+        setIfAbsent(response, ROUTE_MATCHED_HEADER, String.valueOf(hasMatchedRoute(request)));
-+    }
-+
-+    private static boolean hasMatchedRoute(HttpRequest<?> request) {
-+        return request.getAttribute(ROUTE_MATCHED_ATTRIBUTE, Boolean.class)
-+            .orElseGet(() -> BasicHttpAttributes.getRouteMatchInfo(request).isPresent());
-+    }
-+
-+    /** Leaves an already-set header untouched, so a controller or another filter can still override it. */
-+    private static void setIfAbsent(MutableHttpResponse<?> response, String name, String value) {
-+        if (!response.getHeaders().contains(name)) {
-+            response.getHeaders().set(name, value);
-+        }
-+    }
-+
-+    @Override
-+    public int getOrder() {
-+        return ServerFilterPhase.FIRST.order();
-+    }
-+}
 diff --git a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
 index dff794ca9c..1f9d9c42a3 100644
 --- a/webserver/src/main/java/io/kestra/webserver/filter/ProblemResponseFilter.java
@@ -672,38 +554,29 @@ index 453742c280..f47d06355d 100644
      @Schema(description = "Whether this is the default MCP server, auto-provisioned per tenant.", accessMode = Schema.AccessMode.READ_ONLY) boolean isDefault,
  
 diff --git a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
-index 5c7932d861..80b466b5ed 100644
+index 5c7932d861..779a4dd063 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rooting/TenantAliasingRooter.java
-@@ -5,8 +5,11 @@ import java.util.Collection;
+@@ -5,6 +5,7 @@ import java.util.Collection;
  import java.util.List;
  import java.util.regex.Pattern;
  
-+import io.kestra.webserver.utils.RequestUtils;
 +
  import io.micronaut.context.annotation.Replaces;
  import io.micronaut.context.annotation.Requires;
-+import io.micronaut.context.annotation.Value;
  import io.micronaut.http.HttpRequest;
- import io.micronaut.web.router.DefaultRouter;
- import io.micronaut.web.router.RouteBuilder;
-@@ -26,9 +29,14 @@ public class TenantAliasingRooter extends DefaultRouter {
+@@ -26,7 +27,10 @@ public class TenantAliasingRooter extends DefaultRouter {
          Pattern.compile("/api/v1/configs/login")
      );
  
-+    private final String contextPath;
 +
      @Inject
--    public TenantAliasingRooter(Collection<RouteBuilder> builders) {
 +    public TenantAliasingRooter(
 +        Collection<RouteBuilder> builders,
-+        @Value("${micronaut.server.context-path:}") String contextPath) {
+     public TenantAliasingRooter(Collection<RouteBuilder> builders) {
          super(builders);
-+        this.contextPath = RequestUtils.normalizeContextPath(contextPath);
      }
- 
-     @SneakyThrows
-@@ -38,17 +46,54 @@ public class TenantAliasingRooter extends DefaultRouter {
+@@ -38,17 +42,54 @@ public class TenantAliasingRooter extends DefaultRouter {
          // a raw-path miss upstream in AuthenticationFilter stays a 404 here too (GHSA-rjhm-qm6w-m7x9).
          String rawPath = request.getPath();
          UriRouteMatch<T, R> closest = super.findClosest(request);
@@ -727,7 +600,7 @@ index 5c7932d861..80b466b5ed 100644
 -        boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(rawPath).matches());
 -        if (rawPath.startsWith("/api/v1/") && !excluded) {
 -            String rewrittenRawPath = rawPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
-+        String apiPath = RequestUtils.stripContextPath(contextPath, rawPath);
++        String apiPath = rawPath;
 +        boolean excluded = EXCLUDED_ROUTES.stream().anyMatch(route -> route.matcher(apiPath).matches());
 +        if (apiPath.startsWith("/api/v1/") && !excluded) {
 +            // dsh: the tenant-less /api/v1/{a}/{b}[/{c}] form must resolve to the upstream tenant
@@ -737,7 +610,7 @@ index 5c7932d861..80b466b5ed 100644
 +            // the upstream routes only (dsh catch-alls excluded — the rewritten URI still starts
 +            // with /api/v1, so they would match it too); on a miss fall back to the raw closest
 +            // match, which is how the dsh apps API (/api/v1/dsh.apps/hello/index) keeps resolving.
-+            String strippedContextPath = rawPath.substring(0, rawPath.length() - apiPath.length());
++        String strippedContextPath = "";
 +            String rewrittenRawPath = strippedContextPath + apiPath.replaceFirst("^/api/v1", "/api/v1/" + getTenantId());
              URI updatedUri = new URI(rebuildRawUri(request, rewrittenRawPath));
 -            return super.findClosest(request.toMutableRequest().uri(updatedUri));
@@ -895,52 +768,3 @@ index e9913a5448..a315ec8504 100644
          if (webserverConfiguration.googleAnalytics() != null) {
              line = line.replace("KESTRA_GOOGLE_ANALYTICS = null;", "KESTRA_GOOGLE_ANALYTICS = '" + webserverConfiguration.googleAnalytics() + "';");
          }
-diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java b/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java
-index 23afff17db..70e5e3580d 100644
---- a/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java
-+++ b/webserver/src/main/java/io/kestra/webserver/services/ai/AiServiceManager.java
-@@ -14,6 +14,8 @@ import io.kestra.core.services.InstanceService;
- import io.kestra.core.utils.VersionProvider;
- import io.kestra.webserver.services.ai.gemini.GeminiAiService;
- import io.kestra.webserver.services.ai.gemini.GeminiConfiguration;
-+import io.kestra.webserver.services.ai.openai.OpenAiAiService;
-+import io.kestra.webserver.services.ai.openai.OpenAiConfiguration;
- import io.kestra.webserver.services.posthog.PosthogService;
- 
- import io.micronaut.context.annotation.Requires;
-@@ -128,10 +130,13 @@ public class AiServiceManager {
-             return null;
-         }
- 
--        if (!"gemini".equals(type)) {
-+        // dsh: openai-compatible is unlocked as a product decision — upstream's OSS/EE split
-+        // is a commercial gate, not a technical one (docs/merge-upstream-review-20260912.md
-+        // 三.1/风险 #1). Upstream will never take this; guard this branch on every merge.
-+        if (!"gemini".equals(type) && !"openai".equals(type)) {
-             throw new IllegalArgumentException(
--                "Unsupported AI provider type '" + type + "' for Kestra OSS. Only 'gemini' is supported. " +
--                    "Other providers (openai, anthropic, ollama, etc.) require Kestra Enterprise Edition."
-+                "Unsupported AI provider type '" + type + "' for Kestra OSS. Only 'gemini' and 'openai' (any OpenAI-compatible endpoint via 'base-url') are supported. " +
-+                    "Other providers (anthropic, ollama, etc.) require Kestra Enterprise Edition."
-             );
-         }
- 
-@@ -139,6 +144,18 @@ public class AiServiceManager {
-             ObjectMapper mapper = JacksonMapper.ofJson().copy()
-                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
- 
-+            if ("openai".equals(type)) {
-+                OpenAiConfiguration openAiConfig = mapper.convertValue(configMap, OpenAiConfiguration.class);
-+                AiService<?> service = new OpenAiAiService(
-+                    pluginRegistry, jsonSchemaGenerator, versionProvider, instanceService, posthogService, this.namespaceContextTool, provider.displayName(), listeners, openAiConfig,
-+                    expressionContextService, flowParsingService
-+                );
-+                if (this.kestraDocsContextTool != null) {
-+                    service.setKestraDocsContextTool(this.kestraDocsContextTool);
-+                }
-+                return service;
-+            }
-+
-             GeminiConfiguration geminiConfig = mapper.convertValue(configMap, GeminiConfiguration.class);
-             AiService<?> service = new GeminiAiService(
-                 pluginRegistry, jsonSchemaGenerator, versionProvider, instanceService, posthogService, this.namespaceContextTool, provider.displayName(), listeners, geminiConfig,
