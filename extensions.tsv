@@ -2,9 +2,11 @@
 # 本仓骨架客户中立：扩展仓名/角色是数据不是代码（AGENTS.md §0 北极星：服务任何下游）。
 # 列（TSV，# 开头为注释）：name | slot | 说明
 # slot 语义（与 docs/extension-mechanisms.md §0 通道矩阵对应）：
-#   plugin     → 通道③：jar 落 $WORK/plugins/（镜像 /app/plugins，插件体系自动扫描）
+#   plugin     → 通道③：jar 落 /app/plugins（部署侧 volume 挂载 + 重启；本仓构建期零 jar——
+#                定位裁定 2026-10-07，脚本暂存路径仅保留为机械能力、注册表无使用行）
 #   classpath  → 通道②：jar 须进应用 classpath（bean 进 Micronaut 上下文）——
-#                承载依赖 R-CLASSPATH-MERGE（未落地前本仓不注入，报 PENDING）
+#                承载依赖 R-CLASSPATH-MERGE：本仓构建期仅注入 manifest 条目元数据，
+#                jar 本体部署侧挂载；未落地前报 PENDING
 #   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）
 # 2026-10-07 范围收窄：仅保留当前活跃客户（范围裁定见 AGENTS.md §0；历史行 git 历史即归档）。
-kestra-oidc-provider	standalone	独立 IdP 进程（webserver 侧认证链 jar 的镜像承载 = R-CLASSPATH-MERGE；实施时为本体 jar 另加 classpath 数据行）
+kestra-oidc-provider	standalone	独立 IdP 进程（webserver 侧认证链 jar 的承载 = R-CLASSPATH-MERGE：落地后另加 classpath 数据行——仅声明 manifest 条目，jar 部署侧挂载）

@@ -117,13 +117,22 @@ slim / no-plugins 三变体**同一 Dockerfile、同一 base 镜像**（实际�
 `v2.0.5-no-plugins` 上（当前调研所用实例形态），运行期 API 装插件默认不可用；需开启时
 在部署配置显式 `kestra.plugins.auto-install.enabled: true`（④ 通道，重启生效）。
 
-**本仓镜像的变体谱系（2026-10-07 命名裁定）**：overlay 镜像 = 上游 Dockerfile 原样 +
-patch 后 webserver，**零插件/零扩展 jar** 烤入（内容同 slim/no-plugins 家族——`extensions.tsv`
-无活跃 plugin/classpath 行、`build-extensions.sh` 留空 `$WORK/plugins`），主 tag 采用
-`${RELEASE}-no-plugins`。与上游同名变体的**唯一行为差异**：本仓不烤任何 Kestra 配置 ⇒
-auto-install 保持源码缺省（OSS+local 开；上游 no-plugins 是烤关）——需加固的部署在
-`KESTRA_CONFIGURATION` 显式关闭（④ 通道，重启生效）。历史无后缀 tag（如 `v2.0.5`）随
-本裁定停止更新，registry 中旧副本为遗留。
+**本仓镜像的变体谱系与定位（2026-10-07 命名与定位裁定，维护者）**：overlay 镜像 = 上游
+Dockerfile 原样 + patch 后 webserver，主 tag `${RELEASE}-no-plugins`。**定位 = 上游
+no-plugins 谱系的加固形态**——「精确控制插件集的加固环境」（上游对 no-plugins 的定义
+原话），两条铁律：
+
+1. **构建期零外部扩展 jar**：镜像 = vanilla + patch；任何扩展 jar（③ 插件槽或 ②
+   classpath 槽）一律**部署侧预置/挂载 + 重启**生效；classpath 承载的构建期唯一动作 =
+   向 executable jar 注入 manifest `Class-Path` **条目元数据**（R-CLASSPATH-MERGE，
+   §4——不是 jar 字节）。
+2. **静态插件集纪律**：插件集由部署侧精确预置（volume + 重启）；auto-install 无法在
+   镜像内烤关（selfrun 只认 `KESTRA_CONFIGURATION` 环境变量→`MICRONAUT_CONFIG_FILES`，
+   烤配置文件不生效），源码缺省在 OSS+local 形态下是开的——**部署基线应显式
+   `kestra.plugins.auto-install.enabled: false`**（④ 通道，重启生效）以闭环静态纪律。
+
+与上游同名变体的唯一实现差异即上述第 2 点的「部署侧承担烤关」。历史无后缀 tag（如
+`v2.0.5`）随命名裁定停止更新，registry 中旧副本为遗留。
 
 ## 2. 各通道证据细则
 
@@ -131,7 +140,7 @@ auto-install 保持源码缺省（OSS+local 开；上游 no-plugins 是烤关）
 |---|---|---|
 | ① | `build.gradle:626-651`（writeExecutableJar=shadowJar+selfrun 前缀）；overlay `scripts/build.sh`（patch→executableJar→镜像） | 每 patch 一行都是升级成本（AGENTS.md §3 质量法的动因） |
 | ② | `gradle/jar/selfrun.sh` 末行 `-jar "$0"`；`Dockerfile:9-13`（COPY docker / + plugins RUN）；EE 痕迹 logback/base.xml:21-23、BaseCommand.java:45；dsh 试点 13/13 `[dsh]`；聚合面实证 `MigrationRunner.java:47-56`（Collection 注入收全量 bean） | 承载机制已立案 R-CLASSPATH-MERGE（§4，候选 b：manifest Class-Path 注入）；同包同名类遮蔽待 OQ2 实证 |
-| ③ | `PluginScanner.scan(Path)`:62-88（`PluginResolver` 枚举目录 → 逐插件组建 `PluginClassLoader.of(location, resources, parent)` → `scanClassLoader` 读类字节识别插件标记类型）；`DefaultPluginRegistry.getOrCreate():57` 启动注册；`PluginController:152` 安装端点 + `computeEnabled`:89-99 门控（源码级 OSS+local 默认开、EE 强制关；镜像变体覆盖见 F4） | 只承载任务/触发器/Runner 等插件面（F3）；新任务类型对**新** flow 生效，已解析 flow 不追溯；安装的 jar 落 local repo（LocalPluginManager），集群传播是 EE（单机 OSS 无此面） |
+| ③ | `PluginScanner.scan(Path)`:62-88（`PluginResolver` 枚举目录 → 逐插件组建 `PluginClassLoader.of(location, resources, parent)` → `scanClassLoader` 读类字节识别插件标记类型）；`DefaultPluginRegistry.getOrCreate():57` 启动注册（**无条件**，不受 auto-install 门控）；`PluginController:152` 安装端点 + `computeEnabled`:89-99 门控（源码级 OSS+local 默认开、EE 强制关；镜像变体覆盖见 F4）。**门控读全（2026-10-07）**：关→`POST /plugins/install` **403 + "Plugin auto-install is disabled on this instance."**（端点存在只是被拒）；开→**仅 catalog 白名单** artifact（`isFromCatalog`，任意 Maven 坐标 400 拒绝）+ 202/jobId 异步（`GET /plugins/install/{jobId}` 轮询进度，429 限并发）；OSS 上**显式配置永远赢**（构造器注释原文 "An explicit property value always wins on OSS"）；EE 强制关 + warn 指路 Plugin Versioning | 只承载任务/触发器/Runner 等插件面（F3）；新任务类型对**新** flow 生效，已解析 flow 不追溯；安装的 jar 落 local repo（LocalPluginManager），集群传播是 EE（单机 OSS 无此面） |
 | ④ | selfrun.sh `KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`；MiscController `@Value("${micronaut.security.enabled:false}")`（REQ-0011 patch 面）= bean 创建期绑定 | 配置改了不重启=不生效（常见误判源） |
 | ⑤ | `BasicAuthService.credentials():205-210`（每次调用 `settingRepository.findByKey` 查库） | 仅 settings 存储面；yml 键不在此列（属④） |
 | ⑥ | BroadcastQueue 订阅 + `@PostConstruct` 全量索引（内存索引形态） | 事件驱动即时更新；重启后重建 |
@@ -162,15 +171,19 @@ selfrun `exec java … -jar "$0"`（selfrun.sh:35）；executable 为合法 zip�
 + plugins 装载 RUN 块（:11-13）证明 `docker/` 子目录是既有注入通道（`docker/app/kestra`
 暂存先例 ⇒ `docker/app/libs/` 落 `/app/libs/`，manifest 条目相对 /app/kestra 解析）。
 
-**交付形态（双模式；manifest 条目 = 镜像 ↔ 部署的唯一契约）**：
-- **烤进镜像**：build-extensions.sh 把 classpath 槽 jar 暂存 `docker/app/libs/`（可复现默认）；
-- **运行时挂载**：部署侧 `-v $PWD/libs:/app/libs`，镜像保持 vanilla+patch、零扩展 jar 字节
-  （约束：挂载 jar 文件名须与 manifest 条目一致；**两种模式都需重启生效**——F2）。
+**交付形态（唯一模式 = 运行时挂载；manifest 条目 = 镜像 ↔ 部署的唯一契约）**：
+构建期唯一动作 = 向 executable jar 注入 manifest `Class-Path` 条目（zip 级**元数据**，
+非 jar 字节）；条目来源 = `extensions.tsv` 的 classpath 行（约定文件名）。jar 本体一律
+由部署侧挂载 `-v $PWD/libs:/app/libs`（缺席=静默休眠，实证 1；文件名须与条目一致；
+挂载后需重启生效——F2）。**烤入镜像模式按定位裁定排除**（2026-10-07：构建期零外部
+扩展 jar——F4 定位段铁律 1），可复现性由「manifest 条目（构建期固定）+ 部署侧 jar
+版本固定」承担。
 
 落选记录：(a) fat jar 解包合并（需复刻 mergeServiceFiles 语义、产物不可与上游逐字节对照、
 jar 不可运行时换挂；EE 实际即此形态）；(c) 自定义 entrypoint `-cp`（`-jar` 下被忽略须绕过
 selfrun，丢 `KESTRA_PLUGINS_PATH`/`KESTRA_CONFIGURATION→MICRONAUT_CONFIG_FILES` 管线，
-触碰 build 面，最次选）。
+触碰 build 面，最次选）；(d) 烤入 `docker/app/libs/`（曾为双模式之一——与 2026-10-07
+定位裁定「构建期零外部扩展 jar」冲突，排除）。
 
 ### JVM 语义实证（2026-10-07，JDK 25 三组最小实验）
 
@@ -199,8 +212,9 @@ selfrun，丢 `KESTRA_PLUGINS_PATH`/`KESTRA_CONFIGURATION→MICRONAUT_CONFIG_FIL
 
 1. 本地机制验证（不跑 gradle）：JVM 语义部分**已实证**（上三组）；剩余 = 对真实 webserver
    executable jar 做 zip 级 manifest 注入冒烟 + selfrun 前缀完整性核对；
-2. CI 端到端：build.sh 注入探针 jar（含 `@Context` 生命周期 bean，启动打日志），验证启动期
-   bean 装载（F2 面），并闭环 OQ2 剩余项。
+2. CI 端到端：build.sh 按 `extensions.tsv` classpath 行注入 manifest 条目，运行时挂载
+   探针 jar（含 `@Context` 生命周期 bean，启动打日志），验证启动期 bean 装载（F2 面），
+   并闭环 OQ2 剩余项。
 
 - **OQ2（认知边界）——半闭环（2026-10-07）**：同包同名类遮蔽方向**已实证**（实验 3：主 jar
   赢，良性）；**剩余** = bean 索引（`META-INF/services` 的 micronaut

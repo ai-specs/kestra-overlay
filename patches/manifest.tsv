@@ -6,5 +6,5 @@
 # 缝隙不入 reserved（登记收回规则见 docs/oss-ee-gap.md §4）。
 # 范围：活跃范围与收窄裁定见 AGENTS.md §0「当前范围」（历史增删 git 历史即归档）。
 0011	0011-oidc-login-boot.patch	core	kestra-oidc-provider	/configs+/configs/login OIDC 登录引导激活(securityEnabled/oidcAuthEnabled/兜底)	1	fork 定制移植(verbatim)	上游 /configs 原生支持第三方 OIDC 部署
-R-CLASSPATH-MERGE	-	reserved	kestra-oidc-provider	通道②镜像承载:manifest Class-Path 注入(选型b已裁定2026-10-07;jar可烤进或运行时挂载,缺席=静默休眠)——认证链 jar 与 R-EE-RBAC SecurityRule jar 的共同前置;实证/设计约束见 docs/extension-mechanisms.md §4	-	docs/oss-ee-gap.md §3/§4	实施指令;实施时闭环 OQ2 剩余项(bean 索引可见性)
+R-CLASSPATH-MERGE	-	reserved	kestra-oidc-provider	通道②镜像承载:manifest Class-Path 条目注入(选型b+定位裁定2026-10-07:构建期零外部扩展jar,jar仅运行时挂载,缺席=静默休眠)——认证链 jar 与 R-EE-RBAC SecurityRule jar 的共同前置;实证/设计约束见 docs/extension-mechanisms.md §4	-	docs/oss-ee-gap.md §3/§4	实施指令;实施时闭环 OQ2 剩余项(bean 索引可见性)
 R-EE-RBAC	-	reserved	(待指名:kestra-oidc-provider 侧或未来授权扩展仓)	授权面:扩展仓 jar 提供 SecurityRule/Authorizer bean(预期零 overlay patch——OSS 无授权钩子,vanilla 实测 IAM API 全 404);展开文档 docs/r-ee-rbac.md	-	docs/oss-ee-gap.md §2-B/§4 + docs/r-ee-rbac.md	消费仓指名+行为证据+R-CLASSPATH-MERGE 落地

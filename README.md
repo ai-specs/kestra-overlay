@@ -48,8 +48,10 @@ reserved 两条：**R-CLASSPATH-MERGE**（通道② jar 承载，认证链与 RB
 
 `patch-verify`（check-patches.sh 结构门 → 上游克隆 → apply 门）→ `build-push`
 （编译 webserver + 镜像 + ghcr，主 tag = BASE release 版本 + **`-no-plugins` 后缀**）。
-镜像谱系：零插件/零扩展 jar 烤入；auto-install 保持源码缺省（与上游同名变体的烤关不同，
-差异注记见 `docs/extension-mechanisms.md` F4）。CI 全绿是唯一通过标志。
+**镜像定位（2026-10-07 裁定）**：加固形态——**构建期零外部扩展 jar**（镜像 = vanilla +
+patch；扩展 jar 一律部署侧挂载 + 重启；classpath 承载仅注入 manifest 条目元数据）；
+auto-install 无法镜像内烤关，部署基线应显式关闭（`docs/extension-mechanisms.md` F4
+定位段）。CI 全绿是唯一通过标志。
 
 ## 维护与升级
 

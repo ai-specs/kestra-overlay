@@ -45,6 +45,20 @@ apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
 已删除，git 历史即归档；重启任一域须按 §2 入口**重新接收**（先补差异表行 + 客户证据），
 不引用已删内容作为立项理由（可作 `[dsh]`/历史证据引用）。
 
+### 镜像定位（2026-10-07 裁定，维护者）
+
+**加固形态（上游 no-plugins 谱系）：「精确控制插件集的加固环境」+ 构建期零外部扩展
+jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md` F4 定位段）：
+
+1. 镜像 = vanilla + patch；任何扩展 jar（③ 插件槽 / ② classpath 槽）一律**部署侧
+   预置/挂载 + 重启**生效，构建期不烤 jar 字节；classpath 承载的构建期唯一动作 =
+   manifest `Class-Path` 条目元数据注入（R-CLASSPATH-MERGE）。
+2. 主 tag = `${RELEASE}-no-plugins`；与上游同名变体的唯一实现差异：auto-install 无法
+   在镜像内烤关（selfrun 只认 `KESTRA_CONFIGURATION` 环境变量）——**部署基线应显式
+   `kestra.plugins.auto-install.enabled: false`**（④ 通道）闭环静态插件集纪律。
+3. 违反零 jar 定位的构建期注入（如重新启用 plugin 槽暂存、烤入 libs）须先修订本节
+   （入口 D），不得经实施顺带发生。
+
 ## 1. 仓库结构与事实源
 
 | 路径 | 是什么 | 约束 |

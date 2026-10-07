@@ -2,12 +2,22 @@
 # build-extensions.sh — extension-repo injection (kestra-overlay side)
 # bash 3.2 compatible (macOS default).
 #
+# POSITIONING (2026-10-07 maintainer ruling): the overlay image bakes ZERO
+# external jars at build time (hardened, no-plugins lineage — see
+# docs/extension-mechanisms.md F4). Extension jars are ALWAYS provisioned by
+# the deployment side: plugin slot -> volume-mounted /app/plugins + restart
+# (channel ③); classpath slot -> manifest Class-Path entries injected by
+# build.sh into the executable jar (metadata only, R-CLASSPATH-MERGE) with the
+# jar bodies mounted at /app/libs (channel ②). The plugin-slot staging path
+# below is retained as machinery only — the registry carries no rows using it,
+# and adding one requires revisiting the positioning ruling first.
+#
 # The extension registry lives in extensions.tsv (name | slot | note) — this
 # script is client-neutral machinery; downstream repos are data, not code
 # (AGENTS.md §0 north star). Slot semantics map to the channel matrix in
 # docs/extension-mechanisms.md §0:
-#   plugin     -> channel ③: jar copied to $WORK/plugins/ (image /app/plugins,
-#                 picked up by the plugin system at startup)
+#   plugin     -> channel ③: report-only under the zero-jar positioning
+#                 (deployments volume-mount /app/plugins + restart)
 #   classpath  -> channel ②: jar must be on the application classpath (beans
 #                 join the Micronaut context). Delivery depends on
 #                 R-CLASSPATH-MERGE (docs/extension-mechanisms.md §4): until
@@ -16,17 +26,16 @@
 #   standalone -> separate process/image built by its own repo CI; not baked
 #                 into the kestra image.
 #
-# Jar sources are prebuilt artifacts from the extension repos (their CI builds
-# and publishes jars); this script only collects and stages them. Source
-# priority per extension (first hit wins):
+# Jar sources (for the legacy staging machinery) are prebuilt artifacts from
+# the extension repos; source priority per extension (first hit wins):
 #   1) EXT_JAR_<NAME_UPPER_UNDERSCORED> env var -> path to a jar file or a dir of jars
-#   2) $PWD/extensions/<name>/                    -> repo checkout; jars discovered under it
-#   3) otherwise                                   -> skipped, reported NOT INJECTED
+#   2) $PWD/extensions/<name>/                   -> repo checkout; jars discovered under it
+#   3) otherwise                                  -> skipped, reported NOT INJECTED
 #
 # No binaries are vendored in this repo: jars come only from extension-repo
 # built artifacts (env var or extensions/ dir). The injection manifest is
 # written to $WORK/.overlay-extensions.json; the official Dockerfile bakes
-# whatever is staged under $WORK/plugins/.
+# whatever is staged under $WORK/plugins/ (expected: nothing).
 set -euo pipefail
 
 WORK="${1:?worktree path required}"
