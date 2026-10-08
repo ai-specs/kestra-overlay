@@ -25,9 +25,10 @@ AGENTS.md §6 的固定 SOP 就是为此设计）。
   收窄后剩什么；移除条件**形态绑定**，AGENTS.md §3-6）；`reserved`（仅 manifest，待激活点，
   对应 docs/oss-ee-gap.md §4）。
 - **总账** `manifest.tsv` 与 patch 文件一一对应，check-patches.sh 强校验。
-- 目录白名单：仅 `webserver/` 组（build 面 CI 必挂已实证 / ui 面不编译 / migration 面
-  归扩展仓 classpath jar——MigrationRunner 收全量 bean，机制证据见 AGENTS.md §2 与
-  §8-2）。
+- 目录白名单：仅 `webserver/` 组（ui 面不编译、模块 include 必挂——理由见 AGENTS.md §2
+  拒绝清单与 §8 陷阱表）。**例外（2026-10-07 R-OIDC-SERVER 裁定）**：`webserver/build.gradle`
+  依赖行与 overlay 自有 schema migration（bean+SQL 成对）随 patch 集走——条件见 AGENTS
+  §2/§3-7。
 
 ## 归因纪律（2026-10-07 审计教训）
 

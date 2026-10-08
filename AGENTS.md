@@ -33,6 +33,10 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 | 业务逻辑实现（控制器、服务、触发器、前端包） | 扩展仓（jar 出仓：plugins/ 槽或外部 classpath jar） |
 | 上游自身内容（含未来 release 会包含的东西） | **本仓永不回移**（见 §5 归因法） |
 
+> **归属例外（2026-10-07 裁定）**：**协议标准基础设施层**（当前唯 R-OIDC-SERVER——协议
+> 稳定 + 实现标准的大粒度新文件层）走 **patch 路线**，不入扩展仓；判定依据与实施前置
+> 见差异表 §4 R-OIDC-SERVER 行、§3-7 质量法条款。
+
 ### 基本原则（2026-10-07 维护者裁定）
 
 本仓只对**上游运行架构与扩展机制**负责。交付物 = 足够的扩展点、占位、激活缝隙，
@@ -103,10 +107,10 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
 **拒绝清单**（历史已验证的歧路，直接拒）：
 - ❌ 无消费扩展仓的「顺手优化/对齐上游」——patch 面只增不减的根源；
 - ❌ 把上游 develop/未来 release 的内容回移到 BASE（「fork 有而 BASE 没有」≠ 定制，见 §5）；
-- ❌ patch 携带业务逻辑（应出仓为扩展仓 jar）；A 类新增文件进 patch 仅限「M 面激活点的编译锚」（manifest 标 `transition` + 移除条件）；
-- ❌ build 面 patch：settings.gradle/docker-entrypoint 等。CI 实证必挂（`Configuring project ':x' without an existing directory`）；
+- ❌ patch 携带业务逻辑（应出仓为扩展仓 jar）；A 类新增文件进 patch 仅限「M 面激活点的编译锚」（manifest 标 `transition` + 移除条件）。**例外（2026-10-07）**：协议标准基础设施层（R-OIDC-SERVER 类）走 patch 路线——条件见 §3-7；
+- ❌ build 面 patch：settings.gradle **模块 include**、docker-entrypoint 等——CI 实证必挂（`Configuring project ':x' without an existing directory`）。**唯一例外（2026-10-07 R-OIDC-SERVER 裁定）**：`webserver/build.gradle` 增**依赖行**允许（nimbus oauth2-oidc-sdk / jbcrypt / micronaut-security 系，fork 归因实证清单）；模块 include 永远禁止；
 - ❌ ui 面 patch：本仓镜像不编译 ui，收了不生效；
-- ❌ migration 面 patch：migration 归扩展仓。`MigrationRunner` 注入 `Collection<MigrationScript>` 收集上下文全部 bean，classpath jar 的也收（`core/migration/MigrationRunner.java:47-56`）——扩展仓 jar 自带 bean+SQL 即生效，overlay patch 无承载点。SQL-only patch 缺 bean 注册，从未生效（§8-2）；
+- ❌ migration 面 patch：**扩展仓需求**的 migration 归扩展仓（`MigrationRunner` 注入 `Collection<MigrationScript>` 收集上下文全部 bean，classpath jar 的也收（`core/migration/MigrationRunner.java:47-56`）——扩展仓 jar 自带 bean+SQL 即生效；SQL-only patch 缺 bean 注册，从未生效，§8-2）。**例外（2026-10-07）**：**overlay 自有 schema**（R-OIDC-SERVER 的用户/client/JWKS 表）的 migration 进 patch——源码级 MigrationScript bean + SQL 成对（F2 机制自动执行，前置裁定③）；
 - ❌ 复刻 EE 产品功能（审计日志、Kafka 队列等）——本仓只补**架构扩展能力**（见差异表 §0 定位）。
 
 ## 3. patch 质量法
@@ -126,6 +130,11 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
    条件必须绑定**可观察的形态事件**（如「R-CLASSPATH-MERGE 落地」「上游向 OSS 开放 X」），
    禁止只写客户阶段号——客户阶段只影响优先级（§0-3），不是形态依据。零 overlay 动作即可
    补足的缝隙不入 reserved（登记收回规则见差异表 §4）。
+7. **协议标准基础设施层**（2026-10-07 增补，R-OIDC-SERVER 裁定）：协议稳定 + 实现标准的
+   大粒度新文件 patch 允许进 patch 集，条件缺一不可：① 按需求对齐拆分（一 patch 一需求，
+   含 build.gradle 依赖行随首个需求 patch 走）；② **与验收测试同批落仓**（`src/test`，
+   CI 定向门，见 §4）；③ 头部「来源」标注协议标准依据（RFC/SDK 及版本）；④ 剥离客户
+   耦合项并在头部声明「手工适配 + 剥离了什么」（fork 移植走 §5.2 归因）。
 
 ## 4. 验证分层（本地快检 vs CI）
 
@@ -133,6 +142,10 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
   有上游树时 `./scripts/check-patches.sh --apply-check <dir>`（顺序应用验证）。
 - **CI（push 触发，唯一通过标志）**：patch-verify（结构检查 + 上游克隆 + 全量 apply）→
   build-push（webserver 编译 + 镜像 + ghcr）。本地不跑 gradle 全量编译。
+- **测试同批（安全敏感铁律，2026-10-07 裁定）**：R-OIDC-SERVER 类 patch 的验收测试与
+  实现同批落仓；CI 定向测试门（`:webserver:test --tests` 包前缀过滤，只跑 patch 引入的
+  测试，不跑上游全量）+ 镜像级 OIDC 流程黑盒；安全专项清单（差异表 §4 R-OIDC-SERVER
+  前置④）动刀前评审定稿，门绿为 DoD 组成部分。
 - CI 平时不跟踪不轮询；**骨架/patch 集大改后查一次**（属「大量变更后跟踪一次」例外）。
 - **禁止**在 CI 红时宣称完成；禁止用 `... | tail` 吞退出码。
 
@@ -199,8 +212,8 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 
 | # | 陷阱 | 证据/轮次 |
 |---|---|---|
-| 1 | build 面 patch 必挂 CI：settings.gradle `include` 本仓不注入的模块目录 → `Configuring project ':relay' without an existing directory`（gradle configure 期失败） | 2026-10-07 CI 实证，build 组已整组删除 |
-| 2 | migration SQL-only patch 从未生效：MigrationScript 是 DI bean，SQL 单独进 patch 漏注册 | fork 实证；2026-10-07 机制结论（升级）：MigrationRunner 收全量 bean（含 classpath jar），扩展仓 jar 自带 bean+SQL 即生效——migration 面**零 overlay patch**（机制结论见 docs/extension-mechanisms.md F2） |
+| 1 | build 面 patch 必挂 CI：settings.gradle `include` 本仓不注入的模块目录 → `Configuring project ':relay' without an existing directory`（gradle configure 期失败） | 2026-10-07 CI 实证，build 组已整组删除。**修订（同日）**：R-OIDC-SERVER 例外允许 webserver/build.gradle 依赖行；**模块 include 仍禁** |
+| 2 | migration SQL-only patch 从未生效：MigrationScript 是 DI bean，SQL 单独进 patch 漏注册 | fork 实证；2026-10-07 机制结论（升级）：MigrationRunner 收全量 bean（含 classpath jar），扩展仓 jar 自带 bean+SQL 即生效——**扩展仓需求**的 migration 面零 overlay patch（机制结论见 docs/extension-mechanisms.md F2）。**修订（同日）**：overlay 自有 schema（R-OIDC-SERVER 前置裁定③）例外——bean+SQL 成对进 patch |
 | 3 | 管道 `… | tail` 吞退出码（tail 恒 0） | 用规范脚本，失败必须中断 |
 | 4 | `git apply` 容忍 patch 首部 `#` 注释行 → 头部注释由此合法（但 diff 之后不允许散文） | 本轮树级验证 |
 | 5 | `--filter=blob:none` 克隆的 lazy checkout 中途断流（HTTP/2 reset） | 用完整浅克隆 + `proxy_on` |
