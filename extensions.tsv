@@ -4,6 +4,8 @@
 # 本仓骨架客户中立：行是数据不是代码（AGENTS.md §0 北极星 + 基本原则）。
 # 登记规则（2026-10-07 裁定）：只登记参与 kestra 镜像交付契约的行（classpath/plugin）；
 # 独立进程/镜像的外部仓不入表（其部署拓扑不在本仓视野——基本原则）。
+# 2026-10-07 前置裁定②：认证链与 R-OIDC-SERVER 一体化进 patch ⇒ kestra-auth-chain.jar
+# 契约行退役（外部 IdP 场景由内置链经配置指向）；认证线不再有 jar 契约。
 # 列（TSV，# 开头为注释）：name | slot | 说明
 # slot 语义（与 docs/extension-mechanisms.md §0 通道矩阵对应；taxonomy 含 standalone
 # 槽位供未来使用，当前无登记行）：
@@ -13,6 +15,4 @@
 #                承载依赖 R-CLASSPATH-MERGE：本仓构建期仅注入 manifest 条目元数据，
 #                jar 本体部署侧挂载 /app/libs；未落地前报 PENDING（占位先行）
 #   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）——不入表（见登记规则）
-# 两线的 classpath 占位行（约定文件名即休眠 manifest 条目；缺席=静默休眠，机制文档 §4 实证 1）：
-kestra-auth-chain	classpath	认证线：webserver 侧认证链 jar（micronaut-security 链 + OIDC 端点）。约定文件名 = kestra-auth-chain.jar。注记：授权服务器半已定位为 R-OIDC-SERVER（本仓预留扩展点，patch 路线——2026-10-07 裁定）；本行只约定链 jar 契约，与 R-OIDC-SERVER 的边界（一体化 or 并存）实施时裁定
 kestra-rbac-authorizer	classpath	授权线：判定 jar（SecurityRule/Authorizer bean + 角色模型，docs/r-ee-rbac.md §5-③）。约定文件名 = kestra-rbac-authorizer.jar。交付方未指名（动刀时按 r-ee-rbac §7 四要件）

@@ -82,11 +82,11 @@ volumes:
 同一能力半的实现可互换（内置服务器 ↔ 外部 IdP）。当前约定的运行线：
 
 ```
-（预留）内置授权服务器 R-OIDC-SERVER ──┐   也可换外部 IdP（OIDC 协议）
-                                      ├→ 认证能力：
-（契约）kestra-auth-chain.jar ────────┘   ① OIDC 登录引导（镜像内置，已生效）
-                                          ② 认证链（契约 jar，待承载）
-                                          ③ 端点门（配置通道，待 ② 在位）
+（预留）R-OIDC-SERVER：内置授权服务器 + 认证链（一体化 patch 路线）
+                                      → 认证能力：
+                                        ① OIDC 登录引导（镜像内置，已生效）
+                                        ② 认证链 + ③ 端点门（② 随 R-OIDC-SERVER 实施；
+                                           外部 IdP 场景走同一内置链的配置）
                                               ↓ 授权能力叠加在认证层之上
 （契约）kestra-rbac-authorizer.jar ────→ 授权能力：每请求 (资源,动作,namespace) 判定
 
@@ -96,7 +96,7 @@ volumes:
 | 运行线元素 | 形态 | 交付/参与的能力 | 状态 |
 |---|---|---|---|
 | OIDC 登录引导字段（`oidcAuthEnabled` 等） | 镜像内置（patch 已实施） | 认证能力·引导半 | **已生效** |
-| `kestra-auth-chain.jar` | classpath 契约 | 认证能力·链半；授权能力的前置 | 契约已约定，承载待实施 |
+| R-OIDC-SERVER（链一体化） | 预留 patch 扩展点 | 认证能力·链半与 IdP 半；授权能力的前置 | 预留（2026-10-07 前置裁定②） |
 | 端点门（`intercept-url-map`） | 配置通道（`KESTRA_CONFIGURATION`） | 认证能力·门半（依赖链半在位） | 同上游可用 |
 | R-OIDC-SERVER | 预留 patch 扩展点（内嵌授权服务器） | 认证能力·IdP 半（与外部 IdP 可互换） | 预留 |
 | `kestra-rbac-authorizer.jar` | classpath 契约 | 授权能力（对接面与验收判据见 `docs/r-ee-rbac.md`） | 契约已约定，承载待实施 |

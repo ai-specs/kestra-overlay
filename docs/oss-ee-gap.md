@@ -41,7 +41,7 @@
 
 | 能力 | OSS 行为 | EE 行为 | 补足方式 | 状态 |
 |---|---|---|---|---|
-| 认证方式 | 仅自研 Basic Auth（cookie）。认证过滤器链不在 OSS 构建（S6）。 | SSO OIDC + SCIM + 服务账号 `[docs]` | 认证链：外部 jar（S6 通道，契约 `kestra-auth-chain.jar`）。授权服务器：**预留扩展点 R-OIDC-SERVER**（patch 路线，2026-10-07 裁定——协议稳定+实现标准 ⇒ 大粒度薄层，区别于 jar 路线）。加 REQ-0011 做 UI 引导。承载依赖 R-CLASSPATH-MERGE（jar 半） | 仓已立项；0011 已实施；R-OIDC-SERVER 已预留 |
+| 认证方式 | 仅自研 Basic Auth（cookie）。认证过滤器链不在 OSS 构建（S6）。 | SSO OIDC + SCIM + 服务账号 `[docs]` | 认证链与授权服务器：**预留扩展点 R-OIDC-SERVER**（patch 路线，2026-10-07 裁定——协议稳定+实现标准 ⇒ 大粒度薄层；前置裁定②：链一体化进 patch，外部 IdP 场景走内置链配置）。加 REQ-0011 做 UI 引导（已实施） | 仓已立项；0011 已实施；R-OIDC-SERVER 已预留 |
 | 登录引导 | `/api/v1/configs`（MiscController）只暴露 `isBasicAuthInitialized`。vanilla 实测 `edition:"OSS"` `[live]` | 同端点给出 SSO 状态 | REQ-0011：`oidcAuthEnabled` 字段 + security-enabled 视为已配置 | 已实施 |
 | SCIM | 无（`ProblemFormatExclusion.java` javadoc 明言归 EE） | 有 `[src+docs]` | —（EE 产品功能） | 不补足 |
 | 服务账号/API token | 无 | 有 `[docs]` | 机器身份走 OIDC JWT（R-EE-RBAC §3） | 不补足 |
@@ -59,9 +59,8 @@
 
 ```
 认证线（OIDC 部署形态；范围裁定：MCP 面除外）：
-    认证链（A1 ← S6 jar，承载 = R-CLASSPATH-MERGE，契约 kestra-auth-chain.jar）
-  + 授权服务器（预留扩展点 R-OIDC-SERVER，patch 路线——2026-10-07 裁定：
-    协议稳定+实现标准 ⇒ 大粒度薄层；内嵌 webserver 形态）
+    认证链 + 授权服务器（预留扩展点 R-OIDC-SERVER，patch 路线，内嵌 webserver——
+    2026-10-07 裁定 + 前置②链一体化：外部 IdP 场景走内置链配置）
   + 登录引导（A2 = REQ-0011，唯一已实施 patch）
   + 最小端点门（B1 = 部署面 intercept-url-map，前提 = 认证链 jar 进镜像）
 
@@ -72,8 +71,8 @@
 
 **扩展点充分性审查（2026-10-07，按基本原则）**：两线占位**具备**，无占位缺失级缺口。
 机制面占位 = reserved（R-CLASSPATH-MERGE）+ REQ-0011（已实施）+ 上游原生缝隙；
-数据面占位 = `extensions.tsv` classpath 行（`kestra-auth-chain.jar` /
-`kestra-rbac-authorizer.jar` = 休眠 manifest 条目）。
+数据面占位 = `extensions.tsv` classpath 行（`kestra-rbac-authorizer.jar` = 休眠
+manifest 条目；认证线无契约——前置裁定②链一体化进 R-OIDC-SERVER）。
 缺口均为实施/实证级——R-CLASSPATH-MERGE 实施（承载，两线共同前置）与
 OQ-RBAC 1-4（r-ee-rbac.md §9）。
 
@@ -87,7 +86,7 @@ OQ-RBAC 1-4（r-ee-rbac.md §9）。
 |---|---|---|---|
 | R-CLASSPATH-MERGE | 通道② jar 承载机制（S6）。已立案待实施；选型 b + 定位裁定 2026-10-07。JVM 语义三组实证与设计约束见机制文档 §4 | 实施指令（认证链 jar 与 R-EE-RBAC 的共同前置） | 构建期仅注入 manifest Class-Path 条目元数据（jar 一律运行时挂载——构建期零外部扩展 jar）。manifest 条目 = 镜像↔部署契约。加 OQ2 剩余实证（bean 索引可见性）。零 patch 文件 |
 | R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 SecurityRule/Authorizer bean | 消费仓指名（kestra-oidc-provider 侧或未来授权扩展仓）+ 行为证据 + R-CLASSPATH-MERGE 落地 | 外部 classpath jar（S6）。预期零 overlay patch。实证含 SecurityRule 从 jar 注册。展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md) |
-| R-OIDC-SERVER | OAuth2/OIDC 授权服务器（Micronaut 生态标准实现，内嵌 webserver 形态）。**2026-10-07 裁定：定位为预留扩展点（patch 路线）**——协议稳定性 + 实现标准性 ⇒ 大粒度仍为薄层（新文件为主，BASE 升级冲突面小）；区别于 jar 路线的外部扩展实现；体现「overlay 先行，jar 路线跟随」模式 | 实施指令（维护者；不绑外部时序——基本原则） | patch 集（授权码流/PKCE/discovery/JWKS/token/client 与用户存储等，按 §3 需求对齐拆分）。**实施前置**：① 修订 §2 build 面条款（依赖引入）与 §3 薄 patch 语义（协议标准基础设施的大粒度新文件层）；② 裁定与 `kestra-auth-chain` 契约行的边界（一体化 or 并存）；③ 持久化设计——须持久用户/client 注册/JWKS 私钥（access token 为 JWT 免存）：复用现有 datasource（新表 ⇒ 随 §2 修订一并裁定 migration 面对 overlay 自有 schema 的适用性）/ settings 键值 / 静态配置声明，实施时定；④ **测试先行门（2026-10-07 增，安全敏感裁定）**——CI 增定向测试步（`:webserver:test --tests` 包前缀过滤，不跑上游全量）+ 镜像级 OIDC 流程黑盒（discovery/授权码+PKCE/token/JWKS/refresh/MCP 动态注册）；安全专项清单（redirect_uri 精确匹配、code 一次性、PKCE、alg=none 与混淆拒绝、JWKS 轮换、secret 哈希存储与日志不泄露、匿名面最小化、vanilla 回归）动刀前先评审；每需求 patch 与其测试同批落仓、门绿为 DoD；`[dsh]` 13/13 安全面测试可作移植底稿 |
+| R-OIDC-SERVER | OAuth2/OIDC 授权服务器（Micronaut 生态标准实现，内嵌 webserver 形态）。**2026-10-07 裁定：定位为预留扩展点（patch 路线）**——协议稳定性 + 实现标准性 ⇒ 大粒度仍为薄层（新文件为主，BASE 升级冲突面小）；区别于 jar 路线的外部扩展实现；体现「overlay 先行，jar 路线跟随」模式 | 实施指令（维护者；不绑外部时序——基本原则） | patch 集（授权码流/PKCE/discovery/JWKS/token/client 与用户存储等，按 §3 需求对齐拆分）。**前置裁定（2026-10-07）**：② 链一体化进 patch（`kestra-auth-chain` 契约退役；外部 IdP 场景走内置链配置）；③ 持久化 = 同 datasource 新表（postgres 起步，migration 进 patch——源码级 MigrationScript bean，F2 自动执行；h2/mysql 留待需求）。**剩余前置**：① 宪章修订（§2 build 面依赖开口 / §3 协议标准基础设施例外 / migration 面为 overlay 自有 schema 开口）；④ **测试先行门（2026-10-07 增，安全敏感裁定）**——CI 增定向测试步（`:webserver:test --tests` 包前缀过滤，不跑上游全量）+ 镜像级 OIDC 流程黑盒（discovery/授权码+PKCE/token/JWKS/refresh/MCP 动态注册）；安全专项清单（redirect_uri 精确匹配、code 一次性、PKCE、alg=none 与混淆拒绝、JWKS 轮换、secret 哈希存储与日志不泄露、匿名面最小化、vanilla 回归）动刀前先评审；每需求 patch 与其测试同批落仓、门绿为 DoD；`[dsh]` 13/13 安全面测试可作移植底稿 |
 
 ## 5. 复现命令（BASE 树内执行）
 
