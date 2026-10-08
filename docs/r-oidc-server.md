@@ -19,9 +19,11 @@
 ## 2. fork 参考协议（会话内维护者解禁，用途限定）
 
 - **路径**：`/Users/xuybin/dsh-monorepo/app-kestra`（仅此子模块；其余 dsh-monorepo 不读）。
-- **归因口径**：merge-base `f6dbbb49fe02ac18d2be88419df33083cf8a7256`（相对
-  `upstream/develop`）——fork 定制 diff 为唯一事实源（AGENTS §5.2；全量 diff 混上游演进，
-  陷阱 #6）。
+- **归因口径与用途边界（2026-10-07 修正）**：merge-base `f6dbbb49fe02ac18d2be88419df33083cf8a7256`
+  （相对 `upstream/develop`）圈定 fork 定制面。**两基分叉**（v2.0.5 @ 172dd0f3 与该
+  merge-base 互不为祖先，基间 webserver/core/cli/jdbc 演进 278 文件 +10595/-1628）⇒
+  定制 diff **只作规格参考**（端点/职责/表结构/测试语义），**禁止直接 diff 成 patch**
+  ——移植走 AGENTS §5.2「跨基移植规则」（漂移清单 + BASE 重写 + 逐文件核对，陷阱 #9）。
 - **纪律**：只作 `[dsh]` 证据与移植底稿，**不作路线图**；移植后漂移核对（§7）；
   判断依据只落差异表行 + 机制证据。
 
@@ -93,8 +95,13 @@ JWKS 缓存撕裂；轮换走双钥并存期）。免持久：access token（JWT
 
 ## 6. 实施顺序（定稿后执行）
 
-1. 临时实施文档（仓外，完成即删）：patch 需求拆分（discovery/授权码流+PKCE/token+
+1. **API 漂移清单**（动刀前工件）：fork oidc 模块的上游依赖类逐个三方核对 v2.0.5
+   （✅ 同签名 / ⚠️ 异签名需适配 / ❌ 需替代），含 Micronaut 平台版本核对。
+2. 临时实施文档（仓外，完成即删）：patch 需求拆分（discovery/授权码流+PKCE/token+
    JWKS/用户与 client 管理/链与登录/M-Face 集成）、文件清单、测试映射、顺序。
-2. §5.3 增量提交法逐需求出 patch（依赖行随首个需求 patch；每 patch 头部按 §3-7 四条件）。
-3. CI 定向测试门（`--tests` 包前缀）+ apply 链 + 镜像级黑盒；全绿为 DoD。
-4. 差异表 §2-A/§4、manifest、README 运行线随实施状态同步。
+3. §5.3 增量提交法在 v2.0.5 树**重写**（来源标注：「参考 fork 实现逻辑重写（跨基）」；
+   依赖行随首个需求 patch；每 patch 头部按 §3-7 四条件）。
+4. 双锚验证：安全清单 §5 全用例过（Testcontainers 真 PG）+ **逐文件**漂移核对
+   （diff 归因于基差或剥离项，不留抽样）。
+5. CI 定向测试门（`--tests` 包前缀）+ apply 链 + 镜像级黑盒；全绿为 DoD。
+6. 差异表 §2-A/§4、manifest、README 运行线随实施状态同步。

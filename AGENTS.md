@@ -170,6 +170,12 @@ git diff $MB HEAD --numstat -- <目录> # 逐文件定制量（ZERO = 上游内�
 ```
 对照法：新文件 `git cat-file -e upstream/develop:<path>` 判断「fork 新增 or 上游已有」。
 
+**跨基移植规则（2026-10-07 增补）**：fork 的编写基是 develop 分叉点，与 BASE（release）
+**分叉**（v2.0.5 与 merge-base f6dbbb49 互不为祖先，基间 278 文件 ±1.2 万行）。定制 diff
+即使归因正确也**不可直接作为 BASE 的 patch**——只作规格参考（端点/职责/表结构/测试语义）。
+移植 = 在 BASE 树按 §5.3 重写：动刀前产出 **API 漂移清单**（fork 依赖的上游类逐个三方
+核对 v2.0.5），patch 头部标「参考 fork 实现逻辑重写（跨基）」，移植后**逐文件**漂移核对。
+
 ### 5.3 patch 生成（增量提交法，禁止手写 hunk）
 ```bash
 cd /tmp/kestra-upstream && git checkout -q -b overlay-work
@@ -220,6 +226,7 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 | 6 | **fork↔release 全量 diff ≠ 定制面**（上游回移误判案：BasicAuthService/RequestUtils/CookiesConfiguration/NotFoundHeadersFilter 纯回移 + ErrorController/MiscController/UiIndexService 大半回移，占原 patch 集 2/3） | 2026-10-07 审计，§5.2 已固化求法 |
 | 7 | TenantAliasingRooter 不得用路由级负向前瞻 regex（Micronaut UriTemplateMatcher 直接抛异常起不来） | fork 实证（原注记随 REQ-0020 删除，教训保留） |
 | 8 | 需求对齐 patch 可能有**先后坐标依赖**（历史实例：0021 的 filter hunk 基于 0020 应用后的状态，该对 patch 已随范围收窄删除）：apply 必须**逐 patch「check→apply」交替**，不能先对干净树全量 --check 再统一 apply（旧独立 patch 集的习惯，2026-10-07 CI 实证挂法） | build.sh 修复提交 + check-patches.sh [8] 一贯正确 |
+| 9 | **跨基移植陷阱**：fork 定制 diff（对 develop）不能直接当 BASE（release）的 patch——即使归因正确，编写基不同（v2.0.5 与 merge-base 互不为祖先，已实证分叉 ±1.2 万行）。必须逻辑级移植：API 漂移清单 + BASE 树重写 + 逐文件漂移核对（§5.2 跨基移植规则） | 2026-10-07 维护者指正 + fork 仓 merge-base --is-ancestor 实证 |
 
 ## 9. 变更纪律
 
