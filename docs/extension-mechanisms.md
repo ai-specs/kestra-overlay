@@ -9,8 +9,8 @@
 
 | 通道 | 是什么 | 重编译 kestra？ | 要外部 jar？ | 要重启？ | 生效时机 | 对应 |
 |---|---|---|---|---|---|---|
-| ① 源码 patch | 改上游源码（webserver M 面） | **要**（overlay CI 重编 executableJar + 重建镜像） | 否 | **要** | 构建期 | 本仓 1 个 patch（REQ-0011） |
-| ② classpath jar | 扩展 jar 与 fat jar 同 classpath，bean 进 Micronaut 上下文 | 否（扩展仓独立编译，带 micronaut 注解处理 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体可烤进或运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b，见 §4） | **要**（F2） | 启动期 | kestra-oidc-provider 认证链 jar、R-EE-RBAC SecurityRule jar（IdP 进程独立成镜像） |
+| ① 源码 patch | 改上游源码（webserver M 面） | **要**（overlay CI 重编 executableJar + 重建镜像） | 否 | **要** | 构建期 | 本仓 1 个 patch（REQ-0011）；预留 R-OIDC-SERVER（授权服务器，patch 路线——2026-10-07 裁定） |
+| ② classpath jar | 扩展 jar 与 fat jar 同 classpath，bean 进 Micronaut 上下文 | 否（扩展仓独立编译，带 micronaut 注解处理 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体可烤进或运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b，见 §4） | **要**（F2） | 启动期 | 认证链 jar（契约 `kestra-auth-chain.jar`）+ R-EE-RBAC SecurityRule jar（契约 `kestra-rbac-authorizer.jar`）。授权服务器不走此通道——R-OIDC-SERVER 为 patch 路线预留扩展点（2026-10-07 裁定） |
 | ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins；部署注入 = `-v ./plugins:/app/plugins` 或 `-e KESTRA_PLUGINS_PATH=/挂载点`，重启生效——F4 ①） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开 → 否（API 装即时注册）；关 → 要 | 启动期；auto-install 开时即时 | 无活跃插件客户（`extensions.tsv`） |
 | ④ 部署配置 | yml/env（`KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`） | 否 | 否 | **要**（配置绑定在 bean 创建期） | 启动期 | kestra-oidc-provider 端点门（前提 = 认证链 jar 进镜像） |
 | ⑤ 运行时 settings | settings 存储（API 写入的键值） | 否 | 否 | **否**（按调用读库） | 即时 | REQ-0011 兜底语义（settings 缺席 → fallback） |

@@ -41,8 +41,10 @@ kestra 侧**薄 overlay 构建仓**。CI 流程：
 1 个 patch：**0011-oidc-login-boot**（/configs OIDC 登录引导激活点；core；消费仓
 kestra-oidc-provider）。
 
-2 条 reserved：**R-CLASSPATH-MERGE**（通道② jar 承载，认证链与 RBAC 的共同前置，
-选型 b 已裁定）与 **R-EE-RBAC**（外部细粒度授权，预期零 patch）。
+3 条 reserved：**R-CLASSPATH-MERGE**（通道② jar 承载，链与 RBAC 的共同前置，
+选型 b 已裁定）、**R-EE-RBAC**（外部细粒度授权，jar 路线，预期零 patch）与
+**R-OIDC-SERVER**（OAuth2/OIDC 授权服务器，**patch 路线**预留扩展点——协议稳定 +
+实现标准 ⇒ 大粒度薄层，2026-10-07 裁定）。
 总账见 `patches/manifest.tsv`（check-patches.sh 强校验一致性）。
 
 ## CI（overlay-build）
