@@ -49,6 +49,12 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 1. **kestra-oidc-provider**（不含 MCP 面——REQ-0010 与差异表 MCP 域行已删）；
 2. **R-EE-RBAC**（`docs/r-ee-rbac.md`，外部细粒度授权能力）。
 
+认证线含一项预留扩展点：**R-OIDC-SERVER**（OAuth2/OIDC 授权服务器，Micronaut 生态
+标准实现，patch 路线——2026-10-07 裁定）。裁定理由：协议稳定性 + 实现标准性 ⇒
+大粒度仍为薄层（新文件为主，BASE 升级冲突面小）；它区别于 jar 路线的外部扩展实现。
+本仓模式 = **overlay 先行**（镜像扩展、classpath 契约、运行扩展点先行约定），
+jar 路线跟随。
+
 apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
 （R-APP-ROUTER/R-NFH-ANCHOR/R-AI-PROVIDERS/R-UI-EDITION-GATE，含更早收回的 R-MIG-DSH）
 已删除，git 历史即归档；重启任一域须按 §2 入口**重新接收**（先补差异表行 + 客户证据），
