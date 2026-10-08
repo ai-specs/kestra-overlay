@@ -165,8 +165,9 @@ R-EE-RBAC SecurityRule jar 都卡在这里（差异表 §1-S6 统一口径）。
 
 **交付形态（唯一模式 = 运行时挂载；manifest 条目 = 镜像 ↔ 部署的唯一契约）**：
 构建期唯一动作 = 注入 manifest 条目（zip 级元数据，非 jar 字节）；条目来源 =
-`extensions.tsv` 的 classpath 行（约定文件名）。jar 本体由部署侧挂载
-`-v $PWD/libs:/app/libs`（缺席 = 静默休眠，实证 1；文件名须与条目一致；挂载后需重启——F2）。
+`extensions.tsv` 的 classpath 行（现有两行占位：`kestra-auth-chain.jar`〔认证线〕/
+`kestra-rbac-authorizer.jar`〔授权线〕——缺席=静默休眠，见实证 1）。jar 本体由部署侧
+挂载 `-v $PWD/libs:/app/libs`（文件名须与条目一致；挂载后需重启——F2）。
 可复现性 = manifest 条目（构建期固定）+ 部署侧 jar 版本固定。
 
 落选记录：(a) fat jar 解包合并——需复刻 mergeServiceFiles 语义，产物不可与上游逐字节对照，

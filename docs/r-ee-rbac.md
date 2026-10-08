@@ -86,10 +86,15 @@ API base 校准：`/api/v1/main/flows/search` → 200（会话有效）；`/conf
 | 层 | 内容 | 归属 | 通道 |
 |---|---|---|---|
 | ① | 扩展 jar 进镜像的承载机制 | **本仓骨架**（R-CLASSPATH-MERGE，已立案待实施，机制文档 §4） | ② 前置 |
-| ② | 认证链（micronaut-security）+ `intercept-url-map` 全局认证门 | kestra-oidc-provider jar + 部署配置 | ②+④ |
+| ② | 认证链（micronaut-security）+ `intercept-url-map` 全局认证门 | 认证链 jar + 部署配置 | ②+④ |
 | ③ | 细粒度判定：SecurityRule（或等价 Authorizer）bean，(资源，动作，namespace) → allow/deny | 扩展仓 jar（角色模型在此层） | ② |
 
 依赖链 ①→②→③，逐层可验收（② 即差异表 §2-B-1 最小端点门）。
+
+**数据面占位（已立，2026-10-07）**：`extensions.tsv` 的 classpath 行 `kestra-rbac-authorizer`
+——约定文件名 `kestra-rbac-authorizer.jar` 即 R-CLASSPATH-MERGE 落地后的 manifest
+Class-Path 条目（休眠占位：缺席=静默休眠；外部仓按约构建、挂载 `/app/libs`、重启生效）。
+认证链同法占位：`kestra-auth-chain.jar`。
 
 ## 6. overlay patch 面
 

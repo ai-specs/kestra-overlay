@@ -69,6 +69,9 @@
 ```
 
 **扩展点充分性审查（2026-10-07，按基本原则）**：两线占位**具备**，无占位缺失级缺口。
+机制面占位 = reserved（R-CLASSPATH-MERGE）+ REQ-0011（已实施）+ 上游原生缝隙；
+数据面占位 = `extensions.tsv` classpath 行（`kestra-auth-chain.jar` /
+`kestra-rbac-authorizer.jar` = 休眠 manifest 条目）。
 缺口均为实施/实证级——R-CLASSPATH-MERGE 实施（承载，两线共同前置）与
 OQ-RBAC 1-4（r-ee-rbac.md §9）。
 
