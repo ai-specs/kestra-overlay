@@ -6,6 +6,11 @@
 > 303 转 GET、浏览器经配置进入框架 OAuth2 客户端；REQ-0131 内置 issuer 的 discovery
 > 直接复用生产元数据，避免启动监听前本机 HTTP 请求失败。原版 UI 必须随 jar 打包。
 > 剩余：REQ-0140（用户管理端点 + F1/C3/F2 专项）。浏览器链最终验收以新 CI 为准。
+> 本轮本地证据：6-patch BASE 重放、42 定向用例、原版 UI 构建、executableJar，
+> 协议黑盒 30 PASS；UI/OIDC HTTP 链黑盒全绿；ego-browser 实测 localhost:8080
+> 输入 tester 后显示 Overview，认证 cookie 请求 `/api/v1/configs` 返回 200。
+> 测试账号由黑盒向真实 PostgreSQL 写入 bcrypt 凭据；当前配置 `users` 尚无自动
+> 初始化实现，不能据此宣称部署配置已自动生成内置账号。
 > **归属**：`docs/oss-ee-gap.md` §2-A/§4 R-OIDC-SERVER 行的展开；宪章依据 AGENTS §0 归属
 > 例外、§2 三处例外、§3-7、§4 测试同批。
 > **一句话**：以 patch 路线在 webserver 内内置 OAuth2/OIDC 授权服务器 + 认证链（一体化），

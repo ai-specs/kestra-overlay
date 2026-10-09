@@ -19,6 +19,12 @@
 > （AGENTS.md §0·基本原则）。
 > 裁定全文与重启规则见 `AGENTS.md` §0。其余域的历史调查存 git 历史。
 
+> **2026-10-09 浏览器链验证**：R-OIDC-SERVER 增 REQ-0131（内置 issuer discovery
+> 启动适配，外部 issuer 仍走框架 discovery）；REQ-0120/0130 修复授权回跳与 POST 后
+> 303。BASE 原版 UI 必须打包。复现：`bash scripts/local-ci.sh`、
+> `bash scripts/blackbox-ui-oidc.sh <image>`；后者验收 UI 拦截→框架 OAuth2 客户端→
+> 内置用户名密码→PKCE 授权码→真实 token 交换→认证 UI/API。保留原协议黑盒门。
+
 ## 1. EE 的交付机制 = overlay 可用的架构缝隙（穷尽列举）
 
 此表是机制事实（缝隙分类学），与域无关。两个活跃事项踩在 S6/S8 上。
