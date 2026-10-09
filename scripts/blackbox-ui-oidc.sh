@@ -7,6 +7,7 @@ BASE="http://localhost:$PORT"
 NET="kestra-ui-bb-$$"
 PG="kestra-ui-pg-$$"
 SERVER="kestra-ui-bb-$$"
+SETUP_MODE="${BB_SETUP_MODE:-form}"
 TEMP_DIR=$(mktemp -d)
 
 cleanup() {
@@ -92,7 +93,7 @@ micronaut:
       clients:
         kestra:
           client-id: kestra-ui
-          client-secret: local-ui-secret
+          client-secret: \${KESTRA_OIDC_UI_CLIENT_SECRET}
           scopes: [openid, profile, email]
           openid:
             issuer: $BASE
@@ -103,8 +104,15 @@ micronaut:
               enabled: false
 YAML
 
+BOOTSTRAP_ENV=(-e KESTRA_OIDC_BOOTSTRAP_USERNAME= -e KESTRA_OIDC_UI_CLIENT_SECRET=local-ui-secret)
+if [ "$SETUP_MODE" = env ]; then
+  BOOTSTRAP_ENV=(-e KESTRA_OIDC_UI_CLIENT_SECRET=local-ui-secret -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd!' \
+    -e KESTRA_OIDC_BOOTSTRAP_EMAIL=tester@local.test -e KESTRA_OIDC_BOOTSTRAP_NAME=Tester)
+elif [ "$SETUP_MODE" != form ]; then
+  echo 'FAIL: BB_SETUP_MODE must be form or env'; exit 1
+fi
 docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" \
-  -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
+  "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
 for attempt in $(seq 1 60); do
   status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)
@@ -113,14 +121,24 @@ for attempt in $(seq 1 60); do
 done
 if [ "$READY" != 1 ]; then docker logs "$SERVER"; exit 1; fi
 
-docker exec -i "$PG" psql -U kestra -d kestra -q -v ON_ERROR_STOP=1 <<SQL
-INSERT INTO oidc_user (username,name,email,roles) VALUES ('tester','Tester','tester@local.test','["user"]');
-INSERT INTO oidc_user_auth_method (user_id,type,credential)
-VALUES ('tester','PASSWORD','\$2a\$10\$Y9P9MR2I8ahJ8av5GEvAGusUNsPvSuXcGLXJwVthfYy8x6K89YtN2');
-INSERT INTO oidc_client (client_id,client_secret,redirect_uris,grant_types,scopes)
-VALUES ('kestra-ui','local-ui-secret','["$BASE/oauth/callback/kestra"]',
-  '["authorization_code","refresh_token"]','["openid","profile","email"]');
-SQL
+if [ "$SETUP_MODE" = form ]; then
+  if [ "${BB_BROWSER:-0}" = 1 ]; then
+    BB_BROWSER_SETUP=1 BB_BROWSER_BASE="$BASE" node "$(dirname "$0")/blackbox-ui-browser.cjs"
+  else
+    assert_status "empty directory offers setup" 200 "$(request "$BASE/oidc/setup")"
+    SETUP_CSRF=$(node -e 'const fs=require("fs");const html=fs.readFileSync(process.argv[1],"utf8");const match=html.match(/name="csrf" value="([^"]+)"/);if(!match)process.exit(1);process.stdout.write(match[1])' "$TEMP_DIR/body")
+    assert_status "setup rejects cross-origin POST" 403 "$(curl -s -b "$TEMP_DIR/cookies" -H 'Origin: https://attacker.example' \
+      --data-urlencode "csrf=$SETUP_CSRF" -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+    assert_status "setup creates OIDC user and UI client" 303 "$(request -H "Origin: $BASE" \
+      --data-urlencode "csrf=$SETUP_CSRF" --data-urlencode username=tester --data-urlencode name=Tester \
+      --data-urlencode email=tester@local.test --data-urlencode 'password=Passw0rd!' "$BASE/oidc/setup")"
+  fi
+else
+  assert_status "environment bootstrap skips setup" 302 "$(request "$BASE/oauth/login/kestra")"
+fi
+assert_status "setup closed after initialization" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+HASH_BEFORE=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
+[[ "$HASH_BEFORE" == '$2a$'* ]] || { echo 'FAIL: password must be bcrypt'; exit 1; }
 
 assert_status "anonymous API is denied" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
 assert_status "UI interception" 307 "$(request -H 'Accept: text/html' "$BASE/ui/")"
@@ -152,10 +170,12 @@ assert_status "browser cookie authenticates API" 200 "$(request "$BASE/api/v1/co
 assert_status "Basic Auth endpoint is disabled" 404 "$(curl -s -b "$TEMP_DIR/cookies" -o /dev/null -w '%{http_code}' "$BASE/api/v1/basicAuthValidationErrors")"
 TOKEN_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc \
   "SELECT count(*) FROM oidc_token WHERE client_id='kestra-ui' AND subject='tester' AND token_type IN ('access','refresh')")
-assert_status "real access and refresh tokens persisted" 2 "$TOKEN_COUNT"
+[[ "$TOKEN_COUNT" -ge 2 ]] || { echo 'FAIL: real tokens not persisted'; exit 1; }
+echo 'PASS: real access and refresh tokens persisted'
 USED_CODE=$(docker exec "$PG" psql -U kestra -d kestra -Atc \
   "SELECT count(*) FROM oidc_authorization_code WHERE client_id='kestra-ui' AND used=true")
-assert_status "authorization code consumed" 1 "$USED_CODE"
+[[ "$USED_CODE" -ge 1 ]] || { echo 'FAIL: authorization code not consumed'; exit 1; }
+echo 'PASS: authorization code consumed'
 assert_status "authenticated dashboard refresh" 200 "$(request "$BASE/ui/dashboards")"
 assert_status "authenticated navigation" 200 "$(request "$BASE/ui/main/flows")"
 CSRF=$(awk '$6=="csrfToken" {print $7}' "$TEMP_DIR/cookies")
@@ -175,4 +195,13 @@ assert_status "invalid OIDC cookie cannot authenticate" 401 "$(curl -s -H 'Cooki
 if [ "${BB_BROWSER:-0}" = 1 ]; then
   BB_BROWSER_BASE="$BASE" node "$(dirname "$0")/blackbox-ui-browser.cjs"
 fi
+docker restart "$SERVER" >/dev/null
+for attempt in $(seq 1 60); do
+  status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)
+  [ "$status" = 200 ] && break
+  sleep 5
+done
+assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
+assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
 echo 'UI OIDC BLACKBOX ALL GREEN'

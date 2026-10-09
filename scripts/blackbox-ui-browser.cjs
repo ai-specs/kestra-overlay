@@ -8,6 +8,15 @@ async function main() {
         const context = await browser.newContext();
         const page = await context.newPage();
         await page.goto(`${base}/ui/`);
+        if (process.env.BB_BROWSER_SETUP === '1') {
+            await page.waitForURL(`${base}/oidc/setup`);
+            await page.locator('input[name=username]').fill('tester');
+            await page.locator('input[name=name]').fill('Tester');
+            await page.locator('input[name=email]').fill('tester@local.test');
+            await page.locator('input[name=password]').fill('Passw0rd!');
+            await page.locator('button[type=submit]').click();
+            console.log('BROWSER FIRST-INSTALL OIDC SETUP COMPLETE');
+        }
         await page.waitForURL(`${base}/oidc/login?**`);
         await page.locator('input[name=username]').fill('tester');
         await page.locator('input[name=password]').fill('wrong-password');
@@ -32,6 +41,8 @@ async function main() {
         await page.waitForURL(`${base}/oidc/login?**`);
         const deniedStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
         if (deniedStatus !== 401) throw new Error(`logged-out API returned ${deniedStatus}`);
+        const setupStatus = await page.evaluate(async () => (await fetch('/oidc/setup')).status);
+        if (setupStatus !== 404) throw new Error(`completed setup remains open (${setupStatus})`);
         console.log('BROWSER OIDC LOGIN, REFRESH, NAVIGATION AND LOGOUT ALL GREEN');
     } finally {
         await browser.close();

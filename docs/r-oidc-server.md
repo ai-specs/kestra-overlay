@@ -38,7 +38,8 @@ cookie 后重认证、退出同时清应用与 IdP 会话、退出后 UI/API 拒
 Basic Auth 登录/退出端点不得认证或改变会话，旧 Basic Auth cookie 不得放行。
 UI 认证检测通过服务端受保护端点，401 后进入 OIDC 客户端；避免 SPA Basic Auth 登录页。
 
-内置账号配置初始化仍未实现，当前验收显式写真实 PG bcrypt 测试账号；此限制保持公开。
+REQ-0133 实现引导与环境变量一次性初始化；旧 `kestra.oidc.users` 预留模型不使用。
+首个 UI client 自动按客户端配置注册，无需人工 SQL。用户管理 API 仍待独立实施。
 
 REQ-0132 实施证据：UI 不再在 OIDC 模式检查旧标志，受保护 `/configs` 成功后
 更新内存状态；刷新重新验证，401 进入框架 OAuth2 客户端。旧 API 登录/退出/setup
@@ -58,8 +59,9 @@ access-token userinfo 验证的回退日志，本轮有效 JWT 刷新实测仍�
 > 本轮本地证据：6-patch BASE 重放、42 定向用例、原版 UI 构建、executableJar，
 > 协议黑盒 30 PASS；UI/OIDC HTTP 链黑盒全绿；ego-browser 实测 localhost:8080
 > 输入 tester 后显示 Overview，认证 cookie 请求 `/api/v1/configs` 返回 200。
-> 测试账号由黑盒向真实 PostgreSQL 写入 bcrypt 凭据；当前配置 `users` 尚无自动
-> 初始化实现，不能据此宣称部署配置已自动生成内置账号。
+> REQ-0133 同批增加 10 个首装/环境变量/事务并发/CSRF 用例（总 54），镜像黑盒
+> 分别从空库走真实安装表单与环境变量跳过；真实 OIDC 登录/刷新/导航/退出/重启
+> 验收。CI Chromium 直接填写首装表单，测试不再用 SQL 预置首个用户与 UI client。
 > **归属**：`docs/oss-ee-gap.md` §2-A/§4 R-OIDC-SERVER 行的展开；宪章依据 AGENTS §0 归属
 > 例外、§2 三处例外、§3-7、§4 测试同批。
 > **一句话**：以 patch 路线在 webserver 内内置 OAuth2/OIDC 授权服务器 + 认证链（一体化），

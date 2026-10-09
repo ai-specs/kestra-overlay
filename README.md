@@ -37,14 +37,11 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 
 ### OIDC 账号与 OAuth client 契约
 
-**首次引导实施中（REQ-0133）**：下一版以 `/oidc/setup` 初始化 OIDC 用户和 UI client，
-或使用 `KESTRA_OIDC_BOOTSTRAP_USERNAME/PASSWORD/EMAIL/NAME` 跳过表单。完成前，
-下文 SQL 是当前版本路径；实施完成后会更新本节，不以计划描述已交付能力。
-
 镜像内置 **OIDC 服务器、用户目录和 client 注册能力**，不预装默认账号、密码或
-固定 OAuth client。首次启动会创建 PostgreSQL 表，不会自动创建用户/client。
-`kestra.oidc.users` 目前只有配置模型，**尚无自动初始化实现，填写它不会生成账号**；
-用户/client 管理 API 也尚未交付。当前部署必须在启动迁移后显式初始化数据库。
+固定 OAuth client。空库首次访问 `/ui/` 会进入 **OIDC 安装引导 `/oidc/setup`**，
+设置首个用户名、显示名、邮箱和密码；服务端同时注册配置中的 UI client。
+也可以加载下表环境变量跳过引导。两种方式均不需要人工 SQL 创建首个用户/client。
+`kestra.oidc.users` 是旧的预留配置模型，不作为初始化入口；使用下述引导/环境变量。
 
 | 名称 | 含义与约束 |
 |---|---|
@@ -54,7 +51,7 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 | client secret | 部署方自行生成；配置值与注册表必须一致；当前 client 表保存 secret 原值，应限制数据库访问 |
 | redirect URI | 必须精确注册，例如 `http://localhost:8080/oauth/callback/kestra`；含协议、域名、端口和路径 |
 | 外部项目 client | 每个应用单独注册 client ID/secret/回调；不要复用 UI client 的凭据与回调 |
-| 测试账号 | CI 使用 `tester / Passw0rd!`、`kestra-ui / local-ui-secret`，由测试向真实 PG 写入；不是镜像默认凭据 |
+| 测试账号 | CI 使用 `tester / Passw0rd!`、`kestra-ui / local-ui-secret`，分别通过真实表单/环境变量初始化；不是镜像默认凭据 |
 
 UI 使用 **OIDC Authorization Code + PKCE S256**，服务端 confidential client 换 token，
 浏览器用 HttpOnly 认证 cookie。OIDC 模式完全停用 Basic Auth；不在 UI Basic Auth
@@ -62,8 +59,9 @@ UI 使用 **OIDC Authorization Code + PKCE S256**，服务端 confidential clien
 
 ### compose 示例（内置 OIDC + UI）
 
-下例用于本机 `http://localhost:8080`。将 `replace-with-your-client-secret` 替换为部署方
-生成的 secret，并使用相同值注册 client。生产部署同时更换公开 URL/issuer/精确回调 URI；
+下例用于本机 `http://localhost:8080`。启动前设置部署方生成的
+`KESTRA_OIDC_UI_CLIENT_SECRET`；首次初始化会自动按配置注册 UI client。
+生产部署同时更换公开 URL/issuer；首次注册的精确回调由 issuer 与客户端名称推导。
 公开 issuer 必须可被用户和消费应用访问。数据库密码也由部署方设置。
 
 ```yaml
@@ -90,6 +88,11 @@ services:
       - ./plugins:/app/plugins   # 插件 jar（重启生效）
       - ./libs:/app/libs         # classpath 契约 jar（重启生效；状态见「扩展能力」表）
     environment:
+      KESTRA_OIDC_UI_CLIENT_SECRET: "${KESTRA_OIDC_UI_CLIENT_SECRET:?Set a UI client secret}"
+      KESTRA_OIDC_BOOTSTRAP_USERNAME: "${KESTRA_OIDC_BOOTSTRAP_USERNAME:-}"
+      KESTRA_OIDC_BOOTSTRAP_PASSWORD: "${KESTRA_OIDC_BOOTSTRAP_PASSWORD:-}"
+      KESTRA_OIDC_BOOTSTRAP_EMAIL: "${KESTRA_OIDC_BOOTSTRAP_EMAIL:-}"
+      KESTRA_OIDC_BOOTSTRAP_NAME: "${KESTRA_OIDC_BOOTSTRAP_NAME:-}"
       KESTRA_CONFIGURATION: |
         datasources:
           postgres:
@@ -141,7 +144,7 @@ services:
               clients:
                 kestra:
                   client-id: kestra-ui
-                  client-secret: replace-with-your-client-secret
+                  client-secret: $${KESTRA_OIDC_UI_CLIENT_SECRET}
                   scopes: [openid, profile, email]
                   openid:
                     issuer: http://localhost:8080
@@ -159,8 +162,8 @@ volumes:
 
 运行说明：
 
-- **认证**：上例启用完整 OIDC 链，关闭 Basic Auth；启动后须按下一节初始化账号/client，
-  再访问 `/ui/`。OIDC 未启用时才保留上游 vanilla Basic Auth 行为。
+- **认证**：上例启用完整 OIDC 链，关闭 Basic Auth；首次访问 `/ui/` 完成引导，
+  或预置初始化环境变量跳过表单。OIDC 未启用时才保留上游 vanilla Basic Auth 行为。
 - 主端口 **8080**（API 与原版 UI，入口 `/ui/`）。**8081** 是 management
   端点：缺省不暴露、**无鉴权**，仅开发用途。
 - 配置只经 `KESTRA_CONFIGURATION` 环境变量进入；改配置、加插件、挂 jar 都**需重启**。
@@ -169,9 +172,48 @@ volumes:
   预置属主所致——`docker run --rm -v <项目名>_kestra-data:/data alpine chown -R 1000:1000 /data`
   一次性修复，或使用已修复构建（2026-10-09 后）。
 
-### 首次初始化账号与 client
+### 首次安装：网页引导或环境变量
 
-1. 将示例保存为 `compose.yml`，执行 `docker compose up -d`。
+网页方式：设置 `KESTRA_OIDC_UI_CLIENT_SECRET`，`docker compose up -d` 后访问 `/ui/`。
+空目录进入 `/oidc/setup`，填写用户名、密码（至少 8 字符，最多 72 UTF-8 字节）；
+显示名、邮箱可选。提交成功后创建账号、bcrypt 凭据与 UI client，再进入 OIDC 登录。
+首个用户具有 `admin` 角色声明；细粒度 RBAC 仍由独立授权能力提供，不能将声明当作已交付 RBAC。
+
+无人值守方式：在启动镜像时加载这些环境变量（上例 compose 已接入）：
+
+| 环境变量 | 用途 |
+|---|---|
+| `KESTRA_OIDC_BOOTSTRAP_USERNAME` | 首个 OIDC 登录名；与 password 必须成对提供 |
+| `KESTRA_OIDC_BOOTSTRAP_PASSWORD` | 首次密码；运行时 bcrypt 后持久化，不保存明文用户密码 |
+| `KESTRA_OIDC_BOOTSTRAP_EMAIL` | 可选邮箱 |
+| `KESTRA_OIDC_BOOTSTRAP_NAME` | 可选显示名，缺省使用登录名 |
+| `KESTRA_OIDC_UI_CLIENT_SECRET` | 示例 compose 的 UI client secret 环境变量，经配置映射给 Micronaut 客户端；引导/无人值守两种方式都需要 |
+
+```bash
+export KESTRA_OIDC_UI_CLIENT_SECRET="$(openssl rand -hex 32)"
+export KESTRA_OIDC_BOOTSTRAP_USERNAME='your-login-name'
+export KESTRA_OIDC_BOOTSTRAP_PASSWORD='choose-your-own-password'
+export KESTRA_OIDC_BOOTSTRAP_EMAIL='you@example.org'
+export KESTRA_OIDC_BOOTSTRAP_NAME='Your Name'
+docker compose up -d
+```
+
+初始化在首次访问 UI/OIDC 客户端入口时执行；提供环境变量后直接进入登录，不显示安装表单。
+首次事务原子创建用户、凭据、UI client 与完成标记；并发安装只允许一次成功。
+重启或改 bootstrap 环境变量不会覆盖已有密码/client。完成后 `/oidc/setup` GET/POST
+返回 404，删除用户也不会重新开放匿名引导；密码恢复/账号管理不能靠清空表实现。
+已有用户部署首次升级保留账号，并关闭引导；若同名 client 与配置冲突，初始化拒绝，
+不静默覆盖 secret/回调。不要在后续启动时随机重生成已经注册的 UI secret。
+
+下例 client 配置名为 `kestra`，client ID 为 `kestra-ui`，精确回调为
+`http://localhost:8080/oauth/callback/kestra`。自定义客户端配置名称时设置
+`kestra.oidc.bootstrap.client-name`，同时对齐 unauthorized URL 与 callback 路径。
+
+### 高级：手工注册外部账号/client（可选）
+
+首次用户与 UI client 使用上一节即可；本节仅用于显式注册其他账号或消费应用。
+
+1. 启动配置好的 `compose.yml`：`docker compose up -d`。
 2. 等待 `curl --fail http://localhost:8080/.well-known/openid-configuration` 成功，确认迁移完成。
 3. 用 bcrypt 工具生成自己密码的 `$2a$` 哈希。下例需要 Python 3 与 `bcrypt` 包
    （`python3 -m pip install bcrypt`），密码通过交互读取：
@@ -233,7 +275,7 @@ client ID、client secret（confidential client）、redirect URI、`openid prof
 | 部署配置通道 | 已生效（同上游） | `KESTRA_CONFIGURATION` 全量可用（含 basic-auth） |
 | classpath jar 承载 | **契约已约定，承载待实施** | 实施后：`/app/libs` 挂载的契约 jar 进入应用 classpath（见下）。实施前挂载**不生效** |
 | 端点门（intercept-url-map） | **已生效，须配置** | 启用 `micronaut.security.enabled: true` 与 `filter.enabled: true`，按上例配置匿名协议入口及受保护 UI/API |
-| 内置 OAuth2/OIDC 授权服务器 + 认证链 | **已生效** | REQ-0100~0132：协议端点、PKCE 授权码、内置登录与完整 UI 认证链；无预置用户/client，初始化见上；管理 API/配置自动初始化仍待实施 |
+| 内置 OAuth2/OIDC 授权服务器 + 认证链 | **已生效** | REQ-0100~0133：协议端点、PKCE 授权码、完整 UI 认证与首次引导/环境变量初始化；无预置账号；管理 API 仍待实施 |
 | 外部细粒度授权对接点 | 预留 | SecurityRule/Authorizer bean jar 的对接（契约名见下） |
 
 ## 扩展能力 × 集成契约（同一条运行线）
@@ -243,7 +285,7 @@ client ID、client secret（confidential client）、redirect URI、`openid prof
 同一能力半的实现可互换（内置服务器 ↔ 外部 IdP）。当前约定的运行线：
 
 ```
-R-OIDC-SERVER：内置授权服务器 + 认证链（协议/UI 链已生效；管理与自动初始化待实施）
+R-OIDC-SERVER：内置授权服务器 + 认证链（协议/UI/首次引导/环境初始化已生效；管理 API 待实施）
                                       → 认证能力：
                                           ① OIDC 登录引导字段（已生效，/api/v1/configs/login）
                                           ② 认证链 + ③ 端点门（已生效；

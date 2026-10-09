@@ -71,3 +71,4 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/oidc-browser" playwright@1.61.1
           "$RUNNER_TEMP/oidc-browser/node_modules/.bin/playwright" install --with-deps chromium
           bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+          BB_SETUP_MODE=env bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins

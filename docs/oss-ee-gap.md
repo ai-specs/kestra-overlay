@@ -28,6 +28,8 @@
 > 新版本 DoD 仍以本地重放与对应新 CI 全绿为准。
 > REQ-0133 已接收：首次安装引导/环境变量一次性初始化 OIDC 用户与 UI client，
 > 属 R-OIDC-SERVER 认证基础设施；实现与安全验收契约先写入 r-oidc-server.md §0。
+> REQ-0133 已实现：网页引导/环境变量初始化共用事务，自动注册 UI client，完成状态
+> 持久化；本地空库两路径与浏览器首装登录实测通过，最终以对应新 CI 为准。
 
 > **2026-10-09 浏览器链验证**：R-OIDC-SERVER 增 REQ-0131（内置 issuer discovery
 > 启动适配，外部 issuer 仍走框架 discovery）；REQ-0120/0130 修复授权回跳与 POST 后

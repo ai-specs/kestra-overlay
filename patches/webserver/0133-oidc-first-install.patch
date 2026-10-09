@@ -1,0 +1,644 @@
+# 需求：REQ-0133 空库 OIDC 首次安装引导与环境变量跳过；一次性创建 OIDC
+#   用户/bcrypt 凭据/UI client/持久化完成标记，完成后进入真实 OIDC 登录。
+# 消费扩展仓：—（R-OIDC-SERVER patch 路线）
+# 状态：core
+# 来源：新写；依据 OIDC Core、RFC6749/7636、OWASP CSRF Prevention Cheat Sheet；
+#   Micronaut 4.10.18 环境配置、PostgreSQL 事务锁。无客户业务/默认账号/固定 secret。
+# 触达上游文件（7）：setup service/controller/filter、migration bean+SQL、两份验收测试。
+# 移除条件：上游 OSS 原生提供等价 OIDC 首次安装与配置初始化或 R-OIDC-SERVER 弃用。
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupController.java
+new file mode 100644
+index 0000000..7575ba5
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupController.java
+@@ -0,0 +1,149 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.security.SecureRandom;
++import java.time.Instant;
++import java.util.Base64;
++import java.util.Map;
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
++
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.MediaType;
++import io.micronaut.http.annotation.Body;
++import io.micronaut.http.annotation.Consumes;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.http.annotation.Post;
++import io.micronaut.http.annotation.Produces;
++import io.micronaut.http.cookie.Cookie;
++import io.micronaut.http.cookie.SameSite;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++
++@Controller("/oidc/setup")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@ExecuteOn(TaskExecutors.IO)
++public class OidcSetupController {
++    private final OidcSetupService setup;
++    private final OidcConfiguration configuration;
++    private final byte[] csrfKey = new byte[32];
++
++    public OidcSetupController(final OidcSetupService setup, final OidcConfiguration configuration) {
++        this.setup = setup;
++        this.configuration = configuration;
++        new SecureRandom().nextBytes(csrfKey);
++    }
++
++    @Get
++    @Produces(MediaType.TEXT_HTML)
++    public HttpResponse<?> page(final HttpRequest<?> request) {
++        try {
++            if (setup.ready()) {
++                return HttpResponse.notFound();
++            }
++            final String token = token();
++            return HttpResponse.ok(html(token, ""))
++                .contentType(MediaType.TEXT_HTML_TYPE)
++                .header("Cache-Control", "no-store")
++                .cookie(Cookie.of("oidc_setup_csrf", token).path("/oidc/setup").httpOnly(true)
++                    .secure(request.isSecure()).sameSite(SameSite.Strict).maxAge(600));
++        } catch (IllegalArgumentException | IllegalStateException exception) {
++            return HttpResponse.serverError("OIDC initialization configuration is invalid");
++        }
++    }
++
++    @Post
++    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
++    public HttpResponse<?> submit(final HttpRequest<?> request, @Body final Map<String, String> form) {
++        try {
++            if (setup.ready()) {
++                return HttpResponse.notFound();
++            }
++            final String token = form.getOrDefault("csrf", "");
++            final String cookie = request.getCookies().findCookie("oidc_setup_csrf").map(Cookie::getValue).orElse("");
++            if (!sameOrigin(request.getHeaders().get("Origin")) || !validToken(token)
++                || !MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8), cookie.getBytes(StandardCharsets.UTF_8))) {
++                return HttpResponse.status(HttpStatus.FORBIDDEN);
++            }
++            if (!setup.setup(form)) {
++                return HttpResponse.status(HttpStatus.CONFLICT);
++            }
++            return HttpResponse.seeOther(URI.create("/ui/"))
++                .header("Cache-Control", "no-store")
++                .cookie(Cookie.of("oidc_setup_csrf", "").path("/oidc/setup").maxAge(0));
++        } catch (IllegalArgumentException exception) {
++            return HttpResponse.badRequest("Provide valid account fields and configure the UI client before initialization");
++        } catch (IllegalStateException exception) {
++            return HttpResponse.serverError("OIDC initialization failed");
++        }
++    }
++
++    private boolean sameOrigin(final String origin) {
++        try {
++            final URI actual = URI.create(origin == null ? "" : origin);
++            final URI expected = URI.create(configuration.getIssuer());
++            return expected.getScheme().equals(actual.getScheme()) && expected.getRawAuthority().equals(actual.getRawAuthority())
++                && (actual.getPath() == null || actual.getPath().isEmpty()) && actual.getRawQuery() == null
++                && actual.getRawFragment() == null;
++        } catch (IllegalArgumentException exception) {
++            return false;
++        }
++    }
++
++    private String token() {
++        final byte[] nonce = new byte[24];
++        new SecureRandom().nextBytes(nonce);
++        final String payload = Instant.now().plusSeconds(600).getEpochSecond() + ":"
++            + Base64.getUrlEncoder().withoutPadding().encodeToString(nonce);
++        return payload + ":" + sign(payload);
++    }
++
++    private boolean validToken(final String token) {
++        try {
++            final String[] parts = token.split(":");
++            return parts.length == 3 && token.length() < 200 && Long.parseLong(parts[0]) > Instant.now().getEpochSecond()
++                && Long.parseLong(parts[0]) <= Instant.now().plusSeconds(600).getEpochSecond()
++                && MessageDigest.isEqual(sign(parts[0] + ":" + parts[1]).getBytes(StandardCharsets.UTF_8),
++                    parts[2].getBytes(StandardCharsets.UTF_8));
++        } catch (IllegalArgumentException exception) {
++            return false;
++        }
++    }
++
++    private String sign(final String payload) {
++        try {
++            final Mac mac = Mac.getInstance("HmacSHA256");
++            mac.init(new SecretKeySpec(csrfKey, "HmacSHA256"));
++            return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(payload.getBytes(StandardCharsets.UTF_8)));
++        } catch (java.security.GeneralSecurityException exception) {
++            throw new IllegalStateException("OIDC setup token unavailable");
++        }
++    }
++
++    private static String html(final String token, final String error) {
++        return """
++            <!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
++            <meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Kestra</title>
++            <style>body{margin:0;background:#f8f7fc;color:#252336;font-family:system-ui,sans-serif}
++            main{width:min(380px,calc(100vw - 48px));margin:8vh auto}h1{text-align:center}
++            label{display:block;margin:16px 0}input{box-sizing:border-box;width:100%%;padding:12px;
++            margin-top:8px;border:1px solid #d8d5e3;border-radius:6px;font:inherit}
++            button{width:100%%;padding:12px;border:0;border-radius:6px;background:#8405ff;color:white;font:inherit}</style>
++            </head><body><main><h1>Set up Kestra</h1><p>Create your first OIDC account.</p>%s
++            <form method="post" action="/oidc/setup"><input type="hidden" name="csrf" value="%s">
++            <label>Username<input name="username" required maxlength="128" autocomplete="username"></label>
++            <label>Display name<input name="name" maxlength="200" autocomplete="name"></label>
++            <label>Email<input name="email" type="email" maxlength="254" autocomplete="email"></label>
++            <label>Password<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
++            <button type="submit">Create account</button></form></main></body></html>
++            """.formatted(error, token);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupFilter.java
+new file mode 100644
+index 0000000..4cc0598
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupFilter.java
+@@ -0,0 +1,32 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.core.annotation.Nullable;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.annotation.RequestFilter;
++import io.micronaut.http.annotation.ServerFilter;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++
++@ServerFilter({"/ui/**", "/oauth/login/**", "/oidc/login"})
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@ExecuteOn(TaskExecutors.IO)
++public class OidcSetupFilter {
++    private final OidcSetupService setup;
++
++    public OidcSetupFilter(final OidcSetupService setup) {
++        this.setup = setup;
++    }
++
++    @RequestFilter
++    @Nullable
++    public HttpResponse<?> filter() {
++        try {
++            return setup.ready() ? null : HttpResponse.seeOther(URI.create("/oidc/setup"));
++        } catch (IllegalArgumentException | IllegalStateException exception) {
++            return HttpResponse.serverError("OIDC initialization configuration is invalid");
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_93OidcServerSetupMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_93OidcServerSetupMigration.java
+new file mode 100644
+index 0000000..47a6148
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_93OidcServerSetupMigration.java
+@@ -0,0 +1,37 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++import javax.sql.DataSource;
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public class V2_0_93OidcServerSetupMigration extends AbstractSQLMigrationScript {
++    private final DataSource dataSource;
++
++    public V2_0_93OidcServerSetupMigration(final DataSource dataSource) {
++        this.dataSource = dataSource;
++    }
++
++    @Override
++    public String scriptId() {
++        return "2.0.93-oidc-server-setup";
++    }
++
++    @Override
++    public String description() {
++        return "Persistent OIDC first-install completion marker";
++    }
++
++    @Override
++    protected DataSource dataSource() {
++        return dataSource;
++    }
++
++    @Override
++    public List<String> sqlResources() {
++        return List.of("/migrations/2.0.93-oidc-server-setup-postgres.sql");
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
+new file mode 100644
+index 0000000..12627df
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
+@@ -0,0 +1,180 @@
++package io.kestra.webserver.oidc.services;
++
++import java.net.URI;
++import java.nio.charset.StandardCharsets;
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.Map;
++import javax.sql.DataSource;
++
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.env.Environment;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Singleton;
++import org.mindrot.jbcrypt.BCrypt;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public class OidcSetupService {
++    private final DataSource dataSource;
++    private final OidcConfiguration configuration;
++    private final Environment environment;
++    private volatile boolean completed;
++
++    public OidcSetupService(final DataSource dataSource, final OidcConfiguration configuration,
++        final Environment environment) {
++        this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
++        this.configuration = configuration;
++        this.environment = environment;
++    }
++
++    public boolean ready() {
++        if (completed) {
++            return true;
++        }
++        return initialize(null);
++    }
++
++    public boolean setup(final Map<String, String> form) {
++        if (completed) {
++            return false;
++        }
++        return initialize(form);
++    }
++
++    private boolean initialize(final Map<String, String> form) {
++        try (Connection connection = dataSource.getConnection()) {
++            connection.setAutoCommit(false);
++            try {
++                try (var statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(1330133)")) {
++                    statement.execute();
++                }
++                if (exists(connection, "SELECT EXISTS(SELECT 1 FROM oidc_setup)")) {
++                    connection.commit();
++                    completed = true;
++                    return form == null;
++                }
++                final boolean existingUsers = exists(connection, "SELECT EXISTS(SELECT 1 FROM oidc_user)");
++                if (existingUsers) {
++                    registerClient(connection, false);
++                    markCompleted(connection);
++                    connection.commit();
++                    completed = true;
++                    return form == null;
++                }
++                final Map<String, String> values = form == null ? bootstrapValues() : form;
++                if (values == null) {
++                    connection.commit();
++                    return false;
++                }
++                final String username = values.getOrDefault("username", "").trim();
++                final String password = values.getOrDefault("password", "");
++                final String name = values.getOrDefault("name", username).trim();
++                final String email = values.getOrDefault("email", "").trim();
++                validate(username, password, name, email);
++                registerClient(connection, true);
++                try (var statement = connection.prepareStatement(
++                    "INSERT INTO oidc_user (username,name,email,roles) VALUES (?,?,?,'[\"admin\"]')")) {
++                    statement.setString(1, username);
++                    statement.setString(2, name.isEmpty() ? username : name);
++                    statement.setString(3, email);
++                    statement.executeUpdate();
++                }
++                try (var statement = connection.prepareStatement(
++                    "INSERT INTO oidc_user_auth_method (user_id,type,credential) VALUES (?,'PASSWORD',?)")) {
++                    statement.setString(1, username);
++                    statement.setString(2, BCrypt.hashpw(password, BCrypt.gensalt(10)));
++                    statement.executeUpdate();
++                }
++                markCompleted(connection);
++                connection.commit();
++                completed = true;
++                return true;
++            } catch (RuntimeException | SQLException exception) {
++                connection.rollback();
++                throw exception;
++            }
++        } catch (SQLException exception) {
++            throw new IllegalStateException("OIDC initialization failed");
++        }
++    }
++
++    private Map<String, String> bootstrapValues() {
++        final String username = property("KESTRA_OIDC_BOOTSTRAP_USERNAME");
++        final String password = property("KESTRA_OIDC_BOOTSTRAP_PASSWORD");
++        final String name = property("KESTRA_OIDC_BOOTSTRAP_NAME");
++        final String email = property("KESTRA_OIDC_BOOTSTRAP_EMAIL");
++        if (username.isEmpty() && password.isEmpty() && name.isEmpty() && email.isEmpty()) {
++            return null;
++        }
++        return Map.of("username", username, "password", password, "name", name, "email", email);
++    }
++
++    private String property(final String key) {
++        return environment.getProperty(key, String.class).orElse("");
++    }
++
++    private static void validate(final String username, final String password, final String name, final String email) {
++        if (!username.matches("[A-Za-z0-9._@+-]{1,128}") || password.length() < 8
++            || password.getBytes(StandardCharsets.UTF_8).length > 72 || name.length() > 200
++            || email.length() > 254 || (!email.isEmpty() && !email.matches("[^\\s@]+@[^\\s@]+\\.[^\\s@]+"))) {
++            throw new IllegalArgumentException("Provide a valid username, email and password (8 characters minimum, 72 UTF-8 bytes maximum)");
++        }
++    }
++
++    private void registerClient(final Connection connection, final boolean required) throws SQLException {
++        final String clientName = property("kestra.oidc.bootstrap.client-name").isEmpty()
++            ? "kestra" : property("kestra.oidc.bootstrap.client-name");
++        if (!clientName.matches("[a-zA-Z0-9_-]+")) {
++            throw new IllegalArgumentException("Invalid OIDC UI client configuration");
++        }
++        final String prefix = "micronaut.security.oauth2.clients." + clientName;
++        final String clientId = property(prefix + ".client-id");
++        final String secret = property(prefix + ".client-secret");
++        if (!required && clientId.isEmpty() && secret.isEmpty()) {
++            return;
++        }
++        final URI issuer = URI.create(configuration.getIssuer());
++        if (clientId.isBlank() || secret.isBlank() || issuer.getHost() == null
++            || !("http".equals(issuer.getScheme()) || "https".equals(issuer.getScheme()))
++            || issuer.getRawQuery() != null || issuer.getRawFragment() != null || issuer.getUserInfo() != null) {
++            throw new IllegalArgumentException("Configure the OIDC UI client ID, secret and public issuer before initialization");
++        }
++        final String callback = configuration.getIssuer().replaceAll("/+$", "") + "/oauth/callback/" + clientName;
++        try (var statement = connection.prepareStatement(
++            "SELECT client_secret,redirect_uris @> jsonb_build_array(?::text),active FROM oidc_client WHERE client_id=?")) {
++            statement.setString(1, callback);
++            statement.setString(2, clientId);
++            try (var result = statement.executeQuery()) {
++                if (result.next()) {
++                    if (!result.getString(1).equals(secret) || !result.getBoolean(2) || !result.getBoolean(3)) {
++                        throw new IllegalArgumentException("Existing OIDC UI client conflicts with configuration");
++                    }
++                    return;
++                }
++            }
++        }
++        try (var statement = connection.prepareStatement(
++            "INSERT INTO oidc_client (client_id,client_secret,redirect_uris,grant_types,scopes)"
++                + " VALUES (?,?,jsonb_build_array(?::text),'[\"authorization_code\",\"refresh_token\"]','[\"openid\",\"profile\",\"email\"]')")) {
++            statement.setString(1, clientId);
++            statement.setString(2, secret);
++            statement.setString(3, callback);
++            statement.executeUpdate();
++        }
++    }
++
++    private static boolean exists(final Connection connection, final String query) throws SQLException {
++        try (var statement = connection.prepareStatement(query); var result = statement.executeQuery()) {
++            result.next();
++            return result.getBoolean(1);
++        }
++    }
++
++    private static void markCompleted(final Connection connection) throws SQLException {
++        try (var statement = connection.prepareStatement("INSERT INTO oidc_setup (singleton) VALUES (true)")) {
++            statement.executeUpdate();
++        }
++    }
++}
+diff --git a/webserver/src/main/resources/migrations/2.0.93-oidc-server-setup-postgres.sql b/webserver/src/main/resources/migrations/2.0.93-oidc-server-setup-postgres.sql
+new file mode 100644
+index 0000000..fbd27c4
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.93-oidc-server-setup-postgres.sql
+@@ -0,0 +1,5 @@
++CREATE TABLE IF NOT EXISTS oidc_setup
++(
++    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
++    completed_at TIMESTAMPTZ NOT NULL DEFAULT now()
++);
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupControllerTest.java
+new file mode 100644
+index 0000000..63b14b8
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupControllerTest.java
+@@ -0,0 +1,77 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.anyMap;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.util.Map;
++import io.kestra.webserver.oidc.controllers.OidcSetupController;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.micronaut.http.HttpMethod;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.cookie.Cookie;
++import io.micronaut.http.simple.SimpleHttpRequest;
++import org.junit.jupiter.api.Test;
++
++class OidcSetupControllerTest {
++    private final OidcSetupService setup = mock(OidcSetupService.class);
++    private final OidcSetupController controller = new OidcSetupController(setup, new OidcConfiguration());
++
++    private SimpleHttpRequest<Map<String, String>> request(final String origin, final String token) {
++        final var request = new SimpleHttpRequest<Map<String, String>>(HttpMethod.POST, "/oidc/setup", Map.of());
++        request.header("Origin", origin);
++        request.cookie(Cookie.of("oidc_setup_csrf", token));
++        return request;
++    }
++
++    private String token() {
++        return controller.page(new SimpleHttpRequest<Void>(HttpMethod.GET, "/oidc/setup", null))
++            .getCookie("oidc_setup_csrf").orElseThrow().getValue();
++    }
++
++    @Test
++    void formUsesCsrfAndValidSubmissionEntersOidcLoginChain() {
++        final String token = token();
++        final var form = Map.of("csrf", token, "username", "first", "password", "FirstPass123!");
++        when(setup.setup(form)).thenReturn(true);
++        final var response = controller.submit(request("http://localhost:8080", token), form);
++        assertEquals(HttpStatus.SEE_OTHER, response.getStatus());
++        assertEquals("/ui/", response.getHeaders().get("Location"));
++        assertFalse(response.getCookies().findCookie("JWT").isPresent());
++        assertEquals("no-store", response.getHeaders().get("Cache-Control"));
++    }
++
++    @Test
++    void missingTamperedAndCrossOriginTokensCannotInitialize() {
++        final String token = token();
++        assertEquals(HttpStatus.FORBIDDEN, controller.submit(request("http://localhost:8080", token), Map.of()).getStatus());
++        assertEquals(HttpStatus.FORBIDDEN, controller.submit(request("http://localhost:8080", token), Map.of("csrf", token + "x")).getStatus());
++        assertEquals(HttpStatus.FORBIDDEN, controller.submit(request("https://attacker.example", token), Map.of("csrf", token)).getStatus());
++        final String expired = "1:" + token.substring(token.indexOf(':') + 1);
++        assertEquals(HttpStatus.FORBIDDEN, controller.submit(request("http://localhost:8080", expired), Map.of("csrf", expired)).getStatus());
++        verify(setup, never()).setup(anyMap());
++    }
++
++    @Test
++    void completedSetupIsClosedForGetAndPost() {
++        when(setup.ready()).thenReturn(true);
++        assertEquals(HttpStatus.NOT_FOUND, controller.page(new SimpleHttpRequest<Void>(HttpMethod.GET, "/oidc/setup", null)).getStatus());
++        assertEquals(HttpStatus.NOT_FOUND, controller.submit(request("http://localhost:8080", ""), Map.of()).getStatus());
++        verify(setup, never()).setup(anyMap());
++    }
++
++    @Test
++    void failuresDoNotExposeCredentials() {
++        final String token = token();
++        when(setup.setup(anyMap())).thenThrow(new IllegalArgumentException("SECRET_VALUE"));
++        final var response = controller.submit(request("http://localhost:8080", token), Map.of("csrf", token));
++        assertEquals(HttpStatus.BAD_REQUEST, response.getStatus());
++        assertTrue(response.body().toString().contains("valid account"));
++        assertFalse(response.body().toString().contains("SECRET_VALUE"));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupServiceTest.java
+new file mode 100644
+index 0000000..8d7798c
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupServiceTest.java
+@@ -0,0 +1,114 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.Executors;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.kestra.webserver.oidc.services.OidcUserService;
++import io.kestra.webserver.oidc.services.OidcClientService;
++import io.micronaut.context.env.Environment;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++class OidcSetupServiceTest extends OidcPostgresTestBase {
++    private Environment environment;
++    private OidcConfiguration configuration;
++
++    @BeforeEach
++    void reset() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("TRUNCATE oidc_setup,oidc_user,oidc_client CASCADE");
++        }
++        environment = mock(Environment.class);
++        when(environment.getProperty(anyString(), eq(String.class))).thenReturn(Optional.empty());
++        property("micronaut.security.oauth2.clients.kestra.client-id", "setup-ui");
++        property("micronaut.security.oauth2.clients.kestra.client-secret", "setup-secret");
++        configuration = new OidcConfiguration();
++    }
++
++    private void property(final String key, final String value) {
++        when(environment.getProperty(key, String.class)).thenReturn(Optional.of(value));
++    }
++
++    private OidcSetupService service() {
++        return new OidcSetupService(dataSource(), configuration, environment);
++    }
++
++    private Map<String, String> account(final String username) {
++        return Map.of("username", username, "password", "SetupPass123!", "name", "First User", "email", "first@example.org");
++    }
++
++    @Test
++    void emptyDirectoryNeedsSetupAndStoresAccountClientAndMarkerAtomically() {
++        final var setup = service();
++        assertFalse(setup.ready());
++        assertTrue(setup.setup(account("first")));
++        final var users = new OidcUserService(dataSource(), new ObjectMapper());
++        assertTrue(users.validateCredentials("first", "SetupPass123!"));
++        assertTrue(users.storedPasswordHash("first").orElseThrow().startsWith("$2a$"));
++        final var clients = new OidcClientService(dataSource(), new ObjectMapper());
++        assertTrue(clients.authenticate("setup-ui", "setup-secret"));
++        assertEquals(java.util.List.of("http://localhost:8080/oauth/callback/kestra"),
++            clients.find("setup-ui").orElseThrow().redirectUris());
++        assertFalse(service().setup(account("second")));
++        users.delete("first");
++        assertTrue(service().ready());
++        assertFalse(service().setup(account("second")));
++    }
++
++    @Test
++    void environmentSkipsSetupAndRestartDoesNotOverwritePassword() {
++        property("KESTRA_OIDC_BOOTSTRAP_USERNAME", "environment-user");
++        property("KESTRA_OIDC_BOOTSTRAP_PASSWORD", "SetupPass123!");
++        assertTrue(service().ready());
++        property("KESTRA_OIDC_BOOTSTRAP_PASSWORD", "ChangedPass123!");
++        assertTrue(service().ready());
++        final var users = new OidcUserService(dataSource(), new ObjectMapper());
++        assertTrue(users.validateCredentials("environment-user", "SetupPass123!"));
++        assertFalse(users.validateCredentials("environment-user", "ChangedPass123!"));
++    }
++
++    @Test
++    void partialEnvironmentAndInvalidPasswordLeaveDatabaseEmpty() {
++        property("KESTRA_OIDC_BOOTSTRAP_USERNAME", "partial");
++        assertThrows(IllegalArgumentException.class, () -> service().ready());
++        assertThrows(IllegalArgumentException.class, () -> service().setup(Map.of("username", "first", "password", "short")));
++        assertTrue(new OidcUserService(dataSource(), new ObjectMapper()).list().isEmpty());
++        assertTrue(new OidcClientService(dataSource(), new ObjectMapper()).list().isEmpty());
++    }
++
++    @Test
++    void clientConflictRollsBackUserAndDoesNotChangeExistingSecret() {
++        final var clients = new OidcClientService(dataSource(), new ObjectMapper());
++        clients.create("setup-ui", "other-secret", java.util.List.of("https://other.example/cb"),
++            java.util.List.of("authorization_code"), java.util.List.of("openid"));
++        assertThrows(IllegalArgumentException.class, () -> service().setup(account("first")));
++        assertTrue(new OidcUserService(dataSource(), new ObjectMapper()).list().isEmpty());
++        assertTrue(clients.authenticate("setup-ui", "other-secret"));
++        assertFalse(service().ready());
++    }
++
++    @Test
++    void concurrentSetupCreatesOnlyOneAccount() throws Exception {
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            final var first = executor.submit(() -> service().setup(account("first")));
++            final var second = executor.submit(() -> service().setup(account("second")));
++            assertNotEquals(first.get(), second.get());
++        }
++        assertEquals(1, new OidcUserService(dataSource(), new ObjectMapper()).list().size());
++    }
++
++    @Test
++    void existingUserIsPreservedAndClosesSetup() {
++        final var users = new OidcUserService(dataSource(), new ObjectMapper());
++        users.create(new OidcUserService.CreateUserRequest("existing", "Existing", "existing@example.org",
++            "ExistingPass123!", java.util.List.of("user")));
++        assertTrue(service().ready());
++        assertTrue(users.validateCredentials("existing", "ExistingPass123!"));
++        assertFalse(service().setup(account("first")));
++    }
++}
