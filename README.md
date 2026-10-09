@@ -9,11 +9,16 @@
 
 ### 下载
 
-镜像在 GHCR 公开发布，无需登录直接拉取：
+镜像发布在 GHCR **私有包**：先登录，再拉取——
 
 ```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u <github-username> --password-stdin
 docker pull ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
 ```
+
+`GITHUB_TOKEN` 需要 `read:packages` 权限（GitHub → Settings → Developer settings →
+Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉取会被拒绝（403），
+这是预期行为。
 
 多架构：镜像提供 `linux/amd64` 与 `linux/arm64`。
 
