@@ -20,6 +20,9 @@ docker pull ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
 Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉取会被拒绝（403），
 这是预期行为。
 
+**访问模型**：本仓库与 GHCR 包同为私有且互相关联——能读到本 README 的 GitHub 账号
+（仓库协作者）即拥有镜像拉取权限，用自己的 PAT 登录即可，无需单独申请凭据。
+
 多架构：镜像提供 `linux/amd64` 与 `linux/arm64`。
 
 | tag | 含义 |
