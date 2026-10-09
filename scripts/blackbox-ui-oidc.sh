@@ -149,11 +149,30 @@ grep -q 'id="app"' "$TEMP_DIR/body"
 ASSET=$(node -e 'const fs=require("fs");const html=fs.readFileSync(process.argv[1],"utf8");const match=html.match(/<script[^>]+src="([^"]+)"/);if(!match)process.exit(1);process.stdout.write(new URL(match[1],process.argv[2]).href)' "$TEMP_DIR/body" "$LANDING_LOCATION")
 assert_status "UI JavaScript is delivered" 200 "$(request "$ASSET")"
 assert_status "browser cookie authenticates API" 200 "$(request "$BASE/api/v1/configs")"
-assert_status "OIDC boot guard" 200 "$(request "$BASE/api/v1/basicAuthValidationErrors")"
+assert_status "Basic Auth endpoint is disabled" 404 "$(curl -s -b "$TEMP_DIR/cookies" -o /dev/null -w '%{http_code}' "$BASE/api/v1/basicAuthValidationErrors")"
 TOKEN_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc \
   "SELECT count(*) FROM oidc_token WHERE client_id='kestra-ui' AND subject='tester' AND token_type IN ('access','refresh')")
 assert_status "real access and refresh tokens persisted" 2 "$TOKEN_COUNT"
 USED_CODE=$(docker exec "$PG" psql -U kestra -d kestra -Atc \
   "SELECT count(*) FROM oidc_authorization_code WHERE client_id='kestra-ui' AND used=true")
 assert_status "authorization code consumed" 1 "$USED_CODE"
+assert_status "authenticated dashboard refresh" 200 "$(request "$BASE/ui/dashboards")"
+assert_status "authenticated navigation" 200 "$(request "$BASE/ui/main/flows")"
+CSRF=$(awk '$6=="csrfToken" {print $7}' "$TEMP_DIR/cookies")
+for path in login logout basicAuth; do
+  LEGACY_STATUS=$(curl -s -b "$TEMP_DIR/cookies" -X POST \
+    -H "X-CSRF-TOKEN: $CSRF" \
+    -H 'Content-Type: application/json' -d '{"username":"tester","password":"Passw0rd!"}' \
+    -o /dev/null -w '%{http_code}' "$BASE/api/v1/$path")
+  [[ "$LEGACY_STATUS" == 404 || "$LEGACY_STATUS" == 403 ]] || { echo "FAIL: legacy $path accepted ($LEGACY_STATUS)"; exit 1; }
+  echo "PASS: legacy $path rejected ($LEGACY_STATUS)"
+done
+assert_status "OIDC logout" 307 "$(request "$BASE/oidc/logout")"
+assert_status "API denied after logout" 401 "$(curl -s -b "$TEMP_DIR/cookies" -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
+assert_status "UI intercepted after logout" 307 "$(request -H 'Accept: text/html' "$BASE/ui/")"
+assert_status "Basic Auth cookie cannot authenticate" 401 "$(curl -s -H 'Cookie: BASIC_AUTH=anything; kestraBasicAuthenticated=true' -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
+assert_status "invalid OIDC cookie cannot authenticate" 401 "$(curl -s -H 'Cookie: JWT=invalid' -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
+if [ "${BB_BROWSER:-0}" = 1 ]; then
+  BB_BROWSER_BASE="$BASE" node "$(dirname "$0")/blackbox-ui-browser.cjs"
+fi
 echo 'UI OIDC BLACKBOX ALL GREEN'

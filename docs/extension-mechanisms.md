@@ -9,6 +9,8 @@
 > oidcAuthEnabled 不足以驱动 BASE UI：其守卫仍检查 Basic Auth 标志。REQ-0132
 > 同批替换 UI 守卫、401 跳转与退出，认证状态从服务端验证，禁止兼容旧 cookie。
 > UI 改动经 npm 构建进入 jar；本例外仅认证面。验收含登录后刷新、导航与退出。
+> REQ-0132 已实现独立 OIDC UI 状态与服务端旧端点禁用，CI 增 Chromium 真实
+> 登录/刷新/导航/退出测试；本地机制证据见 docs/r-oidc-server.md §0。
 
 ## 0. 结论矩阵（一页答案）
 

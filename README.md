@@ -11,10 +11,11 @@
 
 ## 使用镜像
 
-OIDC 模式统一使用 OAuth2/OIDC，完全关闭 Basic Auth 链。`/ui/login` 是 vanilla
-Basic Auth 页面，不能用 OIDC 用户登录。完整前端替换 REQ-0132 正在实施；此前
-CI 只验收首次协议回访，刷新/导航缺口尚未闭环，当前不要将其视为完成版本。
-后续部署与验收以 `docs/r-oidc-server.md` §0 的认证契约为准。
+OIDC 模式统一使用 OAuth2/OIDC，完全关闭 Basic Auth 链。REQ-0132 替换 UI 的
+认证守卫、401 跳转和退出；状态由服务端验证，不依赖 Basic Auth cookie/标志。
+旧登录/setup 页面在 OIDC 模式不进入凭据流程；用户名密码提交在 `/oidc/login`。
+部署与验收以 `docs/r-oidc-server.md` §0 为准，启用 Micronaut Security 并配置
+`micronaut.security.redirect.unauthorized.url: /oauth/login/kestra` 与客户端注册。
 
 ### 下载
 

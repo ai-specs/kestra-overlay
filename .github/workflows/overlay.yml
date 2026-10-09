@@ -64,4 +64,10 @@ jobs:
         with:
           node-version: '24'
       - name: UI interception, password login, OIDC callback and authenticated UI/API
-        run: bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+        env:
+          BB_BROWSER: '1'
+          NODE_PATH: ${{ runner.temp }}/oidc-browser/node_modules
+        run: |
+          npm install --prefix "$RUNNER_TEMP/oidc-browser" playwright@1.61.1
+          "$RUNNER_TEMP/oidc-browser/node_modules/.bin/playwright" install --with-deps chromium
+          bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins

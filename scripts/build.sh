@@ -51,6 +51,7 @@ echo "== scoped OIDC acceptance tests =="
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts)
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 
 echo "== compile webserver executable jar (thin-patched upstream) =="

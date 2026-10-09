@@ -23,6 +23,9 @@
 > 前端必须消费 OIDC 认证状态并统一登录/退出。允许 R-OIDC-SERVER 最小 UI 认证
 > patch（REQ-0132），不伪造 Basic Auth 标志。此前首轮浏览器链全绿不代表刷新与
 > 导航已验收；实施与完整测试契约见 docs/r-oidc-server.md §0。
+> REQ-0132 已实现 UI 独立 OIDC 认证状态（服务端 configs 验证）、统一 401/退出、
+> 旧认证端点拒绝；新增前端定向用例、后端禁用用例与黑盒刷新/导航/退出断言。
+> 新版本 DoD 仍以本地重放与对应新 CI 全绿为准。
 
 > **2026-10-09 浏览器链验证**：R-OIDC-SERVER 增 REQ-0131（内置 issuer discovery
 > 启动适配，外部 issuer 仍走框架 discovery）；REQ-0120/0130 修复授权回跳与 POST 后

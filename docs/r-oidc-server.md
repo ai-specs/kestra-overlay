@@ -24,11 +24,20 @@ UI 认证检测通过服务端受保护端点，401 后进入 OIDC 客户端；�
 
 内置账号配置初始化仍未实现，当前验收显式写真实 PG bcrypt 测试账号；此限制保持公开。
 
+REQ-0132 实施证据：UI 不再在 OIDC 模式检查旧标志，受保护 `/configs` 成功后
+更新内存状态；刷新重新验证，401 进入框架 OAuth2 客户端。旧 API 登录/退出/setup
+由服务端拒绝；内置 logout 同时撤销 IdP 会话并清 JWT cookie。新增后端禁用测试，
+前端测试验证旧标志不能认证；黑盒覆盖刷新、导航、旧端点、无效 cookie、退出。
+ego-browser 已实测无旧标志时 dashboard 刷新、Flows 导航及 API 200；logout 后
+重新出现 OIDC 登录表单且 API 401。此前 userinfo 401 是框架对 ID token 尝试
+access-token userinfo 验证的回退日志，本轮有效 JWT 刷新实测仍通过，不放宽 userinfo。
+
 > **状态**：首批 patch 已实施并本地全绿（2026-10-09，REQ-0100/0110/0120/0130；
 > 8 测试类 36 用例，Testcontainers 真 PG + 验证树 5-patch 重放 + executableJar 全绿）。
 > 浏览器链修复（2026-10-09）：REQ-0120 统一 `from` 回跳；REQ-0130 登录 POST 后
 > 303 转 GET、浏览器经配置进入框架 OAuth2 客户端；REQ-0131 内置 issuer 的 discovery
 > 直接复用生产元数据，避免启动监听前本机 HTTP 请求失败。原版 UI 必须随 jar 打包。
+> REQ-0132 本轮全重放：44 后端用例、2 前端用例、UI 构建与 executableJar 全绿。
 > 剩余：REQ-0140（用户管理端点 + F1/C3/F2 专项）。浏览器链最终验收以新 CI 为准。
 > 本轮本地证据：6-patch BASE 重放、42 定向用例、原版 UI 构建、executableJar，
 > 协议黑盒 30 PASS；UI/OIDC HTTP 链黑盒全绿；ego-browser 实测 localhost:8080

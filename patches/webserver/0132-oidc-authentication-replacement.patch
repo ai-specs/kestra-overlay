@@ -1,0 +1,384 @@
+# 需求：REQ-0132 OIDC 模式完整关闭 Basic Auth 认证链，UI 路由/401/退出统一
+#   使用 OIDC，认证状态由受保护服务端端点验证；登录页沿用上游简洁视觉结构。
+# 消费扩展仓：—（R-OIDC-SERVER patch 路线）
+# 状态：core
+# 来源：新写；依据 OIDC Core、RFC6749/7636/9110；2026-10-09 维护者 UI 认证
+#   例外。未移植客户业务；vanilla 模式保留原链，OIDC 禁止兼容 Basic Auth cookie。
+# 触达上游文件（12）：UI 认证模块+测试、守卫/401/App/用量/退出；MiscController
+#   旧端点禁用、旧端点 filter+测试、OIDC 登录页与退出+测试。
+# 移除条件：上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用。
+diff --git a/ui/src/App.vue b/ui/src/App.vue
+index 0dc5c01..3218c96 100644
+--- a/ui/src/App.vue
++++ b/ui/src/App.vue
+@@ -29,7 +29,7 @@
+     import {useDocStore} from "./stores/doc"
+     import {useMiscStore} from "override/stores/misc"
+     import * as Utils from "./utils/utils"
+-    import * as BasicAuth from "./utils/basicAuth"
++    import * as Authentication from "./utils/authentication"
+     import {applyFontScale, getAppFontSizeMode} from "./utils/appFontSize"
+     import {initPosthogIfEnabled} from "./utils/posthog"
+     import {SAVED_FILTER_ANALYTICS_INJECTION_KEY, trackSavedFilter} from "./utils/savedFilterTracking"
+@@ -83,7 +83,7 @@
+             return newUid
+         })()
+ 
+-        if (!config.isBasicAuthInitialized || !BasicAuth.isLoggedIn()) {
++        if (!Authentication.isLoggedIn()) {
+             return null
+         }
+ 
+@@ -108,7 +108,7 @@
+     }
+ 
+     watch(() => route?.meta?.anonymous, async (anonymous) => {
+-        if (!anonymous && BasicAuth.isLoggedIn()) {
++        if (!anonymous && Authentication.isLoggedIn()) {
+             try {
+                 await loadGeneralResources()
+             } catch (error) {
+diff --git a/ui/src/main.ts b/ui/src/main.ts
+index ff14ec0..86046b2 100644
+--- a/ui/src/main.ts
++++ b/ui/src/main.ts
+@@ -13,7 +13,7 @@ import {useClient} from "@kestra-io/kestra-sdk"
+ import routes from "./routes/routes"
+ import en from "./translations/en.json"
+ import {setupTenantRouter} from "./composables/useTenant"
+-import * as BasicAuth from "./utils/basicAuth"
++import * as Authentication from "./utils/authentication"
+ import {getCsrfToken} from "./utils/csrf"
+ import {useCoreStore} from "./stores/core"
+ import {useLayoutStore} from "./stores/layout"
+@@ -36,7 +36,11 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
+ // Fail closed: an error probing the pre-auth endpoints is no evidence that setup is needed.
+ const handleAuthError = (to: {fullPath: string}, error: unknown) => {
+     if ((error as {response?: {status?: number}} | null)?.response?.status === 401) {
+-        BasicAuth.logout()
++        if (Authentication.isOidc()) {
++            Authentication.login()
++            return false
++        }
++        Authentication.logout()
+         const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
+         return {name: "login", query: fromPath ? {from: fromPath} : {}}
+     } 
+@@ -55,7 +59,7 @@ function setupAxios(router: Router) {
+         document.body.classList.add("login")
+         unsavedChangesStore.unsavedChange = false
+         layoutStore.setTopNavbar(undefined)
+-        BasicAuth.logout()
++        Authentication.setAuthenticated(false)
+     }
+ 
+ 
+@@ -63,7 +67,7 @@ function setupAxios(router: Router) {
+         coreStore,
+         router,
+         beforeLogout,
+-        isLoggedIn: () => !!BasicAuth.isLoggedIn(),
++        isLoggedIn: () => Authentication.isLoggedIn(),
+     })
+ 
+     // Add CSRF token to every request - covers both generated-endpoint calls and
+@@ -92,6 +96,20 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+         }
+         const loginConfig = await miscStore.loadLoginConfig()
+ 
++        Authentication.configureOidc(loginConfig.oidcAuthEnabled === true)
++        if (Authentication.isOidc()) {
++            try {
++                await miscStore.loadConfigs()
++                Authentication.setAuthenticated(true)
++            } catch (error) {
++                return handleAuthError(to, error)
++            }
++            if (to.name === "login" || to.name === "setup") {
++                return {path: "/"}
++            }
++            return
++        }
++
+         if(!loginConfig.isBasicAuthInitialized) {
+             // Since, Configs takes preference
+             // we need to check if any regex validation error in BE.
+@@ -122,7 +140,7 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+             return
+         }
+ 
+-        const hasCredentials = BasicAuth.isLoggedIn()
++        const hasCredentials = Authentication.isLoggedIn()
+ 
+         if (!hasCredentials) {
+             const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
+diff --git a/ui/src/override/components/auth/Auth.vue b/ui/src/override/components/auth/Auth.vue
+index 062ce49..662d49a 100644
+--- a/ui/src/override/components/auth/Auth.vue
++++ b/ui/src/override/components/auth/Auth.vue
+@@ -59,7 +59,7 @@
+     import Slack from "vue-material-design-icons/Slack.vue"
+ 
+     import KS_LOGO from "../../../assets/ks-logo-small.svg"
+-    import * as BasicAuth from "../../../utils/basicAuth"
++    import * as Authentication from "../../../utils/authentication"
+ 
+     const SLACK_URL = "https://kestra.io/slack?utm_source=app&utm_medium=referral&utm_campaign=top-auth"
+ 
+@@ -73,8 +73,9 @@
+         params: {tenant: route.params.tenant},
+     }))
+ 
+-    const logout = () => {
+-        BasicAuth.logout()
++    const logout = async () => {
++        await Authentication.logout()
++        if (Authentication.isOidc()) return
+         delete axios.defaults.headers.common["Authorization"]
+         router.push({name: "login"})
+     }
+diff --git a/ui/src/override/stores/misc.ts b/ui/src/override/stores/misc.ts
+index 4eb0608..e960664 100644
+--- a/ui/src/override/stores/misc.ts
++++ b/ui/src/override/stores/misc.ts
+@@ -1,7 +1,7 @@
+ import {defineStore} from "pinia"
+ import {apiUrl, apiUrlWithoutTenants} from "override/utils/route"
+ import {useApiStore} from "../../stores/api"
+-import * as BasicAuth from "../../utils/basicAuth"
++import * as Authentication from "../../utils/authentication"
+ import {ref} from "vue"
+ import {useClient} from "@kestra-io/kestra-sdk"
+ import {initPosthogIfEnabled} from "../../utils/posthog"
+@@ -64,7 +64,7 @@ export const useMiscStore = defineStore("misc", () => {
+     }
+ 
+     async function loadAllUsages() {
+-        if (configs.value?.isBasicAuthInitialized && BasicAuth.isLoggedIn()) {
++        if (Authentication.isLoggedIn()) {
+             const response = await axios.get(`${apiUrl()}/usages/all`)
+             return response.data
+         }
+diff --git a/ui/src/utils/authentication.spec.ts b/ui/src/utils/authentication.spec.ts
+new file mode 100644
+index 0000000..87b39ac
+--- /dev/null
++++ b/ui/src/utils/authentication.spec.ts
+@@ -0,0 +1,24 @@
++import {beforeEach, describe, expect, it, vi} from "vitest"
++import * as Authentication from "./authentication"
++
++vi.mock("./basicAuth", () => ({isLoggedIn: vi.fn(() => true), logout: vi.fn()}))
++
++describe("OIDC authentication", () => {
++    beforeEach(() => {
++        Authentication.configureOidc(true)
++        Authentication.setAuthenticated(false)
++    })
++
++    it("requires server verification even if a Basic Auth flag exists", () => {
++        expect(Authentication.isLoggedIn()).toBe(false)
++        Authentication.setAuthenticated(true)
++        expect(Authentication.isLoggedIn()).toBe(true)
++        Authentication.setAuthenticated(false)
++        expect(Authentication.isLoggedIn()).toBe(false)
++    })
++
++    it("retains vanilla authentication when OIDC is disabled", () => {
++        Authentication.configureOidc(false)
++        expect(Authentication.isLoggedIn()).toBe(true)
++    })
++})
+diff --git a/ui/src/utils/authentication.ts b/ui/src/utils/authentication.ts
+new file mode 100644
+index 0000000..39d3d70
+--- /dev/null
++++ b/ui/src/utils/authentication.ts
+@@ -0,0 +1,34 @@
++import * as VanillaAuth from "./basicAuth"
++
++let oidcEnabled = false
++let authenticated = false
++
++export function configureOidc(enabled: boolean) {
++    oidcEnabled = enabled
++}
++
++export function isOidc() {
++    return oidcEnabled
++}
++
++export function setAuthenticated(value: boolean) {
++    authenticated = value
++}
++
++export function isLoggedIn() {
++    return oidcEnabled ? authenticated : VanillaAuth.isLoggedIn()
++}
++
++export function login() {
++    authenticated = false
++    window.location.assign("/oauth/login/kestra")
++}
++
++export async function logout() {
++    authenticated = false
++    if (oidcEnabled) {
++        window.location.assign("/oidc/logout")
++        return true
++    }
++    return VanillaAuth.logout()
++}
+diff --git a/ui/src/utils/kestraHttp.ts b/ui/src/utils/kestraHttp.ts
+index 3d85aa3..370a54a 100644
+--- a/ui/src/utils/kestraHttp.ts
++++ b/ui/src/utils/kestraHttp.ts
+@@ -1,4 +1,5 @@
+ import NProgress from "nprogress"
++import * as Authentication from "./authentication"
+ import type {Router} from "vue-router"
+ import {configureClient, useClient, asProblem, type ProblemDetail} from "@kestra-io/kestra-sdk"
+ 
+@@ -140,6 +141,10 @@ export function setupKestraHttp(
+     } = options
+ 
+     function navigateToLogin() {
++        if (Authentication.isOidc()) {
++            Authentication.login()
++            return
++        }
+         if (!router) return
+         const currentPath = window.location.pathname
+         router.push({
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+index 5fd488c..438f276 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+@@ -270,6 +270,9 @@ public class MiscController {
+         description = "On success, issues an HttpOnly session cookie holding the credentials, plus a non-HttpOnly flag cookie the UI reads to know it is logged in."
+     )
+     public MutableHttpResponse<?> login(HttpRequest<?> request, @Body LoginRequest loginRequest) {
++        if (securityEnabled) {
++            return HttpResponse.notFound();
++        }
+         BasicAuthService service = basicAuthService
+             .orElseThrow(() -> new IllegalStateException("basicAuthService bean is required in OSS"));
+ 
+@@ -287,6 +290,9 @@ public class MiscController {
+     @ExecuteOn(TaskExecutors.IO)
+     @Operation(tags = { "Misc" }, summary = "Clear the basic auth session cookie.")
+     public MutableHttpResponse<?> logout() {
++        if (securityEnabled) {
++            return HttpResponse.notFound();
++        }
+         Cookie cookie = Cookie.of(BasicAuthService.BASIC_AUTH_COOKIE_NAME, "")
+             .path("/")
+             .httpOnly(true)
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLegacyAuthFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLegacyAuthFilter.java
+new file mode 100644
+index 0000000..d0d82dc
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLegacyAuthFilter.java
+@@ -0,0 +1,24 @@
++package io.kestra.webserver.oidc.controllers;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.core.annotation.Nullable;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.annotation.RequestFilter;
++import io.micronaut.http.annotation.ServerFilter;
++
++@ServerFilter("/api/v1/**")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "micronaut.security.enabled", value = "true")
++public class OidcLegacyAuthFilter {
++    @RequestFilter
++    @Nullable
++    public HttpResponse<?> filter(final HttpRequest<?> request) {
++        final String path = request.getUri().getPath().replaceAll("/+", "/");
++        if (path.matches("/api/v1/(login|logout|basicAuth|basicAuthValidationErrors)")
++            || path.matches("/api/v1/[^/]+/basicAuth")) {
++            return HttpResponse.notFound();
++        }
++        return null;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
+index 0a32216..6e8f3e3 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
+@@ -83,6 +83,8 @@ public class OidcLoginController {
+     public HttpResponse<?> logout(final HttpRequest<?> request) {
+         sessionService.sessionIdFrom(request).ifPresent(sessionService::revoke);
+         return HttpResponse.temporaryRedirect(URI.create(DEFAULT_LANDING))
++            .cookie(io.micronaut.http.cookie.Cookie.of("JWT", "").path("/").httpOnly(true)
++                .maxAge(java.time.Duration.ZERO))
+             .cookie(io.micronaut.http.cookie.Cookie.of(OidcSessionService.SESSION_COOKIE_NAME, "")
+                 .path("/")
+                 .maxAge(java.time.Duration.ZERO));
+@@ -109,9 +111,18 @@ public class OidcLoginController {
+         return """
+             <!DOCTYPE html>
+             <html lang="en">
+-            <head><meta charset="utf-8"><title>Sign in</title></head>
++            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in | Kestra</title>
++            <style>
++            body{margin:0;background:#f8f7fc;color:#252336;font-family:system-ui,sans-serif}
++            main{width:min(360px,calc(100vw - 48px));margin:12vh auto;text-align:center}
++            h1{font-size:26px;font-weight:600;margin:24px 0 32px}
++            label{display:block;text-align:left;font-size:14px}
++            input:not([type=hidden]){box-sizing:border-box;width:100%%;padding:12px;margin-top:8px;border:1px solid #d8d5e3;border-radius:6px;font:inherit;background:white}
++            button{width:100%%;padding:12px;border:0;border-radius:6px;background:#8405ff;color:white;font:inherit;cursor:pointer}
++            .logo{display:inline-grid;place-items:center;width:54px;height:54px;background:#8405ff;color:white;border-radius:12px;font-size:32px;font-weight:700}
++            </style></head>
+             <body>
+-            <main style="font-family:system-ui,sans-serif;max-width:22rem;margin:12vh auto;">
++            <main><div class="logo" aria-label="Kestra">K</div><h1>Welcome to Kestra</h1>
+             %s
+             <form method="post" action="/oidc/login">
+             <input type="hidden" name="from" value="%s">
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLegacyAuthFilterTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLegacyAuthFilterTest.java
+new file mode 100644
+index 0000000..7da23a1
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLegacyAuthFilterTest.java
+@@ -0,0 +1,26 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++
++import io.kestra.webserver.oidc.controllers.OidcLegacyAuthFilter;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import org.junit.jupiter.api.Test;
++
++class OidcLegacyAuthFilterTest {
++    private final OidcLegacyAuthFilter filter = new OidcLegacyAuthFilter();
++
++    @Test
++    void rejectsLegacyAuthenticationEndpointsIncludingEncodedPath() {
++        for (final String path : new String[]{"/api/v1/login", "/api/v1/logout", "/api/v1/basicAuth",
++            "/api/v1/main/basicAuth", "/api/v1/basicAuthValidationErrors", "/api/v1/%6cogin"}) {
++            assertEquals(HttpStatus.NOT_FOUND, filter.filter(HttpRequest.GET(path)).getStatus());
++        }
++    }
++
++    @Test
++    void leavesApplicationEndpointsToOidcSecurity() {
++        assertNull(filter.filter(HttpRequest.GET("/api/v1/configs")));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
+index 041d3c8..631ae99 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
+@@ -87,6 +87,7 @@ class OidcLoginControllerTest extends OidcPostgresTestBase {
+         final var cleared = response.getCookie(OidcSessionService.SESSION_COOKIE_NAME).orElse(null);
+         assertNotNull(cleared);
+         assertEquals(0L, cleared.getMaxAge(), "logout must clear the cookie");
++        assertEquals(0L, response.getCookie("JWT").orElseThrow().getMaxAge());
+     }
+ 
+     @Test

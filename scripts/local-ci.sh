@@ -58,6 +58,7 @@ fi
 
 echo "== executable jar =="
 (cd "$WORK/ui" && npm ci && npm run build)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts)
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 (cd "$WORK" && ./gradlew executableJar --console=plain -x test -x check)
 
