@@ -2,5 +2,6 @@
 .DS_Store
 # 扩展仓 checkout（build-extensions.sh 的 jar 来源之一，绝不入库）
 extensions/
-# 本地验证用的上游树
+# 本地验证用的上游树与实施工件（.work/）：不提交——避免上游合并时的历史负担；
+# 本地长期保留，用于加快问题排查
 .work/

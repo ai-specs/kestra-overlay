@@ -167,7 +167,7 @@ if [ -n "$APPLY_DIR" ]; then
       fi
     done < "$TMP_PATCHES"
     if [ "$applied" = "$total" ]; then
-      changed=$(git -C "$APPLY_DIR" status --porcelain | awk '{print $2}' | sort -u)
+      changed=$(git -C "$APPLY_DIR" status --porcelain -uall | awk '{print $2}' | sort -u)
       declared_union=$(awk '/^diff --git a\// { path=$0; sub(/^diff --git a\/[^ ]+ b\//, "", path); print path }' $(cat "$TMP_PATCHES") | sort -u)
       mismatch=$(printf '%s\n%s\n' "$changed" "$declared_union" | sort | uniq -u)
       [ -z "$mismatch" ] && ok "顺序应用 $applied/$total 全部成功，改动集合与声明一致" \

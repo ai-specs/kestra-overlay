@@ -1,6 +1,8 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（需求与实施准备文档）
 
-> **状态**：实施中（2026-10-07 起）。四项前置全部闭合。
+> **状态**：首批 patch 已实施并本地全绿（2026-10-09，REQ-0100/0110/0120/0130；
+> 8 测试类 36 用例，Testcontainers 真 PG + 验证树 5-patch 重放 + executableJar 全绿）。
+> 剩余：REQ-0140（用户管理端点 + F1/C3/F2 专项）与镜像级黑盒。
 > **归属**：`docs/oss-ee-gap.md` §2-A/§4 R-OIDC-SERVER 行的展开；宪章依据 AGENTS §0 归属
 > 例外、§2 三处例外、§3-7、§4 测试同批。
 > **一句话**：以 patch 路线在 webserver 内内置 OAuth2/OIDC 授权服务器 + 认证链（一体化），

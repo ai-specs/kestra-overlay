@@ -1,0 +1,387 @@
+# ══ 需求 REQ-0130：R-OIDC-SERVER 登录链（前置裁定②一体化） ══════════════════
+# 需求：认证链用户面——/oidc/login 登录页+提交（bcrypt 验证→会话 cookie→302 回
+#   from）、/oidc/logout、AuthorizationException 处理器（浏览器 307 登录页/API 401）。
+#   前置裁定②：链与服务器一体进 patch（kestra-auth-chain 契约行已退役）。
+# 消费扩展仓：—（R-OIDC-SERVER patch 路线）
+# 状态：core（协议标准基础设施层）
+# 来源：参考 fork LoginController/AuthorizationExceptionHandler 逻辑重写（跨基，漂移
+#   核对完成）。剥离：kestra-self 引导、refresh cookie、state 恢复机、标志 cookie。
+#   简化（漂移注记）：授权完成走「登录→302 回 authorize→cookie 重入发码」，行为等价。
+#   from 消毒=同源相对路径（/ 开头、非 // 与 /\、≤2048）——开放重定向防护 E1。
+# 触达上游文件（2+2 测试）：OidcLoginController、OidcAuthorizationExceptionHandler；
+#   测试两份。
+# 移除条件：同 REQ-0100
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
+new file mode 100644
+index 0000000..a564fd1
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
+@@ -0,0 +1,47 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpHeaders;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Error;
++import io.micronaut.security.authentication.AuthorizationException;
++import jakarta.inject.Singleton;
++
++/**
++ * Routes micronaut-security's {@link AuthorizationException} into the built-in IdP login flow:
++ * browsers (Accept: text/html) get a 307 to {@code /oidc/login} carrying the denied path as the
++ * {@code from} deep link; API clients get a plain 401 (no detail leakage, C3).
++ */
++@Controller
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++public class OidcAuthorizationExceptionHandler {
++
++    /** The IdP login page. */
++    static final String LOGIN_URL = "/oidc/login";
++
++    @Error(global = true)
++    public HttpResponse<?> handle(final HttpRequest<?> request, final AuthorizationException exception) {
++        final String accept = request.getHeaders().get(HttpHeaders.ACCEPT);
++        if (accept != null && accept.contains("text/html")) {
++            return HttpResponse.temporaryRedirect(URI.create(loginUrlWithFrom(request)));
++        }
++        return HttpResponse.status(HttpStatus.UNAUTHORIZED);
++    }
++
++    /** The login URL carrying the denied path as the {@code from} deep link. */
++    static String loginUrlWithFrom(final HttpRequest<?> request) {
++        final String target = request.getPath();
++        if (target == null || target.isBlank() || !target.startsWith("/")) {
++            return LOGIN_URL;
++        }
++        return LOGIN_URL + "?from=" + URLEncoder.encode(target, StandardCharsets.UTF_8);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
+new file mode 100644
+index 0000000..e73038b
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
+@@ -0,0 +1,144 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++
++import io.kestra.webserver.oidc.services.OidcSessionService;
++import io.kestra.webserver.oidc.services.OidcUserService;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MediaType;
++import io.micronaut.http.annotation.Body;
++import io.micronaut.http.annotation.Consumes;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.http.annotation.Post;
++import io.micronaut.http.annotation.Produces;
++import io.micronaut.http.annotation.QueryValue;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++import jakarta.inject.Inject;
++
++/**
++ * The IdP login/logout pages of the built-in OIDC server.
++ *
++ * <p>Flow: an unauthenticated browser hitting a protected route is redirected here (either by
++ * {@link OidcAuthorizationExceptionHandler} or by {@code /oidc/authorize}); after a successful
++ * credential check the user gets an {@code oidc_session} cookie and is sent back to {@code from}
++ * (a sanitized same-origin relative path — open-redirect guard E1).
++ */
++@Controller("/oidc")
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++@ExecuteOn(TaskExecutors.IO)
++public class OidcLoginController {
++
++    /** Fallback landing page when a login carries no usable {@code from}. */
++    static final String DEFAULT_LANDING = "/ui/";
++
++    private final OidcUserService userService;
++    private final OidcSessionService sessionService;
++
++    @Inject
++    public OidcLoginController(final OidcUserService userService, final OidcSessionService sessionService) {
++        this.userService = userService;
++        this.sessionService = sessionService;
++    }
++
++    @Get("/login")
++    @Produces(MediaType.TEXT_HTML)
++    public HttpResponse<String> loginPage(
++        @QueryValue final java.util.Optional<String> from,
++        @QueryValue final java.util.Optional<String> error
++    ) {
++        return HttpResponse.ok(loginPageHtml(sanitizeFrom(from.orElse(null)), error.isPresent()))
++            .contentType(MediaType.TEXT_HTML_TYPE)
++            .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
++    }
++
++    @Post("/login")
++    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
++    public HttpResponse<?> loginSubmit(final HttpRequest<?> request, @Body final java.util.Map<String, String> form) {
++        final String username = form.get("username") == null ? "" : form.get("username").trim();
++        final String password = form.get("password");
++        final String from = sanitizeFrom(form.get("from"));
++
++        if (!userService.validateCredentials(username, password)) {
++            return HttpResponse.ok(loginPageHtml(from, true))
++                .contentType(MediaType.TEXT_HTML_TYPE)
++                .status(io.micronaut.http.HttpStatus.UNAUTHORIZED)
++                .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
++        }
++
++        final String sessionId = sessionService.create(username);
++        return HttpResponse.temporaryRedirect(URI.create(from == null ? DEFAULT_LANDING : from))
++            .cookie(sessionService.sessionCookie(request, sessionId))
++            .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
++    }
++
++    /** OIDC end-session endpoint: revokes the session and clears the cookie. */
++    @Get("/logout")
++    public HttpResponse<?> logout(final HttpRequest<?> request) {
++        sessionService.sessionIdFrom(request).ifPresent(sessionService::revoke);
++        return HttpResponse.temporaryRedirect(URI.create(DEFAULT_LANDING))
++            .cookie(io.micronaut.http.cookie.Cookie.of(OidcSessionService.SESSION_COOKIE_NAME, "")
++                .path("/")
++                .maxAge(java.time.Duration.ZERO));
++    }
++
++    /**
++     * Only same-origin relative paths are accepted as post-login targets: must start with
++     * {@code /} but not {@code //} or {@code /\} (protocol-relative/open-redirect guard, E1).
++     */
++    public static String sanitizeFrom(final String from) {
++        if (from == null || from.isBlank()) {
++            return null;
++        }
++        final String trimmed = from.trim();
++        if (!trimmed.startsWith("/") || trimmed.startsWith("//") || trimmed.startsWith("/\\") || trimmed.length() > 2048) {
++            return null;
++        }
++        return trimmed;
++    }
++
++    /** The login form — self-contained HTML (no external assets), CSP-friendly. */
++    private String loginPageHtml(final String from, final boolean failed) {
++        final String safeFrom = from == null ? DEFAULT_LANDING : from;
++        return """
++            <!DOCTYPE html>
++            <html lang="en">
++            <head><meta charset="utf-8"><title>Sign in</title></head>
++            <body>
++            <main style="font-family:system-ui,sans-serif;max-width:22rem;margin:12vh auto;">
++            %s
++            <form method="post" action="/oidc/login">
++            <input type="hidden" name="from" value="%s">
++            <p><label>Username<br><input name="username" autocomplete="username" required></label></p>
++            <p><label>Password<br><input type="password" name="password" autocomplete="current-password" required></label></p>
++            <p><button type="submit">Sign in</button></p>
++            </form>
++            </main>
++            </body>
++            </html>
++            """.formatted(
++            failed ? "<p style=\"color:#b00;\">Invalid username or password.</p>" : "",
++            htmlEscape(safeFrom)
++        );
++    }
++
++    private static String htmlEscape(final String value) {
++        final StringBuilder sb = new StringBuilder(value.length());
++        for (final char c : value.toCharArray()) {
++            switch (c) {
++                case '<' -> sb.append("&lt;");
++                case '>' -> sb.append("&gt;");
++                case '"' -> sb.append("&quot;");
++                case '&' -> sb.append("&amp;");
++                default -> sb.append(c);
++            }
++        }
++        return sb.toString();
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationExceptionHandlerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationExceptionHandlerTest.java
+new file mode 100644
+index 0000000..541649e
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationExceptionHandlerTest.java
+@@ -0,0 +1,48 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
++import io.kestra.webserver.oidc.controllers.OidcAuthorizationExceptionHandler;
++
++import io.micronaut.core.util.SupplierUtil;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.authentication.AuthorizationException;
++
++import org.junit.jupiter.api.Test;
++
++/**
++ * The redirect-vs-401 split of the authorization exception handler (F1/anonymous-face
++ * behaviour): browsers go to the IdP login page, API clients get a bare 401.
++ */
++class OidcAuthorizationExceptionHandlerTest {
++
++    private final OidcAuthorizationExceptionHandler handler = new OidcAuthorizationExceptionHandler();
++
++    private AuthorizationException denied() {
++        return new AuthorizationException(SupplierUtil.memoized(() -> Authentication.build("anonymous")).get());
++    }
++
++    @Test
++    void browserGetsRedirectToLoginCarryingFrom() {
++        final HttpRequest<?> request = HttpRequest.GET("/api/v1/main/flows").header("Accept", "text/html");
++        final HttpResponse<?> response = handler.handle(request, denied());
++        assertEquals(HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++        assertEquals("/oidc/login?from=%2Fapi%2Fv1%2Fmain%2Fflows", response.getHeaders().get("Location"));
++    }
++
++    @Test
++    void apiClientGetsBareUnauthorized() {
++        final HttpRequest<?> request = HttpRequest.GET("/api/v1/main/flows").header("Accept", "application/json");
++        final HttpResponse<?> response = handler.handle(request, denied());
++        assertEquals(HttpStatus.UNAUTHORIZED, response.getStatus());
++    }
++
++    @Test
++    void noAcceptHeaderGetsUnauthorized() {
++        final HttpResponse<?> response = handler.handle(HttpRequest.GET("/api/v1/main/flows"), denied());
++        assertEquals(HttpStatus.UNAUTHORIZED, response.getStatus());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
+new file mode 100644
+index 0000000..6f8a75a
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
+@@ -0,0 +1,111 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++import java.util.Map;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.controllers.OidcLoginController;
++import io.kestra.webserver.oidc.services.OidcSessionService;
++import io.kestra.webserver.oidc.services.OidcUserService;
++
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++/**
++ * D2 (login/logout session lifecycle) + the open-redirect guard on {@code from} (E1)
++ * for the R-OIDC-SERVER security checklist.
++ */
++class OidcLoginControllerTest extends OidcPostgresTestBase {
++
++    private OidcLoginController controller;
++    private OidcSessionService sessions;
++
++    @BeforeEach
++    void setUp() {
++        final OidcUserService users = new OidcUserService(OidcPostgresTestBase.dataSource(), new ObjectMapper());
++        users.delete("alice");
++        users.create(new OidcUserService.CreateUserRequest("alice", "Alice", "alice@example.org", "correct-horse", List.of("user")));
++        final OidcConfiguration configuration = new OidcConfiguration();
++        sessions = new OidcSessionService(configuration);
++        controller = new OidcLoginController(users, sessions);
++    }
++
++    @Test
++    void loginPageRendersForm() {
++        final HttpResponse<String> response = controller.loginPage(java.util.Optional.of("/ui/flows"), java.util.Optional.empty());
++        assertEquals(HttpStatus.OK, response.getStatus());
++        final String html = response.body();
++        assertTrue(html.contains("form") && html.contains("name=\"username\""), "login page must render the form");
++        assertTrue(html.contains("value=\"/ui/flows\""), "the sanitized from must ride along as a hidden field");
++    }
++
++    @Test
++    void validCredentialsSetSessionAndRedirectBack() {
++        final HttpRequest<Map<String, String>> request = HttpRequest.POST("/oidc/login",
++            Map.of("username", "alice", "password", "correct-horse", "from", "/ui/flows"));
++        final HttpResponse<?> response = controller.loginSubmit(request, Map.of(
++            "username", "alice", "password", "correct-horse", "from", "/ui/flows"));
++
++        assertEquals(HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++        assertEquals("/ui/flows", response.getHeaders().get("Location"));
++        final var cookie = response.getCookie(OidcSessionService.SESSION_COOKIE_NAME).orElse(null);
++        assertNotNull(cookie, "a session cookie must be set on login");
++        assertTrue(cookie.isHttpOnly(), "session cookie must be HttpOnly");
++
++        // The session must resolve back to the subject (authorize relies on this).
++        assertTrue(sessions.subject(cookie.getValue()).isPresent());
++        assertEquals("alice", sessions.subject(cookie.getValue()).orElseThrow());
++    }
++
++    @Test
++    void invalidCredentialsRenderErrorWithUnauthorized() {
++        final var request = HttpRequest.POST("/oidc/login", Map.of("username", "alice", "password", "wrong"));
++        final HttpResponse<?> response = controller.loginSubmit(request, Map.of(
++            "username", "alice", "password", "wrong", "from", "/ui/flows"));
++        assertEquals(HttpStatus.UNAUTHORIZED, response.getStatus());
++        assertTrue(((String) response.body()).contains("Invalid username or password"));
++    }
++
++    @Test
++    void logoutRevokesSessionAndClearsCookie() {
++        final String sessionId = sessions.create("alice");
++        final var request = new io.micronaut.http.simple.SimpleHttpRequest<Void>(io.micronaut.http.HttpMethod.GET, "/oidc/logout", null)
++            .cookie(io.micronaut.http.cookie.Cookie.of(OidcSessionService.SESSION_COOKIE_NAME, sessionId));
++        final HttpResponse<?> response = controller.logout(request);
++
++        assertEquals(HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++        assertTrue(sessions.subject(sessionId).isEmpty(), "logout must revoke the session");
++        final var cleared = response.getCookie(OidcSessionService.SESSION_COOKIE_NAME).orElse(null);
++        assertNotNull(cleared);
++        assertEquals(0L, cleared.getMaxAge(), "logout must clear the cookie");
++    }
++
++    @Test
++    void fromIsSanitizedAgainstOpenRedirect() {
++        assertNull(OidcLoginController.sanitizeFrom("https://evil.example.org/"), "absolute URLs rejected");
++        assertNull(OidcLoginController.sanitizeFrom("//evil.example.org/"), "protocol-relative rejected");
++        assertNull(OidcLoginController.sanitizeFrom("/\\evil.example.org/"), "backslash trick rejected");
++        assertNull(OidcLoginController.sanitizeFrom(null));
++        assertNull(OidcLoginController.sanitizeFrom("  "));
++        assertEquals("/ui/flows", OidcLoginController.sanitizeFrom(" /ui/flows "));
++        assertEquals("/oidc/authorize?client_id=x", OidcLoginController.sanitizeFrom("/oidc/authorize?client_id=x"));
++    }
++
++    @Test
++    void maliciousFromFallsBackToDefaultLanding() {
++        final var request = HttpRequest.POST("/oidc/login", Map.of());
++        final HttpResponse<?> response = controller.loginSubmit(request, Map.of(
++            "username", "alice", "password", "correct-horse", "from", "https://evil.example.org/"));
++        assertEquals(HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++        assertEquals("/ui/", response.getHeaders().get("Location"), "open-redirect target must fall back to /ui/");
++    }
++}

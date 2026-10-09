@@ -1,0 +1,561 @@
+# ══ 需求 REQ-0100：R-OIDC-SERVER JWKS 密钥基座 ════════════════════════════════
+# 需求：内置 OIDC 授权服务器的签名密钥基座——RS256 密钥生成/装载/JWKS 发布/轮换并存；
+#   oidc_jwk 表 migration；webserver 构建面依赖行（AGENTS §2 唯一例外）；OIDC 测试
+#   基座（Testcontainers 真 PG + 动态 migration 扫描——后续需求只加 SQL 不改基座）。
+# 消费扩展仓：—（本仓预留扩展点 R-OIDC-SERVER，patch 路线，2026-10-07 裁定）
+# 状态：core（协议标准基础设施层——AGENTS §3-7；上游不会提供此能力）
+# 来源：参考 fork app-kestra OidcJwkService 实现逻辑重写（跨基：fork 编写基为 develop
+#   分叉点 f6dbbb49，本 patch 基于 v2.0.5 @ 172dd0f3；逐文件漂移核对完成）；
+#   协议标准依据：RFC 7517 (JWK)、RFC 7518 (RS256)、nimbus-jose-jwt 10.9.1。
+#   手工适配 + 剥离了：种子密钥（fork SQL 烤入硬编码 RSA 私钥——安全隐患，改为首用
+#   生成）；门控从默认开改为默认关（加固定位，kestra.oidc.enabled=true 显式开启）。
+# 触达上游文件（4+2 测试）：webserver/build.gradle（M·依赖 6 行）、migration bean+SQL、
+#   OidcJwkService（新增）；测试 OidcJwkServiceTest/OidcPostgresTestBase。
+# 移除条件：上游提供原生 OIDC 授权服务器（预期不会）；或 R-OIDC-SERVER 弃用
+diff --git a/webserver/build.gradle b/webserver/build.gradle
+index 7833929..a524496 100644
+--- a/webserver/build.gradle
++++ b/webserver/build.gradle
+@@ -23,6 +23,13 @@ dependencies {
+     implementation "io.micronaut.cache:micronaut-cache-caffeine"
+ 
+     implementation "io.micronaut.security:micronaut-security-csrf"
++    // R-OIDC-SERVER（协议标准基础设施层，AGENTS §2 唯一例外：本块依赖行）
++    implementation project(":jdbc")
++    implementation "io.micronaut.security:micronaut-security-oauth2"
++    implementation "io.micronaut.security:micronaut-security-jwt"
++    implementation "io.micronaut.data:micronaut-data-connection-jdbc"
++    implementation "com.nimbusds:oauth2-oidc-sdk:11.38.2"
++    implementation "org.mindrot:jbcrypt:0.4"
+ 
+     implementation("com.posthog.java:posthog:1.2.0")
+ 
+@@ -46,6 +53,10 @@ dependencies {
+     testImplementation project(':worker')
+     testImplementation project(':indexer')
+     testImplementation "org.wiremock:wiremock-jetty12"
++    // R-OIDC-SERVER 测试（Testcontainers 真 PG + 驱动，版本随平台/上游）
++    testImplementation "org.testcontainers:postgresql:1.21.4"
++    testImplementation "org.testcontainers:junit-jupiter:1.21.4"
++    testImplementation "org.postgresql:postgresql"
+     testImplementation "org.awaitility:awaitility"
+     testImplementation "io.opentelemetry:opentelemetry-sdk-testing"
+ 
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java
+new file mode 100644
+index 0000000..a99fae5
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java
+@@ -0,0 +1,52 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++
++import javax.sql.DataSource;
++
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++
++/**
++ * PostgreSQL migration for the built-in OIDC server signing keys (table {@code oidc_jwk}).
++ *
++ * <p>Gated by the repository backend only (not by {@code kestra.oidc.enabled}) so the schema is
++ * provisioned even while the feature is off — the HTTP surface stays vanilla until the feature
++ * flag is set. Registered through the Kestra migration mechanism: picked up by
++ * {@code MigrationRunner} and executed in lexical {@link #scriptId()} order after all upstream
++ * {@code 2.0.x} scripts.
++ */
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public class V2_0_90OidcServerJwkMigration extends AbstractSQLMigrationScript {
++
++    private final DataSource dataSource;
++
++    @Inject
++    public V2_0_90OidcServerJwkMigration(final DataSource dataSource) {
++        this.dataSource = dataSource;
++    }
++
++    @Override
++    public String scriptId() {
++        return "2.0.90-oidc-server-jwk";
++    }
++
++    @Override
++    public String description() {
++        return "OIDC server signing keys: oidc_jwk (no seed data — keys are generated on first use)";
++    }
++
++    @Override
++    protected DataSource dataSource() {
++        return dataSource;
++    }
++
++    @Override
++    public List<String> sqlResources() {
++        return List.of("/migrations/2.0.90-oidc-server-jwk-postgres.sql");
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java
+new file mode 100644
+index 0000000..8f36f52
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java
+@@ -0,0 +1,143 @@
++package io.kestra.webserver.oidc.services;
++
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Optional;
++
++import javax.sql.DataSource;
++
++import com.nimbusds.jose.JWSAlgorithm;
++import com.nimbusds.jose.jwk.JWK;
++import com.nimbusds.jose.jwk.JWKSet;
++import com.nimbusds.jose.jwk.KeyUse;
++import com.nimbusds.jose.jwk.RSAKey;
++import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++
++/**
++ * Manages the built-in OIDC server signing keys (table {@code oidc_jwk}).
++ *
++ * <p>The <b>newest</b> active RSA-2048 key signs all tokens (RS256). Every active key — the
++ * current one plus any older ones still in their verification-overlap window — is published in
++ * the public JWK Set for the {@code jwks_uri} endpoint. {@link #rotate()} persists a fresh key
++ * and keeps previous keys active so already-issued tokens keep verifying; retire old keys by
++ * setting {@code active = false}. If no key exists at all, one is generated on first use:
++ * no key material is ever seeded from source.
++ *
++ * <p>Feature-gated: the whole OIDC server is dormant unless {@code kestra.oidc.enabled=true}
++ * (deployment-side activation, channel ④).
++ */
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++public class OidcJwkService {
++
++    private final DataSource dataSource;
++
++    @Inject
++    public OidcJwkService(final DataSource dataSource) {
++        // Unwrap any Micronaut Data AOP proxy so getConnection() works outside a @Connectable context.
++        this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
++    }
++
++    /** A stored JWK record. */
++    public record StoredJwk(String kid, String jwkJson, String algorithm, boolean active) {}
++
++    /** Loads the newest active signing key, generating and persisting one if none exists. */
++    public RSAKey activeSigningKey() {
++        return findNewestActive()
++            .map(this::parseJwk)
++            .orElseGet(this::generateAndStore);
++    }
++
++    /** Generates and persists a fresh active key; previous keys stay active (rotation overlap). */
++    public RSAKey rotate() {
++        return generateAndStore();
++    }
++
++    /** The public JWK Set of all active keys, newest first (for the {@code jwks_uri} endpoint). */
++    public JWKSet publicJwkSet() {
++        final List<JWK> publicKeys = new ArrayList<>();
++        for (final StoredJwk stored : findAllActive()) {
++            publicKeys.add(parseJwk(stored).toPublicJWK());
++        }
++        return new JWKSet(publicKeys);
++    }
++
++    private Optional<StoredJwk> findNewestActive() {
++        final String sql = "SELECT kid, jwk, algorithm, active FROM oidc_jwk WHERE active = TRUE ORDER BY created_at DESC, kid DESC LIMIT 1";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql);
++             ResultSet rs = ps.executeQuery()) {
++            return rs.next() ? Optional.of(map(rs)) : Optional.empty();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to load active OIDC JWK", e);
++        }
++    }
++
++    private List<StoredJwk> findAllActive() {
++        final String sql = "SELECT kid, jwk, algorithm, active FROM oidc_jwk WHERE active = TRUE ORDER BY created_at DESC, kid DESC";
++        final List<StoredJwk> result = new ArrayList<>();
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql);
++             ResultSet rs = ps.executeQuery()) {
++            while (rs.next()) {
++                result.add(map(rs));
++            }
++            return result;
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to load active OIDC JWKs", e);
++        }
++    }
++
++    private StoredJwk map(final ResultSet rs) throws SQLException {
++        return new StoredJwk(
++            rs.getString("kid"),
++            rs.getString("jwk"),
++            rs.getString("algorithm"),
++            rs.getBoolean("active")
++        );
++    }
++
++    private RSAKey parseJwk(final StoredJwk stored) {
++        try {
++            return (RSAKey) JWK.parse(stored.jwkJson());
++        } catch (Exception e) {
++            throw new IllegalStateException("Invalid stored JWK kid=" + stored.kid(), e);
++        }
++    }
++
++    private RSAKey generateAndStore() {
++        final RSAKey key;
++        try {
++            key = new RSAKeyGenerator(2048)
++                .keyID("kestra-oidc-" + Instant.now().toEpochMilli())
++                .algorithm(JWSAlgorithm.RS256)
++                .keyUse(KeyUse.SIGNATURE)
++                .generate();
++        } catch (Exception e) {
++            throw new IllegalStateException("Failed to generate OIDC JWK", e);
++        }
++        final String sql = """
++            INSERT INTO oidc_jwk (kid, jwk, algorithm, active)
++            VALUES (?, ?, 'RS256', TRUE)
++            ON CONFLICT (kid) DO NOTHING""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, key.getKeyID());
++            ps.setString(2, key.toJSONString());
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to persist generated OIDC JWK", e);
++        }
++        return key;
++    }
++}
+diff --git a/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql b/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql
+new file mode 100644
+index 0000000..e4d32e2
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql
+@@ -0,0 +1,17 @@
++-- ============================================================================
++-- R-OIDC-SERVER signing keys (RS256). Applied by the Kestra migration
++-- mechanism (MigrationScript, id 2.0.90-oidc-server-jwk). Backend: PostgreSQL.
++--
++-- No key material is ever seeded from source: OidcJwkService generates the
++-- first RSA-2048 key on first use (hardened persona; no shipped secrets).
++-- Rotation = a new active row while previous rows stay active for the
++-- verification overlap window; retire old keys with active = false.
++-- ============================================================================
++CREATE TABLE IF NOT EXISTS oidc_jwk
++(
++    kid        TEXT        NOT NULL PRIMARY KEY,
++    jwk        TEXT        NOT NULL,                    -- full RSA JWK JSON (incl. private part for signing)
++    algorithm  TEXT        NOT NULL DEFAULT 'RS256',
++    active     BOOLEAN     NOT NULL DEFAULT TRUE,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
++);
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java
+new file mode 100644
+index 0000000..3477b65
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java
+@@ -0,0 +1,107 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.text.ParseException;
++
++import com.nimbusds.jose.JWSAlgorithm;
++import com.nimbusds.jose.JWSHeader;
++import com.nimbusds.jose.JWSObject;
++import com.nimbusds.jose.JWSSigner;
++import com.nimbusds.jose.Payload;
++import com.nimbusds.jose.crypto.RSASSASigner;
++import com.nimbusds.jose.crypto.RSASSAVerifier;
++import com.nimbusds.jose.jwk.JWK;
++import com.nimbusds.jose.jwk.RSAKey;
++
++import io.kestra.webserver.oidc.services.OidcJwkService;
++
++import org.junit.jupiter.api.Test;
++
++/**
++ * B1 (JWT sign/verify) + B3 (JWKS rotation overlap) from the R-OIDC-SERVER security checklist.
++ */
++class OidcJwkServiceTest extends OidcPostgresTestBase {
++
++    private OidcJwkService service() {
++        return new OidcJwkService(OidcPostgresTestBase.dataSource());
++    }
++
++    @Test
++    void generatesAndPersistsKeyOnFirstUse() {
++        final RSAKey first = service().activeSigningKey();
++        assertNotNull(assertDoesNotThrow(first::toPrivateKey), "signing key must carry the private part");
++        assertEquals("RS256", first.getAlgorithm().getName());
++
++        // A fresh service instance must reload (not regenerate) the same key.
++        assertEquals(first.getKeyID(), service().activeSigningKey().getKeyID());
++    }
++
++    @Test
++    void publicJwkSetExposesOnlyPublicParts() {
++        final OidcJwkService svc = service();
++        svc.activeSigningKey();
++        for (final JWK jwk : svc.publicJwkSet().getKeys()) {
++            final String json = jwk.toJSONString();
++            assertFalse(
++                json.contains("\"d\"") || json.contains("\"p\"") || json.contains("\"q\""),
++                "JWKS entries must be public-only (no private key material)"
++            );
++        }
++    }
++
++    @Test
++    void signsAndVerifiesRs256() throws Exception {
++        final RSAKey key = service().activeSigningKey();
++        final String signed = sign(key, "{\"sub\":\"user-1\"}");
++        assertTrue(verifyAgainstJwks(signed), "token signed by the active key must verify via the published JWKS");
++    }
++
++    @Test
++    void rotationKeepsPreviousKeyPublishedAndVerifiable() throws Exception {
++        final OidcJwkService svc = service();
++        final RSAKey original = svc.activeSigningKey();
++        final RSAKey rotated = svc.rotate();
++
++        assertNotEquals(original.getKeyID(), rotated.getKeyID(), "rotation must produce a new key");
++        assertEquals(rotated.getKeyID(), svc.activeSigningKey().getKeyID(), "the newest key must sign after rotation");
++
++        final var published = svc.publicJwkSet().getKeys();
++        assertTrue(published.stream().anyMatch(k -> k.getKeyID().equals(original.getKeyID())),
++            "the previous key must stay published during the overlap window");
++        assertTrue(published.stream().anyMatch(k -> k.getKeyID().equals(rotated.getKeyID())));
++
++        final String legacyToken = sign(original, "{\"sub\":\"legacy\"}");
++        assertTrue(verifyAgainstJwks(legacyToken), "tokens signed by the pre-rotation key must keep verifying");
++    }
++
++    private String sign(final RSAKey key, final String payload) throws Exception {
++        final JWSSigner signer = new RSASSASigner(key);
++        final JWSObject object = new JWSObject(
++            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(),
++            new Payload(payload)
++        );
++        object.sign(signer);
++        return object.serialize();
++    }
++
++    private boolean verifyAgainstJwks(final String serialized) throws ParseException {
++        final JWSObject object = JWSObject.parse(serialized);
++        return service().publicJwkSet().getKeys().stream()
++            .filter(jwk -> jwk.getKeyID() != null && jwk.getKeyID().equals(object.getHeader().getKeyID()))
++            .findFirst()
++            .map(jwk -> {
++                try {
++                    return object.verify(new RSASSAVerifier((RSAKey) jwk));
++                } catch (Exception e) {
++                    throw new IllegalStateException(e);
++                }
++            })
++            .orElse(false);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
+new file mode 100644
+index 0000000..3262778
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
+@@ -0,0 +1,169 @@
++package io.kestra.webserver.oidc;
++
++import java.sql.Connection;
++import java.sql.DriverManager;
++import java.sql.SQLException;
++import java.sql.Statement;
++import java.util.ArrayList;
++import java.util.List;
++
++import javax.sql.DataSource;
++
++import org.junit.jupiter.api.BeforeAll;
++import org.testcontainers.containers.PostgreSQLContainer;
++
++/**
++ * Base for OIDC server tests: boots a real PostgreSQL (Testcontainers) and applies the exact
++ * production migrations. Services are instantiated directly against the container's DataSource
++ * — no Micronaut context needed for storage/service-level tests.
++ */
++public abstract class OidcPostgresTestBase {
++
++    /**
++     * Singleton container (started once per JVM, stopped by Testcontainers' shutdown hook).
++     * NOT @Testcontainers/@Container: that lifecycle restarts the container for every test
++     * class, which would hand later classes an empty database while the migration flag is
++     * already set — the exact failure this base exists to prevent.
++     */
++    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18");
++
++    static {
++        POSTGRES.start();
++    }
++
++    private static volatile boolean migrated = false;
++
++    /**
++     * Discovers the OIDC server migrations from the classpath (files matching
++     * {@code 2.0.9*-oidc-server*.sql}, sorted = scriptId order). Dynamic on purpose: later
++     * requirement patches only add their own SQL file — this base never needs editing again
++     * (which also keeps cross-patch diff hygiene, AGENTS §3-1).
++     */
++    static List<String> migrationResources() {
++        try (var stream = OidcPostgresTestBase.class.getClassLoader().getResourceAsStream("migrations")) {
++            if (stream == null) {
++                throw new IllegalStateException("No /migrations package on the classpath");
++            }
++            return new java.util.ArrayList<>(java.util.Arrays.stream(new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).split("\\n"))
++                .filter(line -> !line.isBlank())
++                .filter(name -> name.matches("2\\.0\\.9\\d-oidc-server.*\\.sql"))
++                .sorted()
++                .map(name -> "/migrations/" + name)
++                .toList());
++        } catch (Exception e) {
++            throw new IllegalStateException("Failed to discover OIDC migrations on the classpath", e);
++        }
++    }
++
++    @BeforeAll
++    static void bootDatabase() throws Exception {
++        applyMigrations();
++    }
++
++    static void applyMigrations() throws Exception {
++        if (migrated) {
++            return;
++        }
++        try (Connection connection = rawConnection()) {
++            for (String resource : migrationResources()) {
++                for (String statement : splitStatements(read(resource))) {
++                    try (Statement st = connection.createStatement()) {
++                        st.execute(statement);
++                    }
++                }
++            }
++        }
++        migrated = true;
++    }
++
++    /** Simple un-pooled DataSource over the test container. */
++    public static DataSource dataSource() {
++        return new DataSource() {
++            @Override
++            public Connection getConnection() throws SQLException {
++                return rawConnection();
++            }
++
++            @Override
++            public Connection getConnection(final String username, final String password) throws SQLException {
++                return rawConnection();
++            }
++
++            @Override
++            public <T> T unwrap(final Class<T> iface) throws SQLException {
++                if (iface.isInstance(this)) {
++                    return iface.cast(this);
++                }
++                throw new SQLException("Not a wrapper for " + iface);
++            }
++
++            @Override
++            public boolean isWrapperFor(final Class<?> iface) {
++                return iface.isInstance(this);
++            }
++
++            @Override
++            public java.io.PrintWriter getLogWriter() {
++                return null;
++            }
++
++            @Override
++            public void setLogWriter(final java.io.PrintWriter out) {
++                // no-op
++            }
++
++            @Override
++            public void setLoginTimeout(final int seconds) {
++                // no-op
++            }
++
++            @Override
++            public int getLoginTimeout() {
++                return 0;
++            }
++
++            @Override
++            public java.util.logging.Logger getParentLogger() {
++                return java.util.logging.Logger.getGlobal();
++            }
++        };
++    }
++
++    private static Connection rawConnection() throws SQLException {
++        return DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
++    }
++
++    private static String read(final String resource) throws Exception {
++        try (var is = OidcPostgresTestBase.class.getResourceAsStream(resource)) {
++            if (is == null) {
++                throw new IllegalStateException("Migration resource not found on classpath: " + resource);
++            }
++            return new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
++        }
++    }
++
++    /** Splits SQL on statement-terminating semicolons, ignoring line comments (our migrations keep it that simple). */
++    static List<String> splitStatements(final String sql) {
++        final List<String> statements = new ArrayList<>();
++        final StringBuilder current = new StringBuilder();
++        for (final String line : sql.split("\n", -1)) {
++            final String trimmed = line.strip();
++            if (trimmed.startsWith("--")) {
++                continue;
++            }
++            current.append(line).append('\n');
++            if (trimmed.endsWith(";")) {
++                final String statement = current.toString().strip();
++                if (!statement.isEmpty()) {
++                    statements.add(statement.substring(0, statement.length() - 1));
++                }
++                current.setLength(0);
++            }
++        }
++        final String tail = current.toString().strip();
++        if (!tail.isEmpty()) {
++            statements.add(tail);
++        }
++        return statements;
++    }
++}

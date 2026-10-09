@@ -1,0 +1,785 @@
+# ══ 需求 REQ-0110：R-OIDC-SERVER 用户与 client 目录存储 ═════════════════════
+# 需求：OIDC 用户目录（oidc_user + oidc_user_auth_method，bcrypt-only）与 client
+#   注册表（oidc_client：常数时间 secret 比较/redirect_uri 精确匹配/public client=
+#   空 secret 走 PKCE）及存储操作。
+# 消费扩展仓：—（R-OIDC-SERVER patch 路线）
+# 状态：core（协议标准基础设施层）
+# 来源：参考 fork OidcUserService/OidcClientService 逻辑重写（跨基，漂移核对完成）；
+#   依据：RFC 6749 §2.1（client types）、jbcrypt 0.4。剥离了：ZITADEL 展示字段、
+#   project/machine-identity 机器（机器身份=client_credentials grant）、表缺席回退。
+# 触达上游文件（4+2 测试）：migration bean+SQL（2.0.91）、OidcUserService、
+#   OidcClientService、OidcException；测试两份。
+# 移除条件：同 REQ-0100
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcException.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcException.java
+new file mode 100644
+index 0000000..fea9819
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcException.java
+@@ -0,0 +1,22 @@
++package io.kestra.webserver.oidc;
++
++import com.nimbusds.oauth2.sdk.ErrorObject;
++
++/**
++ * OAuth2/OIDC protocol error of the built-in server. Carries the RFC 6749 error object so the
++ * token endpoint renders the exact error response (e.g. {@code invalid_client} → 401 with no
++ * detail beyond the code — never leak whether the client or the secret was wrong).
++ */
++public class OidcException extends RuntimeException {
++
++    private final ErrorObject error;
++
++    public OidcException(final ErrorObject error) {
++        super(error.getCode() + (error.getDescription() != null ? ": " + error.getDescription() : ""));
++        this.error = error;
++    }
++
++    public ErrorObject error() {
++        return error;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_91OidcServerDirectoryMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_91OidcServerDirectoryMigration.java
+new file mode 100644
+index 0000000..c676e21
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_91OidcServerDirectoryMigration.java
+@@ -0,0 +1,50 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++
++import javax.sql.DataSource;
++
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++
++/**
++ * PostgreSQL migration for the OIDC server user directory and client registry:
++ * {@code oidc_user}, {@code oidc_user_auth_method}, {@code oidc_client}. No seed data —
++ * accounts and clients are created via the admin endpoints or config bootstrap.
++ *
++ * <p>Gated by the repository backend only (schema is provisioned even while the feature is off).
++ */
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public class V2_0_91OidcServerDirectoryMigration extends AbstractSQLMigrationScript {
++
++    private final DataSource dataSource;
++
++    @Inject
++    public V2_0_91OidcServerDirectoryMigration(final DataSource dataSource) {
++        this.dataSource = dataSource;
++    }
++
++    @Override
++    public String scriptId() {
++        return "2.0.91-oidc-server-directory";
++    }
++
++    @Override
++    public String description() {
++        return "OIDC server directory: oidc_user, oidc_user_auth_method, oidc_client (no seed data)";
++    }
++
++    @Override
++    protected DataSource dataSource() {
++        return dataSource;
++    }
++
++    @Override
++    public List<String> sqlResources() {
++        return List.of("/migrations/2.0.91-oidc-server-directory-postgres.sql");
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
+new file mode 100644
+index 0000000..a9cfbed
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
+@@ -0,0 +1,231 @@
++package io.kestra.webserver.oidc.services;
++
++import java.security.MessageDigest;
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++import java.util.Optional;
++
++import javax.sql.DataSource;
++
++import com.fasterxml.jackson.core.type.TypeReference;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.nimbusds.oauth2.sdk.OAuth2Error;
++// OAuth2Error.INVALID_CLIENT 等常量本身是 ErrorObject 实例
++
++import io.kestra.webserver.oidc.OidcException;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++
++/**
++ * Storage and validation for OAuth2/OIDC clients (table {@code oidc_client}).
++ *
++ * <p>Security properties (R-OIDC-SERVER checklist): client secrets are compared in constant
++ * time (C1); {@code redirect_uri} must match a registered entry EXACTLY — no prefix/suffix
++ * tolerance, which is the open-redirect guard (E1); a public client ({@code
++ * token_endpoint_auth_method=none}) is stored with an EMPTY secret and must use PKCE (S256).
++ */
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++public class OidcClientService {
++
++    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
++
++    private final DataSource dataSource;
++    private final ObjectMapper objectMapper;
++
++    @Inject
++    public OidcClientService(final DataSource dataSource, final ObjectMapper objectMapper) {
++        this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
++        this.objectMapper = objectMapper;
++    }
++
++    /** A registered client. {@code clientSecret == ""} marks a public (PKCE-only) client. */
++    public record OidcClient(
++        String clientId,
++        String clientSecret,
++        List<String> redirectUris,
++        List<String> grantTypes,
++        List<String> scopes,
++        boolean active
++    ) {}
++
++    /** Client view for API responses — never carries the secret. */
++    public record ClientView(
++        String clientId,
++        List<String> redirectUris,
++        List<String> grantTypes,
++        List<String> scopes,
++        boolean active,
++        boolean isPublic
++    ) {}
++
++    public Optional<OidcClient> find(final String clientId) {
++        final String sql = """
++            SELECT client_id, client_secret, redirect_uris, grant_types, scopes, active
++            FROM oidc_client WHERE client_id = ?""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, clientId);
++            try (ResultSet rs = ps.executeQuery()) {
++                return rs.next() ? Optional.of(map(rs)) : Optional.empty();
++            }
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to load OIDC client '" + clientId + "'", e);
++        }
++    }
++
++    public OidcClient require(final String clientId) {
++        return find(clientId).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_CLIENT));
++    }
++
++    public List<ClientView> list() {
++        final String sql = """
++            SELECT client_id, client_secret, redirect_uris, grant_types, scopes, active
++            FROM oidc_client ORDER BY client_id""";
++        final List<ClientView> clients = new ArrayList<>();
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql);
++             ResultSet rs = ps.executeQuery()) {
++            while (rs.next()) {
++                final OidcClient c = map(rs);
++                clients.add(new ClientView(c.clientId(), c.redirectUris(), c.grantTypes(), c.scopes(), c.active(), isPublic(c)));
++            }
++            return clients;
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to list OIDC clients", e);
++        }
++    }
++
++    /**
++     * Verifies {@code client_secret} in constant time. Rejects empty secrets on either side:
++     * a public client (empty stored secret) never authenticates via secret — it must use PKCE.
++     */
++    public boolean authenticate(final String clientId, final String clientSecret) {
++        if (clientSecret == null || clientSecret.isEmpty()) {
++            return false;
++        }
++        return find(clientId)
++            .filter(OidcClient::active)
++            .filter(c -> !c.clientSecret().isEmpty())
++            .map(c -> constantTimeEquals(c.clientSecret(), clientSecret))
++            .orElse(false);
++    }
++
++    public boolean isPublic(final OidcClient client) {
++        return client.clientSecret() == null || client.clientSecret().isEmpty();
++    }
++
++    public boolean isGrantTypeAllowed(final OidcClient client, final String grantType) {
++        return client.grantTypes().contains(grantType);
++    }
++
++    /** Exact string match against the registered redirect URIs (open-redirect guard, E1). */
++    public boolean isRedirectUriRegistered(final OidcClient client, final String redirectUri) {
++        return redirectUri != null && client.redirectUris().contains(redirectUri);
++    }
++
++    public boolean isScopeAllowed(final OidcClient client, final List<String> requestedScopes) {
++        return client.scopes().containsAll(requestedScopes);
++    }
++
++    public void create(
++        final String clientId,
++        final String clientSecret,
++        final List<String> redirectUris,
++        final List<String> grantTypes,
++        final List<String> scopes
++    ) {
++        final String sql = """
++            INSERT INTO oidc_client (client_id, client_secret, redirect_uris, grant_types, scopes, active)
++            VALUES (?, ?, ?::jsonb, ?::jsonb, ?::jsonb, TRUE)
++            ON CONFLICT (client_id) DO NOTHING""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, clientId);
++            ps.setString(2, clientSecret == null ? "" : clientSecret);
++            ps.setString(3, toJson(redirectUris));
++            ps.setString(4, toJson(grantTypes));
++            ps.setString(5, toJson(scopes));
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to create OIDC client '" + clientId + "'", e);
++        }
++    }
++
++    public void updateSecret(final String clientId, final String newSecret) {
++        final String sql = "UPDATE oidc_client SET client_secret = ? WHERE client_id = ?";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, Objects.requireNonNull(newSecret));
++            ps.setString(2, clientId);
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to update OIDC client secret", e);
++        }
++    }
++
++    public void updateActive(final String clientId, final boolean active) {
++        final String sql = "UPDATE oidc_client SET active = ? WHERE client_id = ?";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setBoolean(1, active);
++            ps.setString(2, clientId);
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to update OIDC client active flag", e);
++        }
++    }
++
++    public void delete(final String clientId) {
++        final String sql = "DELETE FROM oidc_client WHERE client_id = ?";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, clientId);
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to delete OIDC client '" + clientId + "'", e);
++        }
++    }
++
++    private OidcClient map(final ResultSet rs) throws SQLException {
++        return new OidcClient(
++            rs.getString("client_id"),
++            rs.getString("client_secret"),
++            fromJson(rs.getString("redirect_uris")),
++            fromJson(rs.getString("grant_types")),
++            fromJson(rs.getString("scopes")),
++            rs.getBoolean("active")
++        );
++    }
++
++    private String toJson(final List<String> list) {
++        try {
++            return objectMapper.writeValueAsString(list == null ? List.of() : list);
++        } catch (Exception e) {
++            throw new IllegalStateException("Failed to serialize JSON list", e);
++        }
++    }
++
++    private List<String> fromJson(final String json) {
++        try {
++            return objectMapper.readValue(json == null ? "[]" : json, STRING_LIST);
++        } catch (Exception e) {
++            throw new IllegalStateException("Failed to parse JSON list", e);
++        }
++    }
++
++    private static boolean constantTimeEquals(final String a, final String b) {
++        return MessageDigest.isEqual(
++            a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
++            b.getBytes(java.nio.charset.StandardCharsets.UTF_8)
++        );
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserService.java
+new file mode 100644
+index 0000000..8889c3e
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserService.java
+@@ -0,0 +1,236 @@
++package io.kestra.webserver.oidc.services;
++
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.Instant;
++import java.util.List;
++import java.util.Optional;
++
++import javax.sql.DataSource;
++
++import com.fasterxml.jackson.core.type.TypeReference;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import org.mindrot.jbcrypt.BCrypt;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++
++/**
++ * Storage for the OIDC user directory (tables {@code oidc_user} + {@code oidc_user_auth_method}).
++ *
++ * <p>Security properties (R-OIDC-SERVER checklist): passwords are stored as bcrypt hashes ONLY —
++ * plaintext never touches the database (C2); {@link #validateCredentials} rejects inactive users
++ * and updates {@code last_login_at} on success.
++ */
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++public class OidcUserService {
++
++    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
++    private static final String PASSWORD_METHOD = "PASSWORD";
++
++    private final DataSource dataSource;
++    private final ObjectMapper objectMapper;
++
++    @Inject
++    public OidcUserService(final DataSource dataSource, final ObjectMapper objectMapper) {
++        this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
++        this.objectMapper = objectMapper;
++    }
++
++    /** The OIDC-facing user identity: {@code sub} is the username. */
++    public record OidcUser(String sub, String name, String email, boolean emailVerified, List<String> roles) {}
++
++    /** Row for the admin list view. */
++    public record UserRow(
++        String username, String name, String email, boolean emailVerified,
++        String userState, Instant lastLoginAt, List<String> roles
++    ) {}
++
++    public record CreateUserRequest(String username, String name, String email, String password, List<String> roles) {}
++
++    private record StoredUser(String username, String name, String email, boolean emailVerified, String userState, String rolesJson) {}
++
++    /** Validates username/password against the directory (bcrypt); rejects INACTIVE users. */
++    public boolean validateCredentials(final String username, final String password) {
++        if (username == null || password == null) {
++            return false;
++        }
++        final Optional<StoredUser> user = findUser(username);
++        if (user.isEmpty() || !"ACTIVE".equals(user.get().userState())) {
++            return false;
++        }
++        final Optional<String> hash = findPasswordHash(username);
++        if (hash.isEmpty() || !BCrypt.checkpw(password, hash.get())) {
++            return false;
++        }
++        updateLastLogin(username);
++        return true;
++    }
++
++    public Optional<OidcUser> bySubject(final String subject) {
++        return findUser(subject).map(u -> new OidcUser(u.username(), u.name(), u.email(), u.emailVerified(), fromJson(u.rolesJson())));
++    }
++
++    public List<UserRow> list() {
++        final String sql = """
++            SELECT username, name, email, email_verified, user_state, last_login_at, roles
++            FROM oidc_user ORDER BY username""";
++        final List<UserRow> rows = new java.util.ArrayList<>();
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql);
++             ResultSet rs = ps.executeQuery()) {
++            while (rs.next()) {
++                rows.add(new UserRow(
++                    rs.getString("username"),
++                    rs.getString("name"),
++                    rs.getString("email"),
++                    rs.getBoolean("email_verified"),
++                    rs.getString("user_state"),
++                    toInstant(rs.getTimestamp("last_login_at")),
++                    fromJson(rs.getString("roles"))
++                ));
++            }
++            return rows;
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to list OIDC users", e);
++        }
++    }
++
++    /** Creates a user with a bcrypt-hashed password (never plaintext — C2). */
++    public void create(final CreateUserRequest request) {
++        if (request.username() == null || request.username().isBlank()
++            || request.password() == null || request.password().isBlank()) {
++            throw new IllegalArgumentException("username and password are required");
++        }
++        final String sql = """
++            INSERT INTO oidc_user (username, name, email, roles)
++            VALUES (?, ?, ?, ?::jsonb)
++            ON CONFLICT (username) DO NOTHING""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, request.username());
++            ps.setString(2, request.name() == null ? request.username() : request.name());
++            ps.setString(3, request.email() == null ? request.username() + "@localhost" : request.email());
++            ps.setString(4, toJson(request.roles() == null ? List.of("user") : request.roles()));
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to create OIDC user '" + request.username() + "'", e);
++        }
++        setPassword(request.username(), request.password());
++    }
++
++    /** Replaces the password (bcrypt). */
++    public void setPassword(final String username, final String newPassword) {
++        final String sql = """
++            INSERT INTO oidc_user_auth_method (user_id, type, credential)
++            VALUES (?, 'PASSWORD', ?)
++            ON CONFLICT (user_id, type) DO UPDATE SET credential = EXCLUDED.credential, updated_at = now()""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, username);
++            ps.setString(2, BCrypt.hashpw(newPassword, BCrypt.gensalt()));
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to set OIDC password", e);
++        }
++    }
++
++    public void updateUserState(final String username, final String state) {
++        final String sql = "UPDATE oidc_user SET user_state = ?, updated_at = now() WHERE username = ?";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, state);
++            ps.setString(2, username);
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to update OIDC user state", e);
++        }
++    }
++
++    public void delete(final String username) {
++        final String sql = "DELETE FROM oidc_user WHERE username = ?";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, username);
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to delete OIDC user '" + username + "'", e);
++        }
++    }
++
++    /** The stored bcrypt hash — used by tests to assert no plaintext ever lands in the DB (C2). */
++    public Optional<String> storedPasswordHash(final String username) {
++        return findPasswordHash(username);
++    }
++
++    private Optional<StoredUser> findUser(final String username) {
++        final String sql = """
++            SELECT username, name, email, email_verified, user_state, roles
++            FROM oidc_user WHERE username = ?""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, username);
++            try (ResultSet rs = ps.executeQuery()) {
++                return rs.next() ? Optional.of(new StoredUser(
++                    rs.getString("username"), rs.getString("name"), rs.getString("email"),
++                    rs.getBoolean("email_verified"), rs.getString("user_state"), rs.getString("roles")
++                )) : Optional.empty();
++            }
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to load OIDC user '" + username + "'", e);
++        }
++    }
++
++    private Optional<String> findPasswordHash(final String username) {
++        final String sql = """
++            SELECT credential FROM oidc_user_auth_method
++            WHERE user_id = ? AND type = 'PASSWORD' AND state = 'ACTIVE'""";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setString(1, username);
++            try (ResultSet rs = ps.executeQuery()) {
++                return rs.next() ? Optional.ofNullable(rs.getString("credential")) : Optional.empty();
++            }
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to load OIDC credential", e);
++        }
++    }
++
++    private void updateLastLogin(final String username) {
++        final String sql = "UPDATE oidc_user SET last_login_at = ? WHERE username = ?";
++        try (Connection connection = dataSource.getConnection();
++             PreparedStatement ps = connection.prepareStatement(sql)) {
++            ps.setTimestamp(1, Timestamp.from(Instant.now()));
++            ps.setString(2, username);
++            ps.executeUpdate();
++        } catch (SQLException e) {
++            throw new IllegalStateException("Failed to update last login", e);
++        }
++    }
++
++    private String toJson(final List<String> list) {
++        try {
++            return objectMapper.writeValueAsString(list);
++        } catch (Exception e) {
++            throw new IllegalStateException("Failed to serialize roles", e);
++        }
++    }
++
++    private List<String> fromJson(final String json) {
++        try {
++            return objectMapper.readValue(json == null ? "[]" : json, STRING_LIST);
++        } catch (Exception e) {
++            throw new IllegalStateException("Failed to parse roles", e);
++        }
++    }
++
++    private static Instant toInstant(final Timestamp timestamp) {
++        return timestamp == null ? null : timestamp.toInstant();
++    }
++}
+diff --git a/webserver/src/main/resources/migrations/2.0.91-oidc-server-directory-postgres.sql b/webserver/src/main/resources/migrations/2.0.91-oidc-server-directory-postgres.sql
+new file mode 100644
+index 0000000..db18e59
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.91-oidc-server-directory-postgres.sql
+@@ -0,0 +1,48 @@
++-- ============================================================================
++-- R-OIDC-SERVER user directory + client registry (id 2.0.91-oidc-server-directory).
++-- Backend: PostgreSQL. ZITADEL-aligned core, trimmed for the hardened persona:
++--   * oidc_user             — the human user record; username is the OIDC sub.
++--   * oidc_user_auth_method — auth methods per user; PASSWORD rows carry the bcrypt hash
++--                             (never plaintext — security checklist C2).
++--   * oidc_client           — OAuth2/OIDC clients. Public clients (PKCE) are stored with an
++--                             EMPTY secret; confidential clients keep a real secret
++--                             (constant-time comparison at the token endpoint).
++-- No seed data: accounts/clients are created via the admin endpoints or config bootstrap.
++-- ============================================================================
++CREATE TABLE IF NOT EXISTS oidc_user
++(
++    username                 TEXT        PRIMARY KEY,             -- = OIDC sub / login name
++    name                     TEXT        NOT NULL,                -- display name
++    email                    TEXT        NOT NULL,
++    email_verified           BOOLEAN     NOT NULL DEFAULT FALSE,
++    user_state               TEXT        NOT NULL DEFAULT 'ACTIVE', -- ACTIVE / INACTIVE
++    password_change_required BOOLEAN     NOT NULL DEFAULT FALSE,
++    last_login_at            TIMESTAMPTZ,
++    roles                    JSONB       NOT NULL DEFAULT '["user"]'::jsonb,
++    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE TABLE IF NOT EXISTS oidc_user_auth_method
++(
++    id          BIGSERIAL   PRIMARY KEY,
++    user_id     TEXT        NOT NULL REFERENCES oidc_user (username) ON DELETE CASCADE,
++    type        TEXT        NOT NULL,                  -- PASSWORD / TOTP / PASSKEY (future)
++    state       TEXT        NOT NULL DEFAULT 'ACTIVE',
++    credential  TEXT,                                  -- PASSWORD rows: bcrypt hash
++    name        TEXT,
++    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++    UNIQUE (user_id, type)
++);
++
++CREATE TABLE IF NOT EXISTS oidc_client
++(
++    client_id     TEXT        NOT NULL PRIMARY KEY,
++    client_secret TEXT        NOT NULL DEFAULT '',     -- EMPTY for public (PKCE) clients
++    redirect_uris JSONB       NOT NULL DEFAULT '[]'::jsonb,
++    grant_types   JSONB       NOT NULL DEFAULT '["authorization_code","client_credentials","refresh_token"]'::jsonb,
++    scopes        JSONB       NOT NULL DEFAULT '["openid","profile","email"]'::jsonb,
++    active        BOOLEAN     NOT NULL DEFAULT TRUE,
++    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
++);
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientServiceTest.java
+new file mode 100644
+index 0000000..7e007a7
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientServiceTest.java
+@@ -0,0 +1,80 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcClientService;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++/**
++ * C1 (secret authentication) + E1 (redirect_uri exact match) for the R-OIDC-SERVER
++ * security checklist.
++ */
++class OidcClientServiceTest extends OidcPostgresTestBase {
++
++    private OidcClientService service;
++
++    @BeforeEach
++    void setUp() {
++        service = new OidcClientService(OidcPostgresTestBase.dataSource(), new ObjectMapper());
++        service.delete("confidential-app");
++        service.delete("public-app");
++    }
++
++    private OidcClientService.OidcClient confidential() {
++        service.create("confidential-app", "s3cret",
++            List.of("https://app.example.org/callback"),
++            List.of("authorization_code", "client_credentials", "refresh_token"),
++            List.of("openid", "profile", "email"));
++        return service.require("confidential-app");
++    }
++
++    @Test
++    void authenticatesCorrectSecretAndRejectsWrongOne() {
++        confidential();
++
++        assertTrue(service.authenticate("confidential-app", "s3cret"));
++        assertFalse(service.authenticate("confidential-app", "s3cret-typo"), "wrong secret must fail");
++        assertFalse(service.authenticate("confidential-app", null), "missing secret must fail");
++        assertFalse(service.authenticate("unknown-app", "s3cret"), "unknown client must fail");
++    }
++
++    @Test
++    void inactiveClientCannotAuthenticate() {
++        final var client = confidential();
++        assertTrue(client.active());
++        service.updateActive("confidential-app", false);
++        assertFalse(service.authenticate("confidential-app", "s3cret"), "inactive client must fail");
++    }
++
++    @Test
++    void redirectUriMustMatchExactly() {
++        final var client = confidential();
++
++        assertTrue(service.isRedirectUriRegistered(client, "https://app.example.org/callback"));
++        assertFalse(service.isRedirectUriRegistered(client, "https://app.example.org/callback/"), "trailing slash is a different URI");
++        assertFalse(service.isRedirectUriRegistered(client, "https://app.example.org/callback?x=1"), "query string is a different URI");
++        assertFalse(service.isRedirectUriRegistered(client, "https://evil.example.org/callback?return=https://app.example.org/callback"), "prefix/embedding tricks must fail");
++        assertFalse(service.isRedirectUriRegistered(client, "https://app.example.org"), "shorter prefix must fail");
++        assertFalse(service.isRedirectUriRegistered(client, null));
++    }
++
++    @Test
++    void publicClientHasEmptySecretAndIsRecognised() {
++        service.create("public-app", null,
++            List.of("http://localhost:5173/callback"),
++            List.of("authorization_code", "refresh_token"),
++            List.of("openid", "profile"));
++
++        final var client = service.require("public-app");
++        assertTrue(service.isPublic(client), "empty secret = public client (must use PKCE)");
++        assertFalse(service.authenticate("public-app", ""), "public client cannot authenticate with a secret");
++        assertTrue(service.isGrantTypeAllowed(client, "authorization_code"));
++        assertFalse(service.isGrantTypeAllowed(client, "client_credentials"), "grant not registered for this client");
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcUserServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcUserServiceTest.java
+new file mode 100644
+index 0000000..5cff8e0
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcUserServiceTest.java
+@@ -0,0 +1,64 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcUserService;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++/**
++ * C2 (bcrypt-only password storage) + validateCredentials behaviour for the R-OIDC-SERVER
++ * security checklist.
++ */
++class OidcUserServiceTest extends OidcPostgresTestBase {
++
++    private OidcUserService service;
++
++    @BeforeEach
++    void setUp() {
++        service = new OidcUserService(OidcPostgresTestBase.dataSource(), new ObjectMapper());
++        service.delete("alice");
++    }
++
++    @Test
++    void validatesCorrectPasswordAndRejectsWrongOne() {
++        service.create(new OidcUserService.CreateUserRequest("alice", "Alice", "alice@example.org", "correct-horse", List.of("user")));
++
++        assertTrue(service.validateCredentials("alice", "correct-horse"));
++        assertFalse(service.validateCredentials("alice", "wrong-horse"));
++        assertFalse(service.validateCredentials("unknown-user", "correct-horse"));
++        assertFalse(service.validateCredentials("alice", null));
++    }
++
++    @Test
++    void storesOnlyBcryptHashesNeverPlaintext() {
++        service.create(new OidcUserService.CreateUserRequest("alice", "Alice", "alice@example.org", "correct-horse", List.of("user")));
++
++        final String hash = service.storedPasswordHash("alice").orElseThrow();
++        assertNotEquals("correct-horse", hash, "plaintext password must never be stored");
++        assertTrue(hash.startsWith("$2"), "stored credential must be a bcrypt hash");
++    }
++
++    @Test
++    void rejectsInactiveUserEvenWithCorrectPassword() {
++        service.create(new OidcUserService.CreateUserRequest("alice", "Alice", "alice@example.org", "correct-horse", List.of("user")));
++        service.updateUserState("alice", "INACTIVE");
++
++        assertFalse(service.validateCredentials("alice", "correct-horse"));
++    }
++
++    @Test
++    void passwordRotationInvalidatesOldPassword() {
++        service.create(new OidcUserService.CreateUserRequest("alice", "Alice", "alice@example.org", "old-password", List.of("user")));
++        service.setPassword("alice", "new-password");
++
++        assertFalse(service.validateCredentials("alice", "old-password"));
++        assertTrue(service.validateCredentials("alice", "new-password"));
++    }
++}
