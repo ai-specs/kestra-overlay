@@ -185,6 +185,25 @@ volumes:
 
 无人值守方式：在启动镜像时加载这些环境变量（上例 compose 已接入）：
 
+也可以直接在 compose 的 `kestra.environment` 中填值，无需 `export` 或执行 `psql`。
+将下列字段合并到上面的完整服务配置（保留 `KESTRA_CONFIGURATION`）：
+
+```yaml
+services:
+  kestra:
+    environment:
+      KESTRA_OIDC_UI_CLIENT_SECRET: "replace-with-your-generated-client-secret"
+      KESTRA_OIDC_BOOTSTRAP_USERNAME: "your-login-name"
+      KESTRA_OIDC_BOOTSTRAP_PASSWORD: "choose-your-own-password"
+      KESTRA_OIDC_BOOTSTRAP_EMAIL: "you@example.org"
+      KESTRA_OIDC_BOOTSTRAP_NAME: "Your Name"
+      KESTRA_OIDC_SETUP_ALLOWED: "false"
+```
+
+然后只需 `docker compose up -d` 和访问 `/ui/`。镜像自身使用生产初始化服务执行
+数据库事务，将这些字段写为用户、bcrypt 凭据、UI client 与安装身份；不会执行部署方
+提供的任意 SQL。与网页表单共用同一初始化逻辑，只跳过表单，不跳过 OIDC 登录。
+
 | 环境变量 | 用途 |
 |---|---|
 | `KESTRA_OIDC_BOOTSTRAP_USERNAME` | 首个 OIDC 登录名；与 password 必须成对提供 |
@@ -225,48 +244,6 @@ docker compose up -d
 `http://localhost:8080/oauth/callback/kestra`。自定义客户端配置名称时设置
 `kestra.oidc.bootstrap.client-name`，同时对齐 unauthorized URL 与 callback 路径。
 
-### 高级：手工注册外部账号/client（可选）
-
-首次用户与 UI client 使用上一节即可；本节仅用于显式注册其他账号或消费应用。
-
-1. 启动配置好的 `compose.yml`：`docker compose up -d`。
-2. 等待 `curl --fail http://localhost:8080/.well-known/openid-configuration` 成功，确认迁移完成。
-3. 用 bcrypt 工具生成自己密码的 `$2a$` 哈希。下例需要 Python 3 与 `bcrypt` 包
-   （`python3 -m pip install bcrypt`），密码通过交互读取：
-
-```bash
-python3 -c 'import bcrypt,getpass; print(bcrypt.hashpw(getpass.getpass("OIDC password: ").encode(),bcrypt.gensalt(rounds=10,prefix=b"2a")).decode())'
-```
-
-4. 把生成的哈希填入下面占位符，client secret 与 compose 保持一致，再执行：
-
-```bash
-docker compose exec -T postgres psql -U kestra -d kestra -v ON_ERROR_STOP=1 \
-  -v oidc_username='your-login-name' \
-  -v oidc_email='you@example.org' \
-  -v oidc_password_hash='replace-with-generated-bcrypt-hash' \
-  -v oidc_client_id='kestra-ui' \
-  -v oidc_client_secret='replace-with-your-client-secret' \
-  -v oidc_callback='http://localhost:8080/oauth/callback/kestra' <<'SQL'
-BEGIN;
-INSERT INTO oidc_user (username, name, email, roles)
-VALUES (:'oidc_username', :'oidc_username', :'oidc_email', '["user"]')
-ON CONFLICT (username) DO NOTHING;
-INSERT INTO oidc_user_auth_method (user_id, type, credential)
-VALUES (:'oidc_username', 'PASSWORD', :'oidc_password_hash')
-ON CONFLICT (user_id, type) DO NOTHING;
-INSERT INTO oidc_client (client_id, client_secret, redirect_uris, grant_types, scopes)
-VALUES (:'oidc_client_id', :'oidc_client_secret', jsonb_build_array(:'oidc_callback'),
-        '["authorization_code","refresh_token"]', '["openid","profile","email"]')
-ON CONFLICT (client_id) DO NOTHING;
-COMMIT;
-SQL
-```
-
-此命令只补缺失记录，不覆盖已有用户密码或 client 配置；重复执行不是改密/改回调操作。
-数据库记录读取即时生效，无需重新构建镜像。配置变更仍需重启。
-初始化后访问 `http://localhost:8080/ui/`，在内置 OIDC 页面输入刚注册的用户名与密码。
-
 ### 其他项目接入内置 IdP
 
 消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
@@ -278,6 +255,8 @@ client ID、client secret（confidential client）、redirect URI、`openid prof
 授权码流及 PKCE S256。public client 的 `client_secret` 为空，强制 S256；不能将 secret
 放入浏览器前端。外部应用不需要在 Kestra 的 Micronaut `clients` 中新增配置——该配置
 仅用于 Kestra 自身作为消费客户端；服务端注册表才决定哪些外部 client 可以授权。
+首装自动注册本实例 UI client；额外消费应用的注册/账号管理 API 仍待后续交付，
+不将手工数据库操作作为本镜像首次安装步骤。
 
 可复现验收入口：`scripts/blackbox-ui-oidc.sh <image>`（实际初始化、UI 链与 token
 持久化检查）、`scripts/blackbox-ui-browser.cjs`（CI Chromium 登录/刷新/导航/退出）。

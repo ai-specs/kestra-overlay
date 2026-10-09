@@ -24,8 +24,6 @@ USER="admin@local.test"
 PASS="Admin1234!"
 OIDC_USER="tester"
 OIDC_PASS="Passw0rd!"
-# jbcrypt(0.4, gensalt 10) of Passw0rd! — 与镜像内 OidcUserService 同一算法族
-OIDC_HASH='$2a$10$Y9P9MR2I8ahJ8av5GEvAGusUNsPvSuXcGLXJwVthfYy8x6K89YtN2'
 PASS_CNT=0; FAIL_CNT=0
 
 ok()  { PASS_CNT=$((PASS_CNT+1)); echo "  PASS  $1"; }
@@ -71,12 +69,56 @@ kestra:
     auto-install:
       enabled: false
 YAML
-  if [ "${1:-}" = "oidc" ]; then printf '  oidc:\n    enabled: true\n'; fi
+  if [ "${1:-}" = "oidc" ]; then
+    cat <<YAML
+  oidc:
+    enabled: true
+    issuer: $BASE
+micronaut:
+  security:
+    enabled: true
+    authentication: idtoken
+    filter:
+      enabled: true
+    redirect:
+      login-success: /ui/
+      unauthorized:
+        url: /oauth/login/kestra
+    intercept-url-map:
+      - pattern: /oidc/**
+        access: [isAnonymous()]
+      - pattern: /.well-known/**
+        access: [isAnonymous()]
+      - pattern: /oauth/**
+        access: [isAnonymous()]
+      - pattern: /api/v1/configs/login
+        access: [isAnonymous()]
+      - pattern: /**
+        access: [isAuthenticated()]
+    oauth2:
+      clients:
+        kestra:
+          client-id: rp-test
+          client-secret: rp-secret
+          scopes: [openid, profile, email]
+          openid:
+            issuer: $BASE
+            token:
+              url: http://localhost:8080/oidc/token
+            jwks-uri: http://localhost:8080/oidc/jwks
+            end-session:
+              enabled: false
+YAML
+  fi
 }
 
 wait_ready() { # container-name
   for i in $(seq 1 60); do
-    code=$(curl -s -u "$USER:$PASS" -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs" || true)
+    if [ "$1" = "$K2" ]; then
+      code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)
+    else
+      code=$(curl -s -u "$USER:$PASS" -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs" || true)
+    fi
     [ "$code" = "200" ] && return 0
     sleep 5
   done
@@ -104,20 +146,14 @@ docker rm -f "$K1" >/dev/null
 
 echo "== Phase B: kestra.oidc.enabled=true 全链 =="
 docker run -d --name "$K2" --network "$NET" -p "$PORT:8080" \
+  -e KESTRA_OIDC_BOOTSTRAP_USERNAME="$OIDC_USER" -e KESTRA_OIDC_BOOTSTRAP_PASSWORD="$OIDC_PASS" \
+  -e KESTRA_OIDC_BOOTSTRAP_EMAIL=tester@local.test -e KESTRA_OIDC_BOOTSTRAP_NAME=Tester \
+  -e KESTRA_OIDC_SETUP_ALLOWED=false \
   -e KESTRA_CONFIGURATION="$(conf oidc)" "$IMAGE" server standalone >/dev/null
 wait_ready "$K2"
 
-# 种子用户与 client（管理端点未交付，直插——与 OidcUserService 同算法/同表）
-docker exec -i "$PG" psql -U kestra -d kestra -q -v ON_ERROR_STOP=1 <<SQL
-INSERT INTO oidc_user (username, name, email, roles)
-VALUES ('$OIDC_USER', 'Tester', 'tester@local.test', '["user"]') ON CONFLICT DO NOTHING;
-INSERT INTO oidc_user_auth_method (user_id, type, credential)
-VALUES ('$OIDC_USER', 'PASSWORD', '$OIDC_HASH') ON CONFLICT (user_id, type) DO UPDATE SET credential = EXCLUDED.credential;
-INSERT INTO oidc_client (client_id, client_secret, redirect_uris, grant_types, scopes)
-VALUES ('rp-test', 'rp-secret', '["http://localhost:9999/cb"]',
-        '["authorization_code","refresh_token"]', '["openid","profile","email"]')
-ON CONFLICT (client_id) DO NOTHING;
-SQL
+assert_eq "环境变量完成生产初始化" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/login")"
+assert_eq "环境初始化后 setup 关闭" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 
 # discovery 元数据
 code=$(curl -s -o "$T/disc.json" -w '%{http_code}' "$BASE/.well-known/openid-configuration")
@@ -144,7 +180,7 @@ assert_eq "good credentials redirect with GET (303)" 303 "$code"
 grep -q "oidc_session" "$T/jar" && ok "登录种下 oidc_session cookie" || bad "oidc_session cookie 缺失"
 
 # authorize：带会话 → 302 code+state
-AUTH="$BASE/oidc/authorize?client_id=rp-test&redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcb&response_type=code&scope=openid&state=xyz123"
+AUTH="$BASE/oidc/authorize?client_id=rp-test&redirect_uri=$BASE/oauth/callback/kestra&response_type=code&scope=openid&state=xyz123"
 loc=$(curl -s -b "$T/jar" -o /dev/null -w '%{redirect_url}' "$AUTH")
 echo "$loc" | grep -q "code=" && ok "authorize 发码（302 带 code）" || bad "authorize 未发码" "$loc"
 echo "$loc" | grep -q "state=xyz123" && ok "state 回显" || bad "state 丢失" "$loc"
@@ -157,14 +193,14 @@ if echo "$loc2" | grep -q "/oidc/login?"; then ok "anonymous authorize redirecte
 
 # code 换 token 三件套
 code=$(curl -s -u rp-test:rp-secret -o "$T/token.json" -w '%{http_code}' \
-  -d "grant_type=authorization_code&code=$CODE&redirect_uri=http://localhost:9999/cb" "$BASE/oidc/token")
+  -d "grant_type=authorization_code&code=$CODE&redirect_uri=$BASE/oauth/callback/kestra" "$BASE/oidc/token")
 assert_eq "token 端点 200" 200 "$code"
 for f in access_token id_token refresh_token; do
   assert_contains "token 响应含 $f" "$f" "$T/token.json"
 done
 
 # code replay must be rejected (D1)
-REPLAY_D="grant_type=authorization_code&code=$CODE&redirect_uri=http://localhost:9999/cb"
+REPLAY_D="grant_type=authorization_code&code=$CODE&redirect_uri=$BASE/oauth/callback/kestra"
 code=$(curl -s -u rp-test:rp-secret -o "$T/replay.json" -w '%{http_code}' -d "$REPLAY_D" "$BASE/oidc/token")
 if [ "$code" = "400" ] || [ "$code" = "401" ]; then ok "code replay rejected ($code)"; else bad "code replay NOT rejected" "$code"; fi
 
