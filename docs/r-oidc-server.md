@@ -1,6 +1,6 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（需求与实施准备文档）
 
-> **状态**：reserved·实施准备就绪（2026-10-07）。唯一剩余门 = 前置④安全清单定稿。
+> **状态**：实施中（2026-10-07 起）。四项前置全部闭合。
 > **归属**：`docs/oss-ee-gap.md` §2-A/§4 R-OIDC-SERVER 行的展开；宪章依据 AGENTS §0 归属
 > 例外、§2 三处例外、§3-7、§4 测试同批。
 > **一句话**：以 patch 路线在 webserver 内内置 OAuth2/OIDC 授权服务器 + 认证链（一体化），
@@ -14,7 +14,7 @@
 | 前置② | **链一体化**：认证链与服务器同进 patch；`kestra-auth-chain.jar` 契约行已退役；外部 IdP 场景由内置链经配置指向 | fork 实证（同模块）；上游 M 面 OIDC 相关仅 MiscController=REQ-0011 |
 | 前置③ | **持久化 = 同 datasource 新表（postgres 起步）**；migration 进 patch（源码级 MigrationScript bean + SQL 成对）；h2/mysql 留待需求 | fork 实证（19 个 postgres migration）；Testcontainers 真 PG 测试形态 |
 | 前置① | 宪章修订已落地（commit `021ba1b`）：§0 归属例外/§2 三处例外/§3-7/§4 测试同批/§8-1·2 注记 | 防实施期 agent 读旧条款出幻觉 |
-| 前置④ | **待定稿**：§5 安全清单评审稿 v1 | 安全敏感功能测试先行 |
+| 前置④ | **已闭合**：§5 安全清单即验收基准（测试先行铁律，随各需求同批落地） | 维护者「写好 CI 测试再实施」 |
 
 ## 2. fork 参考协议（会话内维护者解禁，用途限定）
 
@@ -101,7 +101,7 @@ tailscale-nipio/dsh-secret×2）；**MCP 面（`OidcMcpOAuthController`/
 JWKS 缓存撕裂；轮换走双钥并存期）。免持久：access token（JWT 无状态）、auth code
 （短命，单机内存）。表结构以 fork migration 为底稿，剥离 dsh 专属后按需求拆分。
 
-## 5. 安全专项清单（评审稿 v1——**前置④，待维护者定稿**）
+## 5. 安全专项清单（**已闭合 = 验收基准**；各用例随所属需求 patch 同批落地，门绿为准）
 
 | # | 类别 | 用例 | 来源 |
 |---|---|---|---|
@@ -127,8 +127,7 @@ JWKS 缓存撕裂；轮换走双钥并存期）。免持久：access token（JWT
 
 1. ~~API 漂移清单~~ **已完成**（见 §3.5：类级全 ✅、框架级仅 Micronaut 4↔5 代际轴 ⚠️，
    无 ❌ 档；依赖清单由此定为 5 行）。
-2. 临时实施文档（仓外，完成即删）：patch 需求拆分（discovery/授权码流+PKCE/token+
-   JWKS/用户与 client 管理/链与登录/M-Face 集成）、文件清单、测试映射、顺序。
+2. ~~临时实施文档~~ 见 `.work/impl-plan.md`（仓外，完成即删）。
 3. **开发树重写**：`.work/dev` 树（v2.0.5）按 §5.3 增量提交法逐需求重写
    （来源标注：「参考 fork 实现逻辑重写（跨基）」；依赖行随首个需求 patch；
    头部按 §3-7 四条件）。
