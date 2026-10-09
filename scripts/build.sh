@@ -72,6 +72,7 @@ SHA="$(git rev-parse --short HEAD)"
 # behavior set it explicitly via KESTRA_CONFIGURATION (channel ④, restart).
 # The overlay commit tag keeps traceability; latest is the rolling convenience.
 docker buildx build -f "$WORK/Dockerfile" \
+  --platform linux/amd64,linux/arm64 \
   -t "ghcr.io/ai-specs/kestra-overlay:${RELEASE}-no-plugins" \
   -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" \
   -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"
