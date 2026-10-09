@@ -43,9 +43,11 @@ M 面预估 ≈ 零，全部为新文件。
 `OidcJwkService`（JWKS）/`OidcSessionService`/`OidcTokenService`/`OidcUserService`/
 `NimbusHttpAdapter`。
 
-**依赖清单**（→ webserver/build.gradle 增 ~4 行，宪章 §2 唯一例外）：
+**依赖清单**（→ webserver/build.gradle 增 5 行，宪章 §2 唯一例外；漂移清单核定后由 4 行上调）：
 `com.nimbusds:oauth2-oidc-sdk:11.38.2`、`org.mindrot:jbcrypt`、
-`io.micronaut.security:micronaut-security-oauth2`、`micronaut-security-jwt`。
+`io.micronaut.security:micronaut-security-oauth2`、`micronaut-security-jwt`、
+`io.micronaut.data:micronaut-data-connection-jdbc`（migration 走 DelegatingDataSource，
+fork webserver/build.gradle 同款加法）。
 
 **持久化**：19 个 postgres migration（用户 schema、client〔含 public/active〕、machine
 identities、role assignment、secret schema、多个 redirect 修正）；bean 继承
@@ -64,6 +66,34 @@ identities、role assignment、secret schema、多个 redirect 修正）；bean 
 专属 redirect；migration 中 dsh 专属（dsh-ui-redirect/dsh-pc-web×2/nacos-logout/
 tailscale-nipio/dsh-secret×2）；**MCP 面（`OidcMcpOAuthController`/
 `OidcMcpBearerAuthFilter`——范围裁定 MCP 除外）**；AI 保留面。
+
+## 3.5 API 漂移清单（动刀前第一工件，2026-10-07 完成——方法见 §2 跨基规则）
+
+**类级**（剥离 MCP/Secret/Namespace 面后，剩余移植面的上游依赖仅 3 类）：
+
+| 依赖类 | v2.0.5 | 档 |
+|---|---|---|
+| `io.kestra.jdbc.migration.AbstractSQLMigrationScript`（19 个 migration bean 的基类） | 存在（jdbc 模块在用） | ✅ 直接可用 |
+| `io.kestra.core.tenant.TenantService` | 存在（S2 桩，恒 `main`） | ✅ 可用（桩语义已知） |
+| `io.kestra.core.serializers.JacksonMapper` | 存在 | ✅ 可用 |
+
+归因注：`EncryptionService`/`EncryptionConfig`/`FlowMetaStoreInterface`/
+`DefaultNamespaceService`/`QueryFilter`/`ArrayListTotal`/`McpServer(Cache)` 的引用
+**全部来自剥离面**（`PostgresSecretStore`/`DshSecretService`/`DshNamespaceService`/
+`OidcMcp*`）——剥离后不进入移植面。
+
+**框架级**：
+
+| 轴 | fork（develop 基） | v2.0.5 | 档 |
+|---|---|---|---|
+| Micronaut 平台 | 5.1.5 | **4.10.18** | ⚠️ 代际适配轴（主要注意力所在） |
+| Jackson | 平台是 Jackson 3，但**本模块 import 全部为 Jackson 2**（`com.fasterxml`，零 `tools.jackson`，实测计数 5+4） | Jackson 2 | ✅ 同代，无需改写 |
+| micronaut-security import | 仅 3 个：`Authentication`/`AuthorizationException`/`JwtTokenGenerator` | 4.x 均有 | ✅ 稳定 API |
+| micronaut-data | `DelegatingDataSource`/`Pageable` | 需加 `micronaut-data-connection-jdbc` 依赖（已入依赖清单） | ⚠️ 随依赖行解决 |
+| 其余 Micronaut import | http/context/core/scheduling 稳定面（Controller/Filter/@Replaces/@Requires 等） | 4.x 同名 | ✅ |
+
+**结论**：无 ❌ 档（无需替代实现）。主要适配注意力 = Micronaut 4↔5 的**行为差异**
+（注解处理/bean 装配细节），由双锚验证兜底（§6 步骤 4：测试全过 + 逐文件漂移核对）。
 
 ## 4. 持久化设计（前置裁定③展开）
 
@@ -95,8 +125,8 @@ JWKS 缓存撕裂；轮换走双钥并存期）。免持久：access token（JWT
 
 ## 6. 实施顺序（定稿后执行）
 
-1. **API 漂移清单**（动刀前工件）：fork oidc 模块的上游依赖类逐个三方核对 v2.0.5
-   （✅ 同签名 / ⚠️ 异签名需适配 / ❌ 需替代），含 Micronaut 平台版本核对。
+1. ~~API 漂移清单~~ **已完成**（见 §3.5：类级全 ✅、框架级仅 Micronaut 4↔5 代际轴 ⚠️，
+   无 ❌ 档；依赖清单由此定为 5 行）。
 2. 临时实施文档（仓外，完成即删）：patch 需求拆分（discovery/授权码流+PKCE/token+
    JWKS/用户与 client 管理/链与登录/M-Face 集成）、文件清单、测试映射、顺序。
 3. **开发树重写**：`.work/dev` 树（v2.0.5）按 §5.3 增量提交法逐需求重写
