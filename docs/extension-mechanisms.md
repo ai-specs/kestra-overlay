@@ -5,6 +5,11 @@
 > + kestra.io 文档 + vanilla 实例实测（v2.0.5-no-plugins）。复现命令见 §5。
 > 分工：差异表（oss-ee-gap.md）答「补什么」；本文答「怎么生效」。
 
+> **2026-10-09 认证机制修正**：启用 OIDC 时完全停用 Basic Auth 链。仅后端暴露
+> oidcAuthEnabled 不足以驱动 BASE UI：其守卫仍检查 Basic Auth 标志。REQ-0132
+> 同批替换 UI 守卫、401 跳转与退出，认证状态从服务端验证，禁止兼容旧 cookie。
+> UI 改动经 npm 构建进入 jar；本例外仅认证面。验收含登录后刷新、导航与退出。
+
 ## 0. 结论矩阵（一页答案）
 
 | 通道 | 是什么 | 重编译 kestra？ | 要外部 jar？ | 要重启？ | 生效时机 | 对应 |

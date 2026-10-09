@@ -11,6 +11,11 @@
 
 ## 使用镜像
 
+OIDC 模式统一使用 OAuth2/OIDC，完全关闭 Basic Auth 链。`/ui/login` 是 vanilla
+Basic Auth 页面，不能用 OIDC 用户登录。完整前端替换 REQ-0132 正在实施；此前
+CI 只验收首次协议回访，刷新/导航缺口尚未闭环，当前不要将其视为完成版本。
+后续部署与验收以 `docs/r-oidc-server.md` §0 的认证契约为准。
+
 ### 下载
 
 镜像发布在 GHCR **私有包**：先登录，再拉取——

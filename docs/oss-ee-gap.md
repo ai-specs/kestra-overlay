@@ -19,6 +19,11 @@
 > （AGENTS.md §0·基本原则）。
 > 裁定全文与重启规则见 `AGENTS.md` §0。其余域的历史调查存 git 历史。
 
+> **当前认证裁定（2026-10-09，维护者）**：OIDC 模式完整关闭 Basic Auth 链，
+> 前端必须消费 OIDC 认证状态并统一登录/退出。允许 R-OIDC-SERVER 最小 UI 认证
+> patch（REQ-0132），不伪造 Basic Auth 标志。此前首轮浏览器链全绿不代表刷新与
+> 导航已验收；实施与完整测试契约见 docs/r-oidc-server.md §0。
+
 > **2026-10-09 浏览器链验证**：R-OIDC-SERVER 增 REQ-0131（内置 issuer discovery
 > 启动适配，外部 issuer 仍走框架 discovery）；REQ-0120/0130 修复授权回跳与 POST 后
 > 303。BASE 原版 UI 必须打包。复现：`bash scripts/local-ci.sh`、

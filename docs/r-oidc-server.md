@@ -1,5 +1,29 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（需求与实施准备文档）
 
+## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
+
+维护者裁定：OIDC 模式下完整关闭 Basic Auth 认证链。后端过滤器、凭据登录/退出、
+前端路由守卫、401 跳转、setup 引导与退出统一使用 OIDC；不兼容 BASIC_AUTH 或
+kestraBasicAuthenticated，不伪造旧登录标志。OIDC 未启用时保留 vanilla 行为。
+内置 OIDC 登录页可以复用上游 Basic Auth 页面外观，提交仍验证 OIDC 用户目录，
+随后完成真实授权码/PKCE/token/callback。认证主体由服务端验证，前端不得自证登录。
+
+UI patch 例外已写入 AGENTS §2：仅限本认证链替换与登录外观，保留其他 BASE UI。
+实施需求 REQ-0132（认证模式替换）；归属 = R-OIDC-SERVER，协议基础设施 patch 路线。
+上次 CI 37911602095 全绿仅证明首轮 HTTP 流程，未覆盖刷新/导航；不得引用其作为
+完整前端认证已完成的证据。当前问题已证实：BASE UI 忽略 oidcAuthEnabled，
+仅检查 Basic Auth 标志；框架重读 ID token 时调用 userinfo 返回 401 也须闭环。
+
+实施顺序：先固定本文/差异表/机制/README/manifest 的新契约，再在 BASE 开发树
+按增量提交法实现；实现与验收同批生成 patch；重放全部 patch 后测试与构建。
+验收必须包括：匿名 UI/API 拦截、坏凭据拒绝、用户名密码登录、PKCE/state/nonce、
+真实 token 签发、首次 UI 渲染、刷新 dashboards、再次导航、认证 API、过期/无效
+cookie 后重认证、退出同时清应用与 IdP 会话、退出后 UI/API 拒绝；OIDC 模式
+Basic Auth 登录/退出端点不得认证或改变会话，旧 Basic Auth cookie 不得放行。
+UI 认证检测通过服务端受保护端点，401 后进入 OIDC 客户端；避免 SPA Basic Auth 登录页。
+
+内置账号配置初始化仍未实现，当前验收显式写真实 PG bcrypt 测试账号；此限制保持公开。
+
 > **状态**：首批 patch 已实施并本地全绿（2026-10-09，REQ-0100/0110/0120/0130；
 > 8 测试类 36 用例，Testcontainers 真 PG + 验证树 5-patch 重放 + executableJar 全绿）。
 > 浏览器链修复（2026-10-09）：REQ-0120 统一 `from` 回跳；REQ-0130 登录 POST 后
