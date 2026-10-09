@@ -37,6 +37,10 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 
 ### OIDC 账号与 OAuth client 契约
 
+**首次引导实施中（REQ-0133）**：下一版以 `/oidc/setup` 初始化 OIDC 用户和 UI client，
+或使用 `KESTRA_OIDC_BOOTSTRAP_USERNAME/PASSWORD/EMAIL/NAME` 跳过表单。完成前，
+下文 SQL 是当前版本路径；实施完成后会更新本节，不以计划描述已交付能力。
+
 镜像内置 **OIDC 服务器、用户目录和 client 注册能力**，不预装默认账号、密码或
 固定 OAuth client。首次启动会创建 PostgreSQL 表，不会自动创建用户/client。
 `kestra.oidc.users` 目前只有配置模型，**尚无自动初始化实现，填写它不会生成账号**；

@@ -26,6 +26,8 @@
 > REQ-0132 已实现 UI 独立 OIDC 认证状态（服务端 configs 验证）、统一 401/退出、
 > 旧认证端点拒绝；新增前端定向用例、后端禁用用例与黑盒刷新/导航/退出断言。
 > 新版本 DoD 仍以本地重放与对应新 CI 全绿为准。
+> REQ-0133 已接收：首次安装引导/环境变量一次性初始化 OIDC 用户与 UI client，
+> 属 R-OIDC-SERVER 认证基础设施；实现与安全验收契约先写入 r-oidc-server.md §0。
 
 > **2026-10-09 浏览器链验证**：R-OIDC-SERVER 增 REQ-0131（内置 issuer discovery
 > 启动适配，外部 issuer 仍走框架 discovery）；REQ-0120/0130 修复授权回跳与 POST 后

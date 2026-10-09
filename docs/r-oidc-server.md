@@ -2,6 +2,22 @@
 
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
+**REQ-0133 首次安装引导（维护者授权，实施前契约）**：空目录首次访问 UI 进入
+`/oidc/setup`，设置用户名、显示名、邮箱和密码；存入 OIDC 用户目录（bcrypt），
+同时按配置注册本实例 UI confidential client，随后进入完整 OIDC 登录链。
+UI client 名称默认 `kestra`，ID/secret 从 Micronaut OAuth2 客户端配置取得，回调
+由公开 issuer + `/oauth/callback/<name>` 推导；不预置公共默认密码或固定 secret。
+镜像支持 `KESTRA_OIDC_BOOTSTRAP_USERNAME`、`KESTRA_OIDC_BOOTSTRAP_PASSWORD`、
+`KESTRA_OIDC_BOOTSTRAP_EMAIL`、`KESTRA_OIDC_BOOTSTRAP_NAME` 环境变量跳过表单；
+username/password 必须成对，email/name 可选。仍须配置 UI client ID/secret/issuer。
+变量只用于首次初始化，重复启动不覆盖密码/client；初始化完成状态持久化，即使
+删空用户也不重新开放匿名 setup。已有用户部署视为已初始化，保留账号与 client。
+初始化事务涵盖账号、bcrypt 凭据、UI client 和完成标记，数据库串行锁防并发首建；
+失败回滚、错误不回显密码/secret；已有冲突 client 不可静默覆盖。
+表单 POST 必须校验短期 CSRF token 与同源请求，初始化后 setup GET/POST 关闭。
+验收同批：空库引导、环境变量跳过、坏/部分配置、并发一次成功、重启不覆盖、
+完成后拒绝 setup、真实 OIDC/token/UI 登录与刷新；镜像不得依赖人工 SQL 才能首登。
+
 维护者裁定：OIDC 模式下完整关闭 Basic Auth 认证链。后端过滤器、凭据登录/退出、
 前端路由守卫、401 跳转、setup 引导与退出统一使用 OIDC；不兼容 BASIC_AUTH 或
 kestraBasicAuthenticated，不伪造旧登录标志。OIDC 未启用时保留 vanilla 行为。
