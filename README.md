@@ -174,6 +174,9 @@ volumes:
 
 ### 首次安装：网页引导或环境变量
 
+首次引导正在追加双凭据加固：数据库安装身份与 `/app/storage/.oidc-installation`
+共同决定状态，删除单一标记不能重新开放；异常失败关闭。凭据卷须持久化。
+
 网页方式：设置 `KESTRA_OIDC_UI_CLIENT_SECRET`，`docker compose up -d` 后访问 `/ui/`。
 空目录进入 `/oidc/setup`，填写用户名、密码（至少 8 字符，最多 72 UTF-8 字节）；
 显示名、邮箱可选。提交成功后创建账号、bcrypt 凭据与 UI client，再进入 OIDC 登录。

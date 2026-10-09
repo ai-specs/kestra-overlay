@@ -141,6 +141,7 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
 - **REQ-0133（2026-10-09）**：OIDC 首次安装引导与环境变量初始化属于 R-OIDC-SERVER
   协议基础设施 patch 路线；用户/凭据/UI client/完成标记原子持久化，测试同批。
   完成后关闭匿名引导，重启不得覆盖密码；环境变量契约见 docs/r-oidc-server.md §0。
+  安装身份须由数据库与独立持久化凭据共同锁存；标记删除/损坏时失败关闭，不重新激活。
 
 - **本地（秒级，每次改动必跑）**：`./scripts/check-patches.sh`（结构 + manifest + 重叠检测）；
   有上游树时 `./scripts/check-patches.sh --apply-check <dir>`（顺序应用验证）。
