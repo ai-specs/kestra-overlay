@@ -61,6 +61,12 @@ echo "== extension artifacts (from extension repos; see build-extensions.sh) =="
 bash scripts/build-extensions.sh "$WORK"
 
 echo "== build image (upstream Dockerfile.base/Dockerfile unmodified) =="
+# Multi-platform (amd64+arm64) needs a buildx builder with the docker-container driver
+# (the default docker driver cannot build multi-platform manifests).
+if ! docker buildx inspect kestra-overlay-builder >/dev/null 2>&1; then
+  docker buildx create --name kestra-overlay-builder --driver docker-container --use
+fi
+docker buildx use kestra-overlay-builder
 SHA="$(git rev-parse --short HEAD)"
 # Image lineage: zero plugin/extension jars are baked (extensions.tsv has no
 # active plugin/classpath rows; build-extensions.sh leaves $WORK/plugins empty)
