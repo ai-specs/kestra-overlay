@@ -1115,10 +1115,10 @@ index 0000000..8e2e2a6
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 new file mode 100644
-index 0000000..0cfd8c8
+index 0000000..1b9c05c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,341 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.sql.Connection;
@@ -1218,6 +1218,7 @@ index 0000000..0cfd8c8
 +            .audience(List.of(clientId))
 +            .expirationTime(Date.from(exp))
 +            .issueTime(Date.from(now))
++            .jwtID(java.util.UUID.randomUUID().toString())
 +            .claim("scope", String.join(" ", scope.toStringList()))
 +            .claim("token_type", "access_token");
 +        if (name != null) {
@@ -1271,7 +1272,11 @@ index 0000000..0cfd8c8
 +            idTokenClaims.setClaim("nonce", nonce);
 +        }
 +        try {
-+            return sign(idTokenClaims.toJWTClaimsSet());
++            final JWTClaimsSet base = idTokenClaims.toJWTClaimsSet();
++            final JWTClaimsSet jwtClaims = new JWTClaimsSet.Builder(base)
++                .jwtID(java.util.UUID.randomUUID().toString())
++                .build();
++            return sign(jwtClaims);
 +        } catch (com.nimbusds.oauth2.sdk.ParseException e) {
 +            throw new IllegalStateException("Failed to build ID token claims", e);
 +        }
@@ -1671,13 +1676,14 @@ index 0000000..c5325c5
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
 new file mode 100644
-index 0000000..4726a51
+index 0000000..dff7ea2
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,122 @@
 +package io.kestra.webserver.oidc;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
 +import static org.junit.jupiter.api.Assertions.assertNotNull;
 +import static org.junit.jupiter.api.Assertions.assertThrows;
 +import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -1772,6 +1778,17 @@ index 0000000..4726a51
 +        final RefreshToken second = service.issueRefreshToken("machine-client", "machine-client", new Scope("openid"));
 +        assertThrows(OidcException.class, () -> service.validateRefreshToken(second.getValue(), "other-client"),
 +            "refresh token bound to its client");
++    }
++
++    @Test
++    void accessTokensAreUniquePerIssuanceEvenInTheSameSecond() {
++        // Regression: refresh rotation within the same second used to mint a byte-identical
++        // access token (same claims + iat second) and die on oidc_token's UNIQUE(value).
++        final var first = service.issueAccessToken("machine-client", "machine-client",
++            "machine-client", null, List.of(), new Scope("openid"));
++        final var second = service.issueAccessToken("machine-client", "machine-client",
++            "machine-client", null, List.of(), new Scope("openid"));
++        assertNotEquals(first.getValue(), second.getValue(), "jti must make every access token unique");
 +    }
 +
 +    @Test
