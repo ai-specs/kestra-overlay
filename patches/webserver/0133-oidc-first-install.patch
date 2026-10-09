@@ -1,10 +1,12 @@
 # 需求：REQ-0133 空库 OIDC 首次安装引导与环境变量跳过；一次性创建 OIDC
-#   用户/bcrypt 凭据/UI client/持久化完成标记，完成后进入真实 OIDC 登录。
+#   用户/bcrypt 凭据/UI client/数据库安装身份+独立持久化凭据，完成后进入真实 OIDC 登录。
+#   标记删除/身份不一致/损坏时失败关闭；并发初始化与中断事务不能再次激活。
 # 消费扩展仓：—（R-OIDC-SERVER patch 路线）
 # 状态：core
 # 来源：新写；依据 OIDC Core、RFC6749/7636、OWASP CSRF Prevention Cheat Sheet；
 #   Micronaut 4.10.18 环境配置、PostgreSQL 事务锁。无客户业务/默认账号/固定 secret。
-# 触达上游文件（7）：setup service/controller/filter、migration bean+SQL、两份验收测试。
+# 触达上游文件（11）：setup service/controller/filter/安装凭据、两组 migration
+#   bean+SQL、三份验收测试（并发/CSRF/环境变量/标记破坏/权限/重启）。
 # 移除条件：上游 OSS 原生提供等价 OIDC 首次安装与配置初始化或 R-OIDC-SERVER 弃用。
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupController.java
 new file mode 100644
@@ -242,12 +244,144 @@ index 0000000..47a6148
 +        return List.of("/migrations/2.0.93-oidc-server-setup-postgres.sql");
 +    }
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_94OidcServerInstallationMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_94OidcServerInstallationMigration.java
+new file mode 100644
+index 0000000..ba44c6d
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_94OidcServerInstallationMigration.java
+@@ -0,0 +1,37 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++import javax.sql.DataSource;
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public class V2_0_94OidcServerInstallationMigration extends AbstractSQLMigrationScript {
++    private final DataSource dataSource;
++
++    public V2_0_94OidcServerInstallationMigration(final DataSource dataSource) {
++        this.dataSource = dataSource;
++    }
++
++    @Override
++    public String scriptId() {
++        return "2.0.94-oidc-server-installation";
++    }
++
++    @Override
++    public String description() {
++        return "Bind OIDC setup to a persistent installation identity";
++    }
++
++    @Override
++    protected DataSource dataSource() {
++        return dataSource;
++    }
++
++    @Override
++    public List<String> sqlResources() {
++        return List.of("/migrations/2.0.94-oidc-server-installation-postgres.sql");
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcInstallationReceipt.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcInstallationReceipt.java
+new file mode 100644
+index 0000000..406019b
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcInstallationReceipt.java
+@@ -0,0 +1,83 @@
++package io.kestra.webserver.oidc.services;
++
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.nio.channels.FileChannel;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.LinkOption;
++import java.nio.file.Path;
++import java.nio.file.StandardOpenOption;
++import java.nio.file.attribute.PosixFilePermissions;
++import java.util.Optional;
++import java.util.Set;
++
++public final class OidcInstallationReceipt {
++    private static final String PREFIX = "kestra-oidc-installation-v1\n";
++    private final Path path;
++
++    public OidcInstallationReceipt(final Path path) {
++        this.path = path.toAbsolutePath().normalize();
++    }
++
++    public Optional<String> read() {
++        try {
++            checkPath();
++            if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
++                return Optional.empty();
++            }
++            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.size(path) > 128) {
++                throw new IllegalStateException("OIDC installation receipt is invalid");
++            }
++            final String value = Files.readString(path, StandardCharsets.UTF_8);
++            if (!value.startsWith(PREFIX) || !value.endsWith("\n")) {
++                throw new IllegalStateException("OIDC installation receipt is invalid");
++            }
++            final String identity = value.substring(PREFIX.length(), value.length() - 1);
++            if (!identity.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
++                throw new IllegalStateException("OIDC installation receipt is invalid");
++            }
++            final var permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
++            if (!PosixFilePermissions.fromString("rw-------").containsAll(permissions)) {
++                throw new IllegalStateException("OIDC installation receipt permissions are invalid");
++            }
++            return Optional.of(identity);
++        } catch (IOException exception) {
++            throw new IllegalStateException("OIDC installation receipt is unavailable");
++        }
++    }
++
++    public void create(final String identity) {
++        try {
++            checkPath();
++            final Optional<String> existing = read();
++            if (existing.isPresent()) {
++                if (!existing.get().equals(identity)) {
++                    throw new IllegalStateException("OIDC installation identity mismatch");
++                }
++                return;
++            }
++            Files.createDirectories(path.getParent());
++            checkPath();
++            try (var channel = FileChannel.open(path, Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
++                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))) {
++                final ByteBuffer bytes = ByteBuffer.wrap((PREFIX + identity + "\n").getBytes(StandardCharsets.UTF_8));
++                while (bytes.hasRemaining()) {
++                    channel.write(bytes);
++                }
++                channel.force(true);
++            }
++            try (var directory = FileChannel.open(path.getParent(), StandardOpenOption.READ)) {
++                directory.force(true);
++            }
++        } catch (IOException exception) {
++            throw new IllegalStateException("OIDC installation receipt cannot be persisted");
++        }
++    }
++
++    private void checkPath() {
++        if (Files.isSymbolicLink(path) || Files.isSymbolicLink(path.getParent())) {
++            throw new IllegalStateException("OIDC installation receipt must not be a symbolic link");
++        }
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
 new file mode 100644
-index 0000000..12627df
+index 0000000..8fa17d0
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,205 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.net.URI;
@@ -255,6 +389,9 @@ index 0000000..12627df
 +import java.sql.Connection;
 +import java.sql.SQLException;
 +import java.util.Map;
++import java.util.Optional;
++import java.util.UUID;
++import java.nio.file.Path;
 +import javax.sql.DataSource;
 +
 +import io.kestra.webserver.oidc.OidcConfiguration;
@@ -270,26 +407,24 @@ index 0000000..12627df
 +    private final DataSource dataSource;
 +    private final OidcConfiguration configuration;
 +    private final Environment environment;
-+    private volatile boolean completed;
++    private final OidcInstallationReceipt receipt;
 +
 +    public OidcSetupService(final DataSource dataSource, final OidcConfiguration configuration,
 +        final Environment environment) {
 +        this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
 +        this.configuration = configuration;
 +        this.environment = environment;
++        final String configuredPath = property("kestra.oidc.bootstrap.receipt-path");
++        final String storagePath = property("kestra.storage.local.base-path");
++        this.receipt = new OidcInstallationReceipt(configuredPath.isEmpty()
++            ? Path.of(storagePath.isEmpty() ? "/app/storage" : storagePath, ".oidc-installation") : Path.of(configuredPath));
 +    }
 +
 +    public boolean ready() {
-+        if (completed) {
-+            return true;
-+        }
 +        return initialize(null);
 +    }
 +
 +    public boolean setup(final Map<String, String> form) {
-+        if (completed) {
-+            return false;
-+        }
 +        return initialize(form);
 +    }
 +
@@ -300,23 +435,38 @@ index 0000000..12627df
 +                try (var statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(1330133)")) {
 +                    statement.execute();
 +                }
-+                if (exists(connection, "SELECT EXISTS(SELECT 1 FROM oidc_setup)")) {
++                final Optional<String> storedIdentity = storedIdentity(connection);
++                final Optional<String> receiptIdentity = receipt.read();
++                if (storedIdentity.isPresent()) {
++                    if (receiptIdentity.isPresent() && !receiptIdentity.get().equals(storedIdentity.get())) {
++                        throw new IllegalStateException("OIDC installation identity mismatch");
++                    }
++                    receipt.create(storedIdentity.get());
 +                    connection.commit();
-+                    completed = true;
 +                    return form == null;
++                }
++                if (receiptIdentity.isPresent()) {
++                    throw new IllegalStateException("OIDC installation record is missing; initialization is locked");
 +                }
 +                final boolean existingUsers = exists(connection, "SELECT EXISTS(SELECT 1 FROM oidc_user)");
 +                if (existingUsers) {
 +                    registerClient(connection, false);
-+                    markCompleted(connection);
++                    final String identity = UUID.randomUUID().toString();
++                    receipt.create(identity);
++                    markCompleted(connection, identity);
 +                    connection.commit();
-+                    completed = true;
 +                    return form == null;
 +                }
 +                final Map<String, String> values = form == null ? bootstrapValues() : form;
 +                if (values == null) {
++                    if ("false".equalsIgnoreCase(property("KESTRA_OIDC_SETUP_ALLOWED"))) {
++                        throw new IllegalStateException("OIDC web setup is disabled");
++                    }
 +                    connection.commit();
 +                    return false;
++                }
++                if (form != null && "false".equalsIgnoreCase(property("KESTRA_OIDC_SETUP_ALLOWED"))) {
++                    throw new IllegalStateException("OIDC web setup is disabled");
 +                }
 +                final String username = values.getOrDefault("username", "").trim();
 +                final String password = values.getOrDefault("password", "");
@@ -324,6 +474,8 @@ index 0000000..12627df
 +                final String email = values.getOrDefault("email", "").trim();
 +                validate(username, password, name, email);
 +                registerClient(connection, true);
++                final String identity = UUID.randomUUID().toString();
++                receipt.create(identity);
 +                try (var statement = connection.prepareStatement(
 +                    "INSERT INTO oidc_user (username,name,email,roles) VALUES (?,?,?,'[\"admin\"]')")) {
 +                    statement.setString(1, username);
@@ -337,9 +489,8 @@ index 0000000..12627df
 +                    statement.setString(2, BCrypt.hashpw(password, BCrypt.gensalt(10)));
 +                    statement.executeUpdate();
 +                }
-+                markCompleted(connection);
++                markCompleted(connection, identity);
 +                connection.commit();
-+                completed = true;
 +                return true;
 +            } catch (RuntimeException | SQLException exception) {
 +                connection.rollback();
@@ -422,8 +573,16 @@ index 0000000..12627df
 +        }
 +    }
 +
-+    private static void markCompleted(final Connection connection) throws SQLException {
-+        try (var statement = connection.prepareStatement("INSERT INTO oidc_setup (singleton) VALUES (true)")) {
++    private static Optional<String> storedIdentity(final Connection connection) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT installation_id FROM oidc_setup");
++             var result = statement.executeQuery()) {
++            return result.next() ? Optional.of(result.getString(1)) : Optional.empty();
++        }
++    }
++
++    private static void markCompleted(final Connection connection, final String identity) throws SQLException {
++        try (var statement = connection.prepareStatement("INSERT INTO oidc_setup (singleton,installation_id) VALUES (true,?)")) {
++            statement.setString(1, identity);
 +            statement.executeUpdate();
 +        }
 +    }
@@ -439,6 +598,66 @@ index 0000000..fbd27c4
 +    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
 +    completed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 +);
+diff --git a/webserver/src/main/resources/migrations/2.0.94-oidc-server-installation-postgres.sql b/webserver/src/main/resources/migrations/2.0.94-oidc-server-installation-postgres.sql
+new file mode 100644
+index 0000000..022d72b
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.94-oidc-server-installation-postgres.sql
+@@ -0,0 +1,3 @@
++ALTER TABLE oidc_setup ADD COLUMN IF NOT EXISTS installation_id TEXT;
++UPDATE oidc_setup SET installation_id = gen_random_uuid()::text WHERE installation_id IS NULL;
++ALTER TABLE oidc_setup ALTER COLUMN installation_id SET NOT NULL;
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcInstallationReceiptTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcInstallationReceiptTest.java
+new file mode 100644
+index 0000000..c702538
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcInstallationReceiptTest.java
+@@ -0,0 +1,45 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.attribute.PosixFilePermissions;
++import java.util.UUID;
++import io.kestra.webserver.oidc.services.OidcInstallationReceipt;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class OidcInstallationReceiptTest {
++    @TempDir
++    Path directory;
++
++    @Test
++    void receiptHasPrivatePermissionsAndCannotBeOverwritten() throws Exception {
++        final Path path = directory.resolve("receipt");
++        final var receipt = new OidcInstallationReceipt(path);
++        final String identity = UUID.randomUUID().toString();
++        receipt.create(identity);
++        assertEquals(identity, receipt.read().orElseThrow());
++        assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(path));
++        assertThrows(IllegalStateException.class, () -> receipt.create(UUID.randomUUID().toString()));
++    }
++
++    @Test
++    void symlinkAndOversizedOrPubliclyWritableReceiptFailClosed() throws Exception {
++        final Path path = directory.resolve("receipt");
++        final Path target = directory.resolve("target");
++        Files.writeString(target, "target");
++        Files.createSymbolicLink(path, target);
++        final var receipt = new OidcInstallationReceipt(path);
++        assertThrows(IllegalStateException.class, receipt::read);
++        assertThrows(IllegalStateException.class, () -> receipt.create(UUID.randomUUID().toString()));
++        Files.delete(path);
++        Files.writeString(path, "x".repeat(200));
++        assertThrows(IllegalStateException.class, receipt::read);
++        Files.delete(path);
++        receipt.create(UUID.randomUUID().toString());
++        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-rw-rw-"));
++        assertThrows(IllegalStateException.class, receipt::read);
++    }
++}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupControllerTest.java
 new file mode 100644
 index 0000000..63b14b8
@@ -524,17 +743,26 @@ index 0000000..63b14b8
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupServiceTest.java
 new file mode 100644
-index 0000000..8d7798c
+index 0000000..c633b4f
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSetupServiceTest.java
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,193 @@
 +package io.kestra.webserver.oidc;
 +
-+import static org.junit.jupiter.api.Assertions.*;
-+import static org.mockito.Mockito.*;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.anyString;
++import static org.mockito.Mockito.eq;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
 +
 +import java.util.Map;
 +import java.util.Optional;
++import java.nio.file.Files;
++import java.nio.file.Path;
 +import java.util.concurrent.Executors;
 +import com.fasterxml.jackson.databind.ObjectMapper;
 +import io.kestra.webserver.oidc.services.OidcSetupService;
@@ -543,10 +771,13 @@ index 0000000..8d7798c
 +import io.micronaut.context.env.Environment;
 +import org.junit.jupiter.api.BeforeEach;
 +import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
 +
 +class OidcSetupServiceTest extends OidcPostgresTestBase {
 +    private Environment environment;
 +    private OidcConfiguration configuration;
++    @TempDir
++    Path receiptDirectory;
 +
 +    @BeforeEach
 +    void reset() throws Exception {
@@ -555,6 +786,7 @@ index 0000000..8d7798c
 +        }
 +        environment = mock(Environment.class);
 +        when(environment.getProperty(anyString(), eq(String.class))).thenReturn(Optional.empty());
++        property("kestra.oidc.bootstrap.receipt-path", receiptDirectory.resolve("installation").toString());
 +        property("micronaut.security.oauth2.clients.kestra.client-id", "setup-ui");
 +        property("micronaut.security.oauth2.clients.kestra.client-secret", "setup-secret");
 +        configuration = new OidcConfiguration();
@@ -640,5 +872,71 @@ index 0000000..8d7798c
 +        assertTrue(service().ready());
 +        assertTrue(users.validateCredentials("existing", "ExistingPass123!"));
 +        assertFalse(service().setup(account("first")));
++    }
++
++    @Test
++    void deletingDatabaseMarkerAndUsersCannotReopenSetupOrEnvironmentBootstrap() throws Exception {
++        final var installed = service();
++        assertTrue(installed.setup(account("first")));
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("TRUNCATE oidc_setup,oidc_user CASCADE");
++        }
++        property("KESTRA_OIDC_BOOTSTRAP_USERNAME", "attacker");
++        property("KESTRA_OIDC_BOOTSTRAP_PASSWORD", "AttackerPass123!");
++        assertThrows(IllegalStateException.class, installed::ready);
++        assertThrows(IllegalStateException.class, () -> service().setup(account("attacker")));
++        assertThrows(IllegalStateException.class, () -> service().ready());
++        assertTrue(new OidcUserService(dataSource(), new ObjectMapper()).list().isEmpty());
++    }
++
++    @Test
++    void deletingReceiptRestoresSameIdentityWithoutActivatingSetup() throws Exception {
++        assertTrue(service().setup(account("first")));
++        final String original = Files.readString(receiptDirectory.resolve("installation"));
++        Files.delete(receiptDirectory.resolve("installation"));
++        assertTrue(service().ready());
++        assertEquals(original, Files.readString(receiptDirectory.resolve("installation")));
++        assertFalse(service().setup(account("second")));
++    }
++
++    @Test
++    void corruptedOrReplacedReceiptFailsClosedEvenInSameProcess() throws Exception {
++        final var installed = service();
++        assertTrue(installed.setup(account("first")));
++        final Path path = receiptDirectory.resolve("installation");
++        Files.writeString(path, "deleted or corrupted");
++        assertThrows(IllegalStateException.class, installed::ready);
++        Files.writeString(path, "kestra-oidc-installation-v1\n" + java.util.UUID.randomUUID() + "\n");
++        assertThrows(IllegalStateException.class, () -> service().setup(account("attacker")));
++    }
++
++    @Test
++    void explicitDisableRejectsFormButAllowsEnvironmentFirstInstall() {
++        property("KESTRA_OIDC_SETUP_ALLOWED", "false");
++        assertThrows(IllegalStateException.class, () -> service().ready());
++        assertThrows(IllegalStateException.class, () -> service().setup(account("first")));
++        property("KESTRA_OIDC_BOOTSTRAP_USERNAME", "environment-user");
++        property("KESTRA_OIDC_BOOTSTRAP_PASSWORD", "SetupPass123!");
++        assertTrue(service().ready());
++        assertFalse(service().setup(account("second")));
++    }
++
++    @Test
++    void transactionFailureLeavesLatchAndCannotAutomaticallyRetry() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("ALTER TABLE oidc_user ADD CONSTRAINT setup_reject_test CHECK (username <> 'reject')");
++        }
++        try {
++            assertThrows(IllegalStateException.class, () -> service().setup(account("reject")));
++            assertTrue(Files.exists(receiptDirectory.resolve("installation")));
++            assertTrue(new OidcUserService(dataSource(), new ObjectMapper()).list().isEmpty());
++            assertTrue(new OidcClientService(dataSource(), new ObjectMapper()).list().isEmpty());
++            assertThrows(IllegalStateException.class, () -> service().ready());
++            assertThrows(IllegalStateException.class, () -> service().setup(account("first")));
++        } finally {
++            try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++                statement.execute("ALTER TABLE oidc_user DROP CONSTRAINT setup_reject_test");
++            }
++        }
 +    }
 +}

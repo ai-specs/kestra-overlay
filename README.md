@@ -93,6 +93,7 @@ services:
       KESTRA_OIDC_BOOTSTRAP_PASSWORD: "${KESTRA_OIDC_BOOTSTRAP_PASSWORD:-}"
       KESTRA_OIDC_BOOTSTRAP_EMAIL: "${KESTRA_OIDC_BOOTSTRAP_EMAIL:-}"
       KESTRA_OIDC_BOOTSTRAP_NAME: "${KESTRA_OIDC_BOOTSTRAP_NAME:-}"
+      KESTRA_OIDC_SETUP_ALLOWED: "${KESTRA_OIDC_SETUP_ALLOWED:-true}"
       KESTRA_CONFIGURATION: |
         datasources:
           postgres:
@@ -174,7 +175,7 @@ volumes:
 
 ### 首次安装：网页引导或环境变量
 
-首次引导正在追加双凭据加固：数据库安装身份与 `/app/storage/.oidc-installation`
+首次引导使用双凭据：数据库安装身份与 `/app/storage/.oidc-installation`
 共同决定状态，删除单一标记不能重新开放；异常失败关闭。凭据卷须持久化。
 
 网页方式：设置 `KESTRA_OIDC_UI_CLIENT_SECRET`，`docker compose up -d` 后访问 `/ui/`。
@@ -191,6 +192,7 @@ volumes:
 | `KESTRA_OIDC_BOOTSTRAP_EMAIL` | 可选邮箱 |
 | `KESTRA_OIDC_BOOTSTRAP_NAME` | 可选显示名，缺省使用登录名 |
 | `KESTRA_OIDC_UI_CLIENT_SECRET` | 示例 compose 的 UI client secret 环境变量，经配置映射给 Micronaut 客户端；引导/无人值守两种方式都需要 |
+| `KESTRA_OIDC_SETUP_ALLOWED` | 设为 `false` 时封闭网页首次安装；环境变量初始化仍可用，适合无人值守部署 |
 
 ```bash
 export KESTRA_OIDC_UI_CLIENT_SECRET="$(openssl rand -hex 32)"
@@ -207,6 +209,17 @@ docker compose up -d
 返回 404，删除用户也不会重新开放匿名引导；密码恢复/账号管理不能靠清空表实现。
 已有用户部署首次升级保留账号，并关闭引导；若同名 client 与配置冲突，初始化拒绝，
 不静默覆盖 secret/回调。不要在后续启动时随机重生成已经注册的 UI secret。
+
+安装身份还保存在独立文件 `/app/storage/.oidc-installation`（权限 `0600`），须保留
+示例 `kestra-data` 持久卷；多实例共享同一安装凭据，或由部署侧同步同一可信凭据。
+可通过 `kestra.oidc.bootstrap.receipt-path` 指定其他持久化路径。
+数据库标记删除时，文件锁存仍阻止 setup 和环境变量重建；文件删除时，数据库只恢复
+原身份文件，不创建账号；身份不一致、损坏/符号链接/公开权限时拒绝初始化（500）。
+初始化中断留下文件但没有数据库完成记录时也拒绝重试，避免再次激活；管理员须从可信
+备份核对和恢复安装身份，不使用删除标记的方式重新安装。
+在控制数据库与持久卷的管理权限之外，可进一步在部署配置中设置
+`KESTRA_OIDC_SETUP_ALLOWED=false`，防止网页首装暴露。镜像不能判断有权同时重置数据库、
+凭据卷和部署配置的管理员是否在重装；这些权限属于部署信任边界。
 
 下例 client 配置名为 `kestra`，client ID 为 `kestra-ui`，精确回调为
 `http://localhost:8080/oauth/callback/kestra`。自定义客户端配置名称时设置

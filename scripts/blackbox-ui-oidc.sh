@@ -7,12 +7,14 @@ BASE="http://localhost:$PORT"
 NET="kestra-ui-bb-$$"
 PG="kestra-ui-pg-$$"
 SERVER="kestra-ui-bb-$$"
+STORAGE="kestra-ui-storage-$$"
 SETUP_MODE="${BB_SETUP_MODE:-form}"
 TEMP_DIR=$(mktemp -d)
 
 cleanup() {
   docker rm -f "$SERVER" "$PG" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  docker volume rm "$STORAGE" >/dev/null 2>&1 || true
   rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT
@@ -35,6 +37,7 @@ request() {
 }
 
 docker network create "$NET" >/dev/null
+docker volume create "$STORAGE" >/dev/null
 docker run -d --name "$PG" --network "$NET" \
   -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
 for attempt in $(seq 1 30); do
@@ -107,14 +110,18 @@ YAML
 BOOTSTRAP_ENV=(-e KESTRA_OIDC_BOOTSTRAP_USERNAME= -e KESTRA_OIDC_UI_CLIENT_SECRET=local-ui-secret)
 if [ "$SETUP_MODE" = env ]; then
   BOOTSTRAP_ENV=(-e KESTRA_OIDC_UI_CLIENT_SECRET=local-ui-secret -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd!' \
-    -e KESTRA_OIDC_BOOTSTRAP_EMAIL=tester@local.test -e KESTRA_OIDC_BOOTSTRAP_NAME=Tester)
+    -e KESTRA_OIDC_BOOTSTRAP_EMAIL=tester@local.test -e KESTRA_OIDC_BOOTSTRAP_NAME=Tester -e KESTRA_OIDC_SETUP_ALLOWED=false)
 elif [ "$SETUP_MODE" != form ]; then
   echo 'FAIL: BB_SETUP_MODE must be form or env'; exit 1
 fi
 docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" \
+  -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
 for attempt in $(seq 1 60); do
+  if [ "$(docker inspect -f '{{.State.Running}}' "$SERVER")" != true ]; then
+    docker logs "$SERVER"; exit 1
+  fi
   status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)
   if [ "$status" = 200 ]; then READY=1; break; fi
   sleep 5
@@ -137,6 +144,8 @@ else
   assert_status "environment bootstrap skips setup" 302 "$(request "$BASE/oauth/login/kestra")"
 fi
 assert_status "setup closed after initialization" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+assert_status "completed setup POST cannot reactivate" 404 "$(curl -s -X POST -H "Origin: $BASE" \
+  -d 'username=attacker&password=AttackerPass123!' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 HASH_BEFORE=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 [[ "$HASH_BEFORE" == '$2a$'* ]] || { echo 'FAIL: password must be bcrypt'; exit 1; }
 
@@ -204,4 +213,30 @@ done
 assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
+docker rm -f "$SERVER" >/dev/null
+docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" -v "$STORAGE:/app/storage" \
+  "${BOOTSTRAP_ENV[@]}" -e KESTRA_OIDC_BOOTSTRAP_USERNAME=attacker -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=InjectedPass123!' \
+  -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
+for attempt in $(seq 1 60); do
+  status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)
+  [ "$status" = 200 ] && break
+  sleep 5
+done
+assert_status "recreated container ignores injected bootstrap account" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+ATTACKER_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*) FROM oidc_user WHERE username='attacker'")
+assert_status "bootstrap cannot add another initial account" 0 "$ATTACKER_COUNT"
+INSTALLATION_ID=$(docker exec "$PG" psql -U kestra -d kestra -Atc 'SELECT installation_id FROM oidc_setup')
+docker exec "$PG" psql -U kestra -d kestra -q -v ON_ERROR_STOP=1 -c 'DELETE FROM oidc_setup'
+assert_status "deleted database marker fails closed" 500 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+assert_status "deleted marker cannot reactivate setup POST" 500 "$(curl -s -X POST -H "Origin: $BASE" \
+  -d 'username=attacker&password=AttackerPass123!' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+docker exec -i "$PG" psql -U kestra -d kestra -q -v ON_ERROR_STOP=1 -v installation_id="$INSTALLATION_ID" <<'SQL'
+INSERT INTO oidc_setup (singleton,installation_id) VALUES (true,:'installation_id');
+SQL
+docker exec "$SERVER" rm /app/storage/.oidc-installation
+assert_status "deleted file receipt cannot reopen setup" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+RECEIPT_ID=$(docker exec "$SERVER" sh -c 'sed -n 2p /app/storage/.oidc-installation')
+assert_status "receipt restores original installation identity" "$INSTALLATION_ID" "$RECEIPT_ID"
+docker exec "$SERVER" sh -c 'printf "kestra-oidc-installation-v1\n00000000-0000-0000-0000-000000000000\n" > /app/storage/.oidc-installation'
+assert_status "replaced receipt fails closed" 500 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 echo 'UI OIDC BLACKBOX ALL GREEN'
