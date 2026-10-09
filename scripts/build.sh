@@ -55,6 +55,12 @@ EXE="$(ls -t "$WORK"/build/executable/* | head -1)"
 mkdir -p "$WORK/docker/app"
 cp "$EXE" "$WORK/docker/app/kestra"
 chmod +x "$WORK/docker/app/kestra"
+# Pre-create the storage dir with kestra ownership: the upstream image has no /app/storage,
+# so a named volume mounted there initializes root-owned and the uid-1000 process crashes
+# with AccessDenied on first boot (third-party test 2026-10-09). COPY docker / carries the
+# ownership in via --chown.
+mkdir -p "$WORK/docker/app/storage"
+touch "$WORK/docker/app/storage/.gitkeep"
 echo "webserver jar staged: $(basename "$EXE") -> docker/app/kestra"
 
 echo "== extension artifacts (from extension repos; see build-extensions.sh) =="
