@@ -146,6 +146,11 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
   实现同批落仓；CI 定向测试门（`:webserver:test --tests` 包前缀过滤，只跑 patch 引入的
   测试，不跑上游全量）+ 镜像级 OIDC 流程黑盒；安全专项清单（差异表 §4 R-OIDC-SERVER
   前置④）动刀前评审定稿，门绿为 DoD 组成部分。
+- **本地全链验证循环（2026-10-07 裁定，本条对 R-OIDC-SERVER 类实施期例外于「本地不跑
+  gradle 全量编译」）**：动刀期用 `scripts/local-ci.sh` 在本地模拟完整 CI——验证树
+  `.work/verify` 每次 reset 到 BASE 后按序重放全部 patch → 定向测试（Testcontainers，
+  需 Docker）→ executableJar；开发在 `.work/dev` 树按 §5.3 进行（两树分离，脚本绝不触碰
+  dev 树；`.work/` 不入库）。**本地全绿后才组织 patch 提交推送**；真 CI 仍为唯一通过标志。
 - CI 平时不跟踪不轮询；**骨架/patch 集大改后查一次**（属「大量变更后跟踪一次」例外）。
 - **禁止**在 CI 红时宣称完成；禁止用 `... | tail` 吞退出码。
 

@@ -99,9 +99,11 @@ JWKS 缓存撕裂；轮换走双钥并存期）。免持久：access token（JWT
    （✅ 同签名 / ⚠️ 异签名需适配 / ❌ 需替代），含 Micronaut 平台版本核对。
 2. 临时实施文档（仓外，完成即删）：patch 需求拆分（discovery/授权码流+PKCE/token+
    JWKS/用户与 client 管理/链与登录/M-Face 集成）、文件清单、测试映射、顺序。
-3. §5.3 增量提交法在 v2.0.5 树**重写**（来源标注：「参考 fork 实现逻辑重写（跨基）」；
-   依赖行随首个需求 patch；每 patch 头部按 §3-7 四条件）。
-4. 双锚验证：安全清单 §5 全用例过（Testcontainers 真 PG）+ **逐文件**漂移核对
-   （diff 归因于基差或剥离项，不留抽样）。
-5. CI 定向测试门（`--tests` 包前缀）+ apply 链 + 镜像级黑盒；全绿为 DoD。
-6. 差异表 §2-A/§4、manifest、README 运行线随实施状态同步。
+3. **开发树重写**：`.work/dev` 树（v2.0.5）按 §5.3 增量提交法逐需求重写
+   （来源标注：「参考 fork 实现逻辑重写（跨基）」；依赖行随首个需求 patch；
+   头部按 §3-7 四条件）。
+4. **本地全链循环到完美**：`scripts/local-ci.sh` 在 `.work/verify` 树重放 patch →
+   定向测试（Testcontainers 真 PG，需 Docker）→ executableJar；双锚验证：安全清单 §5
+   全用例过 + **逐文件**漂移核对（diff 归因于基差或剥离项，不留抽样）。
+5. 本地全绿 → 组织 patch 提交推送 → 真 CI（定向门 + apply 链 + 镜像 + 镜像级黑盒）
+   全绿为 DoD；差异表 §2-A/§4、manifest、README 运行线随实施状态同步。
