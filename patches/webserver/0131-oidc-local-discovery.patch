@@ -1,0 +1,137 @@
+# 需求：REQ-0131 内置 IdP 的客户端 discovery 启动适配；HTTP 监听前直接使用生产
+#   discovery 元数据，避免同进程请求本机端口失败；外部 issuer 保留框架 discovery。
+# 消费扩展仓：—（R-OIDC-SERVER patch 路线）
+# 状态：core
+# 来源：新写；依据 OIDC Discovery 1.0、micronaut-security-oauth2 4.15.2
+#   OpenIdProviderMetadataFetcher SPI；无客户耦合项。
+# 触达上游文件（2）：OidcLocalMetadataFetcherFactory + 验收测试。
+# 移除条件：上游原生支持同进程 OIDC discovery 或 R-OIDC-SERVER 弃用。
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLocalMetadataFetcherFactory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLocalMetadataFetcherFactory.java
+new file mode 100644
+index 0000000..0cc6d50
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLocalMetadataFetcherFactory.java
+@@ -0,0 +1,62 @@
++package io.kestra.webserver.oidc.services;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.controllers.OidcDiscoveryController;
++
++import io.micronaut.context.annotation.EachBean;
++import io.micronaut.context.annotation.Factory;
++import io.micronaut.context.annotation.Parameter;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.client.HttpClient;
++import io.micronaut.http.client.annotation.Client;
++import io.micronaut.security.oauth2.client.DefaultOpenIdProviderMetadata;
++import io.micronaut.security.oauth2.client.DefaultOpenIdProviderMetadataFetcher;
++import io.micronaut.security.oauth2.client.OpenIdProviderMetadataFetcher;
++import io.micronaut.security.oauth2.client.OpenIdProviderMetadataFetcherFactory;
++import io.micronaut.security.oauth2.configuration.OpenIdClientConfiguration;
++import jakarta.inject.Singleton;
++
++@Factory
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++public class OidcLocalMetadataFetcherFactory {
++    private final OidcConfiguration configuration;
++    private final OidcDiscoveryController discovery;
++    private final ObjectMapper mapper;
++
++    public OidcLocalMetadataFetcherFactory(
++        final OidcConfiguration configuration,
++        final OidcDiscoveryController discovery,
++        final ObjectMapper mapper
++    ) {
++        this.configuration = configuration;
++        this.discovery = discovery;
++        this.mapper = mapper;
++    }
++
++    @EachBean(OpenIdClientConfiguration.class)
++    @Singleton
++    @Replaces(value = OpenIdProviderMetadataFetcher.class, factory = OpenIdProviderMetadataFetcherFactory.class)
++    public OpenIdProviderMetadataFetcher create(
++        @Parameter final OpenIdClientConfiguration clientConfiguration,
++        @Client final HttpClient httpClient
++    ) {
++        if (clientConfiguration.getIssuer().map(Object::toString).filter(configuration.getIssuer()::equals).isEmpty()) {
++            return new DefaultOpenIdProviderMetadataFetcher(clientConfiguration, httpClient);
++        }
++        return new OpenIdProviderMetadataFetcher() {
++            @Override
++            public String getName() {
++                return clientConfiguration.getName();
++            }
++
++            @Override
++            public DefaultOpenIdProviderMetadata fetch() {
++                final var metadata = mapper.convertValue(discovery.openIdConfiguration().body(), DefaultOpenIdProviderMetadata.class);
++                metadata.setName(getName());
++                return metadata;
++            }
++        };
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLocalMetadataFetcherFactoryTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLocalMetadataFetcherFactoryTest.java
+new file mode 100644
+index 0000000..0ab4b40
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLocalMetadataFetcherFactoryTest.java
+@@ -0,0 +1,55 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.when;
++
++import java.net.URI;
++import java.util.Optional;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.controllers.OidcDiscoveryController;
++import io.kestra.webserver.oidc.services.OidcLocalMetadataFetcherFactory;
++
++import io.micronaut.http.client.HttpClient;
++import io.micronaut.security.oauth2.client.DefaultOpenIdProviderMetadataFetcher;
++import io.micronaut.security.oauth2.configuration.OpenIdClientConfiguration;
++
++import org.junit.jupiter.api.Test;
++
++class OidcLocalMetadataFetcherFactoryTest {
++    private final OidcConfiguration configuration = new OidcConfiguration();
++    private final OidcLocalMetadataFetcherFactory factory = new OidcLocalMetadataFetcherFactory(
++        configuration, new OidcDiscoveryController(configuration), new ObjectMapper());
++
++    @Test
++    void localIssuerUsesProductionDiscoveryWithoutHttpBeforeServerStarts() throws Exception {
++        final var client = mock(OpenIdClientConfiguration.class);
++        when(client.getName()).thenReturn("kestra");
++        when(client.getIssuer()).thenReturn(Optional.of(URI.create(configuration.getIssuer()).toURL()));
++        final var http = mock(HttpClient.class);
++        final var metadata = factory.create(client, http).fetch();
++        assertEquals("kestra", metadata.getName());
++        assertEquals(configuration.getIssuer(), metadata.getIssuer());
++        assertEquals(configuration.getIssuer() + "/oidc/authorize", metadata.getAuthorizationEndpoint());
++        assertEquals(configuration.getIssuer() + "/oidc/token", metadata.getTokenEndpoint());
++        assertEquals(configuration.getIssuer() + "/oidc/jwks", metadata.getJwksUri());
++        verifyNoInteractions(http);
++    }
++
++    @Test
++    void externalIssuerRetainsFrameworkDiscovery() throws Exception {
++        final var client = mock(OpenIdClientConfiguration.class);
++        when(client.getIssuer()).thenReturn(Optional.of(URI.create("https://external.example.org").toURL()));
++        assertInstanceOf(DefaultOpenIdProviderMetadataFetcher.class, factory.create(client, mock(HttpClient.class)));
++    }
++
++    @Test
++    void absentIssuerRetainsFrameworkExplicitEndpointConfiguration() {
++        final var client = mock(OpenIdClientConfiguration.class);
++        when(client.getIssuer()).thenReturn(Optional.empty());
++        assertInstanceOf(DefaultOpenIdProviderMetadataFetcher.class, factory.create(client, mock(HttpClient.class)));
++    }
++}

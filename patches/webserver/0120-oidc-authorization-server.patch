@@ -188,7 +188,7 @@ index 0000000..8dfc57d
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 new file mode 100644
-index 0000000..2c6eb65
+index 0000000..66dd6e3
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 @@ -0,0 +1,474 @@
@@ -368,7 +368,7 @@ index 0000000..2c6eb65
 +        if (subject.isEmpty()) {
 +            // Not logged into the provider yet — the login page (0130) returns here afterwards.
 +            final String returnTo = URLEncoder.encode(request.getUri().toString(), StandardCharsets.UTF_8);
-+            return HttpResponse.temporaryRedirect(URI.create("/oidc/login?return_to=" + returnTo));
++            return HttpResponse.temporaryRedirect(URI.create("/oidc/login?from=" + returnTo));
 +        }
 +
 +        final AuthorizationCode code = authCodeService.create(
@@ -1506,10 +1506,10 @@ index 0000000..fafe233
 +CREATE INDEX IF NOT EXISTS idx_oidc_token_type ON oidc_token (token_type);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 new file mode 100644
-index 0000000..ef9b2f3
+index 0000000..2759acb
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,145 @@
 +package io.kestra.webserver.oidc;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1552,6 +1552,28 @@ index 0000000..ef9b2f3
 +    private String createCode() {
 +        return service.create("code-client", "alice", "https://app.example.org/cb",
 +            List.of("openid"), null, null, null).getValue();
++    }
++
++    @Test
++    void anonymousAuthorizeReturnsToTheCompleteRequestAfterLogin() {
++        final var mapper = new ObjectMapper();
++        final var source = OidcPostgresTestBase.dataSource();
++        final var keys = new io.kestra.webserver.oidc.services.OidcJwkService(source);
++        final var controller = new io.kestra.webserver.oidc.controllers.OidcProviderController(
++            configuration, new OidcClientService(source, mapper), service,
++            new io.kestra.webserver.oidc.services.OidcTokenService(source, mapper, configuration, keys),
++            keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
++            new io.kestra.webserver.oidc.services.OidcSessionService(configuration));
++        final String authorize = "/oidc/authorize?client_id=code-client&redirect_uri=https%3A%2F%2Fapp.example.org%2Fcb"
++            + "&response_type=code&scope=openid&state=round-trip&nonce=nonce-test";
++        final var request = org.mockito.Mockito.spy(io.micronaut.http.HttpRequest.GET(authorize));
++        org.mockito.Mockito.doReturn(new io.micronaut.http.simple.SimpleHttpRequest<Void>(
++            io.micronaut.http.HttpMethod.GET, "/", null).getCookies()).when(request).getCookies();
++        final var response = controller.authorize(request);
++        final String location = response.getHeaders().get("Location");
++        assertTrue(location.startsWith("/oidc/login?from="));
++        assertEquals(authorize, java.net.URLDecoder.decode(location.substring("/oidc/login?from=".length()),
++            java.nio.charset.StandardCharsets.UTF_8));
 +    }
 +
 +    @Test

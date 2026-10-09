@@ -4,10 +4,10 @@
 #
 # 两阶段：
 #   Phase A（默认关回归）：不开 kestra.oidc.enabled —— /oidc/* 与 /.well-known/* 全 404
-#     （功能门控 F2 vanilla 等价）、/ui/ 404（文档化边界：镜像无 UI 资产）、
+#     （功能门控 F2 vanilla 等价）、/ui/ 返回上游 UI HTML、
 #     /api/v1/* 未带凭据 401（OSS 默认强制 basic auth）。
 #   Phase B（开启后全链）：kestra.oidc.enabled=true —— discovery 元数据（S256-only）、
-#     JWKS、登录页渲染、坏凭据 401、好凭据 302+会话 cookie、authorize 发码（state 回显）、
+#     JWKS、登录页渲染、坏凭据 401、好凭据 303+会话 cookie、authorize 发码（state 回显）、
 #     code 换 token 三件套、code 重放拒绝（D1）、userinfo sub 校验、alg=none 拒绝（B2）、
 #     refresh 轮换（旧 refresh 用后即废）。
 set -euo pipefail
@@ -19,6 +19,7 @@ K1="kestra-bb-a-$$"
 K2="kestra-bb-b-$$"
 PORT="${BB_PORT:-18080}"
 BASE="http://localhost:${PORT}"
+T=$(mktemp -d)
 USER="admin@local.test"
 PASS="Admin1234!"
 OIDC_USER="tester"
@@ -37,6 +38,7 @@ assert_contains() { # desc needle haystack-file
 }
 
 cleanup() {
+  rm -rf "$T"
   docker rm -f "$K1" "$K2" "$PG" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
@@ -81,7 +83,7 @@ wait_ready() { # container-name
   echo "FAIL: $1 未就绪（300s）"; docker logs "$1" 2>&1 | tail -20; exit 1
 }
 
-echo "== Phase A: 默认关（vanilla 等价 + 文档化边界）=="
+echo "== Phase A: 默认关（vanilla 等价 + UI 保留）=="
 docker network create "$NET" >/dev/null
 docker run -d --name "$PG" --network "$NET" \
   -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=k3str4 postgres:18 >/dev/null
@@ -95,7 +97,8 @@ assert_eq "未认证 API → 401（OSS 默认强制 basic auth）" 401 "$(curl -
 assert_eq "discovery 默认关 → 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration")"
 assert_eq "jwks 默认关 → 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/jwks")"
 assert_eq "login 默认关 → 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/login")"
-assert_eq "/ui/ → 404（文档化边界：镜像无 UI 资产）" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ui/")"
+assert_eq "已认证 /ui/ → 200（保留上游 UI）" 200 "$(curl -s -u "$USER:$PASS" -o "$T/ui.html" -w '%{http_code}' "$BASE/ui/")"
+assert_contains "UI HTML 包含应用挂载点" 'id="app"' "$T/ui.html"
 
 docker rm -f "$K1" >/dev/null
 
@@ -115,8 +118,6 @@ VALUES ('rp-test', 'rp-secret', '["http://localhost:9999/cb"]',
         '["authorization_code","refresh_token"]', '["openid","profile","email"]')
 ON CONFLICT (client_id) DO NOTHING;
 SQL
-
-T=$(mktemp -d)
 
 # discovery 元数据
 code=$(curl -s -o "$T/disc.json" -w '%{http_code}' "$BASE/.well-known/openid-configuration")
@@ -139,7 +140,7 @@ assert_eq "坏凭据 → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' \
 
 # 好凭据 → 302 + 会话 cookie
 code=$(curl -s -c "$T/jar" -o /dev/null -w '%{http_code}' -d "username=$OIDC_USER&password=$OIDC_PASS&from=/ui/" "$BASE/oidc/login")
-if [ "$code" = "302" ] || [ "$code" = "307" ]; then ok "good credentials redirect ($code)"; else bad "good credentials no redirect" "$code"; fi
+assert_eq "good credentials redirect with GET (303)" 303 "$code"
 grep -q "oidc_session" "$T/jar" && ok "登录种下 oidc_session cookie" || bad "oidc_session cookie 缺失"
 
 # authorize：带会话 → 302 code+state

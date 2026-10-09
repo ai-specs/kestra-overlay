@@ -5,9 +5,9 @@
 镜像 = 上游 kestra OSS（版本由 `patches/BASE` pin，当前 **v2.0.5** @ `172dd0f3`）+ 薄 patch。
 加固形态（no-plugins 谱系）：镜像不携带任何插件/扩展 jar，插件集由部署侧精确控制。
 
-**当前镜像内容物边界（务必先读）**：本镜像只包含**后端引擎与 API**。上游 UI 前端资产
-**不在镜像内**（`/ui/` 返回 404 是预期，不是故障）——API/UI 混排的完整形态属后续交付，
-当前一切接入走 API。8080 端口 = API。
+**镜像内容物**：保留 BASE 的后端引擎、API 与原版 UI。构建先执行上游 UI 的
+`npm ci && npm run build`，再打包可执行 jar；8080 同时提供 API 和 `/ui/`。
+此前漏打 UI 是构建缺陷，不能将 `/ui/` 的 404 当作正常边界。
 
 ## 使用镜像
 
@@ -91,7 +91,7 @@ volumes:
 
 - **认证（重要）**：上游 OSS ≥0.24 **默认强制 basic auth**——不配 `kestra.server.basic-auth`
   则一切 `/api/v1/*` 返回 401。上例已内嵌最小凭据配置，改密后即可用。
-- 主端口 **8080**（API；UI 资产不在镜像内，`/ui/` 404 属预期）。**8081** 是 management
+- 主端口 **8080**（API 与原版 UI，入口 `/ui/`）。**8081** 是 management
   端点：缺省不暴露、**无鉴权**，仅开发用途。
 - 配置只经 `KESTRA_CONFIGURATION` 环境变量进入；改配置、加插件、挂 jar 都**需重启**。
 - 无预装插件：需要插件走 `./plugins` 挂载（重启）或运行期 API 安装（需 `auto-install.enabled: true`）。

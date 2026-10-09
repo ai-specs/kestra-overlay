@@ -30,6 +30,12 @@ settings are ignored）。
 官方 Dockerfile 唯一注入点 = `COPY docker /` + `plugins/`（`Dockerfile:9-13`）。
 docker-entrypoint 全文 3 行，只做 `exec /app/kestra "$@"`。
 
+**UI 保留要求（2026-10-09 修正）**：`no-plugins` 不表示无 UI。BASE 的
+`ui/vite.config.js` 将 `npm run build` 输出到 `webserver/src/main/resources/ui`，
+随后 `executableJar` 打包这些资源。overlay 构建必须先执行 `cd ui && npm ci && npm run build`，
+再执行 Gradle；仅执行 Gradle 会漏打 UI，属于构建缺陷。黑盒门须断言已认证
+`GET /ui/` 返回 200 与应用 HTML，不得将 404 当作成功条件。
+
 推论：外部 jar 进应用 classpath 的唯一入口在**构建期**——并入 fat jar（EE 的做法，见
 logback/base.xml:21-23 与 cli/BaseCommand.java:45 的 EE 类痕迹），或注入 manifest
 `Class-Path` 条目（选型 b：jar 本体可运行时挂载，见 §4）。

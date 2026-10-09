@@ -12,4 +12,5 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0100	0100-oidc-jwk-foundation.patch	core	—（R-OIDC-SERVER patch 路线）	JWKS 密钥基座:RS256 生成/装载/JWKS 发布/轮换并存+oidc_jwk 表+依赖行(§2 唯一例外)	6	参考 fork 逻辑重写(跨基,漂移核对完成);RFC7517/7518,nimbus 10.9.1	上游提供原生 OIDC 授权服务器或 R-OIDC-SERVER 弃用
 0110	0110-oidc-directory-storage.patch	core	—（R-OIDC-SERVER patch 路线）	用户目录(bcrypt-only)+client 注册表(常数时间/redirect 精确匹配/public=PKCE)	7	参考 fork 逻辑重写(跨基,漂移核对完成);RFC6749,jbcrypt 0.4	同 0100
 0120	0120-oidc-authorization-server.patch	core	—（R-OIDC-SERVER patch 路线）	授权服务器协议端点:discovery/JWKS/authorize(PKCE)/token(3 grants,refresh 轮换)/userinfo/introspect/revoke+code/token 表	11	参考 fork 逻辑重写(跨基,漂移核对完成);RFC6749/7636/7662/7009,nimbus 11.38.2	同 0100
-0130	0130-oidc-login-chain.patch	core	—（R-OIDC-SERVER patch 路线）	登录链(裁定②一体化):login/logout+AuthorizationException 处理器(浏览器 307/API 401)+from 消毒	4	参考 fork 逻辑重写(跨基,漂移核对完成);AuthorizationException 语义同 fork	同 0100
+0130	0130-oidc-login-chain.patch	core	—（R-OIDC-SERVER patch 路线）	登录链(裁定②一体化):login 303/logout+AuthorizationException 处理器(配置 OIDC 客户端入口/API 401)+from 消毒	4	参考 fork 逻辑重写(跨基);RFC9110 POST 后 303 + 配置客户端入口	同 0100
+0131	0131-oidc-local-discovery.patch	core	—（R-OIDC-SERVER patch 路线）	内置 IdP 同进程 discovery 启动适配;外部 issuer 保留框架发现	2	新写;OIDC Discovery 1.0 + micronaut-security-oauth2 4.15.2 SPI	上游原生支持同进程 OIDC discovery 或 R-OIDC-SERVER 弃用

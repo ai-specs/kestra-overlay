@@ -46,6 +46,13 @@ if [ "${1:-}" = "--apply-only" ]; then
   exit 0
 fi
 
+echo "== scoped OIDC acceptance tests =="
+(cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' --console=plain)
+
+echo "== build upstream UI assets =="
+(cd "$WORK/ui" && npm ci && npm run build)
+test -s "$WORK/webserver/src/main/resources/ui/index.html"
+
 echo "== compile webserver executable jar (thin-patched upstream) =="
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
   export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || true)"

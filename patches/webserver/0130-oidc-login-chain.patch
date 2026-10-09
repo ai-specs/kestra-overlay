@@ -1,22 +1,23 @@
 # ══ 需求 REQ-0130：R-OIDC-SERVER 登录链（前置裁定②一体化） ══════════════════
-# 需求：认证链用户面——/oidc/login 登录页+提交（bcrypt 验证→会话 cookie→302 回
+# 需求：认证链用户面——/oidc/login 登录页+提交（bcrypt 验证→会话 cookie→303 回
 #   from）、/oidc/logout、AuthorizationException 处理器（浏览器 307 登录页/API 401）。
 #   前置裁定②：链与服务器一体进 patch（kestra-auth-chain 契约行已退役）。
 # 消费扩展仓：—（R-OIDC-SERVER patch 路线）
 # 状态：core（协议标准基础设施层）
 # 来源：参考 fork LoginController/AuthorizationExceptionHandler 逻辑重写（跨基，漂移
-#   核对完成）。剥离：kestra-self 引导、refresh cookie、state 恢复机、标志 cookie。
-#   简化（漂移注记）：授权完成走「登录→302 回 authorize→cookie 重入发码」，行为等价。
+#   核对完成）。剥离：refresh cookie、自写 state 恢复机、标志 cookie；客户端链
+#   使用框架 OAuth2 客户端，经配置指定入口。登录 POST 后 303 转 GET（RFC9110）。
+#   授权完成走「登录→303 回 authorize→cookie 重入发码」，完整链由镜像黑盒验收。
 #   from 消毒=同源相对路径（/ 开头、非 // 与 /\、≤2048）——开放重定向防护 E1。
 # 触达上游文件（2+2 测试）：OidcLoginController、OidcAuthorizationExceptionHandler；
 #   测试两份。
 # 移除条件：同 REQ-0100
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
 new file mode 100644
-index 0000000..a564fd1
+index 0000000..ed0f055
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,56 @@
 +package io.kestra.webserver.oidc.controllers;
 +
 +import java.net.URI;
@@ -24,6 +25,7 @@ index 0000000..a564fd1
 +import java.nio.charset.StandardCharsets;
 +
 +import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.annotation.Value;
 +import io.micronaut.http.HttpHeaders;
 +import io.micronaut.http.HttpRequest;
 +import io.micronaut.http.HttpResponse;
@@ -46,6 +48,14 @@ index 0000000..a564fd1
 +    /** The IdP login page. */
 +    static final String LOGIN_URL = "/oidc/login";
 +
++    private final String loginUrl;
++
++    public OidcAuthorizationExceptionHandler(
++        @Value("${micronaut.security.redirect.unauthorized.url:/oidc/login}") final String loginUrl
++    ) {
++        this.loginUrl = loginUrl;
++    }
++
 +    @Error(global = true)
 +    public HttpResponse<?> handle(final HttpRequest<?> request, final AuthorizationException exception) {
 +        final String accept = request.getHeaders().get(HttpHeaders.ACCEPT);
@@ -56,17 +66,17 @@ index 0000000..a564fd1
 +    }
 +
 +    /** The login URL carrying the denied path as the {@code from} deep link. */
-+    static String loginUrlWithFrom(final HttpRequest<?> request) {
-+        final String target = request.getPath();
++    String loginUrlWithFrom(final HttpRequest<?> request) {
++        final String target = request.getUri().toString();
 +        if (target == null || target.isBlank() || !target.startsWith("/")) {
-+            return LOGIN_URL;
++            return loginUrl;
 +        }
-+        return LOGIN_URL + "?from=" + URLEncoder.encode(target, StandardCharsets.UTF_8);
++        return loginUrl + (loginUrl.contains("?") ? "&" : "?") + "from=" + URLEncoder.encode(target, StandardCharsets.UTF_8);
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 new file mode 100644
-index 0000000..e73038b
+index 0000000..0a32216
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 @@ -0,0 +1,144 @@
@@ -145,7 +155,7 @@ index 0000000..e73038b
 +        }
 +
 +        final String sessionId = sessionService.create(username);
-+        return HttpResponse.temporaryRedirect(URI.create(from == null ? DEFAULT_LANDING : from))
++        return HttpResponse.seeOther(URI.create(from == null ? DEFAULT_LANDING : from))
 +            .cookie(sessionService.sessionCookie(request, sessionId))
 +            .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
 +    }
@@ -216,10 +226,10 @@ index 0000000..e73038b
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationExceptionHandlerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationExceptionHandlerTest.java
 new file mode 100644
-index 0000000..541649e
+index 0000000..3f5ca67
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationExceptionHandlerTest.java
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,56 @@
 +package io.kestra.webserver.oidc;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -241,7 +251,7 @@ index 0000000..541649e
 + */
 +class OidcAuthorizationExceptionHandlerTest {
 +
-+    private final OidcAuthorizationExceptionHandler handler = new OidcAuthorizationExceptionHandler();
++    private final OidcAuthorizationExceptionHandler handler = new OidcAuthorizationExceptionHandler("/oidc/login");
 +
 +    private AuthorizationException denied() {
 +        return new AuthorizationException(SupplierUtil.memoized(() -> Authentication.build("anonymous")).get());
@@ -267,10 +277,18 @@ index 0000000..541649e
 +        final HttpResponse<?> response = handler.handle(HttpRequest.GET("/api/v1/main/flows"), denied());
 +        assertEquals(HttpStatus.UNAUTHORIZED, response.getStatus());
 +    }
++
++    @Test
++    void browserStartsConfiguredOidcClientAndPreservesQuery() {
++        final var configured = new OidcAuthorizationExceptionHandler("/oauth/login/kestra");
++        final var request = HttpRequest.GET("/ui/flows?namespace=main").header("Accept", "text/html");
++        final var response = configured.handle(request, denied());
++        assertEquals("/oauth/login/kestra?from=%2Fui%2Fflows%3Fnamespace%3Dmain", response.getHeaders().get("Location"));
++    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
 new file mode 100644
-index 0000000..6f8a75a
+index 0000000..041d3c8
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLoginControllerTest.java
 @@ -0,0 +1,111 @@
@@ -331,7 +349,7 @@ index 0000000..6f8a75a
 +        final HttpResponse<?> response = controller.loginSubmit(request, Map.of(
 +            "username", "alice", "password", "correct-horse", "from", "/ui/flows"));
 +
-+        assertEquals(HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++        assertEquals(HttpStatus.SEE_OTHER, response.getStatus());
 +        assertEquals("/ui/flows", response.getHeaders().get("Location"));
 +        final var cookie = response.getCookie(OidcSessionService.SESSION_COOKIE_NAME).orElse(null);
 +        assertNotNull(cookie, "a session cookie must be set on login");
@@ -381,7 +399,7 @@ index 0000000..6f8a75a
 +        final var request = HttpRequest.POST("/oidc/login", Map.of());
 +        final HttpResponse<?> response = controller.loginSubmit(request, Map.of(
 +            "username", "alice", "password", "correct-horse", "from", "https://evil.example.org/"));
-+        assertEquals(HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++        assertEquals(HttpStatus.SEE_OTHER, response.getStatus());
 +        assertEquals("/ui/", response.getHeaders().get("Location"), "open-redirect target must fall back to /ui/");
 +    }
 +}

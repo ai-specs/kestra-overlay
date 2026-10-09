@@ -45,6 +45,10 @@ jobs:
         # Gradle cache is handled by actions/cache keyed on upstream BASE.
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Set up Node.js for upstream UI
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Apply patches, compile webserver, stage extension jars, build and push
         run: ./scripts/build.sh
   oidc-blackbox:
@@ -56,3 +60,8 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: "Image-level OIDC black-box (two phases: gated-off regression + full flow)"
         run: ./scripts/blackbox-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: UI interception, password login, OIDC callback and authenticated UI/API
+        run: bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins

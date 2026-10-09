@@ -57,6 +57,8 @@ fi
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" --console=plain)
 
 echo "== executable jar =="
+(cd "$WORK/ui" && npm ci && npm run build)
+test -s "$WORK/webserver/src/main/resources/ui/index.html"
 (cd "$WORK" && ./gradlew executableJar --console=plain -x test -x check)
 
 echo "== local-ci ALL GREEN（可组织 patch 提交推送，真 CI 为最终门）=="
