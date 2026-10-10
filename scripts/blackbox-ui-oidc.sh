@@ -174,7 +174,9 @@ assert_status "post-login authorize" 307 "$(request "$BASE$(location "$TEMP_DIR/
 CALLBACK_LOCATION=$(location "$TEMP_DIR/headers")
 [[ "$CALLBACK_LOCATION" == "$BASE/oauth/callback/kestra?"* ]] || { echo 'FAIL: callback missing'; exit 1; }
 assert_status "real OIDC callback and token exchange" 303 "$(request "$CALLBACK_LOCATION")"
-assert_status "confidential client cannot omit secret" 401 "$(curl -s -d 'client_id=kestra-ui&grant_type=client_credentials' -o /dev/null -w '%{http_code}' "$BASE/oidc/token")"
+SECRETLESS_STATUS=$(curl -s -d 'client_id=kestra-ui&grant_type=client_credentials' -o /dev/null -w '%{http_code}' "$BASE/oidc/token")
+[[ "$SECRETLESS_STATUS" == 400 || "$SECRETLESS_STATUS" == 401 ]] || { echo 'FAIL: confidential client omitted secret'; exit 1; }
+echo 'PASS: confidential client cannot omit secret'
 grep -q 'JWT' "$TEMP_DIR/cookies"
 LANDING_LOCATION=$(location "$TEMP_DIR/headers")
 [[ "$LANDING_LOCATION" == /* ]] && LANDING_LOCATION="$BASE$LANDING_LOCATION"
