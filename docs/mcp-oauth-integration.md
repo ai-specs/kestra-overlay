@@ -76,9 +76,44 @@ roles 或 tenant 声明。正式 client 只能由 owner 使用、查看、撤销
 client 身份不等于用户身份。MCP access token 必须验证签名、issuer、有效期、
 撤销状态、目标 audience/resource，以及 token subject 与 client owner 的绑定。
 授权码和 refresh 记录同样绑定用户、client、回调/授权交互和授权范围；refresh 不得
-扩权。MCP 服务端最终以该用户 principal 执行，且工具内部的每个数据访问/变更均经
-资源授权检查。仅有 sub 或 roles 声明不构成数据隔离，也不能宣称 OSS 的 tenant
-桩已提供多租户。资源所属、共享规则及 R-EE-RBAC 接口须在实施前明确并实测。
+扩权。MCP 服务端最终以该用户 principal 执行。本仓 scope 门独立检查能力契约；
+外部 RBAC 启用后，工具内部每个实际资源操作还必须经过具体资源授权。
+仅有 sub 或 roles 声明不构成数据隔离，也不能宣称 OSS 的 tenant 桩已提供多租户。
+没有外部 RBAC 时可交付能力级限制，不能宣称具体资源/namespace 隔离已经成立。
+
+## MCP 能力 scope 与外部 RBAC 的独立双层门
+
+本仓预制能力契约 `mcp:<资源大类>:read|write|delete`；资源大类不是具体 namespace
+或资源 ID。read 表示查询/查看/列举，write 表示新建/修改且不含删除，delete 单独
+授权；三者不自动相互包含。执行/取消等有副作用能力必须逐工具明确分类，不能未经
+审查隐含归入 write；具体类别与工具映射在 BASE 工具盘点后定稿。
+
+每个工具声明资源大类、动作和所需 scopes；未知或未声明能力默认不暴露、不执行。
+服务端配置可暴露能力 ∩ client 申请 ∩ 用户在同意页确认 = token 授予 scopes。
+用户只能收窄，code/token/refresh 不得扩权；同意页把写入与删除清楚分开。
+tools/list 可以过滤能力，但 tools/call 必须独立强制检查；复合工具检查全部所需
+能力，工具参数不得把只读路径切换为写入/删除或注入更大权限。
+
+| 校验层 | 归属 | 拒绝语义 |
+|---|---|---|
+| 签名/issuer/有效期/撤销、client owner/sub、audience/resource | 本仓 OAuth2/MCP 认证层 | 无效认证拒绝，不能进入工具执行 |
+| 资源大类 read/write/delete、服务端暴露策略与用户二次授权 | 本仓 MCP 能力 scope 门，不依赖 RBAC 模型 | 能力不足拒绝，即使 RBAC 放行也不能扩大 scope |
+| 用户对具体资源、动作、namespace 的权限 | 外部 R-EE-RBAC Authorizer | RBAC 启用后逐实际资源操作强制检查，scope 放行不能绕过 |
+
+两层解耦的是实现和权限模型，不是执行时任选其一。RBAC 启用后：scope 允许 AND
+外部具体资源授权允许，才可执行。REST 与 MCP 使用同一 principal、资源/动作
+规范和授权判定组件；HTTP 路由放行不能代替 MCP 工具内部判定。
+
+必须盘点现有 MCP 工具的直接服务调用、批量、复合、异步及流式路径，为其提供
+不可绕过的 Authorizer 激活点与主体传递。执行/异步阶段按明确策略校验授权，不
+丢失用户身份或以公共身份代替。RBAC 已启用但组件缺席/错误、主体丢失、资源不明
+时失败关闭；未启用 RBAC 则明确处于能力级控制模式，不声称完整数据隔离。
+外部角色/资源归属/namespace 模型仍在扩展仓，本仓只提供 scope 契约与衔接面。
+
+验收分层：scope 独立于 RBAC 拒绝危险工具；用户授权缩减后不能调用未授予能力；
+write 不允许 delete。RBAC 集成验收必须证明同一用户/资源/动作 REST 拒绝则 MCP
+也拒绝且无副作用，包含各工具内部子操作、跨 namespace、异步、组件异常和绕过
+尝试。现有执行路径未全部覆盖时，不得宣称 R-EE-RBAC 完整交付。
 
 ## 临时申请的存储与清理
 
@@ -121,13 +156,13 @@ Origin、SameSite、单次短期交互、点击劫持防护与 redirect 精确�
 目标 MCP 协议版本、资源元数据路径、resource 参数要求和授权范围尚未锁定；不得
 假设普通 OIDC discovery 就等于 MCP 资源发现。MCP API 只接收 access token，拒绝
 Basic Auth、ID token、IdP cookie 和跨资源 token。当前 OIDC scopes 是身份信息范围，
-不是工具/数据权限；MCP scopes 与资源授权映射需要另定，不能直接复用 roles=[admin]。
+不是工具/数据权限；MCP 能力 scope 按上述独立契约实现，不能直接复用 roles=[admin]。
 
 ## 实施顺序与验收门
 
 先按用户归属改造 DCR schema/生命周期与授权确认，保留生产首装两路径；再按 BASE
 证据接通 MCP OAuth2 发现/Bearer 验证，删除 Basic Auth 选项/实现/商业占位；最后接
-用户资源权限与执行 principal。协议基础设施归 R-OIDC-SERVER，数据授权归
+本仓能力 scope 与执行 principal，并保留外部 Authorizer 强制衔接点。协议基础设施归 R-OIDC-SERVER，数据授权归
 R-EE-RBAC/扩展授权实现，不能把业务资源逻辑复制进协议 patch。
 
 实施前闭环：实际消费仓与 MCP 客户端/版本、BASE MCP Basic Auth/占位源码证据、

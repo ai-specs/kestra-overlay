@@ -1,6 +1,7 @@
 # patches/manifest.tsv — patch 总账（与 patches/*/*.patch 一一对应；check-patches.sh 强校验）
 # 后续规划：用户归属 DCR pending→确认绑定 + MCP OAuth2-only，尚无对应 patch；
 # 当前 0134 仅全局 public DCR，不具备 owner/同意页/用户资源隔离。实施前契约见 docs/mcp-oauth-integration.md。
+# MCP 能力 scope 本仓独立预制(read/write/delete,write不含delete)；外部RBAC启用时必须覆盖MCP实际执行并与REST同语义，两层AND，尚未实现。
 # 列：id | patch文件 | status(core|transition|reserved) | 消费扩展仓 | 摘要 | 触达上游文件数 | 来源 | 移除条件
 # reserved 行：patch文件列必须为 `-`，对应 docs/oss-ee-gap.md §4 登记簿。
 # 归因基线：2026-10-07 审计（fork merge-base f6dbbb49 定制 diff 为唯一事实源；见 AGENTS.md §5.2）。

@@ -254,6 +254,12 @@ client 不在用户之间共享，其他用户不能使用或管理。现有动�
 [MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)，含时序图、页面、
 缓存失效恢复、PKCE 边界与分阶段验收。下文描述的是当前已交付的 public DCR。
 
+规划中的 MCP 能力 scope 按资源大类提供 read/write/delete，write 不含删除，
+用户可在授权页进一步收窄。本仓逐工具调用独立强制检查，不依赖外部 RBAC；
+外部 RBAC 启用后，现有 MCP 工具内部实际资源操作还必须经过与 REST 相同的
+细粒度授权。两层均允许才执行；未接 RBAC 时不声称具体资源/namespace 隔离。
+以上能力 scope 和执行层 RBAC 对接均未实现，不能把当前 token scope 当作其证明。
+
 支持 RFC7591 动态 **public client** 注册，适用于公开 MCP、桌面及浏览器客户端：
 `token_endpoint_auth_method=none`，不生成 client secret，授权码流强制 PKCE S256。
 在 `KESTRA_CONFIGURATION` 中设置并重启：

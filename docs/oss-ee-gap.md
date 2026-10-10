@@ -17,7 +17,7 @@
 > `[dsh]` = dsh 项目实证；`[live]` = 本地 vanilla 实例实测。
 >
 > **当前范围（2026-10-07 收窄裁定）**：两项——
-> 1. kestra-oidc-provider，MCP 面除外；
+> 1. kestra-oidc-provider，含后续重新接收的 MCP 认证/能力契约面；
 > 2. R-EE-RBAC（docs/r-ee-rbac.md）。
 >
 > **基本原则**：扩展点/占位的充分性由上游架构与机制推导，不依赖外部实现时序
@@ -87,7 +87,7 @@
 「阶段」只是优先级注记（AGENTS.md §0-3）。一切移除/触发条件形态绑定。
 
 ```
-认证线（OIDC 部署形态；范围裁定：MCP 面除外）：
+认证线（OIDC 部署形态，含新接收 MCP OAuth2-only/能力 scope 规划）：
     认证链 + 授权服务器（预留扩展点 R-OIDC-SERVER，patch 路线，内嵌 webserver——
     2026-10-07 裁定 + 前置②链一体化：外部 IdP 场景走内置链配置）
   + 登录引导（A2 = REQ-0011，唯一已实施 patch）

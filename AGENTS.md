@@ -50,7 +50,7 @@ release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相�
 
 北极星使命不变（服务任何下游），但**活跃范围**收缩为两件事：
 
-1. **kestra-oidc-provider**（不含 MCP 面——REQ-0010 与差异表 MCP 域行已删）；
+1. **kestra-oidc-provider**（含后续重新接收的 MCP OAuth2 认证/能力契约面；旧 MCP patch 已删，不作为新需求依据）；
 2. **R-EE-RBAC**（`docs/r-ee-rbac.md`，外部细粒度授权能力）。
 
 认证线含一项预留扩展点：**R-OIDC-SERVER**（OAuth2/OIDC 授权服务器，Micronaut 生态
@@ -71,6 +71,10 @@ apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
 client 归属用户，采用短期 pending→登录确认绑定 owner 的第二种方案，无管理员
 特例或共享动态 client。方案先行、尚未实施；详细流程/边界/接收与验收门见
 docs/mcp-oauth-integration.md。早期“MCP 面除外”仅为历史范围，不得否定本裁定。
+本仓 MCP scope 独立声明资源大类 read/write/delete（write 不含 delete），用户
+授权只能收窄；不依赖外部 RBAC 模型。R-EE-RBAC 启用时必须拦截全部现有 MCP
+实际执行/子操作路径，与 REST 同主体/资源/动作语义；两层都允许才执行，异常失败
+关闭，未覆盖不能宣称交付。详见 docs/r-ee-rbac.md §3/§6/§8。
 
 **加固形态（上游 no-plugins 谱系）：「精确控制插件集的加固环境」+ 构建期零外部扩展
 jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md` F4 定位段）：

@@ -11,6 +11,10 @@
 REQ-0134 仅全局 public DCR，不具备 owner、确认页或多用户 MCP 隔离。
 MCP 认证面已由维护者重新接收为下一阶段范围（OAuth2-only，删除 Basic Auth），
 不得将旧“MCP 全面除外”覆盖此裁定；具体动刀仍须消费仓/BASE 行为证据与验收定稿。
+**能力/资源授权最新分层**：本仓预制 MCP 资源大类 read/write/delete scope 门，
+write 不含 delete，用户二次授权只能收窄，执行门独立于外部 RBAC。R-EE-RBAC
+启用后必须覆盖全部现有 MCP 工具/子操作/异步执行，与 REST 统一主体、资源、动作
+判定；scope 与 RBAC 同时允许才执行，组件异常失败关闭。具体权限模型留在扩展仓。
 
 **REQ-0134 动态 public client 注册（维护者接收）**：标准 OAuth2 动态注册
 RFC7591/OIDC Registration，不新增 MCP 专属端点。公开 MCP/桌面/浏览器消费方
@@ -174,7 +178,7 @@ identities、role assignment、secret schema、多个 redirect 修正）；bean 
 `DshSecretService`/`PostgresSecretStore`/`DshNamespaceService`；`OidcRedirects` 的客户
 专属 redirect；migration 中 dsh 专属（dsh-ui-redirect/dsh-pc-web×2/nacos-logout/
 tailscale-nipio/dsh-secret×2）；**MCP 面（`OidcMcpOAuthController`/
-`OidcMcpBearerAuthFilter`——范围裁定 MCP 除外）**；AI 保留面。
+`OidcMcpBearerAuthFilter`——首批移植时排除，后续 MCP 认证重新接收须重新推导）**；AI 保留面。
 
 ## 3.5 API 漂移清单（动刀前第一工件，2026-10-07 完成——方法见 §2 跨基规则）
 

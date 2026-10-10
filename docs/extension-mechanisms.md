@@ -4,6 +4,10 @@
 > 登录确认时事务绑定不可变 owner、权限授权与 code，后续 token/refresh/MCP 执行
 > 均校验用户/client/目标资源。OIDC 身份声明与 OSS tenant 桩本身不提供数据隔离。
 > 完整机制与兼容性边界见 [mcp-oauth-integration.md](mcp-oauth-integration.md)。
+> 最新分层：本仓 scope 门独立限制资源大类 read/write/delete（write 不含 delete），
+> 服务端暴露策略∩请求∩用户同意决定授权。外部 RBAC 启用后，必须通过统一
+> Authorizer 拦截每个实际 MCP 资源操作，与 REST 同语义；直接/批量/异步路径
+> 不能绕过。承载缺席可休眠只适用于未启用授权，启用后组件异常必须失败关闭。
 
 > 三个根本问题：改一个架构能力——要不要重新编译？要不要重启？要不要外部 jar？
 > 证据：BASE（v2.0.5 @ 172dd0f37）源码（含上游自述 docs/architecture/）+ dsh 实证

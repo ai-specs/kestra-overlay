@@ -62,12 +62,17 @@ API base 校准：`/api/v1/main/flows/search` → 200（会话有效）；`/conf
 
 在 OSS 镜像上（本仓 patch 集 + 扩展仓 jar + 部署配置的组合形态）：
 
-1. 任一**已认证**主体的每个 HTTP 请求（webserver API 面）可被**外部授权组件**按
-   **(资源， 动作， namespace)** 判定 allow/deny。
+1. 任一**已认证**主体的 REST 请求与 MCP 工具内部实际资源操作可被**外部授权组件**按
+   **(资源， 动作， namespace)** 判定 allow/deny。二者使用同一主体和授权语义；
+   MCP 共用 HTTP 入口不能代替逐工具/子操作判定。
 2. deny → **403 problem+json**（复用上游错误管线）。未认证 → 401（API 客户端）或登录
    重定向（浏览器）。与 EE 语义一致。
 3. 角色/权限模型与主体-角色映射由扩展仓自带。模型自定，不要求复刻 EE 的五角色/
    binding/级联语义。机器身份走 OIDC JWT（差异表 §2-A 替代路线），不建 EE 式 token 库。
+4. 本仓 MCP 能力 scope 独立控制资源大类 read/write/delete（write 不含 delete），
+   不由外部 RBAC 定义或代替；RBAC 启用时两层均须允许。详细契约见
+   [MCP OAuth2 双层门](mcp-oauth-integration.md#mcp-能力-scope-与外部-rbac-的独立双层门)。
+5. RBAC 启用但组件不可用、主体丢失或具体资源无法确定时失败关闭，不静默放行。
 
 ## 4. 非目标（AGENTS.md §2 拒绝清单约束）
 
@@ -78,7 +83,7 @@ API base 校准：`/api/v1/main/flows/search` → 200（会话有效）；`/conf
 | 审计日志 | EE 产品功能 |
 | impersonation | EE 产品功能 |
 | EE 式 API token 签发/管理 | 机器身份走 OIDC JWT |
-| UI 按钮/菜单按权限隐藏 | ui 面禁收；若未来需要按 AGENTS.md §2 入口另立，走扩展仓前端包路线 |
+| UI 按钮/菜单按细粒度 RBAC 隐藏 | 不在本需求；OIDC/MCP 用户同意与能力 scope 页面是独立已接收认证契约，不受此非目标排除 |
 | 照抄 EE 五内置角色/binding 不可变/级联语义 | 业务语义归扩展仓设计 |
 
 ## 5. 交付分层与归属（EE 同构三通道）
@@ -87,7 +92,7 @@ API base 校准：`/api/v1/main/flows/search` → 200（会话有效）；`/conf
 |---|---|---|---|
 | ① | 扩展 jar 进镜像的承载机制 | **本仓骨架**（R-CLASSPATH-MERGE，已立案待实施，机制文档 §4） | ② 前置 |
 | ② | 认证链（micronaut-security）+ `intercept-url-map` 全局认证门 | 认证层（R-OIDC-SERVER patch 内置——前置裁定②）+ 部署配置 | ①+④ |
-| ③ | 细粒度判定：SecurityRule（或等价 Authorizer）bean，(资源，动作，namespace) → allow/deny | 扩展仓 jar（角色模型在此层） | ② |
+| ③ | 细粒度判定：SecurityRule + 必要的执行层 Authorizer，(主体，资源，动作，namespace) → allow/deny；覆盖 REST 与 MCP 实际调用 | 扩展仓 jar（角色模型在此层），本仓提供最小激活面/主体传递 | ② |
 
 依赖链 ①→②→③，逐层可验收（② 即差异表 §2-B-1 最小端点门）。
 
@@ -97,9 +102,10 @@ Class-Path 条目（休眠占位：缺席=静默休眠；外部仓按约构建�
 
 ## 6. overlay patch 面
 
-**预期零 patch**。依据：§1 证据——OSS 无授权钩子可激活，判定组件全部经 classpath jar
-进入。唯一例外：实证发现绕过过滤器链的死角（webhook 端点、SSE/MCP 流式端点等）时，
-按 AGENTS.md §2 入口 B 收最小激活 patch（须有消费扩展仓 + 行为证据 + 差异表行）。
+角色/权限实现进外部 classpath jar，不进 overlay。仅靠 HTTP SecurityRule 是否
+能覆盖现有 MCP 执行路径须逐工具实证，不能预先承诺零 patch。若直接服务调用、
+批量/异步/流式路径缺执行层授权点，按 AGENTS.md §2 入口 B 收最小激活 patch
+（消费仓 + 调用路径证据 + 差异表行），不搬入业务权限模型。缺口未闭环不得交付。
 
 ## 7. 前置与触发条件（形态绑定，AGENTS.md §3-6）
 
@@ -118,6 +124,10 @@ Class-Path 条目（休眠占位：缺席=静默休眠；外部仓按约构建�
 低权限 JWT  curl GET  /api/v1/main/flows/search     → 200（只读放行）
 高权限 JWT  curl POST /api/v1/main/flows            → 2xx（业务结果）
 namespace 边界：低权限对 {ns-allowed} 可写、对 {ns-denied} 403（由扩展仓角色模型定义）
+同用户/资源/动作：REST deny → MCP tools/call 也 deny，无业务副作用
+复合/批量/直接服务/异步：全部子操作受控，身份传递不丢失，无路由绕过
+scope deny + RBAC allow → deny；scope allow + RBAC deny → deny
+RBAC 启用且组件异常/主体缺失/资源不明 → deny
 回归：无认证链部署（不装 ②③）行为与 vanilla OSS 逐字节一致（本仓 patch 不引入授权行为）
 ```
 
@@ -126,8 +136,9 @@ namespace 边界：低权限对 {ns-allowed} 可写、对 {ns-denied} 403（由�
 - **OQ-RBAC-1**：SecurityRule/Authorizer bean 从外部 classpath jar 注册的端到端实证未做。
   随 R-CLASSPATH-MERGE 实施步骤 2 一并闭环（F2：bean 发现=启动期，须带 micronaut 注解
   处理索引）。
-- **OQ-RBAC-2**：过滤器链死角清单（webhook/SSE/MCP 流）未扫。开工前以 BASE 源码
-  `@Filter/@Controller` 路由盘点补齐。
+- **OQ-RBAC-2**：过滤器链与执行层死角未扫。开工前盘点 BASE 路由及全部 MCP
+  工具→服务→具体资源操作（直接、复合、批量、异步、流式）路径，逐一标注统一
+  Authorizer 执行点。只完成路由盘点不算闭环；MCP 路径未覆盖就是授权漏洞。
 - **OQ-RBAC-3**：与 CSRF/SecurityFilter 顺序（micronaut SecurityFilterPhase）协同未实证。
 - **OQ-RBAC-4**（2026-10-07 充分性审查新增）：deny 的 403 是否被上游
   `ProblemResponseFilter` 自动 problem 化未实证（该 filter 对 ≥400 且无 body 的响应补
