@@ -246,6 +246,14 @@ docker compose up -d
 
 ### 其他项目接入内置 IdP
 
+**下一阶段 MCP 用户归属方案（尚未实现）**：客户端先动态注册取得短期待绑定
+client_id，再打开浏览器；用户登录并明确同意后，client 原子绑定该用户，签发
+用户身份的 token，以该用户权限调用 MCP。拒绝删除申请，未确认超时清理；正式
+client 不在用户之间共享，其他用户不能使用或管理。现有动态注册仍是全局记录，
+不能据此宣称多用户隔离已交付。详见
+[MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)，含时序图、页面、
+缓存失效恢复、PKCE 边界与分阶段验收。下文描述的是当前已交付的 public DCR。
+
 支持 RFC7591 动态 **public client** 注册，适用于公开 MCP、桌面及浏览器客户端：
 `token_endpoint_auth_method=none`，不生成 client secret，授权码流强制 PKCE S256。
 在 `KESTRA_CONFIGURATION` 中设置并重启：

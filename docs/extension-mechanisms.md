@@ -1,5 +1,10 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+> **MCP 用户归属机制规划（未实施）**：DCR pending 只提供可发起授权的 client_id；
+> 登录确认时事务绑定不可变 owner、权限授权与 code，后续 token/refresh/MCP 执行
+> 均校验用户/client/目标资源。OIDC 身份声明与 OSS tenant 桩本身不提供数据隔离。
+> 完整机制与兼容性边界见 [mcp-oauth-integration.md](mcp-oauth-integration.md)。
+
 > 三个根本问题：改一个架构能力——要不要重新编译？要不要重启？要不要外部 jar？
 > 证据：BASE（v2.0.5 @ 172dd0f37）源码（含上游自述 docs/architecture/）+ dsh 实证
 > + kestra.io 文档 + vanilla 实例实测（v2.0.5-no-plugins）。复现命令见 §5。

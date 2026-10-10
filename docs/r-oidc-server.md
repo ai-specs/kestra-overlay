@@ -2,6 +2,16 @@
 
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
+**最新用户归属裁定（维护者多轮澄清，优先于下述已交付记录）**：选定“DCR 返回
+短期 pending client_id→浏览器登录确认→原子绑定用户 owner→授权码/token→以该
+用户调用 MCP”。正式动态 client 不共享、无管理员特例；另一用户不得授权、使用
+或管理。拒绝删除 pending，超时清理；额度分 pending 全局与正式用户维度。
+完整可行性、标准衔接、抢占边界、数据隔离及实施门见
+[面向集成方的 MCP OAuth2 文档](mcp-oauth-integration.md)。这是待实施方案；现有
+REQ-0134 仅全局 public DCR，不具备 owner、确认页或多用户 MCP 隔离。
+MCP 认证面已由维护者重新接收为下一阶段范围（OAuth2-only，删除 Basic Auth），
+不得将旧“MCP 全面除外”覆盖此裁定；具体动刀仍须消费仓/BASE 行为证据与验收定稿。
+
 **REQ-0134 动态 public client 注册（维护者接收）**：标准 OAuth2 动态注册
 RFC7591/OIDC Registration，不新增 MCP 专属端点。公开 MCP/桌面/浏览器消费方
 不持有 secret：POST `/oidc/register`，`token_endpoint_auth_method=none`，仅

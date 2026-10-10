@@ -66,6 +66,12 @@ apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
 
 ### 镜像定位（2026-10-07 裁定，维护者）
 
+**后续范围修订（维护者多轮澄清）**：重新接收 MCP **认证面**，目标 OAuth2-only，
+删除 MCP Basic Auth 实现/选项/商业占位；其余 MCP 业务面不自动扩展。动态 MCP
+client 归属用户，采用短期 pending→登录确认绑定 owner 的第二种方案，无管理员
+特例或共享动态 client。方案先行、尚未实施；详细流程/边界/接收与验收门见
+docs/mcp-oauth-integration.md。早期“MCP 面除外”仅为历史范围，不得否定本裁定。
+
 **加固形态（上游 no-plugins 谱系）：「精确控制插件集的加固环境」+ 构建期零外部扩展
 jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md` F4 定位段）：
 

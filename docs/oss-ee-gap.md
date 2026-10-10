@@ -1,5 +1,10 @@
 # OSS vs EE 架构能力差异表（kestra-overlay 立身依据）
 
+> **最新规划裁定**：MCP 认证面重新接收，目标 OAuth2-only + 用户归属动态 client；
+> public DCR pending 经用户确认后绑定 owner，token 与资源执行身份一致，不共享
+> 用户数据。现有实现不具备这些能力。方案与动刀前证据门见
+> [mcp-oauth-integration.md](mcp-oauth-integration.md)；旧 MCP 除外记述是历史范围。
+
 > 本表回答「补什么」。「怎么生效」见 `docs/extension-mechanisms.md`。
 >
 > 使命：立足 BASE pin 的上游 release，补足 OSS 相对 EE 故意阉割的**架构扩展能力**。
@@ -66,6 +71,7 @@
 |---|---|---|---|---|
 | 认证方式 | 仅自研 Basic Auth（cookie）。认证过滤器链不在 OSS 构建（S6）。 | SSO OIDC + SCIM + 服务账号 `[docs]` | 认证链与授权服务器：**预留扩展点 R-OIDC-SERVER**（patch 路线，2026-10-07 裁定——协议稳定+实现标准 ⇒ 大粒度薄层；前置裁定②：链一体化进 patch，外部 IdP 场景走内置链配置）。加 REQ-0011 做 UI 引导（已实施） | 仓已立项；0011 已实施；R-OIDC-SERVER 已预留 |
 | 登录引导 | `/api/v1/configs`（MiscController）只暴露 `isBasicAuthInitialized`。vanilla 实测 `edition:"OSS"` `[live]` | 同端点给出 SSO 状态 | REQ-0011：`oidcAuthEnabled` 字段 + security-enabled 视为已配置 | 已实施 |
+| 用户归属 MCP OAuth2 接入 | 维护者报告 MCP Basic Auth/其他认证占位；BASE 逐文件证据与目标客户端版本待闭环，本轮未复测 | 具体产品实现本轮未核验，不作为方案依据 | 标准 DCR pending→用户确认绑定 owner；MCP OAuth2-only 发现/Bearer 与用户资源授权，边界及验收见 mcp-oauth-integration.md | 规划已接收，未实施；消费仓/行为证据/资源权限契约动刀前补齐 |
 | SCIM | 无（`ProblemFormatExclusion.java` javadoc 明言归 EE） | 有 `[src+docs]` | —（EE 产品功能） | 不补足 |
 | 服务账号/API token | 无 | 有 `[docs]` | 机器身份走 OIDC JWT（R-EE-RBAC §3） | 不补足 |
 
