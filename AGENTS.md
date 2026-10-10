@@ -138,6 +138,10 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
 
 ## 4. 验证分层（本地快检 vs CI）
 
+- **REQ-0134（2026-10-09 维护者接收）**：RFC7591 动态 public client 注册属于
+  R-OIDC-SERVER 标准协议面，可由 MCP 客户端消费；不新增 MCP 专属业务端点。
+  无 secret + S256，开关默认关闭，回调/元数据/注册总量限制与验收同批。
+
 - **REQ-0133（2026-10-09）**：OIDC 首次安装引导与环境变量初始化属于 R-OIDC-SERVER
   协议基础设施 patch 路线；用户/凭据/UI client/完成标记原子持久化，测试同批。
   完成后关闭匿名引导，重启不得覆盖密码；环境变量契约见 docs/r-oidc-server.md §0。

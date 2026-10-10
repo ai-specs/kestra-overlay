@@ -246,6 +246,10 @@ docker compose up -d
 
 ### 其他项目接入内置 IdP
 
+REQ-0134 动态 public client 注册正在实施：标准 RFC7591，`none` 客户端认证 +
+强制 PKCE S256，可供公开 MCP 客户端使用；不要求公开客户端安全保存 client secret。
+注册默认关闭，完成验收后更新启用方式与请求示例。
+
 消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
 authorize `/oidc/authorize`、token `/oidc/token`、JWKS `/oidc/jwks`、userinfo `/oidc/userinfo`。
 `localhost` 仅为本机示例；跨容器/跨主机应用使用部署的公开 issuer。

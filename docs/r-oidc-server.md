@@ -2,6 +2,24 @@
 
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
+**REQ-0134 动态 public client 注册（维护者接收）**：标准 OAuth2 动态注册
+RFC7591/OIDC Registration，不新增 MCP 专属端点。公开 MCP/桌面/浏览器消费方
+不持有 secret：POST `/oidc/register`，`token_endpoint_auth_method=none`，仅
+authorization_code/refresh_token、response_type=code、openid/profile/email，强制
+PKCE S256，随机不可预测 client ID，返回 201、无 client_secret，discovery 广播
+registration_endpoint。注册以 `kestra.oidc.registration.enabled=true` 显式启用，
+默认关闭；允许匿名注册时部署侧限制请求速率，服务端限制元数据长度、回调数和
+注册总量（默认 1000，含现存 client，并发不能绕过），不信任客户端角色/租户声明。
+回调仅 HTTPS 或 loopback HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、
+userinfo、通配符与非 loopback HTTP；精确回调匹配不放宽。元数据不得触发远端抓取。
+首次初始化必须完成后才能注册，完成标记异常失败关闭。不交付 RFC7592 管理 API。
+验收从生产首装路径开始：注册 public client→S256 登录授权→无 secret 换三件套→
+userinfo，缺/错 verifier、空 challenge、非法回调/授权类型、quota/并发与关闭门拒绝。
+
+**第三方验收缺陷收尾**：完成状态过滤器先于 setup body 绑定，空/坏 body 的 POST
+统一 404；显式空 code_challenge 返回 400（缺席仍遵守 confidential/public 规则）；
+部署白名单健康端点使用 `/ping`；README 区分 IdP oidc_session 与应用 JWT/Bearer。
+
 **REQ-0133 首次安装引导（维护者授权，实施前契约）**：空目录首次访问 UI 进入
 `/oidc/setup`，设置用户名、显示名、邮箱和密码；存入 OIDC 用户目录（bcrypt），
 同时按配置注册本实例 UI confidential client，随后进入完整 OIDC 登录链。
