@@ -1,0 +1,284 @@
+# 需求：REQ-0134 RFC7591 public client 动态注册；无 secret+强制 S256，
+#   discovery registration_endpoint、精确安全回调/元数据/并发总量限制。
+# 消费扩展仓：—（R-OIDC-SERVER 标准协议能力，供公开 OAuth2/MCP 客户端消费）
+# 状态：core
+# 来源：新写；RFC7591、OIDC Dynamic Client Registration 1.0、RFC7636；
+#   Micronaut 4.10.18/PostgreSQL。无 MCP 专属端点或客户业务。
+# 触达上游文件（4）：registration controller/service、discovery 激活、PG 验收测试。
+# 移除条件：上游 OSS 原生提供等价 public client 动态注册或 R-OIDC-SERVER 弃用。
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
+index 8dfc57d..75c6999 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
+@@ -36,6 +36,8 @@ import jakarta.inject.Inject;
+ @Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
+ @ExecuteOn(TaskExecutors.IO)
+ public class OidcDiscoveryController {
++    @io.micronaut.context.annotation.Value("${kestra.oidc.registration.enabled:false}")
++    private boolean registrationEnabled;
+ 
+     private final OidcConfiguration configuration;
+ 
+@@ -54,6 +56,9 @@ public class OidcDiscoveryController {
+             URI.create(issuer + "/oidc/jwks")
+         );
+         metadata.setAuthorizationEndpointURI(URI.create(issuer + "/oidc/authorize"));
++        if (registrationEnabled) {
++            metadata.setRegistrationEndpointURI(URI.create(issuer + "/oidc/register"));
++        }
+         metadata.setTokenEndpointURI(URI.create(issuer + "/oidc/token"));
+         metadata.setUserInfoEndpointURI(URI.create(issuer + "/oidc/userinfo"));
+         metadata.setIntrospectionEndpointURI(URI.create(issuer + "/oidc/introspect"));
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
+new file mode 100644
+index 0000000..aebeeb6
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
+@@ -0,0 +1,41 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.util.Map;
++import io.kestra.webserver.oidc.services.OidcRegistrationService;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.annotation.Body;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Post;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++
++@Controller("/oidc/register")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "kestra.oidc.registration.enabled", value = "true")
++@ExecuteOn(TaskExecutors.IO)
++public class OidcRegistrationController {
++    private final OidcRegistrationService registration;
++    private final OidcSetupService setup;
++
++    public OidcRegistrationController(final OidcRegistrationService registration, final OidcSetupService setup) {
++        this.registration = registration;
++        this.setup = setup;
++    }
++
++    @Post
++    public HttpResponse<?> register(@Body final Map<String, Object> metadata) {
++        try {
++            if (!setup.ready()) return HttpResponse.status(HttpStatus.SERVICE_UNAVAILABLE);
++            return HttpResponse.status(HttpStatus.CREATED).body(registration.register(metadata)).header("Cache-Control", "no-store");
++        } catch (IllegalArgumentException exception) {
++            return HttpResponse.badRequest(Map.of("error", exception.getMessage()));
++        } catch (IllegalStateException exception) {
++            final boolean quota = "registration_limit_reached".equals(exception.getMessage());
++            return HttpResponse.status(quota ? HttpStatus.TOO_MANY_REQUESTS : HttpStatus.SERVICE_UNAVAILABLE)
++                .body(Map.of("error", quota ? "temporarily_unavailable" : "registration_unavailable"));
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
+new file mode 100644
+index 0000000..ae918e2
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
+@@ -0,0 +1,122 @@
++package io.kestra.webserver.oidc.services;
++
++import java.net.URI;
++import java.sql.SQLException;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import javax.sql.DataSource;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.annotation.Value;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "kestra.oidc.registration.enabled", value = "true")
++public class OidcRegistrationService {
++    private final DataSource source;
++    private final ObjectMapper mapper;
++    private final int maximum;
++
++    public OidcRegistrationService(final DataSource source, final ObjectMapper mapper,
++        @Value("${kestra.oidc.registration.max-clients:1000}") final int maximum) {
++        this.source = DelegatingDataSource.unwrapDataSource(source);
++        this.mapper = mapper;
++        if (maximum < 1 || maximum > 100000) {
++            throw new IllegalArgumentException("Invalid registration client limit");
++        }
++        this.maximum = maximum;
++    }
++
++    public Map<String, Object> register(final Map<String, Object> request) {
++        if (!List.of("redirect_uris", "token_endpoint_auth_method", "grant_types", "response_types", "scope", "client_name")
++            .containsAll(request.keySet())) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        if (!"none".equals(request.getOrDefault("token_endpoint_auth_method", "client_secret_basic"))) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        final List<String> redirects = strings(request.get("redirect_uris"));
++        if (redirects.isEmpty() || redirects.size() > 10 || redirects.stream().distinct().count() != redirects.size()) {
++            throw new IllegalArgumentException("invalid_redirect_uri");
++        }
++        for (final String redirect : redirects) {
++            validateRedirect(redirect);
++        }
++        final List<String> grants = strings(request.getOrDefault("grant_types", List.of("authorization_code")));
++        final List<String> responses = strings(request.getOrDefault("response_types", List.of("code")));
++        if (!grants.contains("authorization_code") || !List.of("authorization_code", "refresh_token").containsAll(grants)
++            || !responses.equals(List.of("code"))) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        final Object rawScope = request.getOrDefault("scope", "openid profile email");
++        if (!(rawScope instanceof String scope) || scope.length() > 100) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        final List<String> scopes = List.of(scope.trim().split(" +"));
++        if (!scopes.contains("openid") || !List.of("openid", "profile", "email").containsAll(scopes)) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        if (request.containsKey("client_name")
++            && (!(request.get("client_name") instanceof String name) || name.length() > 200 || name.chars().anyMatch(Character::isISOControl))) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        final String clientId = "public-" + UUID.randomUUID();
++        try (var connection = source.getConnection()) {
++            connection.setAutoCommit(false);
++            try {
++                try (var lock = connection.prepareStatement("LOCK TABLE oidc_client IN SHARE ROW EXCLUSIVE MODE")) {
++                    lock.execute();
++                }
++                try (var count = connection.prepareStatement("SELECT count(*) FROM oidc_client"); var result = count.executeQuery()) {
++                    result.next();
++                    if (result.getLong(1) >= maximum) {
++                        throw new IllegalStateException("registration_limit_reached");
++                    }
++                }
++                try (var insert = connection.prepareStatement(
++                    "INSERT INTO oidc_client (client_id,client_secret,redirect_uris,grant_types,scopes) VALUES (?,'',?::jsonb,?::jsonb,?::jsonb)")) {
++                    insert.setString(1, clientId);
++                    insert.setString(2, mapper.writeValueAsString(redirects));
++                    insert.setString(3, mapper.writeValueAsString(grants));
++                    insert.setString(4, mapper.writeValueAsString(scopes));
++                    insert.executeUpdate();
++                }
++                connection.commit();
++            } catch (Exception exception) {
++                connection.rollback();
++                if (exception instanceof IllegalStateException state) throw state;
++                throw new IllegalStateException("registration_failed");
++            }
++        } catch (SQLException exception) {
++            throw new IllegalStateException("registration_failed");
++        }
++        return Map.of("client_id", clientId, "client_id_issued_at", java.time.Instant.now().getEpochSecond(),
++            "token_endpoint_auth_method", "none", "redirect_uris", redirects, "grant_types", grants,
++            "response_types", responses, "scope", String.join(" ", scopes));
++    }
++
++    private static List<String> strings(final Object value) {
++        if (!(value instanceof List<?> list) || list.size() > 10
++            || list.stream().anyMatch(item -> !(item instanceof String text) || text.length() > 2048)) {
++            throw new IllegalArgumentException("invalid_client_metadata");
++        }
++        return list.stream().map(String.class::cast).toList();
++    }
++
++    private static void validateRedirect(final String value) {
++        try {
++            final URI uri = URI.create(value);
++            final String host = uri.getHost();
++            final boolean loopback = List.of("localhost", "127.0.0.1", "[::1]", "::1").contains(host == null ? "" : host);
++            if (host == null || uri.getUserInfo() != null || uri.getRawFragment() != null || value.contains("*")
++                || !("https".equals(uri.getScheme()) || ("http".equals(uri.getScheme()) && loopback))) {
++                throw new IllegalArgumentException("invalid_redirect_uri");
++            }
++        } catch (IllegalArgumentException exception) {
++            throw new IllegalArgumentException("invalid_redirect_uri");
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationServiceTest.java
+new file mode 100644
+index 0000000..f958b82
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationServiceTest.java
+@@ -0,0 +1,72 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.Executors;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcRegistrationService;
++import io.kestra.webserver.oidc.services.OidcClientService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++class OidcRegistrationServiceTest extends OidcPostgresTestBase {
++    @BeforeEach
++    void clearClients() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("TRUNCATE oidc_client CASCADE");
++        }
++    }
++
++    private Map<String, Object> metadata(final String redirect) {
++        return Map.of("redirect_uris", List.of(redirect), "token_endpoint_auth_method", "none",
++            "grant_types", List.of("authorization_code", "refresh_token"));
++    }
++
++    @Test
++    void publicRegistrationCreatesUniquePersistedClientWithoutSecret() {
++        final var service = new OidcRegistrationService(dataSource(), new ObjectMapper(), 10);
++        final var result = service.register(metadata("http://127.0.0.1:9999/cb"));
++        assertEquals("none", result.get("token_endpoint_auth_method"));
++        assertFalse(result.containsKey("client_secret"));
++        final var client = new OidcClientService(dataSource(), new ObjectMapper()).find((String) result.get("client_id")).orElseThrow();
++        assertTrue(client.clientSecret().isEmpty());
++        assertEquals(List.of("http://127.0.0.1:9999/cb"), client.redirectUris());
++        assertFalse(result.get("client_id").equals(service.register(metadata("https://example.org/cb")).get("client_id")));
++    }
++
++    @Test
++    void invalidRedirectsAndPrivilegedMetadataAreRejected() {
++        final var service = new OidcRegistrationService(dataSource(), new ObjectMapper(), 10);
++        for (final String redirect : List.of("http://example.org/cb", "https://user@example.org/cb",
++            "https://example.org/cb#token", "https://*.example.org/cb", "javascript:alert(1)")) {
++            assertThrows(IllegalArgumentException.class, () -> service.register(metadata(redirect)));
++        }
++        assertThrows(IllegalArgumentException.class, () -> service.register(Map.of("redirect_uris", List.of("https://example.org/cb"))));
++        assertThrows(IllegalArgumentException.class, () -> service.register(Map.of("redirect_uris", List.of("https://example.org/cb"),
++            "token_endpoint_auth_method", "none", "roles", List.of("admin"))));
++        assertThrows(IllegalArgumentException.class, () -> service.register(Map.of("redirect_uris", List.of("https://example.org/cb"),
++            "token_endpoint_auth_method", "none", "grant_types", List.of("client_credentials"))));
++    }
++
++    @Test
++    void concurrentRegistrationsCannotExceedQuota() throws Exception {
++        final var service = new OidcRegistrationService(dataSource(), new ObjectMapper(), 1);
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            final var requests = executor.invokeAll(List.of(
++                () -> attempt(service), () -> attempt(service)));
++            assertEquals(1, requests.stream().mapToInt(result -> {
++                try { return (Integer) result.get(); } catch (Exception exception) { throw new IllegalStateException(exception); }
++            }).sum());
++        }
++        assertEquals(1, new OidcClientService(dataSource(), new ObjectMapper()).list().size());
++    }
++
++    private int attempt(final OidcRegistrationService service) {
++        try { service.register(metadata("https://example.org/cb")); return 1; }
++        catch (IllegalStateException exception) { return 0; }
++    }
++}

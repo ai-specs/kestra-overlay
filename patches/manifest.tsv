@@ -18,3 +18,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0131	0131-oidc-local-discovery.patch	core	—（R-OIDC-SERVER patch 路线）	内置 IdP 同进程 discovery 启动适配;外部 issuer 保留框架发现	2	新写;OIDC Discovery 1.0 + micronaut-security-oauth2 4.15.2 SPI	上游原生支持同进程 OIDC discovery 或 R-OIDC-SERVER 弃用
 0132	0132-oidc-authentication-replacement.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 完整替换 Basic Auth UI/凭据/退出链;服务端验证认证状态,刷新与导航验收	12	新写;OIDC Core + RFC6749/7636/9110;2026-10-09 UI 认证例外	上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用
 0133	0133-oidc-first-install.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 首次引导/环境变量初始化;用户+bcrypt+UI client+数据库安装身份与独立凭据,删标记失败关闭/并发防重/CSRF/重启不覆盖	11	新写;OIDC Core+RFC6749/7636+OWASP CSRF+PG事务锁+持久化安装凭据	上游 OSS 提供等价 OIDC 首次安装与配置初始化或 R-OIDC-SERVER 弃用
+0134	0134-oidc-public-registration.patch	core	—（R-OIDC-SERVER 协议能力）	RFC7591 public client 动态注册;无secret+S256,开关/安全回调/元数据/并发注册总量限制	4	新写;RFC7591+OIDC Registration 1.0+RFC7636	上游 OSS 提供等价动态注册或 R-OIDC-SERVER 弃用

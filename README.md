@@ -135,7 +135,7 @@ services:
                 access: [isAnonymous()]
               - pattern: /oauth/**
                 access: [isAnonymous()]
-              - pattern: /health
+              - pattern: /ping
                 access: [isAnonymous()]
               - pattern: /api/v1/configs/login
                 access: [isAnonymous()]
@@ -246,9 +246,34 @@ docker compose up -d
 
 ### 其他项目接入内置 IdP
 
-REQ-0134 动态 public client 注册正在实施：标准 RFC7591，`none` 客户端认证 +
-强制 PKCE S256，可供公开 MCP 客户端使用；不要求公开客户端安全保存 client secret。
-注册默认关闭，完成验收后更新启用方式与请求示例。
+支持 RFC7591 动态 **public client** 注册，适用于公开 MCP、桌面及浏览器客户端：
+`token_endpoint_auth_method=none`，不生成 client secret，授权码流强制 PKCE S256。
+在 `KESTRA_CONFIGURATION` 中设置并重启：
+
+```yaml
+kestra:
+  oidc:
+    registration:
+      enabled: true
+      max-clients: 1000
+```
+
+默认关闭；启用后 discovery 发布 `registration_endpoint`。须先完成生产首次安装。
+使用 README 的 `/oidc/**` 匿名规则时注册无需预共享凭据；部署侧应限制注册请求速率。
+`max-clients` 是全部 client 的上限（含首装 UI client），并发注册不能突破；达到上限
+返回 429。服务端不抓取客户端提供的 URL，仅保存校验后的回调元数据。
+
+```bash
+curl --fail-with-body -X POST 'http://localhost:8080/oidc/register' \
+  -H 'Content-Type: application/json' \
+  -d '{"redirect_uris":["http://127.0.0.1:9999/callback"],"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"],"scope":"openid profile email","client_name":"Public OAuth client"}'
+```
+
+成功返回 201、随机 `client_id` 和确认的元数据，无 `client_secret`。消费方保存 client ID，
+每次授权生成新的 verifier/challenge，携带 state/nonce；使用精确注册的回调换 token，
+提交 `client_id`、code 和 `code_verifier`，不提交 secret。只允许 HTTPS 回调或 loopback
+HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、userinfo、通配符和非 loopback HTTP。
+当前仅 public 授权码/refresh 注册；不提供 RFC7592 client 更新/删除管理或 MCP 专属端点。
 
 消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
 authorize `/oidc/authorize`、token `/oidc/token`、JWKS `/oidc/jwks`、userinfo `/oidc/userinfo`。
@@ -259,8 +284,12 @@ client ID、client secret（confidential client）、redirect URI、`openid prof
 授权码流及 PKCE S256。public client 的 `client_secret` 为空，强制 S256；不能将 secret
 放入浏览器前端。外部应用不需要在 Kestra 的 Micronaut `clients` 中新增配置——该配置
 仅用于 Kestra 自身作为消费客户端；服务端注册表才决定哪些外部 client 可以授权。
-首装自动注册本实例 UI client；额外消费应用的注册/账号管理 API 仍待后续交付，
+首装自动注册本实例 UI confidential client；public 消费方使用上述动态注册；
+额外 confidential client 注册管理及账号管理 API 仍待后续交付，
 不将手工数据库操作作为本镜像首次安装步骤。
+
+会话边界：`oidc_session` 只用于 IdP 登录及授权流程，不认证 Kestra API。API 使用
+Bearer access token；UI 使用 OAuth2 callback 建立的 HttpOnly JWT cookie。
 
 可复现验收入口：`scripts/blackbox-ui-oidc.sh <image>`（实际初始化、UI 链与 token
 持久化检查）、`scripts/blackbox-ui-browser.cjs`（CI Chromium 登录/刷新/导航/退出）。

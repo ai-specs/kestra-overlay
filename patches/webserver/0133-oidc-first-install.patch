@@ -165,10 +165,10 @@ index 0000000..7575ba5
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupFilter.java
 new file mode 100644
-index 0000000..4cc0598
+index 0000000..4d34639
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcSetupFilter.java
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,37 @@
 +package io.kestra.webserver.oidc.controllers;
 +
 +import java.net.URI;
@@ -176,12 +176,13 @@ index 0000000..4cc0598
 +import io.micronaut.context.annotation.Requires;
 +import io.micronaut.core.annotation.Nullable;
 +import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpRequest;
 +import io.micronaut.http.annotation.RequestFilter;
 +import io.micronaut.http.annotation.ServerFilter;
 +import io.micronaut.scheduling.TaskExecutors;
 +import io.micronaut.scheduling.annotation.ExecuteOn;
 +
-+@ServerFilter({"/ui/**", "/oauth/login/**", "/oidc/login"})
++@ServerFilter({"/ui/**", "/oauth/login/**", "/oidc/login", "/oidc/setup"})
 +@Requires(property = "kestra.oidc.enabled", value = "true")
 +@ExecuteOn(TaskExecutors.IO)
 +public class OidcSetupFilter {
@@ -193,9 +194,13 @@ index 0000000..4cc0598
 +
 +    @RequestFilter
 +    @Nullable
-+    public HttpResponse<?> filter() {
++    public HttpResponse<?> filter(final HttpRequest<?> request) {
 +        try {
-+            return setup.ready() ? null : HttpResponse.seeOther(URI.create("/oidc/setup"));
++            final boolean ready = setup.ready();
++            if ("/oidc/setup".equals(request.getPath())) {
++                return ready ? HttpResponse.notFound() : null;
++            }
++            return ready ? null : HttpResponse.seeOther(URI.create("/oidc/setup"));
 +        } catch (IllegalArgumentException | IllegalStateException exception) {
 +            return HttpResponse.serverError("OIDC initialization configuration is invalid");
 +        }

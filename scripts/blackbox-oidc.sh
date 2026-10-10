@@ -154,6 +154,7 @@ wait_ready "$K2"
 
 assert_eq "环境变量完成生产初始化" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/login")"
 assert_eq "环境初始化后 setup 关闭" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+assert_eq "动态注册默认关闭" 404 "$(curl -s -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' "$BASE/oidc/register")"
 
 # discovery 元数据
 code=$(curl -s -o "$T/disc.json" -w '%{http_code}' "$BASE/.well-known/openid-configuration")

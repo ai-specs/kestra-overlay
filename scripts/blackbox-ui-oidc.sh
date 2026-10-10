@@ -68,6 +68,9 @@ kestra:
   oidc:
     enabled: true
     issuer: $BASE
+    registration:
+      enabled: true
+      max-clients: 10
 micronaut:
   security:
     enabled: true
@@ -86,7 +89,7 @@ micronaut:
         access: [isAnonymous()]
       - pattern: /oauth/**
         access: [isAnonymous()]
-      - pattern: /health
+      - pattern: /ping
         access: [isAnonymous()]
       - pattern: /api/v1/configs/login
         access: [isAnonymous()]
@@ -144,6 +147,9 @@ else
   assert_status "environment bootstrap skips setup" 302 "$(request "$BASE/oauth/login/kestra")"
 fi
 assert_status "setup closed after initialization" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+assert_status "anonymous ping" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ping")"
+assert_status "completed setup rejects bodyless POST before binding" 404 "$(curl -s -X POST -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+assert_status "completed setup rejects malformed POST before binding" 404 "$(curl -s -X POST -H 'Content-Type: application/json' -d '{' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 assert_status "completed setup POST cannot reactivate" 404 "$(curl -s -X POST -H "Origin: $BASE" \
   -d 'username=attacker&password=AttackerPass123!' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 HASH_BEFORE=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
@@ -168,6 +174,7 @@ assert_status "post-login authorize" 307 "$(request "$BASE$(location "$TEMP_DIR/
 CALLBACK_LOCATION=$(location "$TEMP_DIR/headers")
 [[ "$CALLBACK_LOCATION" == "$BASE/oauth/callback/kestra?"* ]] || { echo 'FAIL: callback missing'; exit 1; }
 assert_status "real OIDC callback and token exchange" 303 "$(request "$CALLBACK_LOCATION")"
+assert_status "confidential client cannot omit secret" 401 "$(curl -s -d 'client_id=kestra-ui&grant_type=client_credentials' -o /dev/null -w '%{http_code}' "$BASE/oidc/token")"
 grep -q 'JWT' "$TEMP_DIR/cookies"
 LANDING_LOCATION=$(location "$TEMP_DIR/headers")
 [[ "$LANDING_LOCATION" == /* ]] && LANDING_LOCATION="$BASE$LANDING_LOCATION"
@@ -185,6 +192,31 @@ USED_CODE=$(docker exec "$PG" psql -U kestra -d kestra -Atc \
   "SELECT count(*) FROM oidc_authorization_code WHERE client_id='kestra-ui' AND used=true")
 [[ "$USED_CODE" -ge 1 ]] || { echo 'FAIL: authorization code not consumed'; exit 1; }
 echo 'PASS: authorization code consumed'
+assert_status "discovery publishes dynamic registration" 200 "$(request "$BASE/.well-known/openid-configuration")"
+grep -q 'registration_endpoint' "$TEMP_DIR/body"
+assert_status "register public client without secret" 201 "$(request -H 'Content-Type: application/json' \
+  -d '{"redirect_uris":["http://127.0.0.1:9999/cb"],"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"]}' "$BASE/oidc/register")"
+PUBLIC_ID=$(node -e 'const data=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(data.client_secret!==undefined)process.exit(1);process.stdout.write(data.client_id)' "$TEMP_DIR/body")
+VERIFIER='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~'
+CHALLENGE=$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(process.argv[1]).digest("base64url"))' "$VERIFIER")
+assert_status "explicit empty challenge rejected" 400 "$(curl -s -G --data-urlencode "client_id=$PUBLIC_ID" \
+  --data-urlencode 'redirect_uri=http://127.0.0.1:9999/cb' --data-urlencode response_type=code \
+  --data-urlencode code_challenge= -o /dev/null -w '%{http_code}' "$BASE/oidc/authorize")"
+assert_status "public S256 authorize" 307 "$(request -G --data-urlencode "client_id=$PUBLIC_ID" \
+  --data-urlencode 'redirect_uri=http://127.0.0.1:9999/cb' --data-urlencode response_type=code \
+  --data-urlencode scope=openid --data-urlencode "code_challenge=$CHALLENGE" \
+  --data-urlencode code_challenge_method=S256 "$BASE/oidc/authorize")"
+PUBLIC_CODE=$(node -e 'process.stdout.write(new URL(process.argv[1]).searchParams.get("code")||"")' "$(location "$TEMP_DIR/headers")")
+assert_status "public client requires verifier" 400 "$(curl -s -d "client_id=$PUBLIC_ID&grant_type=authorization_code&code=$PUBLIC_CODE&redirect_uri=http://127.0.0.1:9999/cb" \
+  -o /dev/null -w '%{http_code}' "$BASE/oidc/token")"
+assert_status "public client exchanges code without secret" 200 "$(request \
+  --data-urlencode "client_id=$PUBLIC_ID" --data-urlencode grant_type=authorization_code \
+  --data-urlencode "code=$PUBLIC_CODE" --data-urlencode 'redirect_uri=http://127.0.0.1:9999/cb' \
+  --data-urlencode "code_verifier=$VERIFIER" "$BASE/oidc/token")"
+PUBLIC_TOKEN=$(node -e 'const fs=require("fs");const data=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!data.id_token||!data.refresh_token)process.exit(1);process.stdout.write(data.access_token)' "$TEMP_DIR/body")
+assert_status "registered public client userinfo" 200 "$(request -H "Authorization: Bearer $PUBLIC_TOKEN" "$BASE/oidc/userinfo")"
+assert_status "registration rejects remote HTTP callback" 400 "$(curl -s -H 'Content-Type: application/json' \
+  -d '{"redirect_uris":["http://attacker.example/cb"],"token_endpoint_auth_method":"none"}' -o /dev/null -w '%{http_code}' "$BASE/oidc/register")"
 assert_status "authenticated dashboard refresh" 200 "$(request "$BASE/ui/dashboards")"
 assert_status "authenticated navigation" 200 "$(request "$BASE/ui/main/flows")"
 CSRF=$(awk '$6=="csrfToken" {print $7}' "$TEMP_DIR/cookies")
