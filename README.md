@@ -1,6 +1,7 @@
 # kestra-overlay
 
-面向**第三方独立扩展项目**的 kestra 增强镜像与扩展契约提供方。
+这是面向第三方独立扩展项目的 Kestra 增强镜像。
+本文说明如何部署镜像、接入 OIDC、接入 MCP，以及挂载扩展。
 
 当前镜像基于 **Kestra OSS v2.0.5**，提供后端引擎、API、Web UI、内置 OAuth2/OIDC
 及 OAuth2-only MCP。`no-plugins` 变体不预装插件或外部扩展 jar，由部署方控制插件集。
@@ -14,12 +15,12 @@
 | 增加任务、触发器或 Runner 插件 | 插件与外部授权扩展 |
 | 开发外部细粒度授权组件 | jar 契约；先确认 classpath 承载限制 |
 
-## 使用镜像
+## 部署镜像
 
-OIDC 模式统一使用 OAuth2/OIDC，关闭 Basic Auth 链；UI 登录、刷新和退出使用服务端认证。
-旧登录/setup 页面在 OIDC 模式不进入凭据流程；用户名密码提交在 `/oidc/login`。
-部署时启用 Micronaut Security 并配置
-`micronaut.security.redirect.unauthorized.url: /oauth/login/kestra` 与客户端注册。
+本镜像的 OIDC 模式使用 OAuth2/OIDC。
+此模式关闭 Basic Auth。
+UI 登录、刷新和退出都使用 OIDC。
+未登录用户访问受保护页面时，镜像跳转到 `/oauth/login/kestra`。
 
 ### 下载
 
@@ -39,25 +40,27 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 
 多架构：镜像提供 `linux/amd64` 与 `linux/arm64`。
 
-### OIDC 账号与 OAuth client 契约
+### 首次安装和登录
 
-镜像内置 **OIDC 服务器、用户目录和 client 注册能力**，不预装默认账号、密码或
-固定 OAuth client。空库首次访问 `/ui/` 会进入 **OIDC 安装引导 `/oidc/setup`**，
-设置首个用户名、显示名、邮箱和密码；服务端同时注册配置中的 UI client。
-也可以加载下表环境变量跳过引导。两种方式均不需要人工 SQL 创建首个用户/client。
+镜像内置 OIDC 服务器和用户目录。
+镜像不提供默认账号和默认密码。
+空数据库首次访问 `/ui/` 时，页面会打开 `/oidc/setup`。
+你可以在页面中创建第一个用户，也可以使用环境变量完成初始化。
+两种方式都不需要手工执行 SQL。
 
-| 名称 | 含义与约束 |
+| 项目 | 说明 |
 |---|---|
-| OIDC 用户 | 首次安装时设置；用户名也是 OIDC `sub`，密码不会从服务端注册信息中取回 |
-| `kestra` | 下例的 OAuth 客户端配置名称，决定 `/oauth/login/kestra` 与 `/oauth/callback/kestra` 路径；不是 client ID |
-| `kestra-ui` | 下例的 UI client ID，可自定义；必须与配置中的 client ID 一致 |
-| client secret | 部署方生成并保存在 OAuth 客户端配置中；服务端只保存不可逆的安全凭据表示，不能从注册信息取回原值 |
-| redirect URI | 必须精确注册，例如 `http://localhost:8080/oauth/callback/kestra`；含协议、域名、端口和路径 |
-| 外部项目 client | 每个应用单独注册 client ID/secret/回调；不要复用 UI client 的凭据与回调 |
+| OIDC 用户 | 首次安装时设置。用户名也是 OIDC `sub`。密码不会从服务端注册信息中取回。 |
+| OAuth 配置名 `kestra` | 决定 `/oauth/login/kestra` 和 `/oauth/callback/kestra` 路径。它不是 client ID。 |
+| UI client ID `kestra-ui` | 示例中的 UI client ID。你可以修改它。配置和注册信息必须使用同一个值。 |
+| client secret | 由部署方生成并保存在客户端配置中。服务端不能返回原值。 |
+| redirect URI | 必须完全匹配。例如 `http://localhost:8080/oauth/callback/kestra`。 |
+| 外部应用 client | 每个应用使用独立的 client ID、secret 和 redirect URI。不要复用 UI client。 |
 
-UI 使用 **OIDC Authorization Code + PKCE S256**，服务端 confidential client 换 token，
-浏览器用 HttpOnly 认证 cookie。OIDC 模式完全停用 Basic Auth；不在 UI Basic Auth
-表单填写 OIDC 用户。新部署没有默认用户名或密码。
+UI 使用 Authorization Code 和 PKCE S256。
+服务端使用 confidential client 换取 token。
+浏览器使用 HttpOnly cookie 保存登录状态。
+不要在 Basic Auth 表单中填写 OIDC 用户名和密码。
 
 ### compose 示例（内置 OIDC + UI）
 
@@ -260,7 +263,7 @@ client 不在用户之间共享，其他用户不能使用或管理。这里已�
 MCP 能力 scope 按资源大类区分 read/write/delete，write 不含删除；当前仅声明
 `mcp:flows:read` 与 `mcp:executions:write`，现有flow复合call必须两者均具备。
 用户可在授权页进一步收窄。本仓逐工具调用独立强制检查，不依赖外部 RBAC；
-外部 RBAC 启用后，现有 MCP 工具内部实际资源操作还必须经过与 REST 相同的
+外部 RBAC 启用后，MCP 工具执行的资源操作还必须经过与 REST 相同的
 细粒度授权。两层均允许才执行；未接 RBAC 时不声称具体资源/namespace 隔离。
 能力 scope 与 MCP-only Authorizer SPI 已实施；外部 RBAC 与 REST 统一适配未交付。
 
@@ -301,8 +304,9 @@ HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、userinfo、通配符和�
 当前仅public授权码/refresh注册；已提供下述owner list/detail/revoke/delete管理，
 不是RFC7592注册管理协议，不提供client元数据更新接口。
 
-MCP只接受resource-bound access token，拒绝Basic、ID token与IdP/UI cookie；OIDC关闭时
-MCP 未启用 OIDC 时失败关闭，普通 REST 认证保留默认行为。MCP 协议使用 Streamable HTTP；
+MCP 只接受 resource-bound access token。
+MCP 未启用 OIDC 时失败关闭，普通 REST 认证保留默认行为。
+MCP 协议使用 Streamable HTTP。
 不声称外部GUI兼容。`kestra.url`是公开资源基址，不从Host/Forwarded推导。
 首装自动创建的MCP server id为`default`，地址为`${kestra.url}/api/v1/main/mcp/default`
 （基址末尾斜线只保留一个）；`kestra`是默认OAuth客户端配置name，不是MCP server id。
