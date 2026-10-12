@@ -11,7 +11,7 @@
 | 部署 Kestra 并使用 Web UI | 下方 Compose 示例与首次安装说明 |
 | 无人值守部署，启动时创建账号 | 首次安装环境变量 |
 | MCP 客户端连接并执行 flow 工具 | MCP 客户端接入与 flow 工具 |
-| 自己的应用使用内置 IdP | OAuth2/OIDC 消费方接入 |
+| 自己的应用使用内置 IdP | 外部应用使用 OIDC |
 | 增加任务、触发器或 Runner 插件 | 插件与外部授权扩展 |
 | 开发外部细粒度授权组件 | jar 契约；先确认 classpath 承载限制 |
 
@@ -187,16 +187,17 @@ services:
 ```
 
 然后只需 `docker compose up -d` 和访问 `/ui/`。镜像自身使用生产初始化服务执行
-初始化服务将这些字段用于创建用户、安全密码凭据、UI client 与安装身份；不会执行部署方
-提供的任意 SQL。与网页表单共用同一初始化逻辑，只跳过表单，不跳过 OIDC 登录。
+镜像使用这些字段创建用户、登录凭据、UI client 和安装状态。
+镜像不会执行部署方提供的 SQL。
+环境变量只跳过安装表单，不跳过登录。
 
 | 环境变量 | 用途 |
 |---|---|
-| `KESTRA_OIDC_BOOTSTRAP_USERNAME` | 首个 OIDC 登录名；与 password 必须成对提供 |
+| `KESTRA_OIDC_BOOTSTRAP_USERNAME` | 首个 OIDC 登录名。必须与密码一起提供。 |
 | `KESTRA_OIDC_BOOTSTRAP_PASSWORD` | 首次密码；服务端安全保存，不保存明文用户密码 |
 | `KESTRA_OIDC_BOOTSTRAP_EMAIL` | 可选邮箱 |
 | `KESTRA_OIDC_BOOTSTRAP_NAME` | 可选显示名，缺省使用登录名 |
-| `KESTRA_OIDC_UI_CLIENT_SECRET` | 示例 compose 的 UI client secret 环境变量，经配置映射给 Micronaut 客户端；引导/无人值守两种方式都需要 |
+| `KESTRA_OIDC_UI_CLIENT_SECRET` | UI client secret。网页引导和无人值守初始化都需要。 |
 | `KESTRA_OIDC_SETUP_ALLOWED` | 设为 `false` 时封闭网页首次安装；环境变量初始化仍可用，适合无人值守部署 |
 
 ```bash
@@ -211,7 +212,7 @@ docker compose up -d
 初始化在首次访问 UI/OIDC 客户端入口时执行；提供环境变量后直接进入登录，不显示安装表单。
 首次事务原子创建用户、凭据、UI client 与完成标记；并发安装只允许一次成功。
 重启或改 bootstrap 环境变量不会覆盖已有密码/client。完成后 `/oidc/setup` GET/POST
-返回 404，删除用户也不会重新开放匿名引导；密码恢复/账号管理不能靠清空表实现。
+返回 404，删除用户也不会重新开放匿名引导；账号恢复请使用部署方的备份流程。
 已有用户部署首次升级保留账号，并关闭引导；若同名 client 与配置冲突，初始化拒绝，
 不静默覆盖 secret/回调。不要在后续启动时随机重生成已经注册的 UI secret。
 
@@ -297,7 +298,7 @@ HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、userinfo、通配符和�
 不是RFC7592注册管理协议，不提供client元数据更新接口。
 
 MCP 只接受 resource-bound access token。
-MCP 未启用 OIDC 时失败关闭，普通 REST 认证保留默认行为。
+未启用 OIDC 时，MCP 不可用。普通 REST 认证保留默认行为。
 MCP 协议使用 Streamable HTTP。
 不声称外部GUI兼容。`kestra.url`是公开资源基址，不从Host/Forwarded推导。
 首装自动创建的MCP server id为`default`，地址为`${kestra.url}/api/v1/main/mcp/default`
@@ -320,21 +321,14 @@ issuer `https://kestra.example.org` 对应`Origin: https://kestra.example.org`�
 管理调用使用浏览器登录IdP cookie、detail返回的interaction与该Origin，JSON提交；
 单凭MCP access token不能管理client，curl不得遗漏cookie/Origin/interaction。
 管理没有独立UI，也不是RFC7592；撤销立即阻断token、refresh和已有MCPsession后续调用。
-`消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
+消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
 authorize `/oidc/authorize`、token `/oidc/token`、JWKS `/oidc/jwks`、userinfo `/oidc/userinfo`。
 `localhost` 仅为本机示例；跨容器/跨主机应用使用部署的公开 issuer。
 
-为每个消费应用在 `oidc_client` 单独注册 client 与精确回调，并配置其 SDK：issuer、
-client ID、client secret（confidential client）、redirect URI、`openid profile email`、
-授权码流及 PKCE S256。public client 的 `client_secret` 为空，强制 S256；不能将 secret
-放入浏览器前端。外部应用不需要在 Kestra 的 Micronaut `clients` 中新增配置——该配置
-仅用于 Kestra 自身作为消费客户端；服务端注册表才决定哪些外部 client 可以授权。
-首装自动注册本实例 UI confidential client；public 消费方使用上述动态注册；
-额外 confidential client 注册管理及账号管理 API 仍待后续交付，
-不将手工数据库操作作为本镜像首次安装步骤。
-
-会话边界：`oidc_session` 只用于 IdP 登录及授权流程，不认证 Kestra API。API 使用
-Bearer access token；UI 使用 OAuth2 callback 建立的 HttpOnly JWT cookie。
+confidential client 需要由部署方预先注册，并使用精确的 redirect URI。
+public client 使用上面的动态注册接口，不需要 client secret。
+不要把 client secret 放入浏览器前端。
+API 使用 Bearer access token；UI 使用 OAuth2 callback 建立登录 cookie。
 
 #### MCP 地址和 flow 工具
 
@@ -369,11 +363,9 @@ triggers:
 尚未配置工具时 `tools/list` 可以为空；这不等于 token 无效。客户端应从下面的发现
 流程取得资源值，不猜基址、尾随斜线或省略 tenant 的别名。
 
-MCP 只接受 OAuth2 Bearer access token；Basic Auth、ID token、IdP/UI cookie 均不能调用
-MCP。MCP 资源 URL 为 `kestra.url` 加 `/api/v1/{tenant}/mcp/{server-id}`，部署配置的
-`kestra.url` 必须是客户端可访问的稳定绝对 HTTP(S) 地址。当前 MCP SDK 验收基线为
-Java `io.modelcontextprotocol.sdk:mcp:1.1.3`、协议 `2025-06-18`；外部 GUI 客户端
-兼容性尚未验证。
+MCP 只接受 OAuth2 Bearer access token。
+MCP 资源 URL 是 `kestra.url` 加 `/api/v1/{tenant}/mcp/{server-id}`。
+`kestra.url` 必须是客户端可以访问的稳定绝对 HTTP(S) 地址。
 
 启用 OAuth2 后，MCP 客户端按下列顺序工作：
 
@@ -440,8 +432,7 @@ services:
 - `KESTRA_CONFIGURATION` 是部署配置入口；配置变更和插件挂载都需要重启。
 - `/app/plugins` 只承载插件类型，不承载 Controller、Filter 或其他 Web bean。
 - 镜像不烘焙业务扩展 jar；部署方负责扩展文件、版本匹配和运行时挂载。
-- 本 README 描述的是本镜像对第三方的使用契约；实现原理、patch 治理、上游差异和
-  开发流程见仓库内的维护文档，不属于集成方必读内容。
+- 本 README 描述本镜像对第三方的使用契约。
 
 ## 更多
 
