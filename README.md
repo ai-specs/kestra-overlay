@@ -18,7 +18,6 @@
 ## 部署镜像
 
 本镜像的 OIDC 模式使用 OAuth2/OIDC。
-此模式关闭 Basic Auth。
 UI 登录、刷新和退出都使用 OIDC。
 未登录用户访问受保护页面时，镜像跳转到 `/oauth/login/kestra`。
 
@@ -60,7 +59,6 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 UI 使用 Authorization Code 和 PKCE S256。
 服务端使用 confidential client 换取 token。
 浏览器使用 HttpOnly cookie 保存登录状态。
-不要在 Basic Auth 表单中填写 OIDC 用户名和密码。
 
 ### compose 示例（内置 OIDC + UI）
 
@@ -167,15 +165,12 @@ volumes:
 
 运行说明：
 
-- **认证**：上例启用完整 OIDC 链，关闭 Basic Auth；首次访问 `/ui/` 完成引导，
-  或预置初始化环境变量跳过表单。OIDC 未启用时才保留上游 vanilla Basic Auth 行为。
-- 主端口 **8080**（API 与原版 UI，入口 `/ui/`）。**8081** 是 management
+- **认证**：首次访问 `/ui/` 时完成安装引导，或使用初始化环境变量跳过表单。
+  初始化完成后，使用创建的账号登录。
+- 主端口 **8080**（API 与 Web UI，入口 `/ui/`）。**8081** 是 management
   端点：缺省不暴露、**无鉴权**，仅开发用途。
 - 配置只经 `KESTRA_CONFIGURATION` 环境变量进入；改配置、加插件、挂 jar 都**需重启**。
 - 无预装插件：需要插件走 `./plugins` 挂载（重启）或运行期 API 安装（需 `auto-install.enabled: true`）。
-- 若使用旧版构建（首启 `AccessDenied: /app/storage/plugins` 崩溃）：镜像缺 `/app/storage`
-  预置属主所致——`docker run --rm -v <项目名>_kestra-data:/data alpine chown -R 1000:1000 /data`
-  一次性修复，或使用已修复构建（2026-10-09 后）。
 
 ### 首次安装：网页引导或环境变量
 
