@@ -230,28 +230,38 @@ docker compose up -d
 `http://localhost:8080/oauth/callback/kestra`。自定义客户端配置名称时设置
 `kestra.oidc.bootstrap.client-name`，同时对齐 unauthorized URL 与 callback 路径。
 
-### 其他项目接入内置 IdP
+### 外部应用使用 OIDC
 
-MCP 接入提供用户归属与 consent、resource Bearer、复合 scope、OAuth-only、
+外部应用可以使用本镜像的 OIDC 服务登录用户。
+应用需要 issuer、client ID、client secret、redirect URI 和申请的 scope。
+授权端点、token 端点、JWKS 端点和 userinfo 端点来自 OIDC discovery。
+每个应用使用独立的 client 和 redirect URI。
+不要复用 UI client。
+
+应用使用 Authorization Code 和 PKCE S256。
+应用使用 access token 访问 API。
+ID token 只用于确认用户身份，不用于调用 MCP。
+
+### MCP 客户端使用 OAuth2
+
+MCP 接入提供用户归属、consent、resource Bearer、复合 scope、OAuth-only、
 owner 管理和共享注册限速。
-外部RBAC jar和REST适配未交付，不能宣称具体资源隔离。客户端先动态注册取得短期待绑定
-client_id，再打开浏览器；用户登录并明确同意后，client 原子绑定该用户，签发
-用户身份的 token，以该用户权限调用 MCP。拒绝删除申请，未确认超时清理；正式
-client 不在用户之间共享，其他用户不能使用或管理。这里已验证的是client归属与
-能力控制，不是外部RBAC所负责的具体资源/namespace数据隔离。详见
-[MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)，含时序图、页面、
-缓存失效恢复、PKCE 边界和 public DCR 使用约束。
+外部 RBAC 扩展未包含在本镜像中，因此当前不能宣称具体 flow 或 namespace 数据隔离。
+客户端先动态注册取得短期待绑定 client_id，再打开浏览器。
+用户登录并同意后，client 绑定该用户。
+之后签发的 token 使用该用户身份。
+拒绝申请会删除 pending client，未确认的申请会过期清理。
+正式 client 不在用户之间共享。
 
-MCP 能力 scope 按资源大类区分 read/write/delete，write 不含删除；当前仅声明
-`mcp:flows:read` 与 `mcp:executions:write`，现有flow复合call必须两者均具备。
-用户可在授权页进一步收窄。本仓逐工具调用独立强制检查，不依赖外部 RBAC；
-外部 RBAC 启用后，MCP 工具执行的资源操作还必须经过与 REST 相同的
-细粒度授权。两层均允许才执行；未接 RBAC 时不声称具体资源/namespace 隔离。
-能力 scope 与 MCP-only Authorizer SPI 已实施；外部 RBAC 与 REST 统一适配未交付。
+MCP 能力 scope 按资源大类区分 read、write 和 delete。
+write 不包含 delete。
+当前 scope 是 `mcp:flows:read` 和 `mcp:executions:write`。
+用户可以在授权页收窄 scope。
+外部 RBAC 启用后，MCP 工具执行的资源操作还必须通过 REST 使用的细粒度授权。
 
-管理界面的 MCP 编辑页在 OAuth 模式下明确显示“由本实例内置 OIDC 服务器保护”，
-不要求选择外部 OIDC provider；OAuth 保存请求不会写入空的外部 provider。PWA 安装
-提示不会覆盖 `/ui/*/admin/*` 管理页面的操作控件。
+管理界面的 MCP 编辑页在 OAuth 模式下显示“由本实例内置 OIDC 服务器保护”。
+页面不要求选择外部 OIDC provider。
+PWA 安装提示不会覆盖管理页面的操作控件。
 
 支持 RFC7591 动态 **public client** 注册，适用于公开 MCP、桌面及浏览器客户端：
 `token_endpoint_auth_method=none`，不生成 client secret，授权码流强制 PKCE S256。
@@ -326,7 +336,7 @@ client ID、client secret（confidential client）、redirect URI、`openid prof
 会话边界：`oidc_session` 只用于 IdP 登录及授权流程，不认证 Kestra API。API 使用
 Bearer access token；UI 使用 OAuth2 callback 建立的 HttpOnly JWT cookie。
 
-### MCP 客户端接入与 flow 工具
+#### MCP 地址和 flow 工具
 
 本机默认 MCP 地址是 **`http://localhost:8080/api/v1/main/mcp/default`**。
 `main` 是当前 OSS tenant，`default` 是首装自动创建的 server ID；`kestra` 是 OAuth
