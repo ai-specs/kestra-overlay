@@ -81,7 +81,7 @@ while IFS= read -r p; do
   ORDER=$((ORDER+1))
   name="$(basename "$p")"
   echo "$name" | grep -Eq '^[0-9]{4}-[a-z0-9-]+\.patch$' || bad "$name: 命名不符 NNNN-slug.patch"
-  first_diff_line=$(grep -n '^diff --git ' "$p" | head -1 | cut -d: -f1)
+  first_diff_line=$(awk '/^diff --git / {print NR; exit}' "$p")
   if [ -z "$first_diff_line" ]; then bad "$name: 无 diff --git（不是 patch?）"; continue; fi
   # diff 体之后只允许 patch 格式行（头部散文注释只能在 diff 之前）
   if tail -n +"$first_diff_line" "$p" | awk '
