@@ -1,6 +1,9 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
 > **状态**：reserved·已细化（2026-10-07）。开工仍需 AGENTS.md §2 入口 B 四要件。
+> 本轮0170已提供MCP-only typed Principal/FlowResource READ/EXECUTE SPI与失败关闭gate；
+> 缺bean镜像门与异常bean零队列副作用单元路径已验收。没有真实外部RBAC jar，
+> REST适配与具体资源隔离仍未交付，不能把这些测试等同完整R-EE-RBAC。
 > **归属**：`docs/oss-ee-gap.md` §2-B 行 / §4 R-EE-RBAC 行的展开。
 > **一句话**：让任何下游能以 EE 同构方式（外部组件 + 配置）在 OSS 上获得**每请求
 > (资源， 动作， namespace) 级**的授权判定。补的是授权判定钩子这个架构能力，

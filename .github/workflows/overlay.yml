@@ -50,7 +50,11 @@ jobs:
         with:
           node-version: '24'
       - name: Apply patches, compile webserver, stage extension jars, build and push
+        env:
+          WORK: ${{ github.workspace }}/.work/verify
         run: ./scripts/build.sh
+      - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
+        run: bash ./scripts/blackbox-mcp-oauth.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins "${{ github.workspace }}/.work/verify"
   oidc-blackbox:
     needs: build-push
     runs-on: ubuntu-24.04

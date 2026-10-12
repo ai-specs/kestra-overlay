@@ -47,7 +47,9 @@ if [ "${1:-}" = "--apply-only" ]; then
 fi
 
 echo "== scoped OIDC acceptance tests =="
-(cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' --console=plain)
+(cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
+  --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
+  --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)

@@ -2,10 +2,82 @@
 
 ## 交付状态与结论
 
-本文是维护者多次澄清后的目标契约，尚未实现，不能作为当前镜像已支持多用户 MCP
-隔离的声明。当前已交付 OIDC 首装、登录、public DCR、PKCE 和 token 端点；当前
-`oidc_client` 没有 owner，动态注册记录没有临时有效期，authorize 没有用户确认页。
-MCP OAuth2 发现、MCP-only Bearer 认证、用户资源隔离和下述生命周期仍待实施。
+### 2026-10-09 实施裁决与 BASE 核验
+
+本轮接收基线为 BASE v2.0.5 (`172dd0f3760fb1255d3b22bd1fd07ce31b173fa3`)、
+`io.modelcontextprotocol.sdk:mcp:1.1.3`、现有 Streamable HTTP 和共享 PostgreSQL 多副本。
+外部消费仓和 GUI 客户端兼容性不阻断协议实现；真实 SDK 客户端与浏览器授权为验收基线。
+旧记录中的消费仓等待门由本次维护者授权解除，外部 RBAC 产品实现仍不在本轮范围。
+
+- protected resource/audience = 配置 `kestra.url` 的规范公开绝对 HTTP(S) 基址 +
+  `/api/v1/{tenant}/mcp/{id}`。基址不得含 query、fragment、userinfo；不从 Host 或
+  X-Forwarded 头推导。OSS `TenantService.resolveTenant()` 固定 `main`，别名必须规范化。
+- 系统 UI client = `kestra.oidc.bootstrap.client-name`（默认 `kestra`）对应的
+  `micronaut.security.oauth2.clients.<name>.client-id`，数据库精确匹配 secret/callback
+  且安装已经完成才保留。新增显式 client kind；其余历史无 owner client 全部 inactive。
+- 当前工具来自 `McpToolTrigger` flow：发现/定义需要 `mcp:flows:read`，执行需要
+  `mcp:executions:write`。执行 flow 可有危险副作用，同意页明确显示，部署策略可关闭。
+  write 不包含 delete；未知工具拒绝；不虚构取消/删除工具。
+- 执行前提供 MCP Authorizer SPI（可信用户/client/resource 上下文、typed tenant/namespace/flow
+  资源与稳定动作）；本 SPI 只覆盖 MCP，外部组件必须另提供 REST 适配并统一二者判定语义。
+  RBAC 启用但 bean
+  缺席/异常时拒绝。未启用只有能力控制，不宣称 namespace 或数据隔离。
+- session 必须绑定用户/client/resource；缓存权限视图不得跨主体泄露能力。
+- 根仓最终停在 review-ready，不 commit/push；开发树允许按 SOP 增量提交生成 patch。
+
+可复现源码证据（在 BASE 或应用现有 patch 的树内执行）：
+
+0160 证据：`core/mcp/models/McpServer.java` 的 `id` 使用
+`@Pattern(regexp="^[a-z0-9][a-z0-9_-]*")`；资源服务采用相同字符集合，拒绝大小写
+别名、百分号编码分隔符、dot segment 和未知 server。OSS tenant 规范值为 main。
+MCP cache 仅 WEBSERVER/STANDALONE 装配，资源服务通过 BeanProvider 懒取，非 web
+上下文不要求 cache 存在；provider/metadata 的数据库读取保持 IO 执行线程。
+
+```bash
+git show HEAD:webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
+git show HEAD:webserver/src/main/java/io/kestra/mcp/McpToolService.java
+git show HEAD:webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
+git show HEAD:webserver/src/main/java/io/kestra/webserver/filter/McpServerAuthenticationFilter.java
+git show HEAD:webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
+git show HEAD:core/src/main/java/io/kestra/core/mcp/models/McpServer.java
+git show HEAD:core/src/main/java/io/kestra/core/tenant/TenantService.java
+git show HEAD:platform/build.gradle
+```
+
+真实调用链：McpToolController → session/context → McpServerHandlerTransport →
+Streamable transport/SDK → McpToolService → executableScope → ExecutionCommand queue →
+执行结果订阅 → ExecutionOutputService。工具发现使用 findWithNoAcl；默认 access-control
+返回 global，不能作为 RBAC。现有 context 的 equals/hashCode 排除 userId，session 和
+handler 授权视图需要重新校验。执行队列目前只带 trigger/labels/inputs，不带可信主体。
+
+需求拆分：0150 owner/pending/consent + 新迁移与并发测试；0160 resource metadata/Bearer
++ resource-bound code/token/refresh；0170 scope/Authorizer/session/缓存视图 + SDK 实测。
+后续 owner 管理/共享注册 rate 独立编号 REQ-0190，按维护者批准在0180后应用；
+SQL migration 仍为2.0.97。理由是管理补充基于0170策略后的中间态，避免提前应用
+产生同文件上下文依赖；最终集合满足 registration controller 的 rate bean 依赖。
+0170差分覆盖1b12376→4ac62c1，0190覆盖4ac62c1→6a8b629，0180覆盖6a8b629→6617cf0；
+这些提交差分由git生成，14 patch顺序重放与严格hunk重叠检查已通过。
+迁移不得修改既有 SQL checksum；新增 bean+SQL。迁移先将历史 client 标为 inactive legacy，
+不批量撤销 token/code；配置匹配的系统 client 经已初始化 setup 精确识别后恢复。
+识别与其余 legacy client 的 code/token 物理撤销在同一 setup 事务完成；system 历史
+有效 token 保留。已有 system 重复识别幂等；配置/secret/callback/kind 冲突失败关闭，
+不激活 client。SQL 阶段无法读部署配置，不提前猜测 system。
+非 system 历史 client 的旧 code/token 必须在消费时由 inactive/kind 检查拒绝。
+升级时若 UI client 配置不匹配，UI 登录失败关闭并需维护者修复配置，不自动猜测归属。
+首次安装事务必须直接创建 system kind，升级必须只识别已初始化且配置匹配 UI client。
+回滚必须先关闭 MCP 入口并备份数据库再回到旧镜像；不得恢复被停用 client 或重启匿名
+引导，不提供会重新开放 Basic Auth 的认证降级开关。旧镜像读不到新授权语义，不能带
+新 client/token 数据直接恢复对外服务。OIDC 未启用时的 vanilla 行为另作明确回归。
+
+验收清单：新/旧库和首装两路径；配置匹配/不匹配 UI client；无 owner 迁移；pending
+TTL/全局与 owner 额度/多副本并发；同意/拒绝/清理抢占与 CSRF/Origin；精确回调/S256；
+两个 server 的 resource/audience 分离；nonce/state；refresh 缩权和撤销；未知能力拒绝；
+scope 双层检查；Authorizer 缺席/异常无副作用；跨主体 session/缓存；真实 SDK 初始化、
+工具发现和调用；浏览器确认页显示实际回调、当前用户及执行风险。外部 GUI 兼容未验证。
+
+本文契约已由0150/0160/0170/0180/0190在本地实现并验收，待维护者review与真CI。
+owner/pending/consent、resource Bearer、复合scope和生命周期具备；不能作为具体
+namespace/业务数据隔离声明。外部RBAC jar与REST统一适配未交付。
 
 选定方案可行：保持客户端常见的“先动态注册、再打开浏览器授权”顺序，注册返回
 标准 201 JSON 与随机 client_id；服务端先将记录作为短期待绑定申请，用户登录并
@@ -83,6 +155,13 @@ client 身份不等于用户身份。MCP access token 必须验证签名、issue
 
 ## MCP 能力 scope 与外部 RBAC 的独立双层门
 
+0170 维护者裁决：现有 flow 工具是复合操作，声明
+`requiredScopes=[mcp:flows:read,mcp:executions:write]`。read 用于工具定义与返回输出，
+write 用于执行 flow（可有危险副作用）。tools/call 缺任一 scope 拒绝，不自动授予 read，
+不改写原有输出语义。RBAC 启用时 call 同时检查 typed flow 资源的 READ 与 EXECUTE；
+tools/list/schema 也检查 READ。未来纯写且不返回数据的工具可另声明 write-only，
+未知能力仍默认拒绝。同意页须分别说明读取定义/输出和执行 flow 两个用途。
+
 本仓预制能力契约 `mcp:<资源大类>:read|write|delete`；资源大类不是具体 namespace
 或资源 ID。read 表示查询/查看/列举，write 表示新建/修改且不含删除，delete 单独
 授权；三者不自动相互包含。执行/取消等有副作用能力必须逐工具明确分类，不能未经
@@ -159,6 +238,14 @@ Basic Auth、ID token、IdP cookie 和跨资源 token。当前 OIDC scopes 是�
 不是工具/数据权限；MCP 能力 scope 按上述独立契约实现，不能直接复用 roles=[admin]。
 
 ## 实施顺序与验收门
+
+可重复镜像门：`bash scripts/blackbox-mcp-oauth.sh IMAGE /absolute/path/to/verify-tree`。
+脚本自行创建 PostgreSQL 与 standalone 镜像实例，生产环境首装；系统 UI OAuth callback
+cookie + 页面 CSRF 创建 MCP flow，再 DCR/consent/S256/resource token。Java SDK 测试
+使用 verify 树 Gradle test runtime classpath，正向执行 SUCCESS，read-only call 拒绝且
+execution 总数不增加。`BB_MCP_PORT`、`BB_PG_IMAGE` 可覆盖；token 仅临时 0600 文件，
+退出清理。脚本显式验证 SDK JUnit XML skipped=0，缺环境不视为通过。单独运行
+McpSdkInstanceTest 无环境时 assumptions 跳过，仅作手工工具。外部 GUI 兼容仍未验证。
 
 先按用户归属改造 DCR schema/生命周期与授权确认，保留生产首装两路径；再按 BASE
 证据接通 MCP OAuth2 发现/Bearer 验证，删除 Basic Auth 选项/实现/商业占位；最后接

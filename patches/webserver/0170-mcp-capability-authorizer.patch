@@ -1,0 +1,745 @@
+# 需求: REQ-0170 复合 scope 执行门与 MCP Authorizer/session 隔离
+# 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
+# 状态: core
+# 来源: 新写；MCP SDK 1.1.3 + 维护者能力契约；不移植客户业务/RBAC角色模型
+# 触达上游文件: 16 个（详见diff）
+# 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
+diff --git a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
+index f1f7f73..5a01f36 100644
+--- a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
++++ b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
+@@ -14,7 +14,13 @@ public record McpSession(
+     String sessionId,
+     String sseNode,
+     String userId,
+-    boolean deleted) implements HasUID, BroadcastEvent {
++    boolean deleted,
++    String clientId,
++    String resource) implements HasUID, BroadcastEvent {
++
++    public McpSession(String tenantId, String serverId, String sessionId, String sseNode, String userId, boolean deleted) {
++        this(tenantId, serverId, sessionId, sseNode, userId, deleted, null, null);
++    }
+ 
+     /** {@inheritDoc} */
+     @Override
+@@ -31,6 +37,6 @@ public record McpSession(
+     }
+ 
+     public McpSession toDeleted() {
+-        return new McpSession(tenantId, serverId, sessionId, sseNode, userId, true);
++        return new McpSession(tenantId, serverId, sessionId, sseNode, userId, true, clientId, resource);
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
+index e39e618..8ba7f5f 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
+@@ -39,6 +39,7 @@ public class McpServerHandlerTransport {
+     private final McpServerCache mcpServerCache;
+     private final McpSessionService mcpSessionService;
+     private final McpToolAccessControl accessControl;
++    private final io.kestra.webserver.mcp.McpCapabilityGate capabilities;
+ 
+     @Inject
+     public McpServerHandlerTransport(
+@@ -46,12 +47,13 @@ public class McpServerHandlerTransport {
+         McpToolService mcpToolService,
+         McpServerCache mcpServerCache,
+         McpSessionService mcpSessionService,
+-        McpToolAccessControl accessControl) {
++        McpToolAccessControl accessControl, io.kestra.webserver.mcp.McpCapabilityGate capabilities) {
+         this.mcpErrorResponseMapper = mcpErrorResponseMapper;
+         this.mcpToolService = mcpToolService;
+         this.mcpServerCache = mcpServerCache;
+         this.mcpSessionService = mcpSessionService;
+         this.accessControl = accessControl;
++        this.capabilities = capabilities;
+     }
+ 
+     /**
+@@ -78,7 +80,7 @@ public class McpServerHandlerTransport {
+             servers.put(
+                 handlerKey,
+                 new ScopedServer(
+-                    buildServer(handlerKey, scope, transportProvider), scope, handlerKey.tenantId(), handlerKey.serverId()
++                    buildServer(handlerKey, scope, transportProvider), scope, handlerKey.tenantId(), handlerKey.serverId(), kestraMcpTransportContext
+                 )
+             );
+             return transportProvider;
+@@ -104,7 +106,8 @@ public class McpServerHandlerTransport {
+     }
+ 
+     public Mono<Void> refreshTools(String tenantId, String serverId) {
+-        return Flux.fromIterable(keysFor(tenantId, serverId))
++        return Flux.defer(() -> Flux.fromIterable(keysFor(tenantId, serverId)))
++            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
+             .concatMap(key -> Optional.ofNullable(servers.get(key)).map(this::refreshTools).orElseGet(Mono::empty))
+             .then();
+     }
+@@ -147,7 +150,7 @@ public class McpServerHandlerTransport {
+     private Mono<Void> refreshTools(ScopedServer scopedServer) {
+         McpAsyncServer server = scopedServer.server();
+         List<McpServerFeatures.AsyncToolSpecification> newSpecs = mcpToolService.listToolSpecsForServer(
+-            scopedServer.tenantId(), scopedServer.serverId(), scopedServer.scope()
++            scopedServer.tenantId(), scopedServer.serverId(), scopedServer.scope(), scopedServer.identity()
+         );
+         Set<String> newToolNames = newSpecs.stream()
+             .map(spec -> spec.tool().name())
+@@ -192,12 +195,15 @@ public class McpServerHandlerTransport {
+             }
+         });
+ 
+-        return mcpServerSpec.tools(
++        final var identity = KestraMcpTransportContext.builder().tenantId(handlerKey.tenantId()).serverId(handlerKey.serverId())
++            .userId(handlerKey.userId()).clientId(handlerKey.clientId()).resource(handlerKey.resource()).scopes(handlerKey.capabilities()).build();
++        return mcpServerSpec.tools(capabilities.visible(identity) ?
+             this.mcpToolService.listToolSpecsForServer(
+                 handlerKey.tenantId(),
+                 handlerKey.serverId(),
+-                scope
+-            )
++                scope,
++                identity
++            ) : List.of()
+         ).build();
+     }
+ 
+@@ -232,6 +238,6 @@ public class McpServerHandlerTransport {
+         McpAsyncServer server,
+         AccessScope scope,
+         String tenantId,
+-        String serverId) {
++        String serverId, KestraMcpTransportContext identity) {
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
+index 1e6fd7d..b8d9ec6 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
+@@ -58,13 +58,16 @@ public class McpSessionService {
+             boolean isNewOwner = McpSessionEventType.OWNERSHIP_CHANGED == event.type()
+                 && ServerInstance.INSTANCE_ID.equals(session.sseNode());
+             if (!isNewOwner && (event.type() == McpSessionEventType.DELETED || event.type() == McpSessionEventType.OWNERSHIP_CHANGED)) {
+-                KestraMcpTransportContext context = KestraMcpTransportContext.builder()
+-                    .tenantId(session.tenantId())
+-                    .serverId(session.serverId())
+-                    .sessionId(session.sessionId())
+-                    .build();
+-                Optional.ofNullable(streamableSessions.remove(context))
+-                    .ifPresent(McpStreamableServerSession::delete);
++                streamableSessions.entrySet().removeIf(entry -> {
++                    final var context = entry.getKey();
++                    if (java.util.Objects.equals(context.getTenantId(), session.tenantId())
++                        && java.util.Objects.equals(context.getServerId(), session.serverId())
++                        && java.util.Objects.equals(context.getSessionId(), session.sessionId())) {
++                        entry.getValue().delete();
++                        return true;
++                    }
++                    return false;
++                });
+             }
+         });
+     }
+@@ -90,7 +93,7 @@ public class McpSessionService {
+     public boolean sessionExists(KestraMcpTransportContext context) {
+         return sessionRepository.find(
+             context.getTenantId(), context.getServerId(), context.getSessionId()
+-        ).isPresent();
++        ).filter(session -> sameIdentity(session, context)).isPresent();
+     }
+ 
+     Optional<McpStreamableServerSession> findMcpStreamableServerSession(KestraMcpTransportContext context) {
+@@ -107,7 +110,7 @@ public class McpSessionService {
+         }
+         McpSession session = new McpSession(
+             context.getTenantId(), context.getServerId(),
+-            context.getSessionId(), ServerInstance.INSTANCE_ID, context.getUserId(), false
++            context.getSessionId(), ServerInstance.INSTANCE_ID, context.getUserId(), false, context.getClientId(), context.getResource()
+         );
+         sessionRepository.save(session);
+         streamableSessions.put(context, mcpStreamableServerSession);
+@@ -129,7 +132,7 @@ public class McpSessionService {
+     public void takeSseOwnership(KestraMcpTransportContext context, McpStreamableServerSession session) {
+         McpSession updated = new McpSession(
+             context.getTenantId(), context.getServerId(),
+-            context.getSessionId(), ServerInstance.INSTANCE_ID, context.getUserId(), false
++            context.getSessionId(), ServerInstance.INSTANCE_ID, context.getUserId(), false, context.getClientId(), context.getResource()
+         );
+         sessionRepository.save(updated);
+         streamableSessions.put(context, session);
+@@ -155,6 +158,7 @@ public class McpSessionService {
+      */
+     public void close(KestraMcpTransportContext context) {
+         sessionRepository.find(context.getTenantId(), context.getServerId(), context.getSessionId())
++            .filter(session -> sameIdentity(session, context))
+             .ifPresent(session ->
+             {
+                 sessionRepository.delete(context.getTenantId(), context.getSessionId());
+@@ -169,4 +173,10 @@ public class McpSessionService {
+             log.error("Failed to emit MCP session event {} for session {}: {}", event.type(), event.session().sessionId(), e.getMessage(), e);
+         }
+     }
++
++    private boolean sameIdentity(final McpSession session, final KestraMcpTransportContext context) {
++        return java.util.Objects.equals(session.userId(), context.getUserId())
++            && java.util.Objects.equals(session.clientId(), context.getClientId())
++            && java.util.Objects.equals(session.resource(), context.getResource());
++    }
+ }
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolService.java b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
+index 8c1d54b..c2161c3 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpToolService.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
+@@ -57,6 +57,7 @@ public class McpToolService {
+     private final FlowMetaStoreInterface flowMetaStore;
+     private final ExecutionOutputService executionOutputService;
+     private final McpToolAccessControl accessControl;
++    private final io.kestra.webserver.mcp.McpCapabilityGate capabilities;
+     private final Cache<ToolHandlerCacheKey, McpServerFeatures.AsyncToolSpecification> asyncToolSpecificationCache;
+ 
+     private static final McpSchema.CallToolResult FLOW_ERROR_CALL_TOOL_RESULT = McpSchema.CallToolResult.builder()
+@@ -78,7 +79,7 @@ public class McpToolService {
+         FlowInputOutput flowInputOutput,
+         FlowMetaStoreInterface flowMetaStore,
+         ExecutionOutputService executionOutputService,
+-        McpToolAccessControl accessControl) {
++        McpToolAccessControl accessControl, io.kestra.webserver.mcp.McpCapabilityGate capabilities) {
+         this.executionCommandQueue = executionCommandQueue;
+         this.flowRepositoryInterface = flowRepositoryInterface;
+         this.flowToolSchemaMapper = flowToolSchemaMapper;
+@@ -89,6 +90,7 @@ public class McpToolService {
+         this.flowMetaStore = flowMetaStore;
+         this.executionOutputService = executionOutputService;
+         this.accessControl = accessControl;
++        this.capabilities = capabilities;
+         asyncToolSpecificationCache = Caffeine.newBuilder()
+             .maximumSize(mcpConfig.toolCacheConfig().maximumSize())
+             .expireAfterAccess(mcpConfig.toolCacheConfig().expireAfterAccess())
+@@ -110,6 +112,18 @@ public class McpToolService {
+             ).toList();
+     }
+ 
++    public List<McpServerFeatures.AsyncToolSpecification> listToolSpecsForServer(String tenantId, String serverId,
++        AccessScope scope, KestraMcpTransportContext context) {
++        return fetchFlowWithMcpToolTrigger(tenantId, serverId).stream()
++            .filter(flow -> McpToolScope.allows(scope, flow.getNamespace()))
++            .filter(flow -> capabilities.readable(context, tenantId, flow.getNamespace(), flow.getId()).blockOptional().orElse(false))
++            .flatMap(flow -> flow.getTriggers().stream()
++                .filter(isMcpTriggerTypeAndEnabledPredicate())
++                .filter(trigger -> serverId.equals(Objects.requireNonNullElse(((McpToolTrigger) trigger).getMcpServer(), McpToolTrigger.DEFAULT_SERVER_ID)))
++                .map(trigger -> getAsyncToolSpecification(flow, (McpToolTrigger) trigger)))
++            .toList();
++    }
++
+     private McpServerFeatures.AsyncToolSpecification getAsyncToolSpecification(Flow flow, McpToolTrigger toolTrigger) {
+         ToolHandlerCacheKey toolHandlerCacheKey = new ToolHandlerCacheKey(flow, toolTrigger);
+         return asyncToolSpecificationCache.get(
+@@ -155,42 +169,46 @@ public class McpToolService {
+                 return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
+             }
+ 
+-            Execution execution = toolTrigger.evaluate(
+-                flow, input, additionalInputs, Label.from(
+-                    Map.of(
+-                        Label.FROM, Label.FromLabel.MCP.value,
+-                        Label.MCP_SERVER_ID, context.getServerId(),
+-                        Label.MCP_SESSION_ID, context.getSessionId()
++            final String tenant = flow.getTenantId() == null ? context.getTenantId() : flow.getTenantId();
++            return capabilities.execute(context, tenant, flow.getNamespace(), flow.getId()).flatMap(allowed -> {
++                if (!allowed) return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
++                Execution execution = toolTrigger.evaluate(
++                    flow, input, additionalInputs, Label.from(
++                        Map.of(
++                            Label.FROM, Label.FromLabel.MCP.value,
++                            Label.MCP_SERVER_ID, context.getServerId(),
++                            Label.MCP_SESSION_ID, context.getSessionId()
++                        )
+                     )
+-                )
+-            );
+-
+-            List<String> validationErrors = collectInputValidationErrors(flow, execution, input);
+-            if (!validationErrors.isEmpty()) {
+-                log.debug(
+-                    "Rejecting MCP tool '{}' call for flow {}/{}/{} (execution {}): {} invalid input(s): {}",
+-                    toolTrigger.getToolName(), flow.getTenantId(), flow.getNamespace(), flow.getId(),
+-                    execution.getId(), validationErrors.size(), validationErrors
+                 );
+-                return Mono.just(invalidInputResult(validationErrors));
+-            }
+ 
+-            return runFlowForMcpTask(flow, execution)
+-                .flatMap(executionResult ->
+-                {
+-                    try {
+-                        Map<String, Object> outputs = executionResult.getState().isSuccess() ? executionOutputService.getOutputs(executionResult) : null;
+-                        return Mono.just(
+-                            McpSchema.CallToolResult.builder()
+-                                .structuredContent(outputs != null ? outputs : Map.of())
+-                                .isError(!executionResult.getState().isSuccess())
+-                                .build()
+-                        );
+-                    } catch (InternalException e) {
+-                        return Mono.error(e);
+-                    }
+-                })
+-                .onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
++                List<String> validationErrors = collectInputValidationErrors(flow, execution, input);
++                if (!validationErrors.isEmpty()) {
++                    log.debug(
++                        "Rejecting MCP tool '{}' call for flow {}/{}/{} (execution {}): {} invalid input(s): {}",
++                        toolTrigger.getToolName(), flow.getTenantId(), flow.getNamespace(), flow.getId(),
++                        execution.getId(), validationErrors.size(), validationErrors
++                    );
++                    return Mono.just(invalidInputResult(validationErrors));
++                }
++
++                return runFlowForMcpTask(flow, execution)
++                    .flatMap(executionResult ->
++                    {
++                        try {
++                            Map<String, Object> outputs = executionResult.getState().isSuccess() ? executionOutputService.getOutputs(executionResult) : null;
++                            return Mono.just(
++                                McpSchema.CallToolResult.builder()
++                                    .structuredContent(outputs != null ? outputs : Map.of())
++                                    .isError(!executionResult.getState().isSuccess())
++                                    .build()
++                            );
++                        } catch (InternalException e) {
++                            return Mono.error(e);
++                        }
++                    })
++                    .onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
++            });
+         };
+     }
+ 
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
+index ab43f72..e0de6c4 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
+@@ -87,6 +87,8 @@ public class McpToolController {
+             (String) identity.get("client_id"), (String) identity.get("resource"),
+             (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()));
+ 
+-        return handlerRegistry.getServerHandler(transportContext).handleRequest(request, transportContext);
++        return Mono.fromCallable(() -> handlerRegistry.getServerHandler(transportContext))
++            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
++            .flatMap(handler -> handler.handleRequest(request, transportContext));
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java
+new file mode 100644
+index 0000000..7473723
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java
+@@ -0,0 +1,11 @@
++package io.kestra.webserver.mcp;
++
++import java.util.List;
++import java.util.concurrent.CompletionStage;
++
++public interface McpAuthorizer {
++    enum Action { READ, EXECUTE }
++    record Principal(String subject, String clientId, String resource, List<String> scopes) {}
++    record FlowResource(String tenant, String namespace, String flowId) {}
++    CompletionStage<Boolean> authorize(Principal principal, FlowResource resource, Action action);
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
+new file mode 100644
+index 0000000..48417d0
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
+@@ -0,0 +1,64 @@
++package io.kestra.webserver.mcp;
++
++import io.kestra.mcp.KestraMcpTransportContext;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.context.annotation.Value;
++import jakarta.inject.Singleton;
++import reactor.core.publisher.Mono;
++
++@Singleton
++public class McpCapabilityGate {
++    public static final String FLOW_READ = "mcp:flows:read";
++    public static final String EXECUTION_WRITE = "mcp:executions:write";
++    private final boolean oidcEnabled;
++    private final boolean executionEnabled;
++    private final boolean rbacEnabled;
++    private final BeanProvider<McpAuthorizer> authorizers;
++
++    public McpCapabilityGate(@Value("${kestra.oidc.enabled:false}") final boolean oidcEnabled,
++        @Value("${kestra.mcp.execution.enabled:true}") final boolean executionEnabled,
++        @Value("${kestra.mcp.rbac.enabled:false}") final boolean rbacEnabled,
++        final BeanProvider<McpAuthorizer> authorizers) {
++        this.oidcEnabled = oidcEnabled;
++        this.executionEnabled = executionEnabled;
++        this.rbacEnabled = rbacEnabled;
++        this.authorizers = authorizers;
++    }
++
++    public boolean visible(final KestraMcpTransportContext context) {
++        return !oidcEnabled || valid(context) && context.getScopes().contains(FLOW_READ);
++    }
++
++    public Mono<Boolean> readable(final KestraMcpTransportContext context, final String tenant,
++        final String namespace, final String flowId) {
++        if (!visible(context) || !rbacEnabled) return Mono.just(visible(context));
++        return authorize(context, tenant, namespace, flowId, McpAuthorizer.Action.READ);
++    }
++
++    public Mono<Boolean> execute(final KestraMcpTransportContext context, final String tenant,
++        final String namespace, final String flowId) {
++        if (!executionEnabled || oidcEnabled && (!valid(context)
++            || !context.getScopes().containsAll(java.util.List.of(FLOW_READ, EXECUTION_WRITE)))) return Mono.just(false);
++        if (!rbacEnabled) return Mono.just(true);
++        return authorize(context, tenant, namespace, flowId, McpAuthorizer.Action.READ)
++            .flatMap(readAllowed -> readAllowed
++                ? authorize(context, tenant, namespace, flowId, McpAuthorizer.Action.EXECUTE) : Mono.just(false));
++    }
++
++    private Mono<Boolean> authorize(final KestraMcpTransportContext context, final String tenant,
++        final String namespace, final String flowId, final McpAuthorizer.Action action) {
++        if (!valid(context) || tenant == null || namespace == null || flowId == null) return Mono.just(false);
++        return Mono.defer(() -> {
++            if (!authorizers.isPresent()) return Mono.just(false);
++            return Mono.fromCompletionStage(authorizers.get().authorize(
++                new McpAuthorizer.Principal(context.getUserId(), context.getClientId(), context.getResource(), context.getScopes()),
++                new McpAuthorizer.FlowResource(tenant, namespace, flowId), action));
++        }).defaultIfEmpty(false).onErrorReturn(false);
++    }
++
++    private boolean valid(final KestraMcpTransportContext context) {
++        return context != null && context.getUserId() != null && !context.getUserId().isBlank()
++            && context.getClientId() != null && !context.getClientId().isBlank()
++            && context.getResource() != null && !context.getResource().isBlank() && context.getScopes() != null;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
+index 62fdba7..f059c5b 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
+@@ -25,6 +25,16 @@ public class OidcConfiguration {
+     private Duration authorizationCodeTtl = Duration.ofMinutes(5);
+ 
+     private Duration sessionTtl = Duration.ofHours(8);
++    private List<String> mcpScopes = List.of("mcp:flows:read", "mcp:executions:write");
++
++    public List<String> getMcpScopes() { return List.copyOf(mcpScopes); }
++
++    public void setMcpScopes(final List<String> scopes) {
++        if (scopes == null || !List.of("mcp:flows:read", "mcp:executions:write").containsAll(scopes)) {
++            throw new IllegalArgumentException("Unknown MCP capability scope");
++        }
++        this.mcpScopes = List.copyOf(scopes);
++    }
+ 
+     /** Accounts seeded into an empty user directory at startup (bcrypt-hashed at runtime, never stored in config as hashes). */
+     private List<UserSeed> users = List.of();
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
+index 312402c..93058f8 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
+@@ -208,7 +208,7 @@ public class OidcProviderController {
+                     + escape(String.join(" ", requestedScopes)) + "</p><form method=\"post\" action=\"/oidc/consent\">"
+                     + "<input type=\"hidden\" name=\"interaction\" value=\"" + interaction
+                     + "\">" + requestedScopes.stream().map(scope -> "<label><input type=\"checkbox\" name=\"scope-" + escape(scope)
+-                        + "\" value=\"yes\" checked>" + escape(scope) + "</label>").collect(java.util.stream.Collectors.joining())
++                        + "\" value=\"yes\" checked>" + escape(scope) + scopePurpose(scope) + "</label>").collect(java.util.stream.Collectors.joining())
+                     + "<button name=\"decision\" value=\"approve\">Approve selected permissions</button><button name=\"decision\" value=\"deny\">Deny</button></form></body></html>")
+                     .contentType(MediaType.TEXT_HTML_TYPE).header("Cache-Control", "no-store")
+                     .header("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'");
+@@ -309,6 +309,14 @@ public class OidcProviderController {
+         catch (IllegalArgumentException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
+     }
+ 
++    private static String scopePurpose(final String scope) {
++        return switch (scope) {
++            case "mcp:flows:read" -> " — 读取工具定义和流程输出 / Read tool definitions and flow outputs";
++            case "mcp:executions:write" -> " — 执行流程，可能产生危险副作用 / Execute flows, potentially dangerous side effects";
++            default -> "";
++        };
++    }
++
+     private static String escape(final String value) {
+         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+     }
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+index 1596770..bca9cef 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+@@ -61,6 +61,10 @@ public class OidcOwnershipService {
+         try (var connection = source.getConnection()) {
+             final var state = state(connection, clientId, false);
+             requireAuthorizable(state, subject);
++            final var requested = List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +"));
++            if (requested.stream().filter(scope -> scope.startsWith("mcp:")).anyMatch(scope -> !configuration.getMcpScopes().contains(scope))) {
++                throw new IllegalArgumentException("MCP capability is not exposed");
++            }
+             final String interaction = UUID.randomUUID().toString();
+             try (var statement = connection.prepareStatement(
+                 "INSERT INTO oidc_consent(interaction_id,client_id,subject,session_id,parameters,expires_at) VALUES (?,?,?,?,?::jsonb,now()+interval '5 minutes')")) {
+@@ -113,6 +117,9 @@ public class OidcOwnershipService {
+                 }
+                 final List<String> requested = List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +"));
+                 final List<String> granted = selectedScopes == null ? requested : selectedScopes;
++                if (granted.stream().filter(scope -> scope.startsWith("mcp:")).anyMatch(scope -> !configuration.getMcpScopes().contains(scope))) {
++                    throw new IllegalArgumentException("MCP capability is not exposed");
++                }
+                 if (approve && (granted.isEmpty() || !requested.containsAll(granted))) throw new IllegalArgumentException("Invalid consent scope");
+                 if (approve && (!parameters.getOrDefault("code_challenge_method", List.of("")).equals(List.of("S256"))
+                     || !parameters.getOrDefault("code_challenge", List.of("")).getFirst().matches("[A-Za-z0-9_-]{43}"))) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
+index d7b4499..2c2d632 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
+@@ -70,7 +70,7 @@ public class OidcRegistrationService {
+             throw new IllegalArgumentException("invalid_client_metadata");
+         }
+         final List<String> scopes = List.of(scope.trim().split(" +"));
+-        if (!scopes.contains("openid") || !List.of("openid", "profile", "email").containsAll(scopes)) {
++        if (scopes.isEmpty() || !List.of("openid", "profile", "email", "mcp:flows:read", "mcp:executions:write").containsAll(scopes)) {
+             throw new IllegalArgumentException("invalid_client_metadata");
+         }
+         if (request.containsKey("client_name")
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
+new file mode 100644
+index 0000000..b3caed8
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
+@@ -0,0 +1,57 @@
++package io.kestra.mcp;
++
++import java.util.List;
++import java.util.Map;
++import java.util.function.BiFunction;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.services.ExecutionStreamingService;
++import io.kestra.core.services.ExecutionOutputService;
++import io.kestra.core.runners.FlowInputOutput;
++import io.kestra.core.runners.FlowMetaStoreInterface;
++import io.kestra.plugin.core.trigger.McpToolTrigger;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.modelcontextprotocol.server.McpAsyncServerExchange;
++import io.modelcontextprotocol.spec.McpSchema;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.any;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class McpExecutionGateTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void missingCompositeScopesCannotEmitExecutionCommand() throws Exception {
++        final var queue = mock(DispatchQueueInterface.class);
++        final var inputs = mock(FlowInputOutput.class);
++        final var outputs = mock(ExecutionOutputService.class);
++        final var provider = mock(io.micronaut.context.BeanProvider.class);
++        when(provider.isPresent()).thenReturn(true);
++        final var authorizer = mock(io.kestra.webserver.mcp.McpAuthorizer.class);
++        when(provider.get()).thenReturn(authorizer);
++        when(authorizer.authorize(any(), any(), any())).thenReturn(java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException()));
++        final var gate = new McpCapabilityGate(true, true, true, provider);
++        final var service = new McpToolService(queue, mock(FlowRepositoryInterface.class), mock(FlowToolSchemaMapper.class),
++            mock(ExecutionStreamingService.class), mock(io.micronaut.context.event.ApplicationEventPublisher.class),
++            new McpConfig(new McpConfig.ToolCacheConfig(10L, java.time.Duration.ofMinutes(5)), null, java.time.Duration.ofMinutes(5)),
++            inputs, mock(FlowMetaStoreInterface.class), outputs, new DefaultMcpToolAccessControl(), gate);
++        final var flow = Flow.builder().id("flow").namespace("private.ns").tasks(List.of()).build();
++        final var trigger = McpToolTrigger.builder().id("tool").type(McpToolTrigger.class.getName()).toolName("tool").build();
++        final var method = McpToolService.class.getDeclaredMethod("buildCallHandler", Flow.class, McpToolTrigger.class);
++        method.setAccessible(true);
++        final var handler = (BiFunction<McpAsyncServerExchange, McpSchema.CallToolRequest, Mono<McpSchema.CallToolResult>>) method.invoke(service, flow, trigger);
++        final var exchange = mock(McpAsyncServerExchange.class);
++        when(exchange.transportContext()).thenReturn(KestraMcpTransportContext.builder().tenantId("main").serverId("default")
++            .userId("alice").clientId("client").resource("resource").scopes(List.of(McpCapabilityGate.EXECUTION_WRITE)).build());
++        assertTrue(handler.apply(exchange, new McpSchema.CallToolRequest("tool", Map.of())).block().isError());
++        when(exchange.transportContext()).thenReturn(KestraMcpTransportContext.builder().tenantId("main").serverId("default")
++            .userId("alice").clientId("client").resource("resource")
++            .scopes(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE)).build());
++        assertTrue(handler.apply(exchange, new McpSchema.CallToolRequest("tool", Map.of())).block().isError());
++        verifyNoInteractions(queue, inputs, outputs);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java b/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java
+new file mode 100644
+index 0000000..6defcc0
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java
+@@ -0,0 +1,39 @@
++package io.kestra.mcp;
++
++import java.util.Optional;
++import io.kestra.core.mcp.models.McpSession;
++import io.kestra.core.mcp.repositories.McpSessionRepositoryInterface;
++import io.kestra.core.queues.BroadcastQueueInterface;
++import org.junit.jupiter.api.Test;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.any;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class McpSessionIdentityTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void differentUserClientAndResourceCannotReuseOrDeleteSession() {
++        final var repository = mock(McpSessionRepositoryInterface.class);
++        final var queue = mock(BroadcastQueueInterface.class);
++        final var service = new McpSessionService(repository, queue);
++        when(repository.find("main", "default", "session")).thenReturn(Optional.of(
++            new McpSession("main", "default", "session", "node", "alice", false, "client-a", "resource-a")));
++        final var alice = KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId("session")
++            .userId("alice").clientId("client-a").resource("resource-a").build();
++        assertTrue(service.sessionExists(alice));
++        for (final var context : java.util.List.of(
++            KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId("session").userId("bob").clientId("client-a").resource("resource-a").build(),
++            KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId("session").userId("alice").clientId("client-b").resource("resource-a").build(),
++            KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId("session").userId("alice").clientId("client-a").resource("resource-b").build())) {
++            assertFalse(service.sessionExists(context));
++            service.close(context);
++        }
++        verify(repository, never()).delete(any(), any());
++        verifyNoInteractions(queue);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java
+new file mode 100644
+index 0000000..4bc0fc0
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java
+@@ -0,0 +1,77 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import io.kestra.mcp.KestraMcpTransportContext;
++import io.kestra.webserver.mcp.McpAuthorizer;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.micronaut.context.BeanProvider;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.any;
++import static org.mockito.Mockito.eq;
++import static org.mockito.Mockito.atLeastOnce;
++import static org.mockito.Mockito.doReturn;
++
++class McpCapabilityGateTest {
++    private KestraMcpTransportContext identity(final List<String> scopes) {
++        return KestraMcpTransportContext.builder().tenantId("main").serverId("default").userId("alice")
++            .clientId("client").resource("https://example.org/api/v1/main/mcp/default").scopes(scopes).build();
++    }
++
++    @Test
++    void scopesAreIndependentAndExecutionCanBeDisabled() {
++        final var gate = new McpCapabilityGate(true, true, false, null);
++        assertTrue(gate.visible(identity(List.of(McpCapabilityGate.FLOW_READ))));
++        assertFalse(gate.execute(identity(List.of(McpCapabilityGate.FLOW_READ)), "main", "ns", "flow").block());
++        assertFalse(gate.visible(identity(List.of(McpCapabilityGate.EXECUTION_WRITE))));
++        assertFalse(gate.execute(identity(List.of(McpCapabilityGate.EXECUTION_WRITE)), "main", "ns", "flow").block());
++        assertTrue(gate.execute(identity(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE)), "main", "ns", "flow").block());
++        assertFalse(gate.execute(identity(List.of("mcp:executions:delete")), "main", "ns", "flow").block());
++        assertFalse(new McpCapabilityGate(true, false, false, null).execute(identity(List.of(McpCapabilityGate.EXECUTION_WRITE)), "main", "ns", "flow").block());
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void compositeCallRequiresReadAndExecuteForTypedResource() {
++        final BeanProvider<McpAuthorizer> provider = mock(BeanProvider.class);
++        final var authorizer = mock(McpAuthorizer.class);
++        when(provider.isPresent()).thenReturn(true);
++        when(provider.get()).thenReturn(authorizer);
++        final var gate = new McpCapabilityGate(true, true, true, provider);
++        final var context = identity(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE));
++        when(authorizer.authorize(any(), any(), eq(McpAuthorizer.Action.READ))).thenReturn(CompletableFuture.completedFuture(false));
++        assertFalse(gate.execute(context, "main", "private.ns", "same-id").block());
++        verify(authorizer, never()).authorize(any(), any(), eq(McpAuthorizer.Action.EXECUTE));
++        when(authorizer.authorize(any(), any(), eq(McpAuthorizer.Action.READ))).thenReturn(CompletableFuture.completedFuture(true));
++        when(authorizer.authorize(any(), any(), eq(McpAuthorizer.Action.EXECUTE))).thenReturn(CompletableFuture.completedFuture(false));
++        assertFalse(gate.execute(context, "main", "private.ns", "same-id").block());
++        when(authorizer.authorize(any(), any(), eq(McpAuthorizer.Action.EXECUTE))).thenReturn(CompletableFuture.completedFuture(true));
++        assertTrue(gate.execute(context, "main", "private.ns", "same-id").block());
++        verify(authorizer, atLeastOnce()).authorize(eq(new McpAuthorizer.Principal("alice", "client",
++            context.getResource(), context.getScopes())), eq(new McpAuthorizer.FlowResource("main", "private.ns", "same-id")),
++            eq(McpAuthorizer.Action.EXECUTE));
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void authorizerAbsenceExceptionsAndEmptyDecisionsFailClosed() {
++        final BeanProvider<McpAuthorizer> provider = mock(BeanProvider.class);
++        final var gate = new McpCapabilityGate(true, true, true, provider);
++        final var context = identity(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE));
++        assertFalse(gate.execute(context, "main", "ns", "flow").block());
++        when(provider.isPresent()).thenReturn(true);
++        when(provider.get()).thenThrow(new IllegalStateException());
++        assertFalse(gate.execute(context, "main", "ns", "flow").block());
++        final var authorizer = mock(McpAuthorizer.class);
++        doReturn(authorizer).when(provider).get();
++        when(authorizer.authorize(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(new IllegalStateException()));
++        assertFalse(gate.execute(context, "main", "ns", "flow").block());
++        assertFalse(gate.execute(null, "main", "ns", "flow").block());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
+index 0fa89f5..e5059f1 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
+@@ -32,7 +32,20 @@ class McpSdkInstanceTest {
+         final var client = McpClient.sync(transport).requestTimeout(Duration.ofSeconds(15)).build();
+         try {
+             assertNotNull(client.initialize().protocolVersion());
+-            assertNotNull(client.listTools().tools());
++            final var tools = client.listTools().tools();
++            assertNotNull(tools);
++            if ("true".equals(System.getenv("MCP_EXPECT_TOOLS_EMPTY"))) assertTrue(tools.isEmpty(), "RBAC unavailable must hide schemas");
++            final String toolName = System.getenv("MCP_CALL_TOOL");
++            if (toolName != null && !toolName.isBlank()) {
++                if ("true".equals(System.getenv("MCP_EXPECT_HIDDEN_CALL"))) {
++                    assertThrows(io.modelcontextprotocol.spec.McpError.class, () -> client.callTool(
++                        new io.modelcontextprotocol.spec.McpSchema.CallToolRequest(toolName, java.util.Map.of())));
++                    return;
++                }
++                assertTrue(tools.stream().anyMatch(tool -> toolName.equals(tool.name())), "Fixture tool must exist before call");
++                final var result = client.callTool(new io.modelcontextprotocol.spec.McpSchema.CallToolRequest(toolName, java.util.Map.of()));
++                assertEquals(Boolean.parseBoolean(System.getenv("MCP_EXPECT_CALL_ERROR")), Boolean.TRUE.equals(result.isError()));
++            }
+         } finally {
+             client.closeGracefully();
+         }
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
+index 65cb328..bf01fd5 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
+@@ -82,6 +82,18 @@ class OidcOwnershipServiceTest extends OidcPostgresTestBase {
+         }
+     }
+ 
++    @Test
++    void shouldRejectServerDisabledScopesBeforeBinding() {
++        final String client = register();
++        final var config = new OidcConfiguration();
++        config.setMcpScopes(List.of("mcp:flows:read"));
++        final var restricted = new OidcOwnershipService(dataSource(), mapper, 2, config);
++        final var request = new java.util.HashMap<>(parameters());
++        request.put("scope", List.of("openid mcp:flows:read mcp:executions:write"));
++        assertThrows(IllegalArgumentException.class, () -> restricted.begin(client, "alice", "session", request));
++        assertEquals("pending", restricted.state(client).kind());
++    }
++
+     @Test
+     void shouldRejectInactiveUserAndEmptyScopeWithoutBinding() throws Exception {
+         final String client = register();

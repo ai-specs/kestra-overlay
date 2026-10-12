@@ -1,0 +1,273 @@
+# 需求: REQ-0180 mcp-oauth-only
+# 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者授权）
+# 状态: core
+# 来源: 新写；RFC6749/7591 + OWASP CSRF + PostgreSQL事务
+# 触达上游文件: 8 个（详见diff）
+# 移除条件: 上游OSS提供等价能力或本需求弃用
+diff --git a/core/src/main/java/io/kestra/core/mcp/models/McpServer.java b/core/src/main/java/io/kestra/core/mcp/models/McpServer.java
+index fbdb0ad..6923bbe 100644
+--- a/core/src/main/java/io/kestra/core/mcp/models/McpServer.java
++++ b/core/src/main/java/io/kestra/core/mcp/models/McpServer.java
+@@ -92,7 +92,7 @@ public record McpServer(
+             serverType = ServerType.PRIVATE;
+         }
+         if (authType == null) {
+-            authType = AuthType.BASIC;
++            authType = AuthType.OAUTH;
+         }
+         isDefault = DEFAULT_ID.equals(id);
+     }
+diff --git a/core/src/main/java/io/kestra/core/mcp/services/McpServerService.java b/core/src/main/java/io/kestra/core/mcp/services/McpServerService.java
+index f7108fa..3991767 100644
+--- a/core/src/main/java/io/kestra/core/mcp/services/McpServerService.java
++++ b/core/src/main/java/io/kestra/core/mcp/services/McpServerService.java
+@@ -33,7 +33,7 @@ public class McpServerService {
+                 "suitable flow exists, state that the request cannot be fulfilled. Do not provide " +
+                 "explanations about Kestra unless explicitly asked.",
+             McpServer.ServerType.PRIVATE,
+-            McpServer.AuthType.BASIC,
++            McpServer.AuthType.OAUTH,
+             null,
+             null,
+             false,
+diff --git a/ui/src/components/admin/McpServerCard.vue b/ui/src/components/admin/McpServerCard.vue
+index f4c2d7c..5ce6a0e 100644
+--- a/ui/src/components/admin/McpServerCard.vue
++++ b/ui/src/components/admin/McpServerCard.vue
+@@ -96,8 +96,8 @@
+     const {t} = useI18n({useScope: "global"})
+ 
+     const AUTH_LABELS: Record<McpServerAuthType, string> = {
+-        BASIC: "mcp.basic_auth",
+-        API_TOKEN: "mcp.api_token",
++        BASIC: "mcp.oauth",
++        API_TOKEN: "mcp.oauth",
+         OAUTH: "mcp.oauth",
+     }
+ 
+@@ -214,4 +214,4 @@
+     .delete-icon {
+         color: var(--ks-icon-muted);
+     }
+-</style>
+\ No newline at end of file
++</style>
+diff --git a/ui/src/components/admin/mcp/tabs/McpConnect.vue b/ui/src/components/admin/mcp/tabs/McpConnect.vue
+index 51f6a89..3d398b2 100644
+--- a/ui/src/components/admin/mcp/tabs/McpConnect.vue
++++ b/ui/src/components/admin/mcp/tabs/McpConnect.vue
+@@ -151,7 +151,7 @@
+     })
+ 
+     const authType = computed<McpServerAuthType>(
+-        () => mcpStore.server?.authType ?? "BASIC",
++        () => "OAUTH",
+     )
+     const serverType = computed<McpServer["serverType"]>(
+         () => mcpStore.server?.serverType ?? "PRIVATE",
+@@ -175,10 +175,6 @@
+             return null
+         }
+         switch (authType.value) {
+-        case "API_TOKEN":
+-            return "Bearer ${KESTRA_TOKEN}"
+-        case "BASIC":
+-            return "Basic ${KESTRA_BASIC_AUTH}"
+         case "OAUTH":
+             return null
+         }
+@@ -266,12 +262,6 @@
+         if (isPublic.value) {
+             return null
+         }
+-        if (authType.value === "BASIC") {
+-            return "mcp.connect_tab.auth_basic_hint"
+-        }
+-        if (authType.value === "API_TOKEN") {
+-            return "mcp.connect_tab.auth_api_token_hint"
+-        }
+         if (selectedClient.value === "claude_code") {
+             return "mcp.connect_tab.auth_oauth_client_id_hint"
+         }
+@@ -375,4 +365,4 @@
+             color: var(--ks-text-primary);
+         }
+     }
+-</style>
+\ No newline at end of file
++</style>
+diff --git a/ui/src/components/admin/mcp/tabs/McpEdit.vue b/ui/src/components/admin/mcp/tabs/McpEdit.vue
+index 788e442..6c6141b 100644
+--- a/ui/src/components/admin/mcp/tabs/McpEdit.vue
++++ b/ui/src/components/admin/mcp/tabs/McpEdit.vue
+@@ -179,9 +179,7 @@
+     const DEFAULT_OAUTH_SCOPES = ["openid", "profile", "email"]
+ 
+     const AUTH_OPTIONS = [
+-        {value: "BASIC", labelKey: "mcp.basic_auth", hintKey: "mcp.username_password", ee: false},
+-        {value: "API_TOKEN", labelKey: "mcp.api_token", hintKey: "mcp.bearer_token", ee: true},
+-        {value: "OAUTH", labelKey: "mcp.oauth", hintKey: "mcp.oauth_hint", ee: true},
++        {value: "OAUTH", labelKey: "mcp.oauth", hintKey: "mcp.oauth_hint", ee: false},
+     ] as const
+ 
+     type AuthOption = (typeof AUTH_OPTIONS)[number]
+@@ -193,7 +191,7 @@
+         description: "",
+         instructions: "",
+         serverType: "PRIVATE",
+-        authType: "BASIC",
++        authType: "OAUTH",
+         oauthProvider: "",
+         oauthScopesSupported: [...DEFAULT_OAUTH_SCOPES],
+         disabled: false,
+@@ -451,4 +449,4 @@
+     .full-width {
+         width: 100%;
+     }
+-</style>
+\ No newline at end of file
++</style>
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
+index 03dd170..ef2a77b 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpServerController.java
+@@ -140,23 +140,13 @@ public class McpServerController {
+     protected void validateMcp(ApiMcpServer mcpServer) {
+         McpServer.AuthType authType = mcpServer.authType();
+ 
+-        if (
+-            editionProvider.get() == EditionProvider.Edition.OSS
+-                && (authType == McpServer.AuthType.API_TOKEN || authType == McpServer.AuthType.OAUTH)
+-        ) {
+-            throw new HttpStatusException(HttpStatus.FORBIDDEN, "Auth type '" + authType + "' requires Enterprise Edition");
+-        }
++        if (authType != McpServer.AuthType.OAUTH) throw new HttpStatusException(HttpStatus.BAD_REQUEST, "MCP requires OAuth2 authentication");
+ 
+         boolean hasOauthProvider = mcpServer.oauthProvider() != null && !mcpServer.oauthProvider().isBlank();
+         boolean hasScopes = !ListUtils.isEmpty(mcpServer.oauthScopesSupported());
+ 
+         if (authType == McpServer.AuthType.OAUTH) {
+-            if (!hasOauthProvider) {
+-                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthProvider is required when authType is OAUTH");
+-            }
+-            if (!hasScopes) {
+-                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthScopesSupported is required when authType is OAUTH");
+-            }
++            if (hasOauthProvider && !"kestra".equals(mcpServer.oauthProvider())) throw new HttpStatusException(HttpStatus.BAD_REQUEST, "MCP uses the configured Kestra authorization server");
+         } else {
+             if (hasOauthProvider) {
+                 throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthProvider must not be set when authType is not OAUTH");
+diff --git a/webserver/src/main/java/io/kestra/webserver/filter/McpServerAuthenticationFilter.java b/webserver/src/main/java/io/kestra/webserver/filter/McpServerAuthenticationFilter.java
+index 9a9ae38..0763849 100644
+--- a/webserver/src/main/java/io/kestra/webserver/filter/McpServerAuthenticationFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/filter/McpServerAuthenticationFilter.java
+@@ -33,20 +33,6 @@ public class McpServerAuthenticationFilter implements HttpServerFilter {
+     /** Request attribute set when this filter has already made the auth decision. */
+     public static final String MCP_AUTH_HANDLED = "io.kestra.mcp.auth.handled";
+ 
+-    private final McpServerCache mcpServerCache;
+-    private final BasicAuthService basicAuthService;
+-    private final TenantService tenantService;
+-
+-    @Inject
+-    public McpServerAuthenticationFilter(
+-        McpServerCache mcpServerCache,
+-        BasicAuthService basicAuthService,
+-        TenantService tenantService) {
+-        this.mcpServerCache = mcpServerCache;
+-        this.basicAuthService = basicAuthService;
+-        this.tenantService = tenantService;
+-    }
+-
+     @Override
+     public int getOrder() {
+         return ServerFilterPhase.SECURITY.order() - 1;
+@@ -58,30 +44,7 @@ public class McpServerAuthenticationFilter implements HttpServerFilter {
+         if (serverId.isEmpty()) {
+             return chain.proceed(request);
+         }
+-        return Mono.fromCallable(() -> mcpServerCache.get(tenantService.resolveTenant(), serverId.get()))
+-            .subscribeOn(Schedulers.boundedElastic())
+-            .flatMapMany(
+-                optMcpServer -> optMcpServer.isEmpty()
+-                    ? chain.proceed(request)
+-                    : authenticate(request, chain, optMcpServer.get())
+-            );
++        return Flux.just(HttpResponse.<Object> unauthorized().body(java.util.Map.of("error", "oauth2_required")));
+     }
+ 
+-    private Publisher<MutableHttpResponse<?>> authenticate(
+-        HttpRequest<?> request,
+-        ServerFilterChain chain,
+-        McpServer mcpServer) {
+-        if (mcpServer.serverType() == McpServer.ServerType.PUBLIC) {
+-            // Public servers require no auth — enabled/disabled is the controller's concern
+-            request.getAttributes().put(MCP_AUTH_HANDLED, true);
+-            return chain.proceed(request);
+-        }
+-
+-        // PRIVATE server: require Basic auth regardless of enabled state
+-        if (basicAuthService.isAuthenticated(request)) {
+-            request.getAttributes().put(MCP_AUTH_HANDLED, true);
+-            return chain.proceed(request);
+-        }
+-        return Flux.just(HttpResponse.<Object> unauthorized().header("WWW-Authenticate", "Basic"));
+-    }
+ }
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpOAuthOnlyTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpOAuthOnlyTest.java
+new file mode 100644
+index 0000000..5a76f4c
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpOAuthOnlyTest.java
+@@ -0,0 +1,51 @@
++package io.kestra.webserver.oidc;
++
++import java.util.Optional;
++import io.kestra.mcp.McpToolRoute;
++import io.kestra.core.mcp.models.McpServer;
++import io.kestra.webserver.controllers.api.McpServerController;
++import io.kestra.webserver.models.api.ApiMcpServer;
++import io.kestra.webserver.filter.McpServerAuthenticationFilter;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.filter.ServerFilterChain;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertInstanceOf;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.mockStatic;
++import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.verifyNoInteractions;
++
++class McpOAuthOnlyTest {
++    @Test
++    void privatePublicAndUnknownMcpRoutesRejectBasicWithoutOidc() {
++        final var chain = mock(ServerFilterChain.class);
++        final var filter = new McpServerAuthenticationFilter();
++        try (var routes = mockStatic(McpToolRoute.class)) {
++            for (final String id : java.util.List.of("private", "public", "missing")) {
++                final var request = HttpRequest.POST("/api/v1/main/mcp/" + id, "{}").header("Authorization", "Basic dGVzdDp0ZXN0");
++                routes.when(() -> McpToolRoute.serverId(request)).thenReturn(Optional.of(id));
++                assertEquals(HttpStatus.UNAUTHORIZED, Mono.from(filter.doFilter(request, chain)).block().getStatus());
++            }
++            verifyNoInteractions(chain);
++        }
++    }
++
++    @Test
++    void apiRejectsBasicAndApiTokenWithoutEditionGate() throws Exception {
++        final var controller = new McpServerController(null, null, null, null);
++        final var validate = McpServerController.class.getDeclaredMethod("validateMcp", ApiMcpServer.class);
++        validate.setAccessible(true);
++        for (final var type : java.util.List.of(McpServer.AuthType.BASIC, McpServer.AuthType.API_TOKEN)) {
++            final var value = new ApiMcpServer("server", "", "", McpServer.ServerType.PRIVATE, type, null, null, false, false, null, null);
++            final var error = assertThrows(java.lang.reflect.InvocationTargetException.class, () -> validate.invoke(controller, value));
++            assertInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class, error.getCause());
++        }
++        assertDoesNotThrow(() -> validate.invoke(controller, new ApiMcpServer("server", "", "", McpServer.ServerType.PRIVATE,
++            McpServer.AuthType.OAUTH, null, null, false, false, null, null)));
++    }
++}

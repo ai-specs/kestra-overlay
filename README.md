@@ -246,19 +246,22 @@ docker compose up -d
 
 ### 其他项目接入内置 IdP
 
-**下一阶段 MCP 用户归属方案（尚未实现）**：客户端先动态注册取得短期待绑定
+**MCP 用户归属本地验收完成，待维护者review与真CI**：0150/0160/0170/0180/0190
+提供owner/consent、resource Bearer、复合scope、OAuth-only与owner管理/共享限速。
+外部RBAC jar和REST适配未交付，不能宣称具体资源隔离。客户端先动态注册取得短期待绑定
 client_id，再打开浏览器；用户登录并明确同意后，client 原子绑定该用户，签发
 用户身份的 token，以该用户权限调用 MCP。拒绝删除申请，未确认超时清理；正式
-client 不在用户之间共享，其他用户不能使用或管理。现有动态注册仍是全局记录，
-不能据此宣称多用户隔离已交付。详见
+client 不在用户之间共享，其他用户不能使用或管理。这里已验证的是client归属与
+能力控制，不是外部RBAC所负责的具体资源/namespace数据隔离。详见
 [MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)，含时序图、页面、
 缓存失效恢复、PKCE 边界与分阶段验收。下文描述的是当前已交付的 public DCR。
 
-规划中的 MCP 能力 scope 按资源大类提供 read/write/delete，write 不含删除，
+MCP 能力 scope 按资源大类区分 read/write/delete，write 不含删除；当前仅声明
+`mcp:flows:read` 与 `mcp:executions:write`，现有flow复合call必须两者均具备。
 用户可在授权页进一步收窄。本仓逐工具调用独立强制检查，不依赖外部 RBAC；
 外部 RBAC 启用后，现有 MCP 工具内部实际资源操作还必须经过与 REST 相同的
 细粒度授权。两层均允许才执行；未接 RBAC 时不声称具体资源/namespace 隔离。
-以上能力 scope 和执行层 RBAC 对接均未实现，不能把当前 token scope 当作其证明。
+能力 scope 与 MCP-only Authorizer SPI 已实施；外部 RBAC 与 REST 统一适配未交付。
 
 支持 RFC7591 动态 **public client** 注册，适用于公开 MCP、桌面及浏览器客户端：
 `token_endpoint_auth_method=none`，不生成 client secret，授权码流强制 PKCE S256。
@@ -283,11 +286,31 @@ curl --fail-with-body -X POST 'http://localhost:8080/oidc/register' \
   -d '{"redirect_uris":["http://127.0.0.1:9999/callback"],"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"],"scope":"openid profile email","client_name":"Public OAuth client"}'
 ```
 
-成功返回 201、随机 `client_id` 和确认的元数据，无 `client_secret`。消费方保存 client ID，
+成功返回 201、随机临时 `client_id` 和确认的元数据，无 `client_secret`；记录为pending，
+默认30分钟过期，未确认不能换token。登录consent原子绑定owner后才成为正式client；
+拒绝删除pending，过期须重新注册。消费方保存有效client ID，
 每次授权生成新的 verifier/challenge，携带 state/nonce；使用精确注册的回调换 token，
 提交 `client_id`、code 和 `code_verifier`，不提交 secret。只允许 HTTPS 回调或 loopback
 HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、userinfo、通配符和非 loopback HTTP。
-当前仅 public 授权码/refresh 注册；不提供 RFC7592 client 更新/删除管理或 MCP 专属端点。
+当前仅public授权码/refresh注册；已提供下述owner list/detail/revoke/delete管理，
+不是RFC7592注册管理协议，不提供client元数据更新接口。
+
+MCP只接受resource-bound access token，拒绝Basic、ID token与IdP/UI cookie；OIDC关闭时
+MCP失败关闭，普通REST认证保留上游模式。SDK基线为Java MCP 1.1.3，实测协议2025-06-18；
+不声称外部GUI兼容。`kestra.url`是公开资源基址，不从Host/Forwarded推导。
+`kestra.oidc.mcp-scopes`限定可授权能力（默认上述两项）；`kestra.mcp.execution.enabled=false`
+关闭执行。pending TTL为`registration.pending-ttl-minutes`（1–120，默认30），
+`max-pending-clients`默认100、`max-clients`默认1000、`max-clients-per-user`默认20。
+`kestra.oidc.registration.requests-per-minute`默认60，是共享数据库hard ceiling；
+IP/可信入口限速仍是部署责任，数据库异常503，超额429。
+owner浏览器会话可GET `/oidc/clients?page=1&size=20`、GET `/oidc/clients/{id}`，
+均无secret且只返回owner记录；detail返回五分钟单次interaction（每用户最多20）。
+POST `/oidc/clients/{id}/revoke` JSON `{action:"revoke"|"delete",interaction:"..."}`
+要求ACTIVE用户、当前IdP会话与同源Origin；interaction原子消费，重放403、他人404。
+管理没有独立UI，也不是RFC7592；撤销立即阻断token、refresh和已有MCPsession后续调用。
+`bash scripts/blackbox-mcp-oauth.sh IMAGE /absolute/verify-tree`自建PG、生产首装、
+UI cookie+CSRF创建flow，并强制执行SDK正反向、B用户、跨真实server、撤销session/refresh
+和RBAC缺bean镜像门；不接受SDK skipped。异常Authorizer零队列副作用另由单元集成路径验证。
 
 消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
 authorize `/oidc/authorize`、token `/oidc/token`、JWKS `/oidc/jwks`、userinfo `/oidc/userinfo`。

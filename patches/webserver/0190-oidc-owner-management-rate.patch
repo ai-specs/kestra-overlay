@@ -1,0 +1,423 @@
+# 需求: REQ-0190 oidc-owner-management-rate（按维护者裁决在0180后应用，迁移仍2.0.97）
+# 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者授权）
+# 状态: core
+# 来源: 新写；RFC6749/7591 + OWASP CSRF + PostgreSQL事务
+# 触达上游文件: 9 个（详见diff）
+# 移除条件: 上游OSS提供等价能力或本需求弃用
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java
+new file mode 100644
+index 0000000..e7b4a0f
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java
+@@ -0,0 +1,71 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import java.util.Map;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.services.OidcOwnershipService;
++import io.kestra.webserver.oidc.services.OidcSessionService;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Post;
++import io.micronaut.http.annotation.Body;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++import io.micronaut.scheduling.TaskExecutors;
++
++@Controller("/oidc/clients")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@ExecuteOn(TaskExecutors.IO)
++public class OidcOwnedClientController {
++    private final OidcOwnershipService ownership;
++    private final OidcSessionService sessions;
++    private final OidcConfiguration configuration;
++    private final io.kestra.webserver.oidc.services.OidcUserService users;
++
++    public OidcOwnedClientController(final OidcOwnershipService ownership, final OidcSessionService sessions,
++        final OidcConfiguration configuration, final io.kestra.webserver.oidc.services.OidcUserService users) {
++        this.ownership = ownership;
++        this.sessions = sessions;
++        this.configuration = configuration;
++        this.users = users;
++    }
++
++    @Post("/{clientId}/revoke")
++    public HttpResponse<?> revoke(final String clientId, final HttpRequest<?> request, @Body final Map<String, String> form) {
++        final URI issuer = URI.create(configuration.getIssuer());
++        if (!(issuer.getScheme() + "://" + issuer.getRawAuthority()).equals(request.getHeaders().get("Origin"))) return HttpResponse.status(HttpStatus.FORBIDDEN);
++        final var subject = sessions.sessionIdFrom(request).flatMap(sessions::subject);
++        if (subject.isEmpty() || users.bySubject(subject.get()).isEmpty()) return HttpResponse.unauthorized();
++        if (!java.util.List.of("revoke", "delete").contains(form.getOrDefault("action", ""))) return HttpResponse.badRequest();
++        if (form.getOrDefault("interaction", "").isBlank()) return HttpResponse.status(HttpStatus.FORBIDDEN);
++        try {
++            ownership.revoke(clientId, subject.get(), "delete".equals(form.get("action")), form.get("interaction"), sessions.sessionIdFrom(request).orElseThrow());
++            return HttpResponse.noContent();
++        } catch (SecurityException exception) { return HttpResponse.status(HttpStatus.FORBIDDEN); }
++        catch (IllegalArgumentException exception) { return HttpResponse.notFound(); }
++    }
++
++    @io.micronaut.http.annotation.Get("/{clientId}")
++    public HttpResponse<?> detail(final String clientId, final HttpRequest<?> request) {
++        final var subject = sessions.sessionIdFrom(request).flatMap(sessions::subject);
++        if (subject.isEmpty() || users.bySubject(subject.get()).isEmpty()) return HttpResponse.unauthorized();
++        try {
++            final var state = ownership.state(clientId);
++            return HttpResponse.ok(Map.of("client_id", clientId, "client_name", state.name(), "active", state.active(),
++                "interaction", ownership.managementInteraction(clientId, subject.get(), sessions.sessionIdFrom(request).orElseThrow())))
++                .header("Cache-Control", "no-store");
++        } catch (IllegalArgumentException exception) { return HttpResponse.notFound(); }
++    }
++
++    @io.micronaut.http.annotation.Get
++    public HttpResponse<?> list(final HttpRequest<?> request,
++        @io.micronaut.http.annotation.QueryValue(defaultValue = "1") final int page,
++        @io.micronaut.http.annotation.QueryValue(defaultValue = "20") final int size) {
++        final var subject = sessions.sessionIdFrom(request).flatMap(sessions::subject);
++        if (subject.isEmpty() || users.bySubject(subject.get()).isEmpty()) return HttpResponse.unauthorized();
++        try { return HttpResponse.ok(Map.of("clients", ownership.ownedClients(subject.get(), page, size), "page", page, "size", size)).header("Cache-Control", "no-store"); }
++        catch (IllegalArgumentException exception) { return HttpResponse.badRequest(); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
+index aebeeb6..20ea035 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
+@@ -19,16 +19,20 @@ import io.micronaut.scheduling.annotation.ExecuteOn;
+ public class OidcRegistrationController {
+     private final OidcRegistrationService registration;
+     private final OidcSetupService setup;
++    private final io.kestra.webserver.oidc.services.OidcRegistrationRate rate;
+ 
+-    public OidcRegistrationController(final OidcRegistrationService registration, final OidcSetupService setup) {
++    public OidcRegistrationController(final OidcRegistrationService registration, final OidcSetupService setup,
++        final io.kestra.webserver.oidc.services.OidcRegistrationRate rate) {
+         this.registration = registration;
+         this.setup = setup;
++        this.rate = rate;
+     }
+ 
+     @Post
+     public HttpResponse<?> register(@Body final Map<String, Object> metadata) {
+         try {
+             if (!setup.ready()) return HttpResponse.status(HttpStatus.SERVICE_UNAVAILABLE);
++            if (!rate.allow()) return HttpResponse.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "temporarily_unavailable"));
+             return HttpResponse.status(HttpStatus.CREATED).body(registration.register(metadata)).header("Cache-Control", "no-store");
+         } catch (IllegalArgumentException exception) {
+             return HttpResponse.badRequest(Map.of("error", exception.getMessage()));
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_97OidcServerRateMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_97OidcServerRateMigration.java
+new file mode 100644
+index 0000000..9d857a1
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_97OidcServerRateMigration.java
+@@ -0,0 +1,18 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++import javax.sql.DataSource;
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public class V2_0_97OidcServerRateMigration extends AbstractSQLMigrationScript {
++    private final DataSource source;
++    public V2_0_97OidcServerRateMigration(final DataSource source) { this.source = source; }
++    @Override public String scriptId() { return "2.0.97-oidc-server-rate"; }
++    @Override public String description() { return "Shared OAuth registration rate limit"; }
++    @Override protected DataSource dataSource() { return source; }
++    @Override public List<String> sqlResources() { return List.of("/migrations/2.0.97-oidc-server-rate-postgres.sql"); }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+index bca9cef..a90af48 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+@@ -56,6 +56,130 @@ public class OidcOwnershipService {
+         }
+     }
+ 
++    public void revoke(final String clientId, final String subject, final boolean delete) {
++        revoke(clientId, subject, delete, null, null);
++    }
++
++    public void revoke(final String clientId, final String subject, final boolean delete, final String interaction, final String session) {
++        if (subject == null || subject.isBlank()) throw new IllegalArgumentException("Invalid client ownership");
++        try (var connection = source.getConnection()) {
++            connection.setAutoCommit(false);
++            try {
++                try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
++                final var state = state(connection, clientId, true);
++                if (!"owned".equals(state.kind()) || !subject.equals(state.owner())) throw new IllegalArgumentException("Invalid client ownership");
++                requireActive(connection, subject);
++                if (interaction != null) {
++                    try (var statement = connection.prepareStatement("DELETE FROM oidc_client_management WHERE interaction=? AND client_id=? AND subject=? AND session_id=? AND expires_at>now()")) {
++                        statement.setString(1, interaction);
++                        statement.setString(2, clientId);
++                        statement.setString(3, subject);
++                        statement.setString(4, session);
++                        if (statement.executeUpdate() != 1) throw new SecurityException("Invalid management interaction");
++                    }
++                }
++                for (final String sql : List.of("UPDATE oidc_client SET active=FALSE WHERE client_id=?",
++                    "UPDATE oidc_token SET revoked=TRUE WHERE client_id=?", "UPDATE oidc_authorization_code SET used=TRUE WHERE client_id=?",
++                    "DELETE FROM oidc_consent WHERE client_id=?")) {
++                    try (var statement = connection.prepareStatement(sql)) {
++                        statement.setString(1, clientId);
++                        statement.executeUpdate();
++                    }
++                }
++                if (delete) {
++                    try (var statement = connection.prepareStatement("DELETE FROM oidc_client WHERE client_id=?")) {
++                        statement.setString(1, clientId);
++                        statement.executeUpdate();
++                    }
++                }
++                connection.commit();
++            } catch (RuntimeException | SQLException exception) {
++                connection.rollback();
++                throw exception;
++            }
++        } catch (SQLException exception) { throw new IllegalStateException("Cannot revoke client"); }
++    }
++
++    public String managementInteraction(final String clientId, final String subject, final String session) {
++        final String interaction = UUID.randomUUID().toString();
++        try (var connection = source.getConnection()) {
++            connection.setAutoCommit(false);
++            try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
++            final var state = state(connection, clientId, true);
++            if (!"owned".equals(state.kind()) || !java.util.Objects.equals(subject, state.owner()) || subject == null) throw new IllegalArgumentException("Invalid owner");
++            requireActive(connection, subject);
++            try (var cleanup = connection.createStatement()) {
++                cleanup.executeUpdate("DELETE FROM oidc_client_management WHERE interaction IN (SELECT interaction FROM oidc_client_management WHERE expires_at<=now() LIMIT 100)");
++            }
++            try (var count = connection.prepareStatement("SELECT count(*) FROM oidc_client_management WHERE subject=? AND expires_at>now()")) {
++                count.setString(1, subject);
++                try (var result = count.executeQuery()) {
++                    result.next();
++                    if (result.getInt(1) >= 20) throw new IllegalArgumentException("Management interaction limit reached");
++                }
++            }
++            try (var statement = connection.prepareStatement("INSERT INTO oidc_client_management(interaction,client_id,subject,session_id,expires_at) VALUES (?,?,?,?,now()+interval '5 minutes')")) {
++            statement.setString(1, interaction);
++            statement.setString(2, clientId);
++            statement.setString(3, subject);
++            statement.setString(4, session);
++            statement.executeUpdate();
++            }
++            connection.commit();
++            return interaction;
++        } catch (SQLException exception) { throw new IllegalStateException("Cannot begin client management"); }
++    }
++
++    public List<Map<String, Object>> ownedClients(final String subject, final int page, final int size) {
++        if (subject == null || subject.isBlank()) throw new IllegalArgumentException("Invalid owner");
++        if (page < 1 || page > 10000 || size < 1 || size > 100) throw new IllegalArgumentException("Invalid pagination");
++        final var clients = new java.util.ArrayList<Map<String, Object>>();
++        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
++            "SELECT client_id,client_name,active FROM oidc_client WHERE owner_subject=? AND client_kind='owned' ORDER BY created_at DESC,client_id LIMIT ? OFFSET ?")) {
++            statement.setString(1, subject);
++            statement.setInt(2, size);
++            statement.setInt(3, (page-1)*size);
++            try (var result = statement.executeQuery()) {
++                while (result.next()) clients.add(Map.of("client_id", result.getString(1), "client_name", result.getString(2), "active", result.getBoolean(3)));
++            }
++            return clients;
++        } catch (SQLException exception) { throw new IllegalStateException("Cannot list owned clients"); }
++    }
++
++    private void requireActive(final Connection connection, final String subject) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT user_state FROM oidc_user WHERE username=? FOR SHARE")) {
++            statement.setString(1, subject);
++            try (var result = statement.executeQuery()) {
++                if (!result.next() || !"ACTIVE".equals(result.getString(1))) throw new IllegalArgumentException("Inactive owner");
++            }
++        }
++    }
++
++    public boolean consumeManagement(final String interaction, final String clientId, final String subject, final String session) {
++        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
++            "DELETE FROM oidc_client_management WHERE interaction=? AND client_id=? AND subject=? AND session_id=? AND expires_at>now()")) {
++            statement.setString(1, interaction);
++            statement.setString(2, clientId);
++            statement.setString(3, subject);
++            statement.setString(4, session);
++            return statement.executeUpdate() == 1;
++        } catch (SQLException exception) { throw new IllegalStateException("Cannot validate client management"); }
++    }
++
++    @io.micronaut.scheduling.annotation.Scheduled(fixedDelay = "1m")
++    public void cleanup() {
++        try (var connection = source.getConnection()) {
++            connection.setAutoCommit(false);
++            try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
++            try (var statement = connection.createStatement()) {
++                statement.executeUpdate("DELETE FROM oidc_client WHERE client_id IN (SELECT client_id FROM oidc_client WHERE client_kind='pending' AND pending_expires_at<=now() ORDER BY pending_expires_at LIMIT 100)");
++                statement.executeUpdate("DELETE FROM oidc_consent WHERE interaction_id IN (SELECT interaction_id FROM oidc_consent WHERE consumed OR expires_at<=now() ORDER BY expires_at LIMIT 100)");
++                statement.executeUpdate("DELETE FROM oidc_client_management WHERE interaction IN (SELECT interaction FROM oidc_client_management WHERE expires_at<=now() ORDER BY expires_at LIMIT 100)");
++            }
++            connection.commit();
++        } catch (SQLException exception) { throw new IllegalStateException("Cannot clean expired authorization records"); }
++    }
++
+     public String begin(final String clientId, final String subject, final String sessionId,
+         final Map<String, List<String>> parameters) {
+         try (var connection = source.getConnection()) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationRate.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationRate.java
+new file mode 100644
+index 0000000..d1a982e
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationRate.java
+@@ -0,0 +1,29 @@
++package io.kestra.webserver.oidc.services;
++
++import javax.sql.DataSource;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.annotation.Value;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public class OidcRegistrationRate {
++    private final DataSource source;
++    private final int maximum;
++    public OidcRegistrationRate(final DataSource source, @Value("${kestra.oidc.registration.requests-per-minute:60}") final int maximum) {
++        this.source = DelegatingDataSource.unwrapDataSource(source);
++        if (maximum < 1 || maximum > 10000) throw new IllegalArgumentException("Invalid registration rate limit");
++        this.maximum = maximum;
++    }
++    public boolean allow() {
++        try (var connection = source.getConnection(); var statement = connection.prepareStatement("""
++            INSERT INTO oidc_registration_rate(bucket,window_start,requests) VALUES ('global',now(),1)
++            ON CONFLICT(bucket) DO UPDATE SET
++              requests=CASE WHEN oidc_registration_rate.window_start<=now()-interval '1 minute' THEN 1 ELSE LEAST(oidc_registration_rate.requests+1,10001) END,
++              window_start=CASE WHEN oidc_registration_rate.window_start<=now()-interval '1 minute' THEN now() ELSE oidc_registration_rate.window_start END
++            RETURNING requests"""); var result = statement.executeQuery()) {
++            return result.next() && result.getInt(1) <= maximum;
++        } catch (java.sql.SQLException exception) { throw new IllegalStateException("registration_unavailable"); }
++    }
++}
+diff --git a/webserver/src/main/resources/migrations/2.0.97-oidc-server-rate-postgres.sql b/webserver/src/main/resources/migrations/2.0.97-oidc-server-rate-postgres.sql
+new file mode 100644
+index 0000000..aac21d8
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.97-oidc-server-rate-postgres.sql
+@@ -0,0 +1,12 @@
++CREATE TABLE oidc_registration_rate (
++    bucket TEXT PRIMARY KEY,
++    window_start TIMESTAMPTZ NOT NULL,
++    requests INTEGER NOT NULL
++);
++CREATE TABLE oidc_client_management (
++    interaction TEXT PRIMARY KEY,
++    client_id TEXT NOT NULL REFERENCES oidc_client(client_id) ON DELETE CASCADE,
++    subject TEXT NOT NULL,
++    session_id TEXT NOT NULL,
++    expires_at TIMESTAMPTZ NOT NULL
++);
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
+index bf01fd5..f938a6e 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
+@@ -82,6 +82,42 @@ class OidcOwnershipServiceTest extends OidcPostgresTestBase {
+         }
+     }
+ 
++    @Test
++    void managementIsBoundedSingleUseAndOwnerPaginated() throws Exception {
++        final String client = register();
++        owners.complete(owners.begin(client, "alice", "session", parameters()), "alice", "session", true);
++        final String interaction = owners.managementInteraction(client, "alice", "session");
++        assertThrows(IllegalArgumentException.class, () -> owners.revoke(client, "bob", true, interaction, "session"));
++        owners.revoke(client, "alice", false, interaction, "session");
++        assertThrows(SecurityException.class, () -> owners.revoke(client, "alice", false, interaction, "session"));
++        assertEquals(1, owners.ownedClients("alice", 1, 1).size());
++        assertTrue(owners.ownedClients("bob", 1, 1).isEmpty());
++        for (int index=0; index<20; index++) owners.managementInteraction(client, "alice", "session");
++        assertThrows(IllegalArgumentException.class, () -> owners.managementInteraction(client, "alice", "session"));
++        try (var connection=dataSource().getConnection(); var statement=connection.createStatement()) {
++            statement.executeUpdate("UPDATE oidc_client_management SET expires_at=now()-interval '1 second'");
++        }
++        owners.cleanup();
++        assertNotNull(owners.managementInteraction(client, "alice", "session"));
++    }
++
++    @Test
++    void ownerRevocationIsAtomicAndOtherUsersCannotDelete() throws Exception {
++        final String client = register();
++        owners.complete(owners.begin(client, "alice", "session", parameters()), "alice", "session", true);
++        assertThrows(IllegalArgumentException.class, () -> owners.revoke(client, "bob", true));
++        owners.requireOwner(client, "alice");
++        owners.revoke(client, "alice", false);
++        assertFalse(owners.state(client).active());
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "SELECT count(*) FROM oidc_authorization_code WHERE client_id=? AND NOT used")) {
++            statement.setString(1, client);
++            try (var result = statement.executeQuery()) { result.next(); assertEquals(0, result.getInt(1)); }
++        }
++        owners.revoke(client, "alice", true);
++        assertThrows(IllegalArgumentException.class, () -> owners.state(client));
++    }
++
+     @Test
+     void shouldRejectServerDisabledScopesBeforeBinding() {
+         final String client = register();
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationRateTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationRateTest.java
+new file mode 100644
+index 0000000..b8c4364
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationRateTest.java
+@@ -0,0 +1,23 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.oidc.services.OidcRegistrationRate;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class OidcRegistrationRateTest extends OidcPostgresTestBase {
++    @Test
++    void multipleInstancesShareDatabaseRateWindow() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("TRUNCATE oidc_registration_rate");
++        }
++        final var first = new OidcRegistrationRate(dataSource(), 2);
++        final var second = new OidcRegistrationRate(dataSource(), 2);
++        assertTrue(first.allow());
++        assertTrue(second.allow());
++        assertFalse(first.allow());
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("UPDATE oidc_registration_rate SET window_start=now()-interval '2 minutes'");
++        }
++        assertTrue(second.allow());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcSecondUserFixtureTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSecondUserFixtureTest.java
+new file mode 100644
+index 0000000..a64a338
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSecondUserFixtureTest.java
+@@ -0,0 +1,20 @@
++package io.kestra.webserver.oidc;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcUserService;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assumptions.assumeTrue;
++
++class OidcSecondUserFixtureTest {
++    @Test
++    void createNormalSecondUserThroughProductionService() {
++        final String url = System.getenv("OIDC_FIXTURE_JDBC");
++        assumeTrue(url != null, "Controlled image acceptance fixture only");
++        final var source = new org.postgresql.ds.PGSimpleDataSource();
++        source.setURL(url);
++        source.setUser("kestra");
++        source.setPassword("local-ci-only");
++        new OidcUserService(source, new ObjectMapper()).create(new OidcUserService.CreateUserRequest(
++            "second-user", "Second user", "second@example.test", "SecondPass123!", java.util.List.of("user")));
++    }
++}

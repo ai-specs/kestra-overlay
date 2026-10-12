@@ -1,6 +1,8 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
-> **MCP 用户归属机制规划（未实施）**：DCR pending 只提供可发起授权的 client_id；
+> **MCP 用户归属机制（本地实现与验收，待review/真CI）**：0150/0160/0170/0180/0190
+> 提供DCR pending、owner/consent、resource Bearer、能力门、OAuth-only及管理限速。
+> DCR pending 只提供可发起授权的 client_id；
 > 登录确认时事务绑定不可变 owner、权限授权与 code，后续 token/refresh/MCP 执行
 > 均校验用户/client/目标资源。OIDC 身份声明与 OSS tenant 桩本身不提供数据隔离。
 > 完整机制与兼容性边界见 [mcp-oauth-integration.md](mcp-oauth-integration.md)。
@@ -8,6 +10,10 @@
 > 服务端暴露策略∩请求∩用户同意决定授权。外部 RBAC 启用后，必须通过统一
 > Authorizer 拦截每个实际 MCP 资源操作，与 REST 同语义；直接/批量/异步路径
 > 不能绕过。承载缺席可休眠只适用于未启用授权，启用后组件异常必须失败关闭。
+> 当前只有MCP-only SPI与scope gate，外部RBAC jar及REST适配未交付。
+> 缺bean镜像门、异常Authorizer handler→gate→queue单元门各自验证失败关闭，
+> 不等同完整REST/MCP数据隔离。镜像撤销existing session/refresh证据来自
+> `.work/final-verify-blackbox.log`，复跑命令见README；不依赖先前交互浏览器状态。
 
 > 三个根本问题：改一个架构能力——要不要重新编译？要不要重启？要不要外部 jar？
 > 证据：BASE（v2.0.5 @ 172dd0f37）源码（含上游自述 docs/architecture/）+ dsh 实证

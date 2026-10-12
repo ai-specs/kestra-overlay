@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IMAGE="${1:?usage: blackbox-mcp-oauth.sh IMAGE [verify-tree]}"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK="${2:-$REPO/.work/verify}"
+PORT="${BB_MCP_PORT:-18086}"
+BASE="http://localhost:$PORT"
+NET="overlay-mcp-bb-$$"
+PG="overlay-mcp-pg-$$"
+APP="overlay-mcp-app-$$"
+TEMP_DIR=$(mktemp -d)
+cleanup() {
+  docker rm -f "$APP" "$PG" >/dev/null 2>&1 || true
+  docker network rm "$NET" >/dev/null 2>&1 || true
+  rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+docker network create "$NET" >/dev/null
+docker run -d --name "$PG" --network "$NET" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
+cat > "$TEMP_DIR/config.yml" <<EOF
+datasources:
+  postgres:
+    url: jdbc:postgresql://$PG:5432/kestra
+    driverClassName: org.postgresql.Driver
+    username: kestra
+    password: local-ci-only
+kestra:
+  url: $BASE/
+  repository:
+    type: postgres
+  queue:
+    type: postgres
+  storage:
+    type: local
+    local:
+      base-path: /app/storage
+  plugins:
+    auto-install:
+      enabled: false
+  oidc:
+    enabled: true
+    issuer: $BASE
+    registration:
+      enabled: true
+micronaut:
+  security:
+    enabled: true
+    authentication: idtoken
+    filter:
+      enabled: true
+    intercept-url-map:
+      - pattern: /oidc/**
+        access: [isAnonymous()]
+      - pattern: /.well-known/**
+        access: [isAnonymous()]
+      - pattern: /oauth/**
+        access: [isAnonymous()]
+      - pattern: /**
+        access: [isAuthenticated()]
+    oauth2:
+      clients:
+        kestra:
+          client-id: ci-ui
+          client-secret: local-ci-ui-only
+          scopes: [openid, profile, email]
+          openid:
+            issuer: $BASE
+            token:
+              url: http://localhost:8080/oidc/token
+            jwks-uri: http://localhost:8080/oidc/jwks
+EOF
+PG_READY=0
+for attempt in $(seq 1 30); do
+  if docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1; then PG_READY=1; break; fi
+  sleep 1
+done
+[ "$PG_READY" = 1 ] || { echo 'FAIL PostgreSQL readiness timeout'; exit 1; }
+docker run -d --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+  -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd!' \
+  "$IMAGE" server standalone >/dev/null
+READY=0
+for attempt in $(seq 1 60); do
+  [ "$(docker inspect -f '{{.State.Running}}' "$APP")" = true ] || { echo 'FAIL MCP container exited during startup'; exit 1; }
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)" = 200 ]; then READY=1; break; fi
+  sleep 2
+done
+[ "$READY" = 1 ] || { echo 'FAIL MCP instance startup'; exit 1; }
+node "$REPO/scripts/blackbox-mcp-oauth.mjs" "$BASE" "$TEMP_DIR"
+PG_PORT=$(docker port "$PG" 5432/tcp | sed 's/.*://')
+(cd "$WORK" && OIDC_FIXTURE_JDBC="jdbc:postgresql://127.0.0.1:$PG_PORT/kestra" \
+  ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.OidcSecondUserFixtureTest --console=plain)
+grep -q 'tests="1" skipped="0" failures="0" errors="0"' "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.OidcSecondUserFixtureTest.xml"
+node "$REPO/scripts/blackbox-mcp-second-user.mjs" "$BASE" "$TEMP_DIR"
+sdk() {
+  (cd "$WORK" && MCP_INSTANCE_URL="$BASE" MCP_TOKEN_FILE="$TEMP_DIR/$1" MCP_CALL_TOOL=overlay-acceptance MCP_EXPECT_CALL_ERROR="$2" \
+    ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.McpSdkInstanceTest --console=plain)
+  RESULT="$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.McpSdkInstanceTest.xml"
+  test -f "$RESULT"
+  grep -q 'tests="1" skipped="0" failures="0" errors="0"' "$RESULT" || { echo 'FAIL SDK acceptance skipped or failed'; exit 1; }
+}
+sdk full.json false
+COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance' AND value->'state'->>'current'='SUCCESS'")
+[ "$COUNT" = 1 ] || { echo 'FAIL successful execution missing'; exit 1; }
+sdk read.json true
+COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance'")
+[ "$COUNT" = 1 ] || { echo 'FAIL denied call created execution'; exit 1; }
+node "$REPO/scripts/blackbox-mcp-lifecycle.mjs" "$BASE" "$TEMP_DIR"
+COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance'")
+[ "$COUNT" = 1 ] || { echo 'FAIL revoked session created execution'; exit 1; }
+docker rm -f "$APP" >/dev/null
+printf '\nkestra.mcp.rbac.enabled: true\n' >> "$TEMP_DIR/config.yml"
+docker run -d --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+  "$IMAGE" server standalone >/dev/null
+READY=0
+for attempt in $(seq 1 60); do
+  [ "$(docker inspect -f '{{.State.Running}}' "$APP")" = true ] || { echo 'FAIL RBAC instance exited'; exit 1; }
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)" = 200 ]; then READY=1; break; fi
+  sleep 2
+done
+[ "$READY" = 1 ] || { echo 'FAIL RBAC readiness'; exit 1; }
+(cd "$WORK" && MCP_INSTANCE_URL="$BASE" MCP_TOKEN_FILE="$TEMP_DIR/rbac.json" MCP_EXPECT_TOOLS_EMPTY=true MCP_CALL_TOOL=overlay-acceptance MCP_EXPECT_HIDDEN_CALL=true \
+  ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.McpSdkInstanceTest --console=plain)
+grep -q 'tests="1" skipped="0" failures="0" errors="0"' "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.McpSdkInstanceTest.xml"
+COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance'")
+[ "$COUNT" = 1 ] || { echo 'FAIL RBAC unavailable created execution'; exit 1; }
+echo 'PASS RBAC enabled without Authorizer hides tools and creates no execution'
+echo 'MCP BLACKBOX ALL GREEN: real SDK success and scope deny with zero new executions'

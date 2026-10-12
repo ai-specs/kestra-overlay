@@ -1,0 +1,1107 @@
+# 需求: REQ-0160 MCP resource/audience/Bearer 与可信身份传播
+# 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
+# 状态: core
+# 来源: 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型
+# 触达上游文件: 24 个（详见 diff）
+# 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
+diff --git a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
+index 9903d69..d936d67 100644
+--- a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
++++ b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
+@@ -17,6 +17,8 @@ import jakarta.inject.Singleton;
+ public class DefaultMcpToolAccessControl implements McpToolAccessControl {
+     @Override
+     public Optional<String> callerId(HttpRequest<?> request) {
++        final var verified = request.getAttribute("io.kestra.mcp.authentication", io.micronaut.security.authentication.Authentication.class);
++        if (verified.isPresent()) return verified.map(io.micronaut.security.authentication.Authentication::getName);
+         return request.getUserPrincipal().map(Principal::getName);
+     }
+ 
+diff --git a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
+index e93c3ee..fb03331 100644
+--- a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
++++ b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
+@@ -11,11 +11,14 @@ import lombok.EqualsAndHashCode;
+  */
+ @Data
+ @Builder
+-@EqualsAndHashCode(exclude = "userId")
++@EqualsAndHashCode
+ public class KestraMcpTransportContext implements McpTransportContext {
+     private final String tenantId;
+     private final String serverId;
+     private final String userId;
++    private final String clientId;
++    private final String resource;
++    private final java.util.List<String> scopes;
+     private String sessionId;
+ 
+     @Override
+@@ -25,6 +28,9 @@ public class KestraMcpTransportContext implements McpTransportContext {
+             case "serverId" -> serverId;
+             case "sessionId" -> sessionId;
+             case "userId" -> userId;
++            case "clientId" -> clientId;
++            case "resource" -> resource;
++            case "scopes" -> scopes;
+             default -> null;
+         };
+     }
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
+index 2bef821..e39e618 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
+@@ -204,12 +204,21 @@ public class McpServerHandlerTransport {
+     private record HandlerKey(
+         String tenantId,
+         String serverId,
+-        String scopeKey) {
++        String scopeKey,
++        String userId,
++        String clientId,
++        String resource,
++        List<String> capabilities) {
+         public static HandlerKey from(KestraMcpTransportContext kestraMcpTransportContext, AccessScope scope) {
+             return new HandlerKey(
+                 kestraMcpTransportContext.getTenantId(),
+                 kestraMcpTransportContext.getServerId(),
+-                McpToolScope.cacheKey(scope)
++                McpToolScope.cacheKey(scope),
++                kestraMcpTransportContext.getUserId(),
++                kestraMcpTransportContext.getClientId(),
++                kestraMcpTransportContext.getResource(),
++                kestraMcpTransportContext.getScopes() == null ? List.of()
++                    : kestraMcpTransportContext.getScopes().stream().distinct().sorted().toList()
+             );
+         }
+     }
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
+index d7e2233..eb87652 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
+@@ -7,12 +7,16 @@ import jakarta.inject.Singleton;
+ 
+ @Singleton
+ public class McpSessionFactory {
+-    public KestraMcpTransportContext build(String tenantId, String serverId, @Nullable String sessionId, @Nullable String callerId) {
++    public KestraMcpTransportContext build(String tenantId, String serverId, @Nullable String sessionId, @Nullable String callerId,
++        @Nullable String clientId, @Nullable String resource, @Nullable java.util.List<String> scopes) {
+         return KestraMcpTransportContext.builder()
+             .tenantId(tenantId)
+             .serverId(serverId)
+             .sessionId(sessionId != null ? sessionId : UUID.randomUUID().toString())
+             .userId(callerId)
++            .clientId(clientId)
++            .resource(resource)
++            .scopes(scopes == null ? java.util.List.of() : java.util.List.copyOf(scopes))
+             .build();
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
+index 5195153..ab43f72 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
+@@ -81,9 +81,11 @@ public class McpToolController {
+             return Mono.just(HttpResponse.status(HttpStatus.SERVICE_UNAVAILABLE));
+         }
+ 
+-        var transportContext = sessionFactory.build(
+-            tenantId, id, request.getHeaders().get(HttpHeaders.MCP_SESSION_ID), accessControl.callerId(request).orElse(null)
+-        );
++        var identity = request.getAttribute("io.kestra.mcp.identity", java.util.Map.class).orElse(java.util.Map.of());
++        var transportContext = sessionFactory.build(tenantId, id, request.getHeaders().get(HttpHeaders.MCP_SESSION_ID),
++            (String) identity.getOrDefault("subject", accessControl.callerId(request).orElse(null)),
++            (String) identity.get("client_id"), (String) identity.get("resource"),
++            (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()));
+ 
+         return handlerRegistry.getServerHandler(transportContext).handleRequest(request, transportContext);
+     }
+diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java
+new file mode 100644
+index 0000000..bf3be71
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java
+@@ -0,0 +1,21 @@
++package io.kestra.webserver.mcp;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Singleton;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Mono;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public class McpAuthenticationFetcher implements AuthenticationFetcher<HttpRequest<?>> {
++    @Override
++    public int getOrder() { return -1000; }
++
++    @Override
++    public Publisher<Authentication> fetchAuthentication(final HttpRequest<?> request) {
++        return Mono.justOrEmpty(request.getAttribute("io.kestra.mcp.authentication", Authentication.class));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
+new file mode 100644
+index 0000000..9f633c0
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
+@@ -0,0 +1,56 @@
++package io.kestra.webserver.mcp;
++
++import java.util.Map;
++import io.kestra.mcp.McpToolRoute;
++import io.kestra.webserver.oidc.services.OidcTokenService;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.filter.HttpServerFilter;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.http.filter.ServerFilterPhase;
++import io.micronaut.security.authentication.Authentication;
++import org.reactivestreams.Publisher;
++import jakarta.inject.Singleton;
++import reactor.core.publisher.Mono;
++import reactor.core.scheduler.Schedulers;
++
++@Filter("/api/v1/*/mcp/*")
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "kestra.server-type", pattern = "(WEBSERVER|STANDALONE)")
++public class McpBearerFilter implements HttpServerFilter {
++    private final McpResourceUrl resources;
++    private final OidcTokenService tokens;
++
++    public McpBearerFilter(final McpResourceUrl resources, final OidcTokenService tokens) {
++        this.resources = resources;
++        this.tokens = tokens;
++    }
++
++    @Override
++    public int getOrder() { return ServerFilterPhase.SECURITY.order() - 2; }
++
++    @Override
++    public Publisher<MutableHttpResponse<?>> doFilter(final HttpRequest<?> request, final ServerFilterChain chain) {
++        final var server = McpToolRoute.serverId(request);
++        if (server.isEmpty()) return chain.proceed(request);
++        return Mono.fromCallable(() -> {
++            if (request.getUri().getRawPath().contains("%")) throw new IllegalArgumentException("Noncanonical MCP route");
++            final String tenant = McpToolRoute.tenantId(request).orElseThrow();
++            final String resource = resources.parseExact(resources.resource(tenant, server.get()).toString()).toString();
++            final String header = request.getHeaders().get("Authorization");
++            if (header == null || !header.startsWith("Bearer ") || header.substring(7).isBlank()) throw new IllegalArgumentException("Invalid authentication");
++            final var claims = tokens.validateResourceAccessToken(header.substring(7), resource);
++            final var stored = tokens.findByValue(header.substring(7)).orElseThrow();
++            request.setAttribute("io.kestra.mcp.identity", Map.of("subject", claims.getSubject(), "client_id", stored.clientId(), "resource", resource, "scopes", stored.scopes()));
++            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), Map.of("client_id", stored.clientId(), "resource", resource, "scope", stored.scopes())));
++            return true;
++        }).subscribeOn(Schedulers.boundedElastic()).onErrorReturn(false)
++            .flatMapMany(authenticated -> authenticated ? chain.proceed(request)
++                : Mono.just(HttpResponse.unauthorized().header("WWW-Authenticate",
++                    "Bearer resource_metadata=\"" + resources.metadata("main", server.get()) + "\"").body(Map.of("error", "invalid_token"))));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java
+new file mode 100644
+index 0000000..e231218
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java
+@@ -0,0 +1,33 @@
++package io.kestra.webserver.mcp;
++
++import java.util.List;
++import java.util.Map;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++
++@Controller("/.well-known/oauth-protected-resource")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@ExecuteOn(TaskExecutors.IO)
++public class McpResourceMetadataController {
++    private final McpResourceUrl resources;
++    private final OidcConfiguration configuration;
++
++    public McpResourceMetadataController(final McpResourceUrl resources, final OidcConfiguration configuration) {
++        this.resources = resources;
++        this.configuration = configuration;
++    }
++
++    @Get("/{path:.*}")
++    public HttpResponse<?> metadata(final String path) {
++        try {
++            final String resource = resources.fromMetadataPath(path).toString();
++            return HttpResponse.ok(Map.of("resource", resource, "authorization_servers", List.of(configuration.getIssuer()), "bearer_methods_supported", List.of("header")))
++                .header("Cache-Control", "no-store");
++        } catch (IllegalArgumentException exception) { return HttpResponse.notFound(); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java
+new file mode 100644
+index 0000000..25726fa
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java
+@@ -0,0 +1,81 @@
++package io.kestra.webserver.mcp;
++
++import java.net.URI;
++import java.util.Objects;
++
++import io.micronaut.context.annotation.Value;
++import jakarta.inject.Singleton;
++import io.micronaut.context.BeanProvider;
++
++@Singleton
++@io.micronaut.context.annotation.Requires(property = "kestra.oidc.enabled", value = "true")
++public class McpResourceUrl {
++    private final URI base;
++    private final BeanProvider<io.kestra.mcp.McpServerCache> servers;
++
++    public McpResourceUrl(@Value("${kestra.url:}") final String configuredBase, final BeanProvider<io.kestra.mcp.McpServerCache> servers) {
++        this.base = parse(configuredBase);
++        this.servers = servers;
++    }
++
++    public URI parseExact(final String value) {
++        if (value == null) throw new IllegalArgumentException("resource is required");
++        final URI candidate;
++        try { candidate = URI.create(value); } catch (IllegalArgumentException exception) { throw new IllegalArgumentException("Invalid resource"); }
++        if (candidate.getRawPath() == null || !base.getScheme().equalsIgnoreCase(candidate.getScheme()) || !base.getRawAuthority().equals(candidate.getRawAuthority())
++            || candidate.getRawQuery() != null || candidate.getRawFragment() != null || candidate.getUserInfo() != null
++            || !candidate.getRawPath().startsWith(base.getRawPath())) throw new IllegalArgumentException("Invalid resource");
++        final String suffix = candidate.getRawPath().substring(base.getRawPath().length());
++        if (!suffix.matches("api/v1/[a-z0-9][a-z0-9_-]*/mcp/[a-z0-9][a-z0-9_-]*") || suffix.contains("%") || suffix.contains("..")) {
++            throw new IllegalArgumentException("Invalid resource");
++        }
++        final String[] parts = suffix.split("/");
++        if (!io.kestra.core.tenant.TenantService.MAIN_TENANT.equals(parts[2])
++            || !resource(parts[2], parts[4]).toString().equals(value)) throw new IllegalArgumentException("Invalid resource");
++        try {
++            if (servers.get().get(parts[2], parts[4]).isEmpty()) throw new IllegalArgumentException("Unknown resource");
++        } catch (RuntimeException exception) {
++            throw new IllegalArgumentException("Unknown resource");
++        }
++        return candidate;
++    }
++
++    public URI resource(final String tenant, final String serverId) {
++        return URI.create(base.toString() + "api/v1/" + encode(tenant) + "/mcp/" + encode(serverId));
++    }
++
++    public URI metadata(final String tenant, final String serverId) {
++        return URI.create(base.getScheme() + "://" + base.getRawAuthority()
++            + "/.well-known/oauth-protected-resource" + resource(tenant, serverId).getRawPath());
++    }
++
++    public URI fromMetadataPath(final String path) {
++        final String prefix = base.getRawPath().substring(1);
++        if (!path.startsWith(prefix)) throw new IllegalArgumentException("Invalid resource");
++        final String suffix = path.substring(prefix.length());
++        final String[] parts = suffix.split("/");
++        if (parts.length != 5 || !"api".equals(parts[0]) || !"v1".equals(parts[1]) || !"mcp".equals(parts[3])) {
++            throw new IllegalArgumentException("Invalid resource");
++        }
++        return parseExact(resource(parts[2], parts[4]).toString());
++    }
++
++    private static URI parse(final String value) {
++        if (value == null || value.isBlank()) throw new IllegalArgumentException("kestra.url must be configured");
++        final URI uri;
++        try { uri = URI.create(value); } catch (IllegalArgumentException exception) { throw new IllegalArgumentException("kestra.url must be a valid absolute URL"); }
++        if (!uri.isAbsolute() || !("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
++            || uri.getHost() == null || uri.getRawQuery() != null || uri.getRawFragment() != null || uri.getUserInfo() != null) {
++            throw new IllegalArgumentException("kestra.url must be an absolute HTTP(S) URL without query, fragment or userinfo");
++        }
++        if (!uri.normalize().equals(uri) || uri.getRawPath().contains("%") || uri.getRawPath().contains("//")) {
++            throw new IllegalArgumentException("kestra.url must have a canonical base path");
++        }
++        return URI.create(uri.toString().replaceAll("/+$", "") + "/");
++    }
++
++    private static String encode(final String value) {
++        if (!Objects.requireNonNull(value).matches("[a-z0-9][a-z0-9_-]*")) throw new IllegalArgumentException("Invalid MCP route identity");
++        return value;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
+index e9a3e5b..312402c 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
+@@ -56,6 +56,7 @@ import io.kestra.webserver.oidc.services.OidcAuthorizationCodeService;
+ import io.kestra.webserver.oidc.services.OidcClientService;
+ import io.kestra.webserver.oidc.services.OidcJwkService;
+ import io.kestra.webserver.oidc.services.OidcSessionService;
++import io.kestra.webserver.mcp.McpResourceUrl;
+ import io.kestra.webserver.oidc.services.OidcTokenService;
+ import io.kestra.webserver.oidc.services.OidcUserService;
+ 
+@@ -95,6 +96,7 @@ public class OidcProviderController {
+     private final OidcUserService userService;
+     private final OidcSessionService sessionService;
+     private final io.kestra.webserver.oidc.services.OidcOwnershipService ownership;
++    private final McpResourceUrl resources;
+ 
+     @Inject
+     public OidcProviderController(
+@@ -105,7 +107,8 @@ public class OidcProviderController {
+         final OidcJwkService jwkService,
+         final OidcUserService userService,
+         final OidcSessionService sessionService,
+-        final io.kestra.webserver.oidc.services.OidcOwnershipService ownership
++        final io.kestra.webserver.oidc.services.OidcOwnershipService ownership,
++        final McpResourceUrl resources
+     ) {
+         this.configuration = configuration;
+         this.clientService = clientService;
+@@ -115,6 +118,7 @@ public class OidcProviderController {
+         this.userService = userService;
+         this.sessionService = sessionService;
+         this.ownership = ownership;
++        this.resources = resources;
+     }
+ 
+     @Get("/jwks")
+@@ -126,6 +130,13 @@ public class OidcProviderController {
+     @Get("/authorize")
+     public HttpResponse<?> authorize(final HttpRequest<?> request) {
+         final var parameters = queryParams(request);
++        if (parameters.containsKey("resource")) {
++            final var requestedResources = parameters.get("resource");
++            if (requestedResources.size() != 1) {
++                return HttpResponse.badRequest(Map.of("error", "invalid_target"));
++            }
++            try { this.resources.parseExact(requestedResources.getFirst()); } catch (IllegalArgumentException exception) { return HttpResponse.badRequest(Map.of("error", "invalid_target")); }
++        }
+         if (parameters.containsKey("code_challenge") && parameters.get("code_challenge").stream().anyMatch(String::isBlank)) {
+             return HttpResponse.badRequest(Map.of("error", "invalid_request"));
+         }
+@@ -150,6 +161,9 @@ public class OidcProviderController {
+         if (!client.active()) {
+             return HttpResponse.badRequest("Unknown client_id");
+         }
++        if (parameters.containsKey("resource") && "system".equals(ownership.state(client.clientId()).kind())) {
++            return HttpResponse.badRequest(Map.of("error", "invalid_client"));
++        }
+ 
+         if (redirectUri == null || !clientService.isRedirectUriRegistered(client, redirectUri.toString())) {
+             // E1: never redirect with an unregistered URI — 400, no redirect leakage.
+@@ -235,6 +249,7 @@ public class OidcProviderController {
+             final OidcClientService.OidcClient client = clientService.require(clientId.getValue());
+ 
+             final AuthorizationGrant grant = tokenRequest.getAuthorizationGrant();
++            requestResource(tokenRequest);
+             final String grantType = grant.getType().getValue();
+             if (!clientService.isGrantTypeAllowed(client, grantType)) {
+                 throw new OidcException(OAuth2Error.UNAUTHORIZED_CLIENT.appendDescription(": grant type not enabled for this client"));
+@@ -286,6 +301,14 @@ public class OidcProviderController {
+         }
+     }
+ 
++    private String requestResource(final TokenRequest request) {
++        final var values = request.getResources();
++        if (values == null || values.isEmpty()) return null;
++        if (values.size() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        try { return resources.parseExact(values.getFirst().toString()).toString(); }
++        catch (IllegalArgumentException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
++    }
++
+     private static String escape(final String value) {
+         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+     }
+@@ -436,7 +459,7 @@ public class OidcProviderController {
+             grant.getAuthorizationCode().getValue(),
+             client.clientId(),
+             redirectUri != null ? redirectUri.toString() : null,
+-            grant.getCodeVerifier()
++            grant.getCodeVerifier(), requestResource(tokenRequest)
+         );
+ 
+         List<String> scopes = stored.scopes();
+@@ -454,8 +477,8 @@ public class OidcProviderController {
+         final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
+             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
+         final BearerAccessToken accessToken = tokenService.issueAccessToken(
+-            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
+-        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
++            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope, stored.resource());
++        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope, stored.resource());
+ 
+         if (scope.contains("openid")) {
+             final SignedJWT idToken = tokenService.issueIdToken(
+@@ -491,8 +514,8 @@ public class OidcProviderController {
+         final TokenRequest tokenRequest,
+         final RefreshTokenGrant grant
+     ) {
+-        final OidcTokenService.StoredToken stored = tokenService.validateRefreshToken(
+-            grant.getRefreshToken().getValue(), client.clientId());
++        final OidcTokenService.StoredToken stored = tokenService.validateResourceRefreshToken(
++            grant.getRefreshToken().getValue(), client.clientId(), requestResource(tokenRequest));
+         if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
+         tokenService.revoke(stored.value()); // rotation: the old refresh token dies on use
+ 
+@@ -509,8 +532,8 @@ public class OidcProviderController {
+         final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
+             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
+         final BearerAccessToken accessToken = tokenService.issueAccessToken(
+-            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
+-        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
++            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope, stored.resource());
++        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope, stored.resource());
+         final AccessTokenResponse response = new AccessTokenResponse(
+             new com.nimbusds.oauth2.sdk.token.Tokens(accessToken, refreshToken));
+         return tokenOk(response.toJSONObject());
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java
+new file mode 100644
+index 0000000..6adf696
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java
+@@ -0,0 +1,27 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++import javax.sql.DataSource;
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public class V2_0_96OidcServerResourceMigration extends AbstractSQLMigrationScript {
++    private final DataSource source;
++
++    public V2_0_96OidcServerResourceMigration(final DataSource source) { this.source = source; }
++
++    @Override
++    public String scriptId() { return "2.0.96-oidc-server-resource"; }
++
++    @Override
++    public String description() { return "OAuth authorization code and token resource binding"; }
++
++    @Override
++    protected DataSource dataSource() { return source; }
++
++    @Override
++    public List<String> sqlResources() { return List.of("/migrations/2.0.96-oidc-server-resource-postgres.sql"); }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
+index 21d1173..c283ea3 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
+@@ -50,7 +50,7 @@ public class OidcAuthorizationCodeService {
+     /** A stored authorization code. */
+     public record StoredCode(
+         String code, String clientId, String subject, String redirectUri, List<String> scopes,
+-        String codeChallenge, String codeChallengeMethod, String nonce, Instant expiresAt, boolean used
++        String codeChallenge, String codeChallengeMethod, String nonce, Instant expiresAt, boolean used, String resource
+     ) {}
+ 
+     @Inject
+@@ -99,7 +99,7 @@ public class OidcAuthorizationCodeService {
+ 
+     public Optional<StoredCode> find(final String codeValue) {
+         final String sql = """
+-            SELECT code, client_id, subject, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, expires_at, used
++            SELECT code, client_id, subject, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, expires_at, used, resource
+             FROM oidc_authorization_code WHERE code = ?""";
+         try (Connection connection = dataSource.getConnection();
+              PreparedStatement ps = connection.prepareStatement(sql)) {
+@@ -116,7 +116,7 @@ public class OidcAuthorizationCodeService {
+                         rs.getString("code_challenge_method"),
+                         rs.getString("nonce"),
+                         rs.getTimestamp("expires_at").toInstant(),
+-                        rs.getBoolean("used")
++                        rs.getBoolean("used"), rs.getString("resource")
+                     ));
+                 }
+                 return Optional.empty();
+@@ -128,11 +128,16 @@ public class OidcAuthorizationCodeService {
+ 
+     /** Consumes a code: full validation (D1) then marks it used. */
+     public StoredCode consume(final String codeValue, final String expectedClientId, final String redirectUri, final CodeVerifier codeVerifier) {
++        return consume(codeValue, expectedClientId, redirectUri, codeVerifier, null);
++    }
++
++    public StoredCode consume(final String codeValue, final String expectedClientId, final String redirectUri, final CodeVerifier codeVerifier, final String resource) {
+         final StoredCode stored = find(codeValue)
+             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown authorization code")));
+         if (stored.used()) {
+             throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": authorization code already used"));
+         }
++        if (!java.util.Objects.equals(stored.resource(), resource)) throw new OidcException(OAuth2Error.INVALID_GRANT);
+         if (stored.expiresAt().isBefore(Instant.now())) {
+             throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": authorization code expired"));
+         }
+@@ -175,11 +180,11 @@ public class OidcAuthorizationCodeService {
+     }
+ 
+     private void markUsed(final String codeValue) {
+-        final String sql = "UPDATE oidc_authorization_code SET used = TRUE WHERE code = ?";
++        final String sql = "UPDATE oidc_authorization_code SET used = TRUE WHERE code = ? AND NOT used AND expires_at>now()";
+         try (Connection connection = dataSource.getConnection();
+              PreparedStatement ps = connection.prepareStatement(sql)) {
+             ps.setString(1, codeValue);
+-            ps.executeUpdate();
++            if (ps.executeUpdate() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
+         } catch (SQLException e) {
+             throw new IllegalStateException("Failed to mark OIDC authorization code used", e);
+         }
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+index 7d2419c..1596770 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+@@ -147,7 +147,7 @@ public class OidcOwnershipService {
+                 }
+                 if (approve) {
+                     try (var statement = connection.prepareStatement(
+-                        "INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,scopes,code_challenge,code_challenge_method,nonce,expires_at) VALUES (?,?,?,?,?::jsonb,?,?,?,?)")) {
++                        "INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,scopes,code_challenge,code_challenge_method,nonce,expires_at,resource) VALUES (?,?,?,?,?::jsonb,?,?,?,?,?)")) {
+                         statement.setString(1, code);
+                         statement.setString(2, clientId);
+                         statement.setString(3, subject);
+@@ -157,6 +157,7 @@ public class OidcOwnershipService {
+                         statement.setString(7, "S256");
+                         statement.setString(8, parameters.getOrDefault("nonce", List.of("")).getFirst());
+                         statement.setTimestamp(9, java.sql.Timestamp.from(Instant.now().plus(configuration.getAuthorizationCodeTtl())));
++                        statement.setString(10, parameters.getOrDefault("resource", java.util.Collections.singletonList(null)).getFirst());
+                         statement.executeUpdate();
+                     }
+                 }
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
+index ee73881..218c2b5 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
+@@ -77,7 +77,7 @@ public class OidcTokenService {
+     /** A stored token record (mirror of the table row). */
+     public record StoredToken(
+         long id, String clientId, String subject, String tokenType, String value,
+-        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked
++        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked, String resource
+     ) {}
+ 
+     /** Issues an access token (RS256 JWT), signs it with the newest active key and persists it. */
+@@ -89,12 +89,18 @@ public class OidcTokenService {
+         final List<String> roles,
+         final Scope scope
+     ) {
++        return issueAccessToken(clientId, subject, name, email, roles, scope, null);
++    }
++
++    public BearerAccessToken issueAccessToken(final String clientId, final String subject, final String name,
++        final String email, final List<String> roles, final Scope scope, final String resource) {
+         final Instant now = Instant.now();
+         final Instant exp = now.plus(configuration.getAccessTokenTtl());
+         final JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
+             .issuer(configuration.getIssuer())
+             .subject(subject)
+-            .audience(List.of(clientId))
++            .audience(List.of(resource == null ? clientId : resource))
++            .claim("client_id", clientId)
+             .expirationTime(Date.from(exp))
+             .issueTime(Date.from(now))
+             .jwtID(java.util.UUID.randomUUID().toString())
+@@ -110,15 +116,19 @@ public class OidcTokenService {
+             claims.claim("roles", roles);
+         }
+         final String jwt = sign(claims.build()).serialize();
+-        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
++        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp, resource);
+         return new BearerAccessToken(jwt, configuration.getAccessTokenTtl().getSeconds(), scope);
+     }
+ 
+     /** Issues a new opaque refresh token and persists it. */
+     public RefreshToken issueRefreshToken(final String clientId, final String subject, final Scope scope) {
++        return issueRefreshToken(clientId, subject, scope, null);
++    }
++
++    public RefreshToken issueRefreshToken(final String clientId, final String subject, final Scope scope, final String resource) {
+         final RefreshToken refreshToken = new RefreshToken();
+         final Instant now = Instant.now();
+-        persist("refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()));
++        persist("refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
+         return refreshToken;
+     }
+ 
+@@ -183,10 +193,22 @@ public class OidcTokenService {
+         if (!"access".equals(stored.tokenType())) {
+             throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
+         }
++        try {
++            if (!"access_token".equals(claims.getStringClaim("token_type"))) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        } catch (java.text.ParseException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
+         validateClientAndSubject(stored);
+         return claims;
+     }
+ 
++    public JWTClaimsSet validateResourceAccessToken(final String value, final String expectedResource) {
++        final var claims = validateAccessToken(value);
++        final var stored = findByValue(value).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT));
++        if (expectedResource == null || !expectedResource.equals(stored.resource())
++            || !claims.getAudience().equals(List.of(expectedResource))
++            || !java.util.Objects.equals(claims.getSubject(), stored.subject())) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        return claims;
++    }
++
+     /** Validates a refresh token for exchange, returning its stored record. */
+     public StoredToken validateRefreshToken(final String value, final String expectedClientId) {
+         final StoredToken stored = findByValue(value)
+@@ -227,9 +249,15 @@ public class OidcTokenService {
+         }
+     }
+ 
++    public StoredToken validateResourceRefreshToken(final String value, final String clientId, final String resource) {
++        final var stored = validateRefreshToken(value, clientId);
++        if (!java.util.Objects.equals(stored.resource(), resource)) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        return stored;
++    }
++
+     public Optional<StoredToken> findByValue(final String value) {
+         final String sql = """
+-            SELECT id, client_id, subject, token_type, value, scopes, issued_at, expires_at, revoked
++            SELECT id, client_id, subject, token_type, value, scopes, issued_at, expires_at, revoked, resource
+             FROM oidc_token WHERE value = ?""";
+         try (Connection connection = dataSource.getConnection();
+              PreparedStatement ps = connection.prepareStatement(sql)) {
+@@ -309,11 +337,11 @@ public class OidcTokenService {
+ 
+     private void persist(
+         final String type, final String clientId, final String subject,
+-        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt
++        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt, final String resource
+     ) {
+         final String sql = """
+-            INSERT INTO oidc_token (client_id, subject, token_type, value, scopes, issued_at, expires_at)
+-            VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)""";
++            INSERT INTO oidc_token (client_id, subject, token_type, value, scopes, issued_at, expires_at, resource)
++            VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?)""";
+         try (Connection connection = dataSource.getConnection();
+              PreparedStatement ps = connection.prepareStatement(sql)) {
+             ps.setString(1, clientId);
+@@ -323,6 +351,7 @@ public class OidcTokenService {
+             ps.setString(5, toJson(scopes));
+             ps.setTimestamp(6, Timestamp.from(issuedAt));
+             ps.setTimestamp(7, Timestamp.from(expiresAt));
++            ps.setString(8, resource);
+             ps.executeUpdate();
+         } catch (SQLException e) {
+             throw new IllegalStateException("Failed to persist OIDC token", e);
+@@ -341,7 +370,7 @@ public class OidcTokenService {
+             fromJson(rs.getString("scopes")),
+             issuedAt == null ? null : issuedAt.toInstant(),
+             expiresAt == null ? null : expiresAt.toInstant(),
+-            rs.getBoolean("revoked")
++            rs.getBoolean("revoked"), rs.getString("resource")
+         );
+     }
+ 
+diff --git a/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql b/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql
+new file mode 100644
+index 0000000..295ed40
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE oidc_authorization_code ADD COLUMN resource TEXT;
++ALTER TABLE oidc_token ADD COLUMN resource TEXT;
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java b/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java
+index 7d64c04..fd20578 100644
+--- a/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java
++++ b/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java
+@@ -49,6 +49,24 @@ class McpServerHandlerTransportTest {
+         assertThat(mcpServerHandlerTransport.listToolsForServer(null, serverB).collectList().block()).isEmpty();
+     }
+ 
++    @Test
++    void shouldSeparateHandlersByVerifiedCallerAndCapabilities() {
++        final String server = UUID.randomUUID().toString();
++        final var alice = KestraMcpTransportContext.builder().serverId(server).userId("alice")
++            .clientId("alice-client").resource("https://example.org/mcp/first")
++            .scopes(List.of("mcp:flows:read")).build();
++        final var bob = KestraMcpTransportContext.builder().serverId(server).userId("bob")
++            .clientId("bob-client").resource("https://example.org/mcp/first")
++            .scopes(List.of("mcp:flows:read")).build();
++        final var elevated = KestraMcpTransportContext.builder().serverId(server).userId("alice")
++            .clientId("alice-client").resource("https://example.org/mcp/first")
++            .scopes(List.of("mcp:flows:read", "mcp:executions:write")).build();
++        assertThat(mcpServerHandlerTransport.getServerHandler(alice)).isNotSameAs(mcpServerHandlerTransport.getServerHandler(bob));
++        assertThat(mcpServerHandlerTransport.getServerHandler(alice)).isNotSameAs(mcpServerHandlerTransport.getServerHandler(elevated));
++        assertThat(mcpServerHandlerTransport.getServerHandler(alice)).isSameAs(mcpServerHandlerTransport.getServerHandler(alice));
++        mcpServerHandlerTransport.close();
++    }
++
+     @Test
+     void shouldCompleteWhenClosingWithoutAnyBuiltServer() {
+         // Given / When / Then — closing an untouched registry must not block or throw
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpBearerFilterTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpBearerFilterTest.java
+new file mode 100644
+index 0000000..65c3570
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpBearerFilterTest.java
+@@ -0,0 +1,49 @@
++package io.kestra.webserver.oidc;
++
++import java.util.Optional;
++import java.util.List;
++import com.nimbusds.jwt.JWTClaimsSet;
++import io.kestra.mcp.McpToolRoute;
++import io.kestra.webserver.mcp.McpBearerFilter;
++import io.kestra.webserver.mcp.McpResourceUrl;
++import io.kestra.webserver.oidc.services.OidcTokenService;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.filter.ServerFilterChain;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.mockStatic;
++import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.any;
++import static org.mockito.Mockito.anyString;
++
++class McpBearerFilterTest {
++    @Test
++    void shouldChallengeBasicCookieAndInvalidBearerWithoutExecuting() {
++        final var resources = mock(McpResourceUrl.class);
++        final var tokens = mock(OidcTokenService.class);
++        final var chain = mock(ServerFilterChain.class);
++        when(resources.resource("main", "first")).thenReturn(java.net.URI.create("https://example.org/api/v1/main/mcp/first"));
++        when(resources.parseExact(anyString())).thenReturn(java.net.URI.create("https://example.org/api/v1/main/mcp/first"));
++        when(resources.metadata("main", "first")).thenReturn(java.net.URI.create("https://example.org/.well-known/oauth-protected-resource/api/v1/main/mcp/first"));
++        when(tokens.validateResourceAccessToken(anyString(), anyString())).thenThrow(new IllegalArgumentException());
++        final var filter = new McpBearerFilter(resources, tokens);
++        try (var routes = mockStatic(McpToolRoute.class)) {
++            routes.when(() -> McpToolRoute.serverId(any())).thenReturn(Optional.of("first"));
++            routes.when(() -> McpToolRoute.tenantId(any())).thenReturn(Optional.of("main"));
++            for (final String header : List.of("", "Basic abc", "Bearer cross-resource")) {
++                final var request = HttpRequest.POST("/api/v1/main/mcp/first", "{}").header("Cookie", "JWT=old; oidc_session=old");
++                if (!header.isEmpty()) request.header("Authorization", header);
++                final var response = Mono.from(filter.doFilter(request, chain)).block();
++                assertEquals(HttpStatus.UNAUTHORIZED, response.getStatus());
++                assertTrue(response.getHeaders().get("WWW-Authenticate").contains("resource_metadata=\"https://example.org/.well-known/oauth-protected-resource/"));
++            }
++            verifyNoInteractions(chain);
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpSecurityTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpSecurityTest.java
+new file mode 100644
+index 0000000..dcc306c
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpSecurityTest.java
+@@ -0,0 +1,74 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Map;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.mcp.models.McpServer;
++import io.kestra.core.mcp.repositories.McpServerRepositoryInterface;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.runtime.server.EmbeddedServer;
++import jakarta.inject.Inject;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import io.modelcontextprotocol.json.McpJsonMapper;
++import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapper;
++import io.modelcontextprotocol.spec.McpSchema;
++import io.modelcontextprotocol.spec.ProtocolVersions;
++import tools.jackson.databind.json.JsonMapper;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.oidc.enabled", value = "true")
++@Property(name = "kestra.url", value = "https://kestra.example.org")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/.well-known/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "micronaut.security.intercept-url-map[1].pattern", value = "/oidc/**")
++@Property(name = "micronaut.security.intercept-url-map[1].access[0]", value = "isAnonymous()")
++@Property(name = "micronaut.security.intercept-url-map[2].pattern", value = "/api/**")
++@Property(name = "micronaut.security.intercept-url-map[2].access[0]", value = "isAuthenticated()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++class McpHttpSecurityTest {
++    @Inject EmbeddedServer server;
++    @Inject McpServerRepositoryInterface servers;
++
++    @Test
++    void realHttpRejectsBasicAndCookiesWithResourceChallenge() throws Exception {
++        servers.save(null, new McpServer("main", "http-security", "", "", McpServer.ServerType.PRIVATE,
++            McpServer.AuthType.BASIC, null, null, false, false, false, null, null));
++        final var client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
++        for (final String authorization : List.of("", "Basic YWRtaW46cGFzc3dvcmQ=", "Bearer invalid")) {
++            final var builder = HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/mcp/http-security"))
++                .header("Content-Type", "application/json").header("Accept", "application/json, text/event-stream")
++                .header("Cookie", "BASIC_AUTH=old; kestraBasicAuthenticated=true; oidc_session=old; JWT=old")
++                .POST(HttpRequest.BodyPublishers.ofString("{}"));
++            if (!authorization.isEmpty()) builder.header("Authorization", authorization);
++            final var response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
++            assertEquals(401, response.statusCode());
++            assertTrue(response.headers().firstValue("WWW-Authenticate").orElseThrow().contains("resource_metadata="));
++            assertFalse(response.body().contains("<html"));
++        }
++    }
++
++    @Test
++    void sdkInitializeAndToolsListRemainTheNextAuthenticatedGate() throws Exception {
++        final var mapper = new JacksonMcpJsonMapper(JsonMapper.builder().build());
++        final var initialize = new McpSchema.JSONRPCRequest(McpSchema.JSONRPC_VERSION, McpSchema.METHOD_INITIALIZE, 1,
++            new McpSchema.InitializeRequest(ProtocolVersions.MCP_2025_03_26,
++                new McpSchema.ClientCapabilities(null, null, null, null),
++                new McpSchema.Implementation("overlay-test-client", "1.0")));
++        final var body = mapper.writeValueAsString(initialize);
++        final var client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
++        final var response = client.send(HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/mcp/http-security"))
++            .header("Content-Type", "application/json").header("Accept", "application/json, text/event-stream")
++            .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
++        assertEquals(401, response.statusCode());
++        assertTrue(response.headers().firstValue("WWW-Authenticate").orElseThrow().contains("resource_metadata="));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpTestClientFilter.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpTestClientFilter.java
+new file mode 100644
+index 0000000..4324996
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpTestClientFilter.java
+@@ -0,0 +1,20 @@
++package io.kestra.webserver.oidc;
++
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MutableHttpRequest;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.filter.ClientFilterChain;
++import io.micronaut.http.filter.HttpClientFilter;
++import org.reactivestreams.Publisher;
++
++@Filter("/**")
++@Requires(property = "mcp.http.security.fixture", value = "true")
++@Replaces(io.kestra.webserver.filter.TestAuthFilter.class)
++public class McpHttpTestClientFilter implements HttpClientFilter {
++    @Override
++    public Publisher<? extends HttpResponse<?>> doFilter(final MutableHttpRequest<?> request, final ClientFilterChain chain) {
++        return chain.proceed(request);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpIdentityPropagationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpIdentityPropagationTest.java
+new file mode 100644
+index 0000000..1d4a40e
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpIdentityPropagationTest.java
+@@ -0,0 +1,32 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Map;
++import io.kestra.mcp.DefaultMcpToolAccessControl;
++import io.kestra.mcp.McpSessionFactory;
++import io.kestra.webserver.mcp.McpAuthenticationFetcher;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++
++class McpIdentityPropagationTest {
++    @Test
++    void shouldPropagateVerifiedSubjectClientResourceAndScopes() {
++        final var request = HttpRequest.POST("/api/v1/main/mcp/first", "{}");
++        final var authentication = Authentication.build("alice", Map.of("client_id", "client-a"));
++        request.setAttribute("io.kestra.mcp.authentication", authentication);
++        assertEquals("alice", new DefaultMcpToolAccessControl().callerId(request).orElseThrow());
++        assertSame(authentication, Mono.from(new McpAuthenticationFetcher().fetchAuthentication(request)).block());
++        final var factory = new McpSessionFactory();
++        final var alice = factory.build("main", "first", "session", "alice", "client-a", "https://example.org/first", List.of("mcp:flows:read"));
++        final var bob = factory.build("main", "first", "session", "bob", "client-b", "https://example.org/first", List.of("mcp:flows:read"));
++        assertNotEquals(alice, bob);
++        assertEquals("alice", alice.get("userId"));
++        assertEquals("client-a", alice.get("clientId"));
++        assertEquals(List.of("mcp:flows:read"), alice.get("scopes"));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java
+new file mode 100644
+index 0000000..b5d6bf6
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java
+@@ -0,0 +1,51 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.mcp.McpResourceUrl;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++class McpResourceUrlTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void shouldAcceptOnlyExistingCanonicalResource() {
++        final var provider = org.mockito.Mockito.mock(io.micronaut.context.BeanProvider.class);
++        final var repository = org.mockito.Mockito.mock(io.kestra.core.mcp.repositories.McpServerRepositoryInterface.class);
++        final var queue = org.mockito.Mockito.mock(io.kestra.core.queues.BroadcastQueueInterface.class);
++        final var cache = new io.kestra.mcp.McpServerCache(repository, queue, new io.kestra.mcp.McpConfig(null,
++            new io.kestra.mcp.McpConfig.ServerCacheConfig(10L, java.time.Duration.ofMinutes(5)), java.time.Duration.ofMinutes(5)));
++        org.mockito.Mockito.when(provider.get()).thenReturn(cache);
++        org.mockito.Mockito.when(repository.get("main", "first")).thenReturn(java.util.Optional.of(
++            org.mockito.Mockito.mock(io.kestra.core.mcp.models.McpServer.class)));
++        org.mockito.Mockito.when(repository.get("main", "second")).thenReturn(java.util.Optional.of(
++            org.mockito.Mockito.mock(io.kestra.core.mcp.models.McpServer.class)));
++        final var resources = new McpResourceUrl("https://example.org/prefix", provider);
++        assertEquals(resources.resource("main", "first"), resources.parseExact("https://example.org/prefix/api/v1/main/mcp/first"));
++        assertEquals(resources.resource("main", "second"), resources.parseExact("https://example.org/prefix/api/v1/main/mcp/second"));
++        assertEquals("https://example.org/.well-known/oauth-protected-resource/prefix/api/v1/main/mcp/first",
++            resources.metadata("main", "first").toString());
++        assertEquals(resources.resource("main", "first"), resources.fromMetadataPath("prefix/api/v1/main/mcp/first"));
++        for (final String invalid : java.util.List.of("https:opaque", "https://example.org/prefix/api/v1/main/mcp/missing",
++            "https://example.org/prefix/api/v1/other/mcp/first", "http://example.org/prefix/api/v1/main/mcp/first",
++            "https://evil.org/prefix/api/v1/main/mcp/first", "https://example.org/prefix/api/v1/main/mcp/first%2Fother",
++            "https://example.org/prefix/api/v1/main/mcp/../first", "https://example.org/prefix/api/v1/main/mcp/first?query")) {
++            assertThrows(IllegalArgumentException.class, () -> resources.parseExact(invalid));
++        }
++        assertThrows(IllegalArgumentException.class, () -> resources.parseExact(null));
++    }
++    @Test
++    void shouldSeparateServersAndPreserveDeploymentPrefix() {
++        final var resources = new McpResourceUrl("https://kestra.example.org/prefix/", null);
++        assertEquals("https://kestra.example.org/prefix/api/v1/main/mcp/first", resources.resource("main", "first").toString());
++        assertNotEquals(resources.resource("main", "first"), resources.resource("main", "second"));
++    }
++
++    @Test
++    void shouldRejectUntrustedOrAmbiguousBaseUrls() {
++        for (final String base : java.util.List.of("", "/relative", "https://example.org?query", "https://example.org#fragment", "https://user@example.org", "file:///tmp")) {
++            assertThrows(IllegalArgumentException.class, () -> new McpResourceUrl(base, null));
++        }
++        assertThrows(IllegalArgumentException.class, () -> new McpResourceUrl("https://example.org", null).resource("main", "../other"));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
+new file mode 100644
+index 0000000..0fa89f5
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
+@@ -0,0 +1,40 @@
++package io.kestra.webserver.oidc;
++
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.modelcontextprotocol.client.McpClient;
++import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
++import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapper;
++import tools.jackson.databind.json.JsonMapper;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assumptions.assumeTrue;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class McpSdkInstanceTest {
++    @Test
++    void shouldInitializeAndListThroughRealSdkTransport() throws Exception {
++        final String instanceUrl = System.getenv("MCP_INSTANCE_URL");
++        final String tokenFile = System.getenv("MCP_TOKEN_FILE");
++        assumeTrue(instanceUrl != null && !instanceUrl.isBlank(), "Manual acceptance requires a running MCP instance via MCP_INSTANCE_URL");
++        assumeTrue(tokenFile != null && !tokenFile.isBlank() && Files.isRegularFile(Path.of(tokenFile)),
++            "Manual acceptance requires a locally obtained resource-bound token file via MCP_TOKEN_FILE");
++        final String token = new ObjectMapper().readTree(Files.readString(
++            Path.of(tokenFile))).get("access_token").asText();
++        final var transport = HttpClientStreamableHttpTransport.builder(instanceUrl)
++            .endpoint("/api/v1/main/mcp/default")
++            .customizeRequest(builder -> builder.header("Authorization", "Bearer " + token))
++            .jsonMapper(new JacksonMcpJsonMapper(JsonMapper.builder().build())).build();
++        final var client = McpClient.sync(transport).requestTimeout(Duration.ofSeconds(15)).build();
++        try {
++            assertNotNull(client.initialize().protocolVersion());
++            assertNotNull(client.listTools().tools());
++        } finally {
++            client.closeGracefully();
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
+index 6e5ce51..9f4e279 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
+@@ -42,6 +42,23 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
+             List.of("openid"), null, null, null).getValue();
+     }
+ 
++    @Test
++    void resourceMismatchDoesNotConsumeAuthorizationCode() throws Exception {
++        final String code = createCode();
++        final String resource = "https://example.org/api/v1/main/mcp/first";
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "UPDATE oidc_authorization_code SET resource=? WHERE code=?")) {
++            statement.setString(1, resource);
++            statement.setString(2, code);
++            statement.executeUpdate();
++        }
++        assertThrows(OidcException.class, () -> service.consume(code, "code-client", "https://app.example.org/cb", null));
++        assertThrows(OidcException.class, () -> service.consume(code, "code-client", "https://app.example.org/cb", null,
++            "https://example.org/api/v1/main/mcp/second"));
++        assertTrue(!service.find(code).orElseThrow().used());
++        assertEquals(resource, service.consume(code, "code-client", "https://app.example.org/cb", null, resource).resource());
++    }
++
+     @Test
+     void anonymousAuthorizeReturnsToTheCompleteRequestAfterLogin() {
+         final var mapper = new ObjectMapper();
+@@ -52,7 +69,8 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
+             new io.kestra.webserver.oidc.services.OidcTokenService(source, mapper, configuration, keys),
+             keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
+             new io.kestra.webserver.oidc.services.OidcSessionService(configuration),
+-            new io.kestra.webserver.oidc.services.OidcOwnershipService(source, mapper, 20));
++            new io.kestra.webserver.oidc.services.OidcOwnershipService(source, mapper, 20),
++            new io.kestra.webserver.mcp.McpResourceUrl("https://example.org", null));
+         final String authorize = "/oidc/authorize?client_id=code-client&redirect_uri=https%3A%2F%2Fapp.example.org%2Fcb"
+             + "&response_type=code&scope=openid&state=round-trip&nonce=nonce-test";
+         final var request = org.mockito.Mockito.spy(io.micronaut.http.HttpRequest.GET(authorize));
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
+index ead0d6b..4ffe9ca 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
+@@ -73,6 +73,22 @@ class OidcTokenServiceTest extends OidcPostgresTestBase {
+         assertThrows(OidcException.class, () -> service.validateAccessToken(machine.getValue()));
+     }
+ 
++    @Test
++    void resourceTokensCannotCrossServersOrUseIdTokens() {
++        final String first = "https://example.org/api/v1/main/mcp/first";
++        final String second = "https://example.org/api/v1/main/mcp/second";
++        final var access = service.issueAccessToken("machine-client", "machine-client", "Machine", null,
++            List.of(), new Scope("openid"), first);
++        service.validateResourceAccessToken(access.getValue(), first);
++        assertThrows(OidcException.class, () -> service.validateResourceAccessToken(access.getValue(), second));
++        final var refresh = service.issueRefreshToken("machine-client", "machine-client", new Scope("openid"), first);
++        service.validateResourceRefreshToken(refresh.getValue(), "machine-client", first);
++        assertThrows(OidcException.class, () -> service.validateResourceRefreshToken(refresh.getValue(), "machine-client", second));
++        assertThrows(OidcException.class, () -> service.validateResourceRefreshToken(refresh.getValue(), "machine-client", null));
++        final var idToken = service.issueIdToken("machine-client", "machine-client", "Machine", null, List.of(), "nonce");
++        assertThrows(OidcException.class, () -> service.validateResourceAccessToken(idToken.serialize(), first));
++    }
++
+     @Test
+     void issuesAndValidatesAccessToken() {
+         final var access = service.issueAccessToken("machine-client", "machine-client",

@@ -54,7 +54,9 @@ echo "== scoped tests (filter: $TESTS) =="
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
   export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || true)"
 fi
-(cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" --console=plain)
+(cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
+  --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
+  --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
 
 echo "== executable jar =="
 (cd "$WORK/ui" && npm ci && npm run build)

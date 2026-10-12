@@ -69,7 +69,7 @@ apps/AI/UI 等其余域的 patch（0010/0020/0021/0022）与 reserved
 **后续范围修订（维护者多轮澄清）**：重新接收 MCP **认证面**，目标 OAuth2-only，
 删除 MCP Basic Auth 实现/选项/商业占位；其余 MCP 业务面不自动扩展。动态 MCP
 client 归属用户，采用短期 pending→登录确认绑定 owner 的第二种方案，无管理员
-特例或共享动态 client。方案先行、尚未实施；详细流程/边界/接收与验收门见
+特例或共享动态 client。0150/0160/0170/0180/0190 已生成并本地重放，扩大镜像门本地通过；待维护者review与真CI。详细流程/边界/接收与验收门见
 docs/mcp-oauth-integration.md。早期“MCP 面除外”仅为历史范围，不得否定本裁定。
 本仓 MCP scope 独立声明资源大类 read/write/delete（write 不含 delete），用户
 授权只能收窄；不依赖外部 RBAC 模型。R-EE-RBAC 启用时必须拦截全部现有 MCP

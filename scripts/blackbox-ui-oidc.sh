@@ -71,6 +71,7 @@ kestra:
     registration:
       enabled: true
       max-clients: 10
+      max-pending-clients: 10
 micronaut:
   security:
     enabled: true
@@ -204,10 +205,14 @@ CHALLENGE=$(node -e 'process.stdout.write(require("crypto").createHash("sha256")
 assert_status "explicit empty challenge rejected" 400 "$(curl -s -G --data-urlencode "client_id=$PUBLIC_ID" \
   --data-urlencode 'redirect_uri=http://127.0.0.1:9999/cb' --data-urlencode response_type=code \
   --data-urlencode code_challenge= -o /dev/null -w '%{http_code}' "$BASE/oidc/authorize")"
-assert_status "public S256 authorize" 307 "$(request -G --data-urlencode "client_id=$PUBLIC_ID" \
+assert_status "public S256 consent page" 200 "$(request -G --data-urlencode "client_id=$PUBLIC_ID" \
   --data-urlencode 'redirect_uri=http://127.0.0.1:9999/cb' --data-urlencode response_type=code \
   --data-urlencode scope=openid --data-urlencode "code_challenge=$CHALLENGE" \
   --data-urlencode code_challenge_method=S256 "$BASE/oidc/authorize")"
+INTERACTION=$(node -e 'const text=require("fs").readFileSync(process.argv[1],"utf8");const match=text.match(/name="interaction" value="([^"]+)"/);if(!match)process.exit(1);process.stdout.write(match[1])' "$TEMP_DIR/body")
+assert_status "public client user confirms ownership" 303 "$(request -H "Origin: $BASE" \
+  --data-urlencode "interaction=$INTERACTION" --data-urlencode decision=approve \
+  --data-urlencode scope-openid=yes "$BASE/oidc/consent")"
 PUBLIC_CODE=$(node -e 'process.stdout.write(new URL(process.argv[1]).searchParams.get("code")||"")' "$(location "$TEMP_DIR/headers")")
 assert_status "public client requires verifier" 400 "$(curl -s -d "client_id=$PUBLIC_ID&grant_type=authorization_code&code=$PUBLIC_CODE&redirect_uri=http://127.0.0.1:9999/cb" \
   -o /dev/null -w '%{http_code}' "$BASE/oidc/token")"
