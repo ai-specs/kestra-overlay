@@ -6,6 +6,9 @@ on:
 permissions:
   contents: read
   packages: write
+concurrency:
+  group: overlay-release
+  cancel-in-progress: false
 jobs:
   patch-verify:
     runs-on: ubuntu-24.04
@@ -17,6 +20,8 @@ jobs:
         run: ./scripts/build.sh --apply-only
   build-push:
     needs: patch-verify
+    outputs:
+      image: ${{ steps.candidate.outputs.image }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -50,11 +55,14 @@ jobs:
         with:
           node-version: '24'
       - name: Apply patches, compile webserver, stage extension jars, build and push
+        id: candidate
         env:
           WORK: ${{ github.workspace }}/.work/verify
         run: ./scripts/build.sh
       - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
-        run: bash ./scripts/blackbox-mcp-oauth.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins "${{ github.workspace }}/.work/verify"
+        env:
+          CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
+        run: bash ./scripts/blackbox-mcp-oauth.sh "$CANDIDATE_IMAGE" "${{ github.workspace }}/.work/verify"
   oidc-blackbox:
     needs: build-push
     runs-on: ubuntu-24.04
@@ -63,7 +71,9 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: "Image-level OIDC black-box (two phases: gated-off regression + full flow)"
-        run: ./scripts/blackbox-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+        env:
+          CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
+        run: ./scripts/blackbox-oidc.sh "$CANDIDATE_IMAGE"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -71,8 +81,21 @@ jobs:
         env:
           BB_BROWSER: '1'
           NODE_PATH: ${{ runner.temp }}/oidc-browser/node_modules
+          CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
         run: |
           npm install --prefix "$RUNNER_TEMP/oidc-browser" playwright@1.61.1
           "$RUNNER_TEMP/oidc-browser/node_modules/.bin/playwright" install --with-deps chromium
-          bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
-          BB_SETUP_MODE=env bash ./scripts/blackbox-ui-oidc.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+          bash ./scripts/blackbox-ui-oidc.sh "$CANDIDATE_IMAGE"
+          BB_SETUP_MODE=env bash ./scripts/blackbox-ui-oidc.sh "$CANDIDATE_IMAGE"
+  promote:
+    needs: [build-push, oidc-blackbox]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Promote verified immutable candidate to deployment tags
+        env:
+          CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
+        run: bash ./scripts/promote-image.sh "$CANDIDATE_IMAGE"

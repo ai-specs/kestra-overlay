@@ -218,6 +218,9 @@ assert_eq "alg=none token → 401" 401 "$(curl -s -H "Authorization: Bearer $H.$
 # refresh 轮换：旧 refresh 用后即废
 RT=$(sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p' "$T/token.json")
 RT_D="grant_type=refresh_token&refresh_token=$RT"
+code=$(curl -s -u rp-test:rp-secret -o "$T/rt-invalid-scope.json" -w '%{http_code}' -d "$RT_D&scope=not-granted" "$BASE/oidc/token")
+assert_eq "refresh invalid scope rejected without consuming token" 400 "$code"
+assert_contains "refresh scope error" '"invalid_scope"' "$T/rt-invalid-scope.json"
 code=$(curl -s -u rp-test:rp-secret -o "$T/rt.json" -w '%{http_code}' -d "$RT_D" "$BASE/oidc/token")
 assert_eq "refresh rotation 200" 200 "$code"
 assert_contains "rotated response has access_token" "access_token" "$T/rt.json"

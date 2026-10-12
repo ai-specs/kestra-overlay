@@ -254,6 +254,9 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 
 ## 9. 变更纪律
 
+- 镜像发布先构建唯一候选并固定 digest，全部协议/浏览器/MCP 验收通过后推广正式 tag；
+  基础层 OCI index 由 `patches/IMAGE_BASE` 固定，变更须核验 amd64/arm64 后更新。
+
 - main 直推（本仓无 PR 流程）；commit message 指明需求号或范围。
 - 每 patch 的增/删/改在 commit message 记录理由；被删 patch 的理由入 manifest 或 commit（git 历史即归档，不留 .bak）。
 - 本文件与 `docs/oss-ee-gap.md`、`patches/manifest.tsv` 与实际 patch 集**四者一致**，由

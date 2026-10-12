@@ -1,0 +1,85 @@
+# 需求：REQ-0211 pending注册quota饱和明确429；非quota数据库故障保持503。
+# 消费扩展仓：—（R-OIDC-SERVER patch 路线）
+# 状态：core
+# 来源：新写；RFC7591及生产审计P2错误映射修复，PG并发/饱和测试同批。
+# 触达上游文件：OidcRegistrationController、OidcRegistrationQuotaTest（2文件）。
+# 移除条件：上游提供等价注册quota错误语义或R-OIDC-SERVER弃用。
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
+index 20ea035..c3ebf16 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcRegistrationController.java
+@@ -37,7 +37,8 @@ public class OidcRegistrationController {
+         } catch (IllegalArgumentException exception) {
+             return HttpResponse.badRequest(Map.of("error", exception.getMessage()));
+         } catch (IllegalStateException exception) {
+-            final boolean quota = "registration_limit_reached".equals(exception.getMessage());
++            final boolean quota = "registration_limit_reached".equals(exception.getMessage())
++                || "pending_registration_limit_reached".equals(exception.getMessage());
+             return HttpResponse.status(quota ? HttpStatus.TOO_MANY_REQUESTS : HttpStatus.SERVICE_UNAVAILABLE)
+                 .body(Map.of("error", quota ? "temporarily_unavailable" : "registration_unavailable"));
+         }
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationQuotaTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationQuotaTest.java
+new file mode 100644
+index 0000000..562f2b2
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationQuotaTest.java
+@@ -0,0 +1,58 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.Callable;
++import java.util.concurrent.Executors;
++import javax.sql.DataSource;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.controllers.OidcRegistrationController;
++import io.kestra.webserver.oidc.services.OidcRegistrationRate;
++import io.kestra.webserver.oidc.services.OidcRegistrationService;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.micronaut.http.HttpStatus;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++class OidcRegistrationQuotaTest extends OidcPostgresTestBase {
++    private final Map<String, Object> metadata = Map.of("redirect_uris", List.of("https://example.org/callback"),
++        "token_endpoint_auth_method", "none");
++
++    private OidcRegistrationController controller(final DataSource source) {
++        final var setup = mock(OidcSetupService.class);
++        when(setup.ready()).thenReturn(true);
++        return new OidcRegistrationController(new OidcRegistrationService(source, new ObjectMapper(), 10, 1, 30),
++            setup, new OidcRegistrationRate(dataSource(), 100));
++    }
++
++    @Test
++    void shouldReturn429ForSequentialAndConcurrentPendingSaturation() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("TRUNCATE oidc_client CASCADE");
++            statement.execute("TRUNCATE oidc_registration_rate");
++        }
++        final var controller = controller(dataSource());
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            final var results = executor.invokeAll(List.<Callable<HttpStatus>>of(
++                () -> controller.register(metadata).getStatus(), () -> controller.register(metadata).getStatus()));
++            final var statuses = List.of(results.get(0).get(), results.get(1).get());
++            assertEquals(1, statuses.stream().filter(HttpStatus.CREATED::equals).count());
++            assertEquals(1, statuses.stream().filter(HttpStatus.TOO_MANY_REQUESTS::equals).count());
++        }
++        assertEquals(HttpStatus.TOO_MANY_REQUESTS, controller.register(metadata).getStatus());
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement();
++            var result = statement.executeQuery("SELECT count(*) FROM oidc_client WHERE client_kind='pending'")) {
++            result.next();
++            assertEquals(1, result.getInt(1));
++        }
++    }
++
++    @Test
++    void shouldReturn503ForDatabaseFailure() throws Exception {
++        final var broken = mock(DataSource.class);
++        when(broken.getConnection()).thenThrow(new java.sql.SQLException("Unavailable"));
++        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, controller(broken).register(metadata).getStatus());
++    }
++}
+

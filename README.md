@@ -39,6 +39,10 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 
 多架构：镜像提供 `linux/amd64` 与 `linux/arm64`。
 
+正式 release/commit/latest tag 仅在 MCP、OIDC 和浏览器镜像验收通过后更新；所有
+验收引用同一个不可变候选 digest。基础运行镜像固定于 `patches/IMAGE_BASE` 的
+多架构 OCI index digest。候选失败不会覆盖正式部署 tag。
+
 ### OIDC 账号与 OAuth client 契约
 
 镜像内置 **OIDC 服务器、用户目录和 client 注册能力**，不预装默认账号、密码或
@@ -52,7 +56,7 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 | OIDC 用户 | `oidc_user.username` 为登录名和 OIDC `sub`；密码在 `oidc_user_auth_method` 中以 bcrypt 保存 |
 | `kestra` | 下例的 Micronaut 客户端配置名称，决定 `/oauth/login/kestra` 与 `/oauth/callback/kestra` 路径；不是 client ID |
 | `kestra-ui` | 下例为本实例 UI 选用的 client ID，可自定义；必须同时存在于配置与 `oidc_client` 注册表 |
-| client secret | 部署方自行生成；配置值与注册表必须一致；当前 client 表保存 secret 原值，应限制数据库访问 |
+| client secret | 部署方自行生成并保留在 OAuth 客户端配置中；授权服务器以独立随机盐的版本化 PBKDF2-HMAC-SHA256 哈希保存，不能从注册表取回原值；旧版本数据库启动时自动迁移，失败则阻止启动 |
 | redirect URI | 必须精确注册，例如 `http://localhost:8080/oauth/callback/kestra`；含协议、域名、端口和路径 |
 | 外部项目 client | 每个应用单独注册 client ID/secret/回调；不要复用 UI client 的凭据与回调 |
 

@@ -42,6 +42,8 @@ kestra:
     issuer: $BASE
     registration:
       enabled: true
+      max-pending-clients: 20
+      requests-per-minute: 100
 micronaut:
   security:
     enabled: true
@@ -86,6 +88,12 @@ for attempt in $(seq 1 60); do
 done
 [ "$READY" = 1 ] || { echo 'FAIL MCP instance startup'; exit 1; }
 node "$REPO/scripts/blackbox-mcp-oauth.mjs" "$BASE" "$TEMP_DIR"
+HASHED_UI_CLIENT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM oidc_client WHERE client_id='ci-ui' AND secret_format='pbkdf2-sha256-v1' AND client_secret <> 'local-ci-ui-only'")
+[ "$HASHED_UI_CLIENT" = 1 ] || {
+  docker exec "$PG" psql -U kestra -Atc "SELECT client_id,secret_format,client_secret='local-ci-ui-only' AS is_plaintext,client_secret LIKE '{pbkdf2-sha256-v1}%' AS is_hash FROM oidc_client"
+  echo 'FAIL bootstrap client secret was not hashed'; exit 1;
+}
+echo 'PASS production bootstrap stores a versioned hash instead of the UI client secret'
 if [ "${MCP_PRISTINE_PROBE:-0}" = 1 ]; then exit 0; fi
 PG_PORT=$(docker port "$PG" 5432/tcp | sed 's/.*://')
 (cd "$WORK" && OIDC_FIXTURE_JDBC="jdbc:postgresql://127.0.0.1:$PG_PORT/kestra" \
@@ -106,6 +114,21 @@ sdk read.json true
 COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance'")
 [ "$COUNT" = 1 ] || { echo 'FAIL denied call created execution'; exit 1; }
 node "$REPO/scripts/blackbox-mcp-lifecycle.mjs" "$BASE" "$TEMP_DIR"
+QUOTA_REJECTED=0
+for attempt in $(seq 1 25); do
+  STATUS=$(curl -sS -o "$TEMP_DIR/quota.json" -w '%{http_code}' \
+    -H 'Content-Type: application/json' \
+    -d '{"redirect_uris":["http://127.0.0.1:19999/callback"],"token_endpoint_auth_method":"none"}' \
+    "$BASE/oidc/register")
+  case "$STATUS" in
+    201) ;;
+    429) QUOTA_REJECTED=1; break ;;
+    *) echo "FAIL pending quota returned unexpected HTTP $STATUS"; exit 1 ;;
+  esac
+done
+PENDING_COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM oidc_client WHERE client_kind='pending' AND pending_expires_at>now()")
+[ "$QUOTA_REJECTED" = 1 ] && [ "$PENDING_COUNT" = 20 ] || { echo 'FAIL pending quota saturation was not enforced'; exit 1; }
+echo 'PASS pending registration saturation returns 429 at the configured database quota'
 COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance'")
 [ "$COUNT" = 1 ] || { echo 'FAIL revoked session created execution'; exit 1; }
 docker rm -f "$APP" >/dev/null

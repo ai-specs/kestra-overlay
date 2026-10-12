@@ -7,8 +7,7 @@
 #   BASE 格式 / manifest 结构与状态合法性 / patch 文件与 manifest 一一对应 /
 #   目录白名单（仅 webserver 组）/ 头部注释必填字段 / 文件数声明一致 /
 #   冲突标记 / 同文件跨 patch 改动行冲突（坐标归一化后） / （可选）顺序应用 + 改动集合核对
-# 坐标归一化：增量提交法生成的 patch N 旧行号基于「patch 1..N-1 应用后」的文件；
-# 冲突检测先把各 patch 的旧行号按前序 patch 在该文件的累计行数增量折算回 BASE 坐标。
+# 冲突检测使用每个 hunk 的旧侧行号与逐行 provenance；不使用整文件累计 delta。
 # 权威判定始终是 --apply-check 的真实顺序应用（git apply）；静态检测是无需上游树的快速门。
 # bash 3.2 兼容（macOS 默认 shell）。
 set -euo pipefail
@@ -36,6 +35,14 @@ else
   if echo "$L1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+'; then ok "release tag: $L1"; else bad "第 1 行不是 release tag: $L1"; fi
   if echo "$L2" | grep -Eq '^[0-9a-f]{40}$'; then ok "commit sha: ${L2:0:12}"; else bad "第 2 行不是 40 位 sha: $L2"; fi
   [ "$(wc -l < "$BASE_FILE" | tr -d ' ')" = "2" ] && ok "恰好 2 行" || bad "应恰好 2 行"
+fi
+
+IMAGE_BASE_FILE="$PATCH_DIR/IMAGE_BASE"
+if [ -f "$IMAGE_BASE_FILE" ] && [ "$(wc -l < "$IMAGE_BASE_FILE" | tr -d ' ')" = 1 ] \
+  && grep -Eq '^ghcr.io/kestra-io/kestra-base@sha256:[0-9a-f]{64}$' "$IMAGE_BASE_FILE"; then
+  ok "基础镜像固定为 OCI digest"
+else
+  bad "patches/IMAGE_BASE 必须为一行固定基础镜像 digest"
 fi
 
 echo "== [2] manifest 结构 =="
@@ -88,8 +95,9 @@ while IFS= read -r p; do
     head -n "$((first_diff_line-1))" "$p" | grep -q "$field" || bad "$name: 头部缺字段「$field」"
   done
   grep -Eq '^\+?(<<<<<<<|>>>>>>>)' "$p" && bad "$name: 含冲突标记"
-  # 输出（组前置）：C <order> <file> <delta> <patch> 后跟本组 D/I 记录：
-  #   D <oldline>  被 '-' 的旧行；I <point> 插在旧第 point 行之前的 '+' 段首
+  # 输出（组前置）：C <order> <file> <delta> <patch> 后跟本组 D/I 记录。
+  # Coordinates are hunk-local old-side coordinates. They are never normalized by
+  # a whole-file delta: later insertions cannot move earlier provenance.
   awk -v order="$ORDER" -v patch="$name" '
     function flushgroup(   ) {
       if (cur != "") {
@@ -100,13 +108,13 @@ while IFS= read -r p; do
     }
     /^diff --git a\// { flushgroup(); path=$0; sub(/^diff --git a\/[^ ]+ b\//, "", path)
                         cur=path; files[cur]=1; isnew=0; curplus=0; curminus=0 }
-    /^new file mode/ { isnew=1 }
-    /^@@ / { split($3, o, ","); os=o[1]; sub(/^-/, "", os); old=os+0; inhunk=1; lastplus=0 }
+    /^new file mode/ { isnew=1; buf=buf "N\n" }
+    /^@@ / { split($2, o, ","); os=o[1]; sub(/^-/, "", os); old=os+0; inhunk=1; lastplus=0; buf=buf "H\t" old "\t" (o[2]=="" ? 1 : o[2]) "\n" }
     inhunk && /^diff --git / { inhunk=0 }
-    inhunk && /^-/ { if (!isnew) buf = buf "D\t" old "\n"; old++; curminus++; lastplus=0 }
-    inhunk && /^\+/ { if (!lastplus && !isnew) buf = buf "I\t" old "\n"
+    inhunk && /^-/ { buf = buf "D\t" old "\n"; old++; curminus++; lastplus=0 }
+    inhunk && /^\+/ { buf = buf "I\t" old "\n"
                       curplus++; lastplus=1 }
-    inhunk && (/^ / || /^$/) { old++; lastplus=0 }
+    inhunk && /^ / { buf=buf "K\t" old "\n"; old++; lastplus=0 }
     END { flushgroup(); cnt=0; for (f in files) cnt++; print patch "\t" cnt > "'"$TMP_FCNT"'" }
   ' "$p" >> "$TMP_HUNKS"
 done < "$TMP_PATCHES"
@@ -125,24 +133,87 @@ done < "$TMP_FCNT"
 
 echo "== [6] 同文件跨 patch 改动行冲突（坐标归一化后比较）==="
 conflict=$(awk -F'\t' '
-  $1=="C" { gfile=$3; gpatch=$5; goff=cum[gfile]; cum[gfile]+=$4; next }
-  $1=="D" { print "D\t" gfile "\t" ($2-goff) "\t" gpatch; next }
-  $1=="I" { print "I\t" gfile "\t" ($2-goff) "\t" gpatch }
-' "$TMP_HUNKS" | awk -F'\t' '
-  $1=="D" { k=$2 SUBSEP $3; if ((k in downer) && downer[k] != $4)
-              print "    " $2 ": 旧行 " $3 " 被 patch[" downer[k] "] 与 patch[" $4 "] 同时改写"
-            downer[k]=$4 }
-  $1=="I" { ik[$2 SUBSEP $3] = ik[$2 SUBSEP $3] " " $4 }
-  END {
-    for (k in ik) {
-      split(k, p, SUBSEP); f=p[1]; pt=p[2]+0
-      if ((k in downer)) {
-        split(ik[k], plist, " ")
-        for (i in plist) if (plist[i] != downer[k])
-          print "    " f ": patch[" plist[i] "] 的插入点落在 patch[" downer[k] "] 删除的旧行 " pt " 上"
+  function ensure(target,    position) {
+    for (position=lengths[file]+1; position<=target; position++) {
+      nextBase[file]++
+      identity[file,position]="base:" nextBase[file]
+      owner[file,position]=""
+    }
+    if (target>lengths[file]) lengths[file]=target
+  }
+  function report(previous, detail) {
+    if (previous!="" && previous!=patch)
+      print "    " file ": " detail "，patch[" previous "] 与 patch[" patch "]"
+  }
+  function flush(    position, delta, source, target) {
+    if (!active) return
+    delta=outputCount-oldCount
+    if (delta>0) {
+      for (position=lengths[file]; position>=start+oldCount; position--) {
+        identity[file,position+delta]=identity[file,position]
+        owner[file,position+delta]=owner[file,position]
+      }
+    } else if (delta<0) {
+      for (position=start+oldCount; position<=lengths[file]; position++) {
+        identity[file,position+delta]=identity[file,position]
+        owner[file,position+delta]=owner[file,position]
+      }
+      for (position=lengths[file]+delta+1; position<=lengths[file]; position++) {
+        delete identity[file,position]; delete owner[file,position]
       }
     }
-  }')
+    for (position=1; position<=outputCount; position++) {
+      identity[file,start+position-1]=outputIdentity[position]
+      owner[file,start+position-1]=outputOwner[position]
+      delete outputIdentity[position]; delete outputOwner[position]
+    }
+    lengths[file]+=delta
+    offset+=delta
+    active=0
+  }
+  $1=="C" {
+    flush()
+    file=$3; patch=$5; offset=0; creation=0
+    next
+  }
+  $1=="N" { creation=1; lengths[file]=0; nextBase[file]=0; next }
+  $1=="H" {
+    flush()
+    oldCount=$3+0
+    start=($2+0)+(oldCount==0 ? 1 : 0)+offset
+    ensure(start+oldCount-1)
+    cursor=start; outputCount=0; active=1; insertion=0
+    next
+  }
+  $1=="K" {
+    outputCount++
+    outputIdentity[outputCount]=identity[file,cursor]
+    outputOwner[outputCount]=owner[file,cursor]
+    cursor++; insertion=0
+    next
+  }
+  $1=="D" {
+    report(owner[file,cursor], "同一来源行 " identity[file,cursor] " 再次改写")
+    cursor++; insertion=0
+    next
+  }
+  $1=="I" {
+    if (!insertion) {
+      ensure(cursor)
+      anchor=file SUBSEP (cursor>1 ? identity[file,cursor-1] : "BOF") SUBSEP identity[file,cursor]
+      if (insertionAnchor[identity[file,cursor]]!="") anchor=insertionAnchor[identity[file,cursor]]
+      if (!creation) report(anchorOwner[anchor], "同一来源边界再次插入")
+      if (!creation) anchorOwner[anchor]=patch
+    }
+    outputCount++; serial++
+    outputIdentity[outputCount]=creation ? "initial:" serial : "added:" patch ":" serial
+    outputOwner[outputCount]=creation ? "" : patch
+    if (!creation) insertionAnchor[outputIdentity[outputCount]]=anchor
+    insertion=1
+    next
+  }
+  END { flush() }
+' "$TMP_HUNKS")
 if [ -z "$conflict" ]; then ok "无跨 patch 改动行冲突"; else bad "存在冲突（同文件多需求拆分时改动行不得互侵占）:"; echo "$conflict"; fi
 
 echo "== [7] transition 行必须声明收窄后形态 =="

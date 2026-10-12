@@ -1,5 +1,10 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+> **发布治理修复（2026-10-11）**：基础镜像以 `patches/IMAGE_BASE` OCI index digest
+> 固定。构建只推唯一候选 tag，验收全部使用候选 digest；MCP/OIDC/浏览器门全部成功
+> 后才推广 release/commit/latest tag。禁止验收前更新可部署正式 tag；发布串行化防
+> 旧 run 覆盖新版本，不改上游 Dockerfile，用 build-arg 固定基础层。
+
 > **MCP 用户归属机制（本地实现与验收，待review/真CI）**：0150/0160/0170/0180/0190
 > 提供DCR pending、owner/consent、resource Bearer、能力门、OAuth-only及管理限速。
 > DCR pending 只提供可发起授权的 client_id；

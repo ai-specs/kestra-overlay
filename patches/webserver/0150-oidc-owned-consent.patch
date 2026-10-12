@@ -1,23 +1,27 @@
 # 需求: REQ-0150 用户归属 pending/consent 与生命周期
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
-# 来源: 新写；RFC7591/7636/6749 + PostgreSQL 事务；不移植客户业务/RBAC角色模型
-# 触达上游文件: 12 个（详见 diff）
+# 来源: 新写；RFC7591/7636/6749 + PostgreSQL 事务；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 触达上游文件: 16 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-index 8402a3f..e9a3e5b 100644
+index 8402a3f..9fb4a2c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-@@ -94,6 +94,7 @@ public class OidcProviderController {
+@@ -94,6 +94,8 @@ public class OidcProviderController {
      private final OidcJwkService jwkService;
      private final OidcUserService userService;
      private final OidcSessionService sessionService;
 +    private final io.kestra.webserver.oidc.services.OidcOwnershipService ownership;
++    private final io.kestra.webserver.oidc.services.OidcConsentPolicy consentPolicy;
  
      @Inject
      public OidcProviderController(
-@@ -103,7 +104,8 @@ public class OidcProviderController {
+@@ -101,17 +103,21 @@ public class OidcProviderController {
+         final OidcClientService clientService,
+         final OidcAuthorizationCodeService authCodeService,
          final OidcTokenService tokenService,
++        final io.kestra.webserver.oidc.services.OidcConsentPolicy consentPolicy,
          final OidcJwkService jwkService,
          final OidcUserService userService,
 -        final OidcSessionService sessionService
@@ -26,7 +30,9 @@ index 8402a3f..e9a3e5b 100644
      ) {
          this.configuration = configuration;
          this.clientService = clientService;
-@@ -112,6 +114,7 @@ public class OidcProviderController {
+         this.authCodeService = authCodeService;
+         this.tokenService = tokenService;
++        this.consentPolicy = consentPolicy;
          this.jwkService = jwkService;
          this.userService = userService;
          this.sessionService = sessionService;
@@ -34,7 +40,7 @@ index 8402a3f..e9a3e5b 100644
      }
  
      @Get("/jwks")
-@@ -181,6 +184,24 @@ public class OidcProviderController {
+@@ -181,6 +187,24 @@ public class OidcProviderController {
              return HttpResponse.temporaryRedirect(URI.create("/oidc/login?from=" + returnTo));
          }
  
@@ -48,7 +54,7 @@ index 8402a3f..e9a3e5b 100644
 +                    + escape(String.join(" ", requestedScopes)) + "</p><form method=\"post\" action=\"/oidc/consent\">"
 +                    + "<input type=\"hidden\" name=\"interaction\" value=\"" + interaction
 +                    + "\">" + requestedScopes.stream().map(scope -> "<label><input type=\"checkbox\" name=\"scope-" + escape(scope)
-+                        + "\" value=\"yes\" checked>" + escape(scope) + "</label>").collect(java.util.stream.Collectors.joining())
++                        + "\" value=\"yes\" checked>" + escape(scope) + consentPolicy.description(scope) + "</label>").collect(java.util.stream.Collectors.joining())
 +                    + "<button name=\"decision\" value=\"approve\">Approve selected permissions</button><button name=\"decision\" value=\"deny\">Deny</button></form></body></html>")
 +                    .contentType(MediaType.TEXT_HTML_TYPE).header("Cache-Control", "no-store")
 +                    .header("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'");
@@ -59,7 +65,7 @@ index 8402a3f..e9a3e5b 100644
          final AuthorizationCode code = authCodeService.create(
              client.clientId(),
              subject.get(),
-@@ -241,6 +262,34 @@ public class OidcProviderController {
+@@ -241,6 +265,34 @@ public class OidcProviderController {
          }
      }
  
@@ -94,7 +100,7 @@ index 8402a3f..e9a3e5b 100644
      @Get("/userinfo")
      @Produces(MediaType.APPLICATION_JSON)
      public HttpResponse<?> userInfoGet(final HttpRequest<?> request) {
-@@ -297,9 +346,15 @@ public class OidcProviderController {
+@@ -297,9 +349,15 @@ public class OidcProviderController {
  
          final String value = introspectionRequest.getToken().getValue();
          final Optional<OidcTokenService.StoredToken> stored = tokenService.findByValue(value);
@@ -111,7 +117,7 @@ index 8402a3f..e9a3e5b 100644
  
          final TokenIntrospectionSuccessResponse.Builder builder = new TokenIntrospectionSuccessResponse.Builder(active);
          if (active) {
-@@ -387,13 +442,15 @@ public class OidcProviderController {
+@@ -387,13 +445,15 @@ public class OidcProviderController {
          List<String> scopes = stored.scopes();
          if (tokenRequest.getScope() != null) {
              final List<String> requested = tokenRequest.getScope().toStringList();
@@ -128,13 +134,7 @@ index 8402a3f..e9a3e5b 100644
          final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
          final BearerAccessToken accessToken = tokenService.issueAccessToken(
-@@ -436,12 +493,13 @@ public class OidcProviderController {
-     ) {
-         final OidcTokenService.StoredToken stored = tokenService.validateRefreshToken(
-             grant.getRefreshToken().getValue(), client.clientId());
-+        if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
-         tokenService.revoke(stored.value()); // rotation: the old refresh token dies on use
- 
+@@ -441,13 +501,14 @@ public class OidcProviderController {
          List<String> scopes = stored.scopes();
          if (tokenRequest.getScope() != null) {
              final List<String> requested = tokenRequest.getScope().toStringList();
@@ -143,6 +143,13 @@ index 8402a3f..e9a3e5b 100644
                  throw new OidcException(OAuth2Error.INVALID_SCOPE);
              }
              scopes = requested;
+         }
+         final Scope scope = new Scope(scopes.toArray(new String[0]));
+ 
++        if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
+         final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
+             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
+         final BearerAccessToken accessToken = tokenService.issueAccessToken(
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_95OidcServerOwnerMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_95OidcServerOwnerMigration.java
 new file mode 100644
 index 0000000..aa92bd7
@@ -178,12 +185,112 @@ index 0000000..aa92bd7
 +    @Override
 +    public List<String> sqlResources() { return List.of("/migrations/2.0.95-oidc-server-owner-postgres.sql"); }
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientSecretCodec.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientSecretCodec.java
+new file mode 100644
+index 0000000..c44cc4d
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientSecretCodec.java
+@@ -0,0 +1,21 @@
++package io.kestra.webserver.oidc.services;
++
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++
++public interface OidcClientSecretCodec {
++    String format();
++    String encode(String secret);
++    boolean matches(String secret, String encoded);
++
++    static OidcClientSecretCodec plaintext() {
++        return new OidcClientSecretCodec() {
++            public String format() { return "plain-v1"; }
++            public String encode(final String secret) { return secret == null ? "" : secret; }
++            public boolean matches(final String secret, final String encoded) {
++                if (secret == null || encoded == null || secret.isEmpty() || encoded.isEmpty()) return false;
++                return MessageDigest.isEqual(secret.getBytes(StandardCharsets.UTF_8), encoded.getBytes(StandardCharsets.UTF_8));
++            }
++        };
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
+index a9cfbed..d1714f5 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
+@@ -40,11 +40,18 @@ public class OidcClientService {
+ 
+     private final DataSource dataSource;
+     private final ObjectMapper objectMapper;
++    private final OidcClientSecretCodec secretCodec;
+ 
+-    @Inject
+     public OidcClientService(final DataSource dataSource, final ObjectMapper objectMapper) {
++        this(dataSource, objectMapper, OidcClientSecretCodec.plaintext());
++    }
++
++    @Inject
++    public OidcClientService(final DataSource dataSource, final ObjectMapper objectMapper,
++        final OidcClientSecretCodec secretCodec) {
+         this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
+         this.objectMapper = objectMapper;
++        this.secretCodec = secretCodec;
+     }
+ 
+     /** A registered client. {@code clientSecret == ""} marks a public (PKCE-only) client. */
+@@ -115,7 +122,7 @@ public class OidcClientService {
+         return find(clientId)
+             .filter(OidcClient::active)
+             .filter(c -> !c.clientSecret().isEmpty())
+-            .map(c -> constantTimeEquals(c.clientSecret(), clientSecret))
++            .map(c -> secretCodec.matches(clientSecret, c.clientSecret()))
+             .orElse(false);
+     }
+ 
+@@ -150,7 +157,7 @@ public class OidcClientService {
+         try (Connection connection = dataSource.getConnection();
+              PreparedStatement ps = connection.prepareStatement(sql)) {
+             ps.setString(1, clientId);
+-            ps.setString(2, clientSecret == null ? "" : clientSecret);
++            ps.setString(2, clientSecret == null || clientSecret.isEmpty() ? "" : secretCodec.encode(clientSecret));
+             ps.setString(3, toJson(redirectUris));
+             ps.setString(4, toJson(grantTypes));
+             ps.setString(5, toJson(scopes));
+@@ -164,7 +171,7 @@ public class OidcClientService {
+         final String sql = "UPDATE oidc_client SET client_secret = ? WHERE client_id = ?";
+         try (Connection connection = dataSource.getConnection();
+              PreparedStatement ps = connection.prepareStatement(sql)) {
+-            ps.setString(1, Objects.requireNonNull(newSecret));
++            ps.setString(1, secretCodec.encode(Objects.requireNonNull(newSecret)));
+             ps.setString(2, clientId);
+             ps.executeUpdate();
+         } catch (SQLException e) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcConsentPolicy.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcConsentPolicy.java
+new file mode 100644
+index 0000000..e7db485
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcConsentPolicy.java
+@@ -0,0 +1,16 @@
++package io.kestra.webserver.oidc.services;
++
++import java.util.List;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public class OidcConsentPolicy {
++    public void validate(final List<String> scopes) {
++    }
++
++    public String description(final String scope) {
++        return "";
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 new file mode 100644
-index 0000000..7d2419c
+index 0000000..cd3f6e2
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,216 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.sql.Connection;
@@ -207,6 +314,7 @@ index 0000000..7d2419c
 +    private final ObjectMapper mapper;
 +    private final int ownerMaximum;
 +    private final io.kestra.webserver.oidc.OidcConfiguration configuration;
++    private final OidcConsentPolicy consentPolicy;
 +
 +    public record ClientState(String kind, String owner, Instant expiresAt, String name, boolean active) {}
 +    public record ConsentResult(Map<String, List<String>> parameters, String code) {}
@@ -216,15 +324,22 @@ index 0000000..7d2419c
 +        this(source, mapper, ownerMaximum, new io.kestra.webserver.oidc.OidcConfiguration());
 +    }
 +
-+    @jakarta.inject.Inject
 +    public OidcOwnershipService(final DataSource source, final ObjectMapper mapper,
 +        @Value("${kestra.oidc.registration.max-clients-per-user:20}") final int ownerMaximum,
 +        final io.kestra.webserver.oidc.OidcConfiguration configuration) {
++        this(source, mapper, ownerMaximum, configuration, new OidcConsentPolicy());
++    }
++
++    @jakarta.inject.Inject
++    public OidcOwnershipService(final DataSource source, final ObjectMapper mapper,
++        @Value("${kestra.oidc.registration.max-clients-per-user:20}") final int ownerMaximum,
++        final io.kestra.webserver.oidc.OidcConfiguration configuration, final OidcConsentPolicy consentPolicy) {
 +        this.source = DelegatingDataSource.unwrapDataSource(source);
 +        this.mapper = mapper;
 +        if (ownerMaximum < 1 || ownerMaximum > 1000) throw new IllegalArgumentException("Invalid owner client limit");
 +        this.ownerMaximum = ownerMaximum;
 +        this.configuration = configuration;
++        this.consentPolicy = consentPolicy;
 +    }
 +
 +    public ClientState state(final String clientId) {
@@ -236,10 +351,22 @@ index 0000000..7d2419c
 +    }
 +
 +    public void requireOwner(final String clientId, final String subject) {
-+        final var state = state(clientId);
++        try (var connection = source.getConnection()) {
++            requireOwner(connection, clientId, subject);
++        } catch (SQLException exception) {
++            throw new IllegalStateException("Cannot validate client ownership", exception);
++        }
++    }
++
++    public void requireOwner(final Connection connection, final String clientId, final String subject) throws SQLException {
++        final var state = state(connection, clientId, false);
 +        if (subject == null || subject.isBlank() || !state.active() || !"owned".equals(state.kind()) || !subject.equals(state.owner())) {
 +            throw new IllegalArgumentException("Invalid client ownership");
 +        }
++    }
++
++    public void validateConsentPolicy(final Map<String, List<String>> parameters) {
++        consentPolicy.validate(List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +")));
 +    }
 +
 +    public String begin(final String clientId, final String subject, final String sessionId,
@@ -247,6 +374,7 @@ index 0000000..7d2419c
 +        try (var connection = source.getConnection()) {
 +            final var state = state(connection, clientId, false);
 +            requireAuthorizable(state, subject);
++            validateConsentPolicy(parameters);
 +            final String interaction = UUID.randomUUID().toString();
 +            try (var statement = connection.prepareStatement(
 +                "INSERT INTO oidc_consent(interaction_id,client_id,subject,session_id,parameters,expires_at) VALUES (?,?,?,?,?::jsonb,now()+interval '5 minutes')")) {
@@ -299,6 +427,7 @@ index 0000000..7d2419c
 +                }
 +                final List<String> requested = List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +"));
 +                final List<String> granted = selectedScopes == null ? requested : selectedScopes;
++                consentPolicy.validate(granted);
 +                if (approve && (granted.isEmpty() || !requested.containsAll(granted))) throw new IllegalArgumentException("Invalid consent scope");
 +                if (approve && (!parameters.getOrDefault("code_challenge_method", List.of("")).equals(List.of("S256"))
 +                    || !parameters.getOrDefault("code_challenge", List.of("")).getFirst().matches("[A-Za-z0-9_-]{43}"))) {
@@ -450,10 +579,31 @@ index ae918e2..d7b4499 100644
                  }
                  connection.commit();
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
-index 8fa17d0..fd634d5 100644
+index 8fa17d0..f7372d3 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
-@@ -58,6 +58,7 @@ public class OidcSetupService {
+@@ -24,12 +24,20 @@ public class OidcSetupService {
+     private final OidcConfiguration configuration;
+     private final Environment environment;
+     private final OidcInstallationReceipt receipt;
++    private final OidcClientSecretCodec secretCodec;
+ 
+     public OidcSetupService(final DataSource dataSource, final OidcConfiguration configuration,
+         final Environment environment) {
++        this(dataSource, configuration, environment, OidcClientSecretCodec.plaintext());
++    }
++
++    @jakarta.inject.Inject
++    public OidcSetupService(final DataSource dataSource, final OidcConfiguration configuration,
++        final Environment environment, final OidcClientSecretCodec secretCodec) {
+         this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
+         this.configuration = configuration;
+         this.environment = environment;
++        this.secretCodec = secretCodec;
+         final String configuredPath = property("kestra.oidc.bootstrap.receipt-path");
+         final String storagePath = property("kestra.storage.local.base-path");
+         this.receipt = new OidcInstallationReceipt(configuredPath.isEmpty()
+@@ -58,6 +66,7 @@ public class OidcSetupService {
                          throw new IllegalStateException("OIDC installation identity mismatch");
                      }
                      receipt.create(storedIdentity.get());
@@ -461,7 +611,7 @@ index 8fa17d0..fd634d5 100644
                      connection.commit();
                      return form == null;
                  }
-@@ -173,8 +174,8 @@ public class OidcSetupService {
+@@ -173,15 +182,47 @@ public class OidcSetupService {
              }
          }
          try (var statement = connection.prepareStatement(
@@ -470,9 +620,10 @@ index 8fa17d0..fd634d5 100644
 +            "INSERT INTO oidc_client (client_id,client_secret,redirect_uris,grant_types,scopes,client_kind)"
 +                + " VALUES (?,?,jsonb_build_array(?::text),'[\"authorization_code\",\"refresh_token\"]','[\"openid\",\"profile\",\"email\"]','system')")) {
              statement.setString(1, clientId);
-             statement.setString(2, secret);
+-            statement.setString(2, secret);
++            statement.setString(2, secretCodec.encode(secret));
              statement.setString(3, callback);
-@@ -182,6 +183,38 @@ public class OidcSetupService {
+             statement.executeUpdate();
          }
      }
  
@@ -490,7 +641,7 @@ index 8fa17d0..fd634d5 100644
 +            statement.setString(1, callback);
 +            statement.setString(2, clientId);
 +            try (var result = statement.executeQuery()) {
-+                if (!result.next() || !secret.equals(result.getString(1)) || !result.getBoolean(2)
++                if (!result.next() || !secretCodec.matches(secret, result.getString(1)) || !result.getBoolean(2)
 +                    || result.getString(4) != null || !java.util.List.of("legacy", "system").contains(result.getString(3))
 +                    || "system".equals(result.getString(3)) && !result.getBoolean(5)) {
 +                    throw new IllegalStateException("OIDC UI client conflicts with configuration");
@@ -512,7 +663,7 @@ index 8fa17d0..fd634d5 100644
          try (var statement = connection.prepareStatement(query); var result = statement.executeQuery()) {
              result.next();
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-index 1b9c05c..ee73881 100644
+index 1b9c05c..9885dcd 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 @@ -168,7 +168,7 @@ public class OidcTokenService {
@@ -532,7 +683,7 @@ index 1b9c05c..ee73881 100644
          return claims;
      }
  
-@@ -202,9 +203,30 @@ public class OidcTokenService {
+@@ -202,9 +203,38 @@ public class OidcTokenService {
          if (!stored.clientId().equals(expectedClientId)) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": refresh token issued to a different client"));
          }
@@ -541,7 +692,15 @@ index 1b9c05c..ee73881 100644
      }
  
 +    private void validateClientAndSubject(final StoredToken token) {
-+        try (var connection = dataSource.getConnection(); var statement = connection.prepareStatement(
++        try (var connection = dataSource.getConnection()) {
++            validateClientAndSubject(connection, token);
++        } catch (SQLException exception) {
++            throw new IllegalStateException("Cannot validate token lifecycle", exception);
++        }
++    }
++
++    private void validateClientAndSubject(final Connection connection, final StoredToken token) {
++        try (var statement = connection.prepareStatement(
 +            "SELECT c.active,c.client_kind,c.owner_subject,u.user_state FROM oidc_client c LEFT JOIN oidc_user u ON u.username=? WHERE c.client_id=?")) {
 +            statement.setString(1, token.subject());
 +            statement.setString(2, token.clientId());
@@ -576,6 +735,26 @@ index 8889c3e..72108dd 100644
      }
  
      public List<UserRow> list() {
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/PlaintextOidcClientSecretCodec.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/PlaintextOidcClientSecretCodec.java
+new file mode 100644
+index 0000000..7883e45
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/PlaintextOidcClientSecretCodec.java
+@@ -0,0 +1,14 @@
++package io.kestra.webserver.oidc.services;
++
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public class PlaintextOidcClientSecretCodec implements OidcClientSecretCodec {
++    public String format() { return "plain-v1"; }
++    public String encode(final String secret) { return OidcClientSecretCodec.plaintext().encode(secret); }
++    public boolean matches(final String secret, final String encoded) {
++        return OidcClientSecretCodec.plaintext().matches(secret, encoded);
++    }
++}
 diff --git a/webserver/src/main/resources/migrations/2.0.95-oidc-server-owner-postgres.sql b/webserver/src/main/resources/migrations/2.0.95-oidc-server-owner-postgres.sql
 new file mode 100644
 index 0000000..2ecb529
@@ -600,12 +779,14 @@ index 0000000..2ecb529
 +    consumed BOOLEAN NOT NULL DEFAULT FALSE
 +);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
-index 2759acb..6e5ce51 100644
+index 2759acb..39da5c9 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
-@@ -51,7 +51,8 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
+@@ -50,8 +50,10 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
+         final var controller = new io.kestra.webserver.oidc.controllers.OidcProviderController(
              configuration, new OidcClientService(source, mapper), service,
              new io.kestra.webserver.oidc.services.OidcTokenService(source, mapper, configuration, keys),
++            new io.kestra.webserver.oidc.services.OidcConsentPolicy(),
              keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
 -            new io.kestra.webserver.oidc.services.OidcSessionService(configuration));
 +            new io.kestra.webserver.oidc.services.OidcSessionService(configuration),

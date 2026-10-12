@@ -17,7 +17,11 @@ RELEASE="$(sed -n 1p patches/BASE)"
 BASE="$(sed -n 2p patches/BASE)"
 UPSTREAM_REPO="${KESTRA_UPSTREAM_REPO:-https://github.com/kestra-io/kestra.git}"
 WORK="${WORK:-$(mktemp -d)}"
-IMAGE_TAG="${IMAGE_TAG:-kestra-overlay:dev}"
+IMAGE_REPOSITORY="ghcr.io/ai-specs/kestra-overlay"
+BUILD_ID="${GITHUB_RUN_ID:-local-$(date -u +%Y%m%d%H%M%S)}-${GITHUB_RUN_ATTEMPT:-1}"
+CANDIDATE_TAG="${IMAGE_REPOSITORY}:candidate-$(git rev-parse HEAD)-${BUILD_ID}"
+IMAGE_BASE="$(cat patches/IMAGE_BASE)"
+[[ "$IMAGE_BASE" =~ ^ghcr.io/kestra-io/kestra-base@sha256:[0-9a-f]{64}$ ]] || { echo 'FAIL: invalid pinned image base'; exit 1; }
 
 echo "== kestra-overlay: upstream=$UPSTREAM_REPO base=$BASE =="
 if [ ! -d "$WORK/.git" ]; then
@@ -83,7 +87,6 @@ if ! docker buildx inspect kestra-overlay-builder >/dev/null 2>&1; then
   docker buildx create --name kestra-overlay-builder --driver docker-container --use
 fi
 docker buildx use kestra-overlay-builder
-SHA="$(git rev-parse --short HEAD)"
 # Image lineage: zero plugin/extension jars are baked (extensions.tsv has no
 # active plugin/classpath rows; build-extensions.sh leaves $WORK/plugins empty)
 # — the same content family as upstream's slim/no-plugins variants. Main tag
@@ -92,9 +95,17 @@ SHA="$(git rev-parse --short HEAD)"
 # so auto-install keeps its source default (OSS + storage.type=local => on),
 # whereas upstream's no-plugins bakes it off. Deployments wanting the hardened
 # behavior set it explicitly via KESTRA_CONFIGURATION (channel ④, restart).
-# The overlay commit tag keeps traceability; latest is the rolling convenience.
+# Candidate promotion is performed only after all image acceptance gates pass.
+METADATA="$WORK/overlay-image-metadata.json"
 docker buildx build -f "$WORK/Dockerfile" \
+  --build-arg "BASE_IMAGE=$IMAGE_BASE" \
+  --metadata-file "$METADATA" \
   --platform linux/amd64,linux/arm64 \
-  -t "ghcr.io/ai-specs/kestra-overlay:${RELEASE}-no-plugins" \
-  -t "ghcr.io/ai-specs/kestra-overlay:${SHA}" \
-  -t "ghcr.io/ai-specs/kestra-overlay:latest" --push "$WORK"
+  -t "$CANDIDATE_TAG" --push "$WORK"
+DIGEST=$(node -e 'const fs=require("fs");const data=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const digest=data["containerimage.digest"];if(!/^sha256:[0-9a-f]{64}$/.test(digest||""))process.exit(1);process.stdout.write(digest)' "$METADATA")
+CANDIDATE_IMAGE="${IMAGE_REPOSITORY}@${DIGEST}"
+printf '%s\n' "$CANDIDATE_IMAGE" > "$WORK/overlay-candidate-image"
+echo "Candidate image: $CANDIDATE_IMAGE"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  printf 'image=%s\n' "$CANDIDATE_IMAGE" >> "$GITHUB_OUTPUT"
+fi

@@ -1,8 +1,8 @@
 # 需求: REQ-0160 MCP resource/audience/Bearer 与可信身份传播
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
-# 来源: 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型
-# 触达上游文件: 24 个（详见 diff）
+# 来源: 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 触达上游文件: 25 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 diff --git a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
 index 9903d69..d936d67 100644
@@ -334,7 +334,7 @@ index 0000000..7cfecf7
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-index e9a3e5b..312402c 100644
+index 9fb4a2c..67b17ea 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 @@ -56,6 +56,7 @@ import io.kestra.webserver.oidc.services.OidcAuthorizationCodeService;
@@ -345,33 +345,40 @@ index e9a3e5b..312402c 100644
  import io.kestra.webserver.oidc.services.OidcTokenService;
  import io.kestra.webserver.oidc.services.OidcUserService;
  
-@@ -95,6 +96,7 @@ public class OidcProviderController {
-     private final OidcUserService userService;
-     private final OidcSessionService sessionService;
-     private final io.kestra.webserver.oidc.services.OidcOwnershipService ownership;
-+    private final McpResourceUrl resources;
- 
-     @Inject
-     public OidcProviderController(
-@@ -105,7 +107,8 @@ public class OidcProviderController {
+@@ -102,6 +103,7 @@ public class OidcProviderController {
+         final OidcConfiguration configuration,
+         final OidcClientService clientService,
+         final OidcAuthorizationCodeService authCodeService,
++        final McpResourceUrl resources,
+         final OidcTokenService tokenService,
+         final io.kestra.webserver.oidc.services.OidcConsentPolicy consentPolicy,
          final OidcJwkService jwkService,
-         final OidcUserService userService,
-         final OidcSessionService sessionService,
--        final io.kestra.webserver.oidc.services.OidcOwnershipService ownership
-+        final io.kestra.webserver.oidc.services.OidcOwnershipService ownership,
-+        final McpResourceUrl resources
-     ) {
+@@ -112,6 +114,7 @@ public class OidcProviderController {
          this.configuration = configuration;
          this.clientService = clientService;
-@@ -115,6 +118,7 @@ public class OidcProviderController {
-         this.userService = userService;
-         this.sessionService = sessionService;
-         this.ownership = ownership;
+         this.authCodeService = authCodeService;
 +        this.resources = resources;
+         this.tokenService = tokenService;
+         this.consentPolicy = consentPolicy;
+         this.jwkService = jwkService;
+@@ -120,6 +123,16 @@ public class OidcProviderController {
+         this.ownership = ownership;
      }
  
++    private final McpResourceUrl resources;
++
++    private String requestResource(final TokenRequest request) {
++        final var values = request.getResources();
++        if (values == null || values.isEmpty()) return null;
++        if (values.size() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        try { return resources.parseExact(values.getFirst().toString()).toString(); }
++        catch (IllegalArgumentException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
++    }
++
      @Get("/jwks")
-@@ -126,6 +130,13 @@ public class OidcProviderController {
+     @Produces(MediaType.APPLICATION_JSON)
+     public HttpResponse<?> jwks() {
+@@ -129,6 +142,13 @@ public class OidcProviderController {
      @Get("/authorize")
      public HttpResponse<?> authorize(final HttpRequest<?> request) {
          final var parameters = queryParams(request);
@@ -385,7 +392,7 @@ index e9a3e5b..312402c 100644
          if (parameters.containsKey("code_challenge") && parameters.get("code_challenge").stream().anyMatch(String::isBlank)) {
              return HttpResponse.badRequest(Map.of("error", "invalid_request"));
          }
-@@ -150,6 +161,9 @@ public class OidcProviderController {
+@@ -153,6 +173,9 @@ public class OidcProviderController {
          if (!client.active()) {
              return HttpResponse.badRequest("Unknown client_id");
          }
@@ -395,7 +402,7 @@ index e9a3e5b..312402c 100644
  
          if (redirectUri == null || !clientService.isRedirectUriRegistered(client, redirectUri.toString())) {
              // E1: never redirect with an unregistered URI — 400, no redirect leakage.
-@@ -235,6 +249,7 @@ public class OidcProviderController {
+@@ -238,6 +261,7 @@ public class OidcProviderController {
              final OidcClientService.OidcClient client = clientService.require(clientId.getValue());
  
              final AuthorizationGrant grant = tokenRequest.getAuthorizationGrant();
@@ -403,22 +410,7 @@ index e9a3e5b..312402c 100644
              final String grantType = grant.getType().getValue();
              if (!clientService.isGrantTypeAllowed(client, grantType)) {
                  throw new OidcException(OAuth2Error.UNAUTHORIZED_CLIENT.appendDescription(": grant type not enabled for this client"));
-@@ -286,6 +301,14 @@ public class OidcProviderController {
-         }
-     }
- 
-+    private String requestResource(final TokenRequest request) {
-+        final var values = request.getResources();
-+        if (values == null || values.isEmpty()) return null;
-+        if (values.size() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        try { return resources.parseExact(values.getFirst().toString()).toString(); }
-+        catch (IllegalArgumentException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
-+    }
-+
-     private static String escape(final String value) {
-         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
-     }
-@@ -436,7 +459,7 @@ public class OidcProviderController {
+@@ -439,7 +463,7 @@ public class OidcProviderController {
              grant.getAuthorizationCode().getValue(),
              client.clientId(),
              redirectUri != null ? redirectUri.toString() : null,
@@ -427,7 +419,7 @@ index e9a3e5b..312402c 100644
          );
  
          List<String> scopes = stored.scopes();
-@@ -454,8 +477,8 @@ public class OidcProviderController {
+@@ -457,8 +481,8 @@ public class OidcProviderController {
          final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
          final BearerAccessToken accessToken = tokenService.issueAccessToken(
@@ -438,28 +430,31 @@ index e9a3e5b..312402c 100644
  
          if (scope.contains("openid")) {
              final SignedJWT idToken = tokenService.issueIdToken(
-@@ -491,8 +514,8 @@ public class OidcProviderController {
+@@ -494,9 +518,8 @@ public class OidcProviderController {
          final TokenRequest tokenRequest,
          final RefreshTokenGrant grant
      ) {
 -        final OidcTokenService.StoredToken stored = tokenService.validateRefreshToken(
 -            grant.getRefreshToken().getValue(), client.clientId());
+-        tokenService.revoke(stored.value()); // rotation: the old refresh token dies on use
 +        final OidcTokenService.StoredToken stored = tokenService.validateResourceRefreshToken(
 +            grant.getRefreshToken().getValue(), client.clientId(), requestResource(tokenRequest));
-         if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
-         tokenService.revoke(stored.value()); // rotation: the old refresh token dies on use
  
-@@ -509,8 +532,8 @@ public class OidcProviderController {
+         List<String> scopes = stored.scopes();
+         if (tokenRequest.getScope() != null) {
+@@ -511,11 +534,7 @@ public class OidcProviderController {
+         if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
          final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
-         final BearerAccessToken accessToken = tokenService.issueAccessToken(
+-        final BearerAccessToken accessToken = tokenService.issueAccessToken(
 -            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
 -        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
-+            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope, stored.resource());
-+        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope, stored.resource());
-         final AccessTokenResponse response = new AccessTokenResponse(
-             new com.nimbusds.oauth2.sdk.token.Tokens(accessToken, refreshToken));
+-        final AccessTokenResponse response = new AccessTokenResponse(
+-            new com.nimbusds.oauth2.sdk.token.Tokens(accessToken, refreshToken));
++        final AccessTokenResponse response = new AccessTokenResponse(tokenService.rotateRefreshToken(stored, user, scope));
          return tokenOk(response.toJSONObject());
+     }
+ 
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java
 new file mode 100644
 index 0000000..6adf696
@@ -556,10 +551,10 @@ index 21d1173..c283ea3 100644
              throw new IllegalStateException("Failed to mark OIDC authorization code used", e);
          }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-index 7d2419c..1596770 100644
+index cd3f6e2..deec90f 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-@@ -147,7 +147,7 @@ public class OidcOwnershipService {
+@@ -169,7 +169,7 @@ public class OidcOwnershipService {
                  }
                  if (approve) {
                      try (var statement = connection.prepareStatement(
@@ -568,7 +563,7 @@ index 7d2419c..1596770 100644
                          statement.setString(1, code);
                          statement.setString(2, clientId);
                          statement.setString(3, subject);
-@@ -157,6 +157,7 @@ public class OidcOwnershipService {
+@@ -179,6 +179,7 @@ public class OidcOwnershipService {
                          statement.setString(7, "S256");
                          statement.setString(8, parameters.getOrDefault("nonce", List.of("")).getFirst());
                          statement.setTimestamp(9, java.sql.Timestamp.from(Instant.now().plus(configuration.getAuthorizationCodeTtl())));
@@ -577,7 +572,7 @@ index 7d2419c..1596770 100644
                      }
                  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-index ee73881..218c2b5 100644
+index 9885dcd..0d62179 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 @@ -77,7 +77,7 @@ public class OidcTokenService {
@@ -589,7 +584,7 @@ index ee73881..218c2b5 100644
      ) {}
  
      /** Issues an access token (RS256 JWT), signs it with the newest active key and persists it. */
-@@ -89,12 +89,18 @@ public class OidcTokenService {
+@@ -89,12 +89,23 @@ public class OidcTokenService {
          final List<String> roles,
          final Scope scope
      ) {
@@ -598,6 +593,11 @@ index ee73881..218c2b5 100644
 +
 +    public BearerAccessToken issueAccessToken(final String clientId, final String subject, final String name,
 +        final String email, final List<String> roles, final Scope scope, final String resource) {
++        return issueAccessToken(null, clientId, subject, name, email, roles, scope, resource);
++    }
++
++    private BearerAccessToken issueAccessToken(final Connection connection, final String clientId, final String subject,
++        final String name, final String email, final List<String> roles, final Scope scope, final String resource) {
          final Instant now = Instant.now();
          final Instant exp = now.plus(configuration.getAccessTokenTtl());
          final JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
@@ -609,12 +609,12 @@ index ee73881..218c2b5 100644
              .expirationTime(Date.from(exp))
              .issueTime(Date.from(now))
              .jwtID(java.util.UUID.randomUUID().toString())
-@@ -110,15 +116,19 @@ public class OidcTokenService {
+@@ -110,18 +121,88 @@ public class OidcTokenService {
              claims.claim("roles", roles);
          }
          final String jwt = sign(claims.build()).serialize();
 -        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
-+        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp, resource);
++        persist(connection, "access", clientId, subject, scope.toStringList(), jwt, now, exp, resource);
          return new BearerAccessToken(jwt, configuration.getAccessTokenTtl().getSeconds(), scope);
      }
  
@@ -624,24 +624,70 @@ index ee73881..218c2b5 100644
 +    }
 +
 +    public RefreshToken issueRefreshToken(final String clientId, final String subject, final Scope scope, final String resource) {
++        return issueRefreshToken(null, clientId, subject, scope, resource);
++    }
++
++    private RefreshToken issueRefreshToken(final Connection connection, final String clientId, final String subject,
++        final Scope scope, final String resource) {
          final RefreshToken refreshToken = new RefreshToken();
          final Instant now = Instant.now();
 -        persist("refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()));
-+        persist("refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
++        persist(connection, "refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
          return refreshToken;
      }
  
-@@ -183,10 +193,22 @@ public class OidcTokenService {
-         if (!"access".equals(stored.tokenType())) {
-             throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
-         }
-+        try {
-+            if (!"access_token".equals(claims.getStringClaim("token_type"))) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        } catch (java.text.ParseException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
-         validateClientAndSubject(stored);
-         return claims;
-     }
- 
++    public com.nimbusds.oauth2.sdk.token.Tokens rotateRefreshToken(final StoredToken stored,
++        final OidcUserService.OidcUser user, final Scope scope) {
++        try (Connection connection = dataSource.getConnection()) {
++            connection.setAutoCommit(false);
++            try {
++                try (PreparedStatement lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) {
++                    lock.execute();
++                }
++                final StoredToken current;
++                try (PreparedStatement statement = connection.prepareStatement(
++                    "SELECT * FROM oidc_token WHERE id=? AND value=? FOR UPDATE")) {
++                    statement.setLong(1, stored.id());
++                    statement.setString(2, stored.value());
++                    try (ResultSet result = statement.executeQuery()) {
++                        if (!result.next()) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                        current = map(result);
++                    }
++                }
++                if (current.revoked() || !"refresh".equals(current.tokenType())
++                    || !current.clientId().equals(stored.clientId()) || !current.subject().equals(user.sub())
++                    || !java.util.Objects.equals(current.resource(), stored.resource())
++                    || current.expiresAt() == null || !current.expiresAt().isAfter(Instant.now())) {
++                    throw new OidcException(OAuth2Error.INVALID_GRANT);
++                }
++                if (!current.scopes().containsAll(scope.toStringList())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                validateClientAndSubject(connection, current);
++                try (PreparedStatement statement = connection.prepareStatement("SELECT scopes FROM oidc_client WHERE client_id=? FOR UPDATE")) {
++                    statement.setString(1, current.clientId());
++                    try (ResultSet result = statement.executeQuery()) {
++                        if (!result.next()) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                        if (!fromJson(result.getString(1)).containsAll(scope.toStringList())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                    }
++                }
++                try (PreparedStatement statement = connection.prepareStatement(
++                    "UPDATE oidc_token SET revoked=TRUE WHERE id=? AND revoked=FALSE AND token_type='refresh' AND expires_at>now()")) {
++                    statement.setLong(1, stored.id());
++                    if (statement.executeUpdate() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                }
++                final var access = issueAccessToken(connection, stored.clientId(), user.sub(), user.name(), user.email(),
++                    user.roles(), scope, stored.resource());
++                final var refresh = issueRefreshToken(connection, stored.clientId(), user.sub(), scope, stored.resource());
++                connection.commit();
++                return new com.nimbusds.oauth2.sdk.token.Tokens(access, refresh);
++            } catch (RuntimeException | SQLException exception) {
++                connection.rollback();
++                throw exception;
++            }
++        } catch (SQLException exception) {
++            throw new IllegalStateException("Failed to rotate OIDC refresh token", exception);
++        }
++    }
++
 +    public JWTClaimsSet validateResourceAccessToken(final String value, final String expectedResource) {
 +        final var claims = validateAccessToken(value);
 +        final var stored = findByValue(value).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT));
@@ -651,10 +697,20 @@ index ee73881..218c2b5 100644
 +        return claims;
 +    }
 +
-     /** Validates a refresh token for exchange, returning its stored record. */
-     public StoredToken validateRefreshToken(final String value, final String expectedClientId) {
+     /** Issues an OIDC ID token (RS256 JWT) for the given client (audience). */
+     public SignedJWT issueIdToken(
+         final String clientId,
+@@ -175,6 +256,9 @@ public class OidcTokenService {
+         if (exp == null || exp.before(new Date())) {
+             throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": token expired"));
+         }
++        try {
++            if (!"access_token".equals(claims.getStringClaim("token_type"))) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        } catch (java.text.ParseException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
          final StoredToken stored = findByValue(value)
-@@ -227,9 +249,15 @@ public class OidcTokenService {
+             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown token")));
+         if (stored.revoked()) {
+@@ -235,9 +319,15 @@ public class OidcTokenService {
          }
      }
  
@@ -671,22 +727,38 @@ index ee73881..218c2b5 100644
              FROM oidc_token WHERE value = ?""";
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
-@@ -309,11 +337,11 @@ public class OidcTokenService {
+@@ -317,13 +407,25 @@ public class OidcTokenService {
  
      private void persist(
          final String type, final String clientId, final String subject,
 -        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt
 +        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt, final String resource
      ) {
++        persist(null, type, clientId, subject, scopes, value, issuedAt, expiresAt, resource);
++    }
++
++    private void persist(final Connection transaction, final String type, final String clientId, final String subject,
++        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt, final String resource) {
++        if (transaction == null) {
++            try (Connection connection = dataSource.getConnection()) {
++                persist(connection, type, clientId, subject, scopes, value, issuedAt, expiresAt, resource);
++                return;
++            } catch (SQLException exception) {
++                throw new IllegalStateException("Failed to persist OIDC token", exception);
++            }
++        }
          final String sql = """
 -            INSERT INTO oidc_token (client_id, subject, token_type, value, scopes, issued_at, expires_at)
 -            VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)""";
+-        try (Connection connection = dataSource.getConnection();
+-             PreparedStatement ps = connection.prepareStatement(sql)) {
 +            INSERT INTO oidc_token (client_id, subject, token_type, value, scopes, issued_at, expires_at, resource)
 +            VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?)""";
-         try (Connection connection = dataSource.getConnection();
-              PreparedStatement ps = connection.prepareStatement(sql)) {
++        try (PreparedStatement ps = transaction.prepareStatement(sql)) {
              ps.setString(1, clientId);
-@@ -323,6 +351,7 @@ public class OidcTokenService {
+             ps.setString(2, subject);
+             ps.setString(3, type);
+@@ -331,6 +433,7 @@ public class OidcTokenService {
              ps.setString(5, toJson(scopes));
              ps.setTimestamp(6, Timestamp.from(issuedAt));
              ps.setTimestamp(7, Timestamp.from(expiresAt));
@@ -694,7 +766,7 @@ index ee73881..218c2b5 100644
              ps.executeUpdate();
          } catch (SQLException e) {
              throw new IllegalStateException("Failed to persist OIDC token", e);
-@@ -341,7 +370,7 @@ public class OidcTokenService {
+@@ -349,7 +452,7 @@ public class OidcTokenService {
              fromJson(rs.getString("scopes")),
              issuedAt == null ? null : issuedAt.toInstant(),
              expiresAt == null ? null : expiresAt.toInstant(),
@@ -1044,13 +1116,67 @@ index 0000000..0fa89f5
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
-index 6e5ce51..9f4e279 100644
+index 39da5c9..f72b236 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
-@@ -42,6 +42,23 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
-             List.of("openid"), null, null, null).getValue();
-     }
- 
+@@ -49,6 +49,7 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
+         final var keys = new io.kestra.webserver.oidc.services.OidcJwkService(source);
+         final var controller = new io.kestra.webserver.oidc.controllers.OidcProviderController(
+             configuration, new OidcClientService(source, mapper), service,
++            new io.kestra.webserver.mcp.McpResourceUrl("https://example.org", null),
+             new io.kestra.webserver.oidc.services.OidcTokenService(source, mapper, configuration, keys),
+             new io.kestra.webserver.oidc.services.OidcConsentPolicy(),
+             keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAuthorizationCodeTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAuthorizationCodeTest.java
+new file mode 100644
+index 0000000..2698e27
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAuthorizationCodeTest.java
+@@ -0,0 +1,165 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.time.Duration;
++import java.util.List;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.nimbusds.oauth2.sdk.pkce.CodeChallengeMethod;
++import com.nimbusds.oauth2.sdk.pkce.CodeVerifier;
++
++import io.kestra.webserver.oidc.services.OidcAuthorizationCodeService;
++import io.kestra.webserver.oidc.services.OidcClientService;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++/**
++ * D1 (one-shot codes) + PKCE verification for the R-OIDC-SERVER security checklist.
++ */
++class OidcResourceAuthorizationCodeTest extends OidcPostgresTestBase {
++
++    private OidcAuthorizationCodeService service;
++    private OidcConfiguration configuration;
++
++    @BeforeEach
++    void setUp() {
++        final ObjectMapper mapper = new ObjectMapper();
++        configuration = new OidcConfiguration();
++        service = new OidcAuthorizationCodeService(OidcPostgresTestBase.dataSource(), mapper, configuration);
++        final OidcClientService clients = new OidcClientService(OidcPostgresTestBase.dataSource(), mapper);
++        clients.delete("code-client");
++        clients.create("code-client", "s3cret",
++            List.of("https://app.example.org/cb"), List.of("authorization_code", "refresh_token"),
++            List.of("openid", "profile"));
++    }
++
++    private String createCode() {
++        return service.create("code-client", "alice", "https://app.example.org/cb",
++            List.of("openid"), null, null, null).getValue();
++    }
++
 +    @Test
 +    void resourceMismatchDoesNotConsumeAuthorizationCode() throws Exception {
 +        final String code = createCode();
@@ -1068,27 +1194,243 @@ index 6e5ce51..9f4e279 100644
 +        assertEquals(resource, service.consume(code, "code-client", "https://app.example.org/cb", null, resource).resource());
 +    }
 +
-     @Test
-     void anonymousAuthorizeReturnsToTheCompleteRequestAfterLogin() {
-         final var mapper = new ObjectMapper();
-@@ -52,7 +69,8 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
-             new io.kestra.webserver.oidc.services.OidcTokenService(source, mapper, configuration, keys),
-             keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
-             new io.kestra.webserver.oidc.services.OidcSessionService(configuration),
--            new io.kestra.webserver.oidc.services.OidcOwnershipService(source, mapper, 20));
-+            new io.kestra.webserver.oidc.services.OidcOwnershipService(source, mapper, 20),
-+            new io.kestra.webserver.mcp.McpResourceUrl("https://example.org", null));
-         final String authorize = "/oidc/authorize?client_id=code-client&redirect_uri=https%3A%2F%2Fapp.example.org%2Fcb"
-             + "&response_type=code&scope=openid&state=round-trip&nonce=nonce-test";
-         final var request = org.mockito.Mockito.spy(io.micronaut.http.HttpRequest.GET(authorize));
-diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
-index ead0d6b..4ffe9ca 100644
---- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
-+++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
-@@ -73,6 +73,22 @@ class OidcTokenServiceTest extends OidcPostgresTestBase {
-         assertThrows(OidcException.class, () -> service.validateAccessToken(machine.getValue()));
-     }
- 
++    @Test
++    void anonymousAuthorizeReturnsToTheCompleteRequestAfterLogin() {
++        final var mapper = new ObjectMapper();
++        final var source = OidcPostgresTestBase.dataSource();
++        final var keys = new io.kestra.webserver.oidc.services.OidcJwkService(source);
++        final var controller = new io.kestra.webserver.oidc.controllers.OidcProviderController(
++            configuration, new OidcClientService(source, mapper), service,
++            new io.kestra.webserver.mcp.McpResourceUrl("https://example.org", null),
++            new io.kestra.webserver.oidc.services.OidcTokenService(source, mapper, configuration, keys),
++            new io.kestra.webserver.oidc.services.OidcConsentPolicy(),
++            keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
++            new io.kestra.webserver.oidc.services.OidcSessionService(configuration),
++            new io.kestra.webserver.oidc.services.OidcOwnershipService(source, mapper, 20));
++        final String authorize = "/oidc/authorize?client_id=code-client&redirect_uri=https%3A%2F%2Fapp.example.org%2Fcb"
++            + "&response_type=code&scope=openid&state=round-trip&nonce=nonce-test";
++        final var request = org.mockito.Mockito.spy(io.micronaut.http.HttpRequest.GET(authorize));
++        org.mockito.Mockito.doReturn(new io.micronaut.http.simple.SimpleHttpRequest<Void>(
++            io.micronaut.http.HttpMethod.GET, "/", null).getCookies()).when(request).getCookies();
++        final var response = controller.authorize(request);
++        final String location = response.getHeaders().get("Location");
++        assertTrue(location.startsWith("/oidc/login?from="));
++        assertEquals(authorize, java.net.URLDecoder.decode(location.substring("/oidc/login?from=".length()),
++            java.nio.charset.StandardCharsets.UTF_8));
++    }
++
++    @Test
++    void consumesValidCodeAndMarksItUsed() {
++        final String code = createCode();
++        final var stored = service.consume(code, "code-client", "https://app.example.org/cb", null);
++        assertEquals("alice", stored.subject());
++        assertTrue(service.find(code).orElseThrow().used(), "consumed code must be marked used");
++    }
++
++    @Test
++    void codeIsOneShotReplayRejected() {
++        final String code = createCode();
++        service.consume(code, "code-client", "https://app.example.org/cb", null);
++        assertThrows(OidcException.class,
++            () -> service.consume(code, "code-client", "https://app.example.org/cb", null),
++            "replaying a used code must fail (D1)");
++    }
++
++    @Test
++    void unknownCodeRejected() {
++        assertThrows(OidcException.class, () -> service.consume("no-such-code", "code-client", null, null));
++    }
++
++    @Test
++    void wrongClientRejected() {
++        final String code = createCode();
++        assertThrows(OidcException.class, () -> service.consume(code, "other-client", null, null));
++    }
++
++    @Test
++    void redirectMismatchRejected() {
++        final String code = createCode();
++        assertThrows(OidcException.class,
++            () -> service.consume(code, "code-client", "https://app.example.org/other", null));
++    }
++
++    @Test
++    void expiredCodeRejected() {
++        configuration.setAuthorizationCodeTtl(Duration.ofSeconds(-1));
++        final String code = createCode();
++        assertThrows(OidcException.class,
++            () -> service.consume(code, "code-client", "https://app.example.org/cb", null));
++    }
++
++    @Test
++    void pkceS256VerifierMustMatchChallenge() {
++        final CodeVerifier verifier = new CodeVerifier();
++        final String challenge = s256(verifier);
++        final String code = service.create("code-client", "alice", "https://app.example.org/cb",
++            List.of("openid"), challenge, CodeChallengeMethod.S256, null).getValue();
++
++        service.consume(code, "code-client", "https://app.example.org/cb", verifier);
++
++        final String code2 = service.create("code-client", "alice", "https://app.example.org/cb",
++            List.of("openid"), challenge, CodeChallengeMethod.S256, null).getValue();
++        assertThrows(OidcException.class,
++            () -> service.consume(code2, "code-client", "https://app.example.org/cb", new CodeVerifier()),
++            "wrong verifier must fail PKCE");
++    }
++
++    @Test
++    void storedChallengeRequiresVerifier() {
++        final String challenge = s256(new CodeVerifier());
++        final String code = service.create("code-client", "alice", "https://app.example.org/cb",
++            List.of("openid"), challenge, CodeChallengeMethod.S256, null).getValue();
++        assertThrows(OidcException.class,
++            () -> service.consume(code, "code-client", "https://app.example.org/cb", null),
++            "missing verifier against a stored challenge must fail");
++    }
++
++    static String s256(final CodeVerifier verifier) {
++        try {
++            final byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
++                .digest(verifier.getValue().getBytes(java.nio.charset.StandardCharsets.US_ASCII));
++            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
++        } catch (Exception e) {
++            throw new IllegalStateException(e);
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceTokenTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceTokenTest.java
+new file mode 100644
+index 0000000..34cad3e
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceTokenTest.java
+@@ -0,0 +1,216 @@
++package io.kestra.webserver.oidc;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++import java.util.concurrent.Executors;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.nimbusds.jose.JWSAlgorithm;
++import com.nimbusds.jose.JWSHeader;
++import com.nimbusds.jose.JWSObject;
++import com.nimbusds.jose.Payload;
++import com.nimbusds.jwt.JWTClaimsSet;
++import com.nimbusds.oauth2.sdk.Scope;
++import com.nimbusds.oauth2.sdk.token.RefreshToken;
++
++import io.kestra.webserver.oidc.services.OidcClientService;
++import io.kestra.webserver.oidc.services.OidcJwkService;
++import io.kestra.webserver.oidc.services.OidcTokenService;
++import io.kestra.webserver.oidc.services.OidcUserService;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++/**
++ * A3 (client-credential-style issuance) + B1/B2 (RS256 verify, alg=none rejection)
++ * + refresh rotation for the R-OIDC-SERVER security checklist.
++ */
++class OidcResourceTokenTest extends OidcPostgresTestBase {
++
++    private static final String ISSUER = "http://kestra-oidc-test";
++
++    private OidcTokenService service;
++    private OidcClientService clients;
++
++    @BeforeEach
++    void setUp() throws Exception {
++        final ObjectMapper mapper = new ObjectMapper();
++        final OidcConfiguration configuration = new OidcConfiguration();
++        configuration.setIssuer(ISSUER);
++        service = new OidcTokenService(OidcPostgresTestBase.dataSource(), mapper, configuration,
++            new OidcJwkService(OidcPostgresTestBase.dataSource()));
++        clients = new OidcClientService(OidcPostgresTestBase.dataSource(), mapper);
++        clients.delete("machine-client");
++        clients.create("machine-client", "s3cret", List.of(), List.of("client_credentials"), List.of("openid"));
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("UPDATE oidc_client SET client_kind='system' WHERE client_id='machine-client'");
++        }
++    }
++
++    @Test
++    void shouldKeepRefreshUsableAfterInvalidScopeAndRotateOnceConcurrently() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("INSERT INTO oidc_user(username,name,email) VALUES ('rotation-user','User','user@example.org') ON CONFLICT(username) DO UPDATE SET user_state='ACTIVE'");
++        }
++        final var user = new OidcUserService.OidcUser("rotation-user", "User", "user@example.org", false, List.of());
++        final var refresh = service.issueRefreshToken("machine-client", user.sub(), new Scope("openid"));
++        final var stored = service.validateRefreshToken(refresh.getValue(), "machine-client");
++        assertThrows(OidcException.class, () -> service.rotateRefreshToken(stored, user, new Scope("openid", "email")));
++        assertTrue(!service.findByValue(refresh.getValue()).orElseThrow().revoked());
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            final var results = executor.invokeAll(List.<java.util.concurrent.Callable<Integer>>of(
++                () -> rotate(stored, user), () -> rotate(stored, user)));
++            assertEquals(1, results.get(0).get() + results.get(1).get());
++        }
++        assertTrue(service.findByValue(refresh.getValue()).orElseThrow().revoked());
++    }
++
++    private int rotate(final OidcTokenService.StoredToken stored, final OidcUserService.OidcUser user) {
++        try { service.rotateRefreshToken(stored, user, new Scope("openid")); return 1; }
++        catch (OidcException exception) { return 0; }
++    }
++
++    @Test
++    void shouldRollBackRotationWhenNewTokenPersistenceFails() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("INSERT INTO oidc_user(username,name,email) VALUES ('rotation-user','User','user@example.org') ON CONFLICT(username) DO UPDATE SET user_state='ACTIVE'");
++        }
++        final var user = new OidcUserService.OidcUser("rotation-user", "User", "user@example.org", false, List.of());
++        final var refresh = service.issueRefreshToken("machine-client", user.sub(), new Scope("openid"));
++        final var stored = service.validateRefreshToken(refresh.getValue(), "machine-client");
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("ALTER TABLE oidc_token ADD CONSTRAINT rotation_failure CHECK (token_type<>'refresh' OR revoked OR value='" + refresh.getValue() + "') NOT VALID");
++        }
++        try {
++            assertThrows(IllegalStateException.class, () -> service.rotateRefreshToken(stored, user, new Scope("openid")));
++            assertTrue(!service.findByValue(refresh.getValue()).orElseThrow().revoked());
++            try (var connection = dataSource().getConnection(); var statement = connection.createStatement();
++                var result = statement.executeQuery("SELECT count(*) FROM oidc_token WHERE client_id='machine-client' AND token_type='access'")) {
++                result.next();
++                assertEquals(0, result.getInt(1));
++            }
++        } finally {
++            try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++                statement.execute("ALTER TABLE oidc_token DROP CONSTRAINT rotation_failure");
++            }
++        }
++        service.rotateRefreshToken(stored, user, new Scope("openid"));
++    }
++
++    @Test
++    void systemUserTokensRejectInactiveDeletedUserAndInactiveClient() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("INSERT INTO oidc_user(username,name,email) VALUES ('lifecycle-user','User','user@example.org') ON CONFLICT(username) DO UPDATE SET user_state='ACTIVE'");
++        }
++        final var access = service.issueAccessToken("machine-client", "lifecycle-user", "User", null, List.of(), new Scope("openid"));
++        final var refresh = service.issueRefreshToken("machine-client", "lifecycle-user", new Scope("openid"));
++        service.validateAccessToken(access.getValue());
++        service.validateRefreshToken(refresh.getValue(), "machine-client");
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("UPDATE oidc_user SET user_state='INACTIVE' WHERE username='lifecycle-user'");
++        }
++        assertThrows(OidcException.class, () -> service.validateAccessToken(access.getValue()));
++        assertThrows(OidcException.class, () -> service.validateRefreshToken(refresh.getValue(), "machine-client"));
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("DELETE FROM oidc_user WHERE username='lifecycle-user'");
++        }
++        assertThrows(OidcException.class, () -> service.validateAccessToken(access.getValue()));
++        clients.updateActive("machine-client", false);
++        final var machine = service.issueAccessToken("machine-client", "machine-client", "Machine", null, List.of(), new Scope("openid"));
++        assertThrows(OidcException.class, () -> service.validateAccessToken(machine.getValue()));
++    }
++
 +    @Test
 +    void resourceTokensCannotCrossServersOrUseIdTokens() {
 +        final String first = "https://example.org/api/v1/main/mcp/first";
@@ -1105,6 +1447,76 @@ index ead0d6b..4ffe9ca 100644
 +        assertThrows(OidcException.class, () -> service.validateResourceAccessToken(idToken.serialize(), first));
 +    }
 +
-     @Test
-     void issuesAndValidatesAccessToken() {
-         final var access = service.issueAccessToken("machine-client", "machine-client",
++    @Test
++    void issuesAndValidatesAccessToken() {
++        final var access = service.issueAccessToken("machine-client", "machine-client",
++            "machine-client", null, List.of(), new Scope("openid"));
++        final JWTClaimsSet claims = service.validateAccessToken(access.getValue());
++        assertEquals("machine-client", claims.getSubject());
++        assertEquals(ISSUER, claims.getIssuer());
++        assertEquals(List.of("machine-client"), claims.getAudience());
++    }
++
++    @Test
++    void revokedAccessTokenRejected() {
++        final var access = service.issueAccessToken("machine-client", "machine-client",
++            "machine-client", null, List.of(), new Scope("openid"));
++        service.revoke(access.getValue());
++        assertThrows(OidcException.class, () -> service.validateAccessToken(access.getValue()));
++    }
++
++    @Test
++    void algNoneTokenRejectedBeforeAnyVerification() {
++        // B2: hand-crafted alg=none token (attack payload, not buildable via the SDK — nimbus 10
++        // itself refuses JWSHeader alg=none). Must die on the algorithm check, before key lookup.
++        final java.util.Base64.Encoder b64 = java.util.Base64.getUrlEncoder().withoutPadding();
++        final String header = b64.encodeToString("{\"alg\":\"none\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        final String payload = b64.encodeToString("{\"sub\":\"forged\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        final String serialized = header + "." + payload + ".";
++        assertThrows(OidcException.class, () -> service.validateAccessToken(serialized));
++    }
++
++    @Test
++    void garbageTokenRejected() {
++        assertThrows(OidcException.class, () -> service.validateAccessToken("not-a-jwt"));
++    }
++
++    @Test
++    void refreshTokensRotateAndBindToClient() {
++        final RefreshToken first = service.issueRefreshToken("machine-client", "machine-client", new Scope("openid"));
++        assertNotNull(first.getValue());
++
++        final var stored = service.validateRefreshToken(first.getValue(), "machine-client");
++        assertEquals("refresh", stored.tokenType());
++
++        service.revoke(stored.value());
++        assertThrows(OidcException.class, () -> service.validateRefreshToken(first.getValue(), "machine-client"),
++            "rotated (revoked) refresh token must no longer validate");
++
++        final RefreshToken second = service.issueRefreshToken("machine-client", "machine-client", new Scope("openid"));
++        assertThrows(OidcException.class, () -> service.validateRefreshToken(second.getValue(), "other-client"),
++            "refresh token bound to its client");
++    }
++
++    @Test
++    void accessTokensAreUniquePerIssuanceEvenInTheSameSecond() {
++        // Regression: refresh rotation within the same second used to mint a byte-identical
++        // access token (same claims + iat second) and die on oidc_token's UNIQUE(value).
++        final var first = service.issueAccessToken("machine-client", "machine-client",
++            "machine-client", null, List.of(), new Scope("openid"));
++        final var second = service.issueAccessToken("machine-client", "machine-client",
++            "machine-client", null, List.of(), new Scope("openid"));
++        assertNotEquals(first.getValue(), second.getValue(), "jti must make every access token unique");
++    }
++
++    @Test
++    void idTokenCarriesAudienceAndNonce() throws Exception {
++        final var idToken = service.issueIdToken("machine-client", "alice", "Alice",
++            "alice@example.org", List.of("user"), "nonce-123");
++        assertTrue(idToken.getState().equals(com.nimbusds.jose.JWSObject.State.SIGNED));
++        final JWTClaimsSet claims = idToken.getJWTClaimsSet();
++        assertEquals(ISSUER, claims.getIssuer());
++        assertEquals("alice", claims.getSubject());
++        assertEquals("nonce-123", claims.getClaim("nonce"));
++    }
++}

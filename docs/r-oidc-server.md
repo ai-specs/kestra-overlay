@@ -2,6 +2,11 @@
 
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
+**生产审计修复契约（2026-10-11）**：invalid_scope/resource/owner 等拒绝不能消耗
+原 refresh，轮换并发仅一次成功；pending quota 饱和返回 429，数据库故障仍 503。
+confidential client 服务端仅保存版本化哈希，UI client 配置仍持原 secret；迁移旧
+明文后不回退明文存储，public 空 secret 语义不变。实现和 PG 回归同批。
+
 最新本地实施：0150/0160/0170/0180/0190补owner/pending/consent、MCP资源认证、能力门、
 OAuth-only与管理/DB限速；详见mcp-oauth-integration.md与README配置/API段。
 扩大镜像门覆盖生产创建B用户、真实第二server、撤销后已有session/refresh及RBAC缺bean；

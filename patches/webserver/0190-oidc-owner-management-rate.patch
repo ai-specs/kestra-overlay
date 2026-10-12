@@ -1,7 +1,7 @@
 # 需求: REQ-0190 oidc-owner-management-rate（按维护者裁决在0180后应用，迁移仍2.0.97）
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者授权）
 # 状态: core
-# 来源: 新写；RFC6749/7591 + OWASP CSRF + PostgreSQL事务
+# 来源: 新写；RFC6749/7591 + OWASP CSRF + PostgreSQL事务；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 9 个（详见diff）
 # 移除条件: 上游OSS提供等价能力或本需求弃用
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java
@@ -132,11 +132,11 @@ index 0000000..9d857a1
 +    @Override public List<String> sqlResources() { return List.of("/migrations/2.0.97-oidc-server-rate-postgres.sql"); }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-index bca9cef..a90af48 100644
+index deec90f..7b0aee2 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-@@ -56,6 +56,130 @@ public class OidcOwnershipService {
-         }
+@@ -76,6 +76,130 @@ public class OidcOwnershipService {
+         consentPolicy.validate(List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +")));
      }
  
 +    public void revoke(final String clientId, final String subject, final boolean delete) {
@@ -319,14 +319,96 @@ index 0000000..aac21d8
 +    session_id TEXT NOT NULL,
 +    expires_at TIMESTAMPTZ NOT NULL
 +);
-diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
-index bf01fd5..f938a6e 100644
---- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
-+++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnershipServiceTest.java
-@@ -82,6 +82,42 @@ class OidcOwnershipServiceTest extends OidcPostgresTestBase {
-         }
-     }
- 
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnedClientManagementTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnedClientManagementTest.java
+new file mode 100644
+index 0000000..9d40a87
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcOwnedClientManagementTest.java
+@@ -0,0 +1,183 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.Executors;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcOwnershipService;
++import io.kestra.webserver.oidc.services.OidcRegistrationService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class OidcOwnedClientManagementTest extends OidcPostgresTestBase {
++    private final ObjectMapper mapper = new ObjectMapper();
++    private OidcOwnershipService owners;
++
++    @BeforeEach
++    void reset() throws Exception {
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("TRUNCATE oidc_client CASCADE");
++            statement.execute("INSERT INTO oidc_user(username,name,email) VALUES ('alice','Alice','alice@example.org'),('bob','Bob','bob@example.org') ON CONFLICT(username) DO UPDATE SET user_state='ACTIVE'");
++        }
++        owners = new OidcOwnershipService(dataSource(), mapper, 2);
++    }
++
++    private String register() {
++        return (String) new OidcRegistrationService(dataSource(), mapper, 10).register(Map.of(
++            "redirect_uris", List.of("https://example.org/callback"), "token_endpoint_auth_method", "none")).get("client_id");
++    }
++
++    private Map<String, List<String>> parameters() {
++        return Map.of("scope", List.of("openid profile"), "redirect_uri", List.of("https://example.org/callback"),
++            "code_challenge", List.of("a".repeat(43)), "code_challenge_method", List.of("S256"));
++    }
++
++    @Test
++    void shouldBindOnceAndRejectOtherUsers() {
++        final String client = register();
++        assertEquals("pending", owners.state(client).kind());
++        assertThrows(IllegalArgumentException.class, () -> owners.requireOwner(client, "alice"));
++        final String interaction = owners.begin(client, "alice", "session", parameters());
++        assertThrows(IllegalArgumentException.class, () -> owners.complete(interaction, "bob", "session", true));
++        owners.complete(interaction, "alice", "session", true);
++        owners.requireOwner(client, "alice");
++        assertThrows(IllegalArgumentException.class, () -> owners.requireOwner(client, "bob"));
++        assertThrows(IllegalArgumentException.class, () -> owners.complete(interaction, "alice", "session", true));
++        assertThrows(IllegalArgumentException.class, () -> owners.begin(client, "bob", "other", Map.of()));
++    }
++
++    @Test
++    void shouldDeleteDeniedPendingButPreserveOwnedClient() {
++        final String client = register();
++        final String interaction = owners.begin(client, "alice", "session", Map.of());
++        owners.complete(interaction, "alice", "session", false);
++        assertThrows(IllegalArgumentException.class, () -> owners.state(client));
++        final String owned = register();
++        owners.complete(owners.begin(owned, "alice", "session", parameters()), "alice", "session", true);
++        owners.complete(owners.begin(owned, "alice", "session", Map.of()), "alice", "session", false);
++        owners.requireOwner(owned, "alice");
++    }
++
++    @Test
++    void shouldIssueNarrowedCodeAtomicallyAndRejectNullOwner() throws Exception {
++        final String client = register();
++        final String interaction = owners.begin(client, "alice", "session", parameters());
++        assertThrows(IllegalArgumentException.class, () -> owners.complete(interaction, "alice", "session", true, List.of("email")));
++        final var result = owners.complete(interaction, "alice", "session", true, List.of("openid"));
++        owners.requireOwner(client, "alice");
++        assertThrows(IllegalArgumentException.class, () -> owners.requireOwner(client, null));
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "SELECT subject,scopes FROM oidc_authorization_code WHERE code=?")) {
++            statement.setString(1, result.code());
++            try (var row = statement.executeQuery()) {
++                assertTrue(row.next());
++                assertEquals("alice", row.getString(1));
++                assertEquals(List.of("openid"), mapper.readValue(row.getString(2), List.class));
++            }
++        }
++    }
++
 +    @Test
 +    void managementIsBoundedSingleUseAndOwnerPaginated() throws Exception {
 +        final String client = register();
@@ -363,9 +445,69 @@ index bf01fd5..f938a6e 100644
 +        assertThrows(IllegalArgumentException.class, () -> owners.state(client));
 +    }
 +
-     @Test
-     void shouldRejectServerDisabledScopesBeforeBinding() {
-         final String client = register();
++    @Test
++    void shouldRejectServerDisabledScopesBeforeBinding() {
++        final String client = register();
++        final var config = new OidcConfiguration();
++        config.setMcpScopes(List.of("mcp:flows:read"));
++        final var restricted = new OidcOwnershipService(dataSource(), mapper, 2, config, new io.kestra.webserver.oidc.services.McpOidcConsentPolicy(config));
++        final var request = new java.util.HashMap<>(parameters());
++        request.put("scope", List.of("openid mcp:flows:read mcp:executions:write"));
++        assertThrows(IllegalArgumentException.class, () -> restricted.begin(client, "alice", "session", request));
++        assertEquals("pending", restricted.state(client).kind());
++    }
++
++    @Test
++    void shouldRejectInactiveUserAndEmptyScopeWithoutBinding() throws Exception {
++        final String client = register();
++        final String interaction = owners.begin(client, "alice", "session", parameters());
++        assertThrows(IllegalArgumentException.class, () -> owners.complete(interaction, "alice", "session", true, List.of()));
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("UPDATE oidc_user SET user_state='INACTIVE' WHERE username='alice'");
++        }
++        assertThrows(IllegalArgumentException.class, () -> owners.complete(interaction, "alice", "session", true, List.of("openid")));
++        assertEquals("pending", owners.state(client).kind());
++    }
++
++    @Test
++    void shouldSerializeRegistrationCleanupApprovalAndRejection() throws Exception {
++        final String client = register();
++        final String approval = owners.begin(client, "alice", "a", parameters());
++        final String denial = owners.begin(client, "bob", "b", parameters());
++        final String expired = register();
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "UPDATE oidc_client SET pending_expires_at=now()-interval '1 second' WHERE client_id=?")) {
++            statement.setString(1, expired);
++            statement.executeUpdate();
++        }
++        try (var executor = Executors.newFixedThreadPool(3)) {
++            final var results = executor.invokeAll(List.of(
++                () -> attempt(approval, "alice", "a"),
++                () -> { try { owners.complete(denial, "bob", "b", false); return 1; } catch (IllegalArgumentException exception) { return 0; } },
++                () -> { register(); return 1; }), 10, java.util.concurrent.TimeUnit.SECONDS);
++            assertTrue(results.stream().noneMatch(java.util.concurrent.Future::isCancelled));
++            for (final var result : results) result.get();
++        }
++        assertThrows(IllegalArgumentException.class, () -> owners.state(expired));
++    }
++
++    @Test
++    void shouldAllowOnlyOneConcurrentOwner() throws Exception {
++        final String client = register();
++        final String first = owners.begin(client, "alice", "a", parameters());
++        final String second = owners.begin(client, "bob", "b", parameters());
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            final var results = executor.invokeAll(List.of(
++                () -> attempt(first, "alice", "a"), () -> attempt(second, "bob", "b")));
++            assertEquals(1, (int) results.get(0).get() + (int) results.get(1).get());
++        }
++    }
++
++    private int attempt(final String interaction, final String user, final String session) {
++        try { owners.complete(interaction, user, session, true); return 1; }
++        catch (IllegalArgumentException exception) { return 0; }
++    }
++}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationRateTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcRegistrationRateTest.java
 new file mode 100644
 index 0000000..b8c4364
