@@ -39,25 +39,19 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 
 多架构：镜像提供 `linux/amd64` 与 `linux/arm64`。
 
-正式 release/commit/latest tag 仅在 MCP、OIDC 和浏览器镜像验收通过后更新；所有
-验收引用同一个不可变候选 digest。基础运行镜像固定于 `patches/IMAGE_BASE` 的
-多架构 OCI index digest。候选失败不会覆盖正式部署 tag；旧提交重跑在晋级前
-核对 main HEAD，避免覆盖新版本。
-
 ### OIDC 账号与 OAuth client 契约
 
 镜像内置 **OIDC 服务器、用户目录和 client 注册能力**，不预装默认账号、密码或
 固定 OAuth client。空库首次访问 `/ui/` 会进入 **OIDC 安装引导 `/oidc/setup`**，
 设置首个用户名、显示名、邮箱和密码；服务端同时注册配置中的 UI client。
 也可以加载下表环境变量跳过引导。两种方式均不需要人工 SQL 创建首个用户/client。
-`kestra.oidc.users` 是旧的预留配置模型，不作为初始化入口；使用下述引导/环境变量。
 
 | 名称 | 含义与约束 |
 |---|---|
-| OIDC 用户 | `oidc_user.username` 为登录名和 OIDC `sub`；密码在 `oidc_user_auth_method` 中以 bcrypt 保存 |
-| `kestra` | 下例的 Micronaut 客户端配置名称，决定 `/oauth/login/kestra` 与 `/oauth/callback/kestra` 路径；不是 client ID |
-| `kestra-ui` | 下例为本实例 UI 选用的 client ID，可自定义；必须同时存在于配置与 `oidc_client` 注册表 |
-| client secret | 部署方自行生成并保留在 OAuth 客户端配置中；授权服务器以独立随机盐的版本化 PBKDF2-HMAC-SHA256 哈希保存，不能从注册表取回原值；旧版本数据库启动时自动迁移，失败则阻止启动 |
+| OIDC 用户 | 首次安装时设置；用户名也是 OIDC `sub`，密码不会从服务端注册信息中取回 |
+| `kestra` | 下例的 OAuth 客户端配置名称，决定 `/oauth/login/kestra` 与 `/oauth/callback/kestra` 路径；不是 client ID |
+| `kestra-ui` | 下例的 UI client ID，可自定义；必须与配置中的 client ID 一致 |
+| client secret | 部署方生成并保存在 OAuth 客户端配置中；服务端只保存不可逆的安全凭据表示，不能从注册信息取回原值 |
 | redirect URI | 必须精确注册，例如 `http://localhost:8080/oauth/callback/kestra`；含协议、域名、端口和路径 |
 | 外部项目 client | 每个应用单独注册 client ID/secret/回调；不要复用 UI client 的凭据与回调 |
 
@@ -187,7 +181,7 @@ volumes:
 
 网页方式：设置 `KESTRA_OIDC_UI_CLIENT_SECRET`，`docker compose up -d` 后访问 `/ui/`。
 空目录进入 `/oidc/setup`，填写用户名、密码（至少 8 字符，最多 72 UTF-8 字节）；
-显示名、邮箱可选。提交成功后创建账号、bcrypt 凭据与 UI client，再进入 OIDC 登录。
+显示名、邮箱可选。提交成功后创建账号、安全密码凭据与 UI client，再进入 OIDC 登录。
 首个用户具有 `admin` 角色声明；细粒度 RBAC 仍由独立授权能力提供，不能将声明当作已交付 RBAC。
 
 无人值守方式：在启动镜像时加载这些环境变量（上例 compose 已接入）：
@@ -208,13 +202,13 @@ services:
 ```
 
 然后只需 `docker compose up -d` 和访问 `/ui/`。镜像自身使用生产初始化服务执行
-数据库事务，将这些字段写为用户、bcrypt 凭据、UI client 与安装身份；不会执行部署方
+初始化服务将这些字段用于创建用户、安全密码凭据、UI client 与安装身份；不会执行部署方
 提供的任意 SQL。与网页表单共用同一初始化逻辑，只跳过表单，不跳过 OIDC 登录。
 
 | 环境变量 | 用途 |
 |---|---|
 | `KESTRA_OIDC_BOOTSTRAP_USERNAME` | 首个 OIDC 登录名；与 password 必须成对提供 |
-| `KESTRA_OIDC_BOOTSTRAP_PASSWORD` | 首次密码；运行时 bcrypt 后持久化，不保存明文用户密码 |
+| `KESTRA_OIDC_BOOTSTRAP_PASSWORD` | 首次密码；服务端安全保存，不保存明文用户密码 |
 | `KESTRA_OIDC_BOOTSTRAP_EMAIL` | 可选邮箱 |
 | `KESTRA_OIDC_BOOTSTRAP_NAME` | 可选显示名，缺省使用登录名 |
 | `KESTRA_OIDC_UI_CLIENT_SECRET` | 示例 compose 的 UI client secret 环境变量，经配置映射给 Micronaut 客户端；引导/无人值守两种方式都需要 |
@@ -254,14 +248,14 @@ docker compose up -d
 ### 其他项目接入内置 IdP
 
 MCP 接入提供用户归属与 consent、resource Bearer、复合 scope、OAuth-only、
-owner 管理和共享注册限速，已通过真实 SDK 与浏览器镜像验收。
+owner 管理和共享注册限速。
 外部RBAC jar和REST适配未交付，不能宣称具体资源隔离。客户端先动态注册取得短期待绑定
 client_id，再打开浏览器；用户登录并明确同意后，client 原子绑定该用户，签发
 用户身份的 token，以该用户权限调用 MCP。拒绝删除申请，未确认超时清理；正式
 client 不在用户之间共享，其他用户不能使用或管理。这里已验证的是client归属与
 能力控制，不是外部RBAC所负责的具体资源/namespace数据隔离。详见
 [MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)，含时序图、页面、
-缓存失效恢复、PKCE 边界与分阶段验收。下文描述的是当前已交付的 public DCR。
+缓存失效恢复、PKCE 边界和 public DCR 使用约束。
 
 MCP 能力 scope 按资源大类区分 read/write/delete，write 不含删除；当前仅声明
 `mcp:flows:read` 与 `mcp:executions:write`，现有flow复合call必须两者均具备。
@@ -308,13 +302,12 @@ HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、userinfo、通配符和�
 不是RFC7592注册管理协议，不提供client元数据更新接口。
 
 MCP只接受resource-bound access token，拒绝Basic、ID token与IdP/UI cookie；OIDC关闭时
-MCP失败关闭，普通REST认证保留上游模式。SDK基线为Java MCP 1.1.3，实测协议2025-06-18；
+MCP 未启用 OIDC 时失败关闭，普通 REST 认证保留默认行为。MCP 协议使用 Streamable HTTP；
 不声称外部GUI兼容。`kestra.url`是公开资源基址，不从Host/Forwarded推导。
 首装自动创建的MCP server id为`default`，地址为`${kestra.url}/api/v1/main/mcp/default`
 （基址末尾斜线只保留一个）；`kestra`是默认OAuth客户端配置name，不是MCP server id。
 管理API `/api/v1/main/mcp-servers/default` 可核对存在/disabled状态；disabled=true必须
 由认证管理API启用后才可连接，空库未创建McpToolTrigger flow时tools/list为空。
-测试fixture显式通过生产API创建flow及`other-server`，不是首装默认资源。
 客户端先读取401 WWW-Authenticate中的resource_metadata，再取JSON.resource作为
 authorize/token的resource；不可用基址、无tenant路径或自行猜`kestra`别名替代。
 `kestra.oidc.mcp-scopes`限定可授权能力（默认上述两项）；`kestra.mcp.execution.enabled=false`
@@ -331,11 +324,7 @@ issuer `https://kestra.example.org` 对应`Origin: https://kestra.example.org`�
 管理调用使用浏览器登录IdP cookie、detail返回的interaction与该Origin，JSON提交；
 单凭MCP access token不能管理client，curl不得遗漏cookie/Origin/interaction。
 管理没有独立UI，也不是RFC7592；撤销立即阻断token、refresh和已有MCPsession后续调用。
-`bash scripts/blackbox-mcp-oauth.sh IMAGE /absolute/verify-tree`自建PG、生产首装、
-UI cookie+CSRF创建flow，并强制执行SDK正反向、B用户、跨真实server、撤销session/refresh
-和RBAC缺bean镜像门；不接受SDK skipped。异常Authorizer零队列副作用另由单元集成路径验证。
-
-消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
+`消费应用从 `http://localhost:8080/.well-known/openid-configuration` 获取协议端点：
 authorize `/oidc/authorize`、token `/oidc/token`、JWKS `/oidc/jwks`、userinfo `/oidc/userinfo`。
 `localhost` 仅为本机示例；跨容器/跨主机应用使用部署的公开 issuer。
 
@@ -350,9 +339,6 @@ client ID、client secret（confidential client）、redirect URI、`openid prof
 
 会话边界：`oidc_session` 只用于 IdP 登录及授权流程，不认证 Kestra API。API 使用
 Bearer access token；UI 使用 OAuth2 callback 建立的 HttpOnly JWT cookie。
-
-可复现验收入口：`scripts/blackbox-ui-oidc.sh <image>`（实际初始化、UI 链与 token
-持久化检查）、`scripts/blackbox-ui-browser.cjs`（CI Chromium 登录/刷新/导航/退出）。
 
 ### MCP 客户端接入与 flow 工具
 
@@ -427,124 +413,42 @@ owner 可以通过 OIDC 会话访问 `/oidc/clients?page=1&size=20` 查看自己
 撤销或删除。其他用户返回 404/403；撤销立即阻断 token、refresh 和已有 MCP session。
 这些接口不是 RFC7592 管理协议，也没有 secret 返回。
 
-真实可重复验收：
+## 扩展契约
 
-```bash
-bash scripts/blackbox-mcp-oauth.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins \
-  "$PWD/.work/verify"
+### 插件
+
+任务、触发器和 Runner 插件通过部署侧挂载 `/app/plugins`，重启 Kestra 后生效。镜像不
+预装插件，也不在构建时烘焙第三方 jar。插件版本必须与 Kestra `v2.0.5` 兼容；请按
+插件项目发布说明选择版本。
+
+```yaml
+services:
+  kestra:
+    volumes:
+      - ./plugins:/app/plugins
 ```
 
-该门自行启动 PostgreSQL 和 Kestra，执行生产首装、浏览器登录/CSRF、DCR/consent、
-resource-bound token、实际 Java MCP SDK initialize/list/call、只读 scope 拒绝、
-用户 B 隔离、跨 resource 拒绝、owner 撤销后 session/refresh 拒绝以及 RBAC 缺失时
-无 execution 副作用。外部 SDK probe 没有运行环境时会明确 skip，不计作通过。
+### 外部授权扩展
 
-## 相对上游原始镜像的扩展能力
+外部细粒度授权扩展预留契约文件名为 `kestra-rbac-authorizer.jar`。当前镜像提供 MCP
+能力级 scope 控制和 Authorizer SPI；具体 flow、namespace 或业务数据的细粒度隔离，
+需要外部 RBAC 扩展实现。该扩展必须同时覆盖 REST 与 MCP 的实际执行路径；仅挂载一个
+未实现对应入口的 jar 不能产生授权效果。
 
-| 能力 | 状态 | 对集成方的意义 |
-|---|---|---|
-| OIDC 登录引导字段 | **已生效** | `GET /api/v1/configs/login`（注意：**login 子端点**，非 `/configs`）返回 `oidcAuthEnabled`；`micronaut.security.enabled=true` 时该字段为 true 且 `isBasicAuthInitialized=true`。⇒ 认证链部署下引导逻辑有判定依据 |
-| plugins/ 插件槽 | 已生效（同上游） | 挂载 `/app/plugins` + 重启。任务/触发器/Runner 插件面；**bean（@Controller/@Filter）不在此槽**。插件版本线：**core 2.0.5 ↔ 插件 1.x 线**（如 `io.kestra.plugin:plugin-script-shell:1.14.0`；Maven 索引的 0.23.0 是旧 API 线，不兼容） |
-| 部署配置通道 | 已生效（同上游） | `KESTRA_CONFIGURATION` 全量可用（含 basic-auth） |
-| classpath jar 承载 | **契约已约定，承载待实施** | 实施后：`/app/libs` 挂载的契约 jar 进入应用 classpath（见下）。实施前挂载**不生效** |
-| 端点门（intercept-url-map） | **已生效，须配置** | 启用 `micronaut.security.enabled: true` 与 `filter.enabled: true`，按上例配置匿名协议入口及受保护 UI/API |
-| 内置 OAuth2/OIDC 授权服务器 + 认证链 | **已生效** | REQ-0100~0133：协议端点、PKCE 授权码、完整 UI 认证与首次引导/环境变量初始化；无预置账号；管理 API 仍待实施 |
-| 外部细粒度授权对接点 | 预留 | SecurityRule/Authorizer bean jar 的对接（契约名见下） |
+当前 classpath 承载通道仍未交付，因此 `/app/libs` 挂载的授权 jar 不会自动生效。不要
+把 `/app/libs` 当作当前版本的可用扩展入口；需要交付该能力时，应以新的镜像契约和版本
+说明为准。
 
-## 扩展能力 × 集成契约（同一条运行线）
+### 配置与边界
 
-运行时上，能力与契约不分家：契约 jar 挂载进 classpath，能力随之激活。
-**允许交叉**：一个契约可以服务多项能力；一项能力可以由多个元素组合；
-同一能力半的实现可互换（内置服务器 ↔ 外部 IdP）。当前约定的运行线：
-
-```
-R-OIDC-SERVER：内置授权服务器 + 认证链（协议/UI/首次引导/环境初始化已生效；管理 API 待实施）
-                                      → 认证能力：
-                                          ① OIDC 登录引导字段（已生效，/api/v1/configs/login）
-                                          ② 认证链 + ③ 端点门（已生效；
-                                             外部 IdP 场景走同一配置通道）
-                                              ↓ 授权能力叠加在认证层之上
-（契约）kestra-rbac-authorizer.jar ────→ 授权能力（每请求 (资源,动作,namespace) 判定）
-
-（同上游）./plugins 挂载 ──────────────→ 插件能力（并行；bean 不走此槽）
-```
-
-classpath 承载（manifest 注入）实施前，契约 jar 挂载 `/app/libs` **不生效**——契约名先行
-约定，集成方可按下列规则**先行构建**。
-
-## jar 契约的构建与命名规则
-
-### 插件与外部授权扩展
-
-任务/触发器/Runner 插件通过 `/app/plugins` 部署侧挂载，重启后生效；镜像构建期不
-烘焙插件或外部 jar。外部细粒度授权组件使用约定的 `kestra-rbac-authorizer.jar`，
-但当前 classpath 承载机制仍是契约占位，挂载 `/app/libs` 在承载实现前不会生效。
-R-EE-RBAC 组件未来需同时覆盖 REST 与 MCP 实际执行路径；没有组件时 MCP 能力门
-仍可限制大类 scope，但不能提供具体资源/namespace 隔离。
-
-| 契约文件名 | 用途 |
-|---|---|
-| `kestra-rbac-authorizer.jar` | 授权判定：SecurityRule/Authorizer bean + 角色模型 |
-
-规则：
-
-- **文件名 = 契约**。镜像构建期会在可执行 jar 的 manifest `Class-Path` 声明这些条目
-  （镜像 ↔ 部署的唯一契约）；jar 本体一律由部署侧挂载 `/app/libs`，镜像不烤 jar 字节。
-  需要新契约名时向本仓登记（协作者提 issue/commit 均可）。
-- **构建规格（对齐本镜像实际内容物）**：
-  - Micronaut 平台：**4.10.28**（micronaut-security 4.15.2）——随 BASE 升级而变，
-    以本节为准；可用下文命令从镜像内自证。
-  - Java：**release 25**（运行时 JDK 25）。
-  - 必须启用 Micronaut 注解处理生成 bean 索引（`META-INF/micronaut/` 下的
-    `BeanDefinitionReference` 服务文件）——无索引 bean 不可见。
-  - 最小 `pom.xml` 关键段：
-
-    ```xml
-    <properties>
-      <maven.compiler.release>25</maven.compiler.release>
-      <micronaut.version>4.10.28</micronaut.version>
-    </properties>
-    <dependencies>
-      <dependency>
-        <groupId>io.micronaut</groupId>
-        <artifactId>micronaut-inject</artifactId>
-        <scope>provided</scope>
-      </dependency>
-      <!-- 按需：micronaut-security(provided) 等 -->
-    </dependencies>
-    <build>
-      <plugins>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-compiler-plugin</artifactId>
-          <configuration>
-            <annotationProcessorPaths>
-              <path>
-                <groupId>io.micronaut</groupId>
-                <artifactId>micronaut-inject-java</artifactId>
-                <version>${micronaut.version}</version>
-              </path>
-            </annotationProcessorPaths>
-          </configuration>
-        </plugin>
-      </plugins>
-    </build>
-    ```
-- **行为语义**：挂载 + 重启生效；**缺席 = 静默休眠**（镜像其他功能不受影响）；同 FQN 类
-  **不可覆盖**镜像内的类（主 jar 永远优先）——扩展 jar 只加新类；同包
-  （`io.kestra.webserver.*`）的 `@Controller`/`@Filter` 可正常注册。
-- **授权对接要点**（原内部文档要点已内联于此）：授权 bean 实现
-  `io.micronaut.security.rules.SecurityRule`（或 `@Replaces` 替换 Authorizer），从
-  JWT/会话解析主体，按 `(资源, 动作, namespace)` 判定 allow/deny；deny → 403。
-
-### 从镜像内自证构建规格
-
-```bash
-docker run --rm --entrypoint sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins -c \
-  'python3 -c "import zipfile; z=zipfile.ZipFile(\"/app/kestra\"); print(z.read(\"META-INF/maven/io.micronaut/micronaut-inject/pom.xml\").decode()[:400])"'
-```
+- `KESTRA_CONFIGURATION` 是部署配置入口；配置变更和插件挂载都需要重启。
+- `/app/plugins` 只承载插件类型，不承载 Controller、Filter 或其他 Web bean。
+- 镜像不烘焙业务扩展 jar；部署方负责扩展文件、版本匹配和运行时挂载。
+- 本 README 描述的是本镜像对第三方的使用契约；实现原理、patch 治理、上游差异和
+  开发流程见仓库内的维护文档，不属于集成方必读内容。
 
 ## 更多
 
-内部治理（需求接收 / patch 质量法 / 升级 SOP）、机制原理（编译/重启/外部 jar）、
-能力差异调查见 `AGENTS.md` 与 `docs/`（仓库协作者可达）。
+- [MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)
+- [OIDC 服务与首次安装契约](docs/r-oidc-server.md)
+- [R-EE-RBAC 扩展边界](docs/r-ee-rbac.md)

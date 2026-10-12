@@ -37,6 +37,30 @@ async function main() {
         await page.getByRole('heading').filter({hasText: 'Flows'}).waitFor();
         const apiStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
         if (apiStatus !== 200) throw new Error(`authenticated API returned ${apiStatus}`);
+        const csrf = await page.locator('meta[name="csrf-token"]').getAttribute('content');
+        const mcpPayload = {id: 'default', serverType: 'PRIVATE', authType: 'OAUTH', disabled: false};
+        const mcpStatus = await page.evaluate(async ({csrf, payload}) => {
+            const headers = {'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf || ''};
+            const existing = await fetch('/api/v1/main/mcp-servers/default');
+            const response = existing.ok
+                ? await fetch('/api/v1/main/mcp-servers/default', {method: 'PUT', headers, body: JSON.stringify(payload)})
+                : await fetch('/api/v1/main/mcp-servers', {method: 'POST', headers, body: JSON.stringify(payload)});
+            return response.status;
+        }, {csrf, payload: mcpPayload});
+        if (mcpStatus < 200 || mcpStatus >= 300) throw new Error(`MCP server setup returned ${mcpStatus}`);
+        await page.goto(`${base}/ui/main/admin/mcp-servers/edit/default/edit`);
+        await page.getByText("Protected by this instance's built-in OIDC server").waitFor();
+        if (await page.getByText('Select a configured OIDC provider').count()) {
+            throw new Error('built-in OIDC MCP editor still exposes external provider selector');
+        }
+        if (await page.getByText('Install Kestra').count()) {
+            throw new Error('PWA install prompt obscures the MCP administration page');
+        }
+        const saveResponse = page.waitForResponse(response =>
+            response.url().includes('/api/v1/main/mcp-servers/default') && response.request().method() === 'PUT');
+        await page.getByRole('button', {name: 'Save', exact: true}).click();
+        if ((await (await saveResponse).status()) < 200) throw new Error('MCP editor save failed');
+        console.log('MCP EDITOR BUILT-IN OIDC AND PWA REGRESSION GREEN');
         await page.goto(`${base}/oidc/logout`);
         await page.waitForURL(`${base}/oidc/login?**`);
         const deniedStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
