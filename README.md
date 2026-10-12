@@ -270,6 +270,10 @@ MCP 能力 scope 按资源大类区分 read/write/delete，write 不含删除；
 细粒度授权。两层均允许才执行；未接 RBAC 时不声称具体资源/namespace 隔离。
 能力 scope 与 MCP-only Authorizer SPI 已实施；外部 RBAC 与 REST 统一适配未交付。
 
+管理界面的 MCP 编辑页在 OAuth 模式下明确显示“由本实例内置 OIDC 服务器保护”，
+不要求选择外部 OIDC provider；OAuth 保存请求不会写入空的外部 provider。PWA 安装
+提示不会覆盖 `/ui/*/admin/*` 管理页面的操作控件。
+
 支持 RFC7591 动态 **public client** 注册，适用于公开 MCP、桌面及浏览器客户端：
 `token_endpoint_auth_method=none`，不生成 client secret，授权码流强制 PKCE S256。
 在 `KESTRA_CONFIGURATION` 中设置并重启：

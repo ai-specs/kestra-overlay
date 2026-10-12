@@ -1,0 +1,104 @@
+# 需求: REQ-0220 修正 MCP 管理编辑页的内置 OIDC 语义并避免 PWA 横幅遮挡管理操作
+# 消费扩展仓: kestra-oidc-provider / MCP 管理 UI
+# 状态: core
+# 来源: 手工适配；沿用上游 MCP 编辑与 PWA 组件，剥离外部 OIDC provider 列表对内置 IdP 的错误依赖
+# 触达上游文件: 3 个（MCP 编辑页、应用壳、英文翻译）
+# 移除条件: 上游 MCP UI 原生支持内置 OIDC provider 语义且不再显示外部 provider 空态
+diff --git a/ui/src/App.vue b/ui/src/App.vue
+index 3218c96..a60804b 100644
+--- a/ui/src/App.vue
++++ b/ui/src/App.vue
+@@ -14,7 +14,7 @@
+     <TourOverlay v-if="loaded && route?.name && !route.meta?.anonymous" />
+     <UnsavedChangesDialog />
+     <DrillDownDrawer />
+-    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous" />
++    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous && !isAdminRoute" />
+ </template>
+ 
+ <script lang="ts" setup>
+@@ -55,6 +55,7 @@
+         : null
+ 
+     const loaded = ref(false)
++    const isAdminRoute = computed(() => route.path.includes("/admin/"))
+ 
+     const apiStore = useApiStore()
+     const layoutStore = useLayoutStore()
+diff --git a/ui/src/components/admin/mcp/tabs/McpEdit.vue b/ui/src/components/admin/mcp/tabs/McpEdit.vue
+index 6c6141b..6cc99ef 100644
+--- a/ui/src/components/admin/mcp/tabs/McpEdit.vue
++++ b/ui/src/components/admin/mcp/tabs/McpEdit.vue
+@@ -79,7 +79,7 @@
+             </KsFormItem>
+ 
+             <KsFormItem
+-                v-if="isOAuth"
++                v-if="isOAuth && !usesBuiltInOidc"
+                 :label="$t('mcp.oauth_provider')"
+                 prop="oauthProvider"
+                 :rules="oauthProviderRules"
+@@ -99,6 +99,15 @@
+                 </KsSelect>
+             </KsFormItem>
+ 
++            <KsAlert
++                v-if="isOAuth && usesBuiltInOidc"
++                type="info"
++                :closable="false"
++                class="type-hint"
++            >
++                {{ $t("mcp.built_in_oidc_hint") }}
++            </KsAlert>
++
+             <KsFormItem
+                 v-if="isOAuth"
+                 :label="$t('mcp.scopes_supported')"
+@@ -208,6 +217,7 @@
+     const isUpdate = computed(() => !!route.params.id)
+     const isPrivate = computed(() => form.value.serverType === "PRIVATE")
+     const isOAuth = computed(() => isPrivate.value && form.value.authType === "OAUTH")
++    const usesBuiltInOidc = computed(() => isOAuth.value)
+ 
+     const privateServer = computed({
+         get: () => form.value.serverType === "PRIVATE",
+@@ -248,16 +258,10 @@
+         if (opt.ee && isOss.value) {
+             return true
+         }
+-        if (opt.value === "OAUTH" && noOauthProviders.value) {
+-            return true
+-        }
+         return false
+     }
+ 
+     const authHint = (opt: AuthOption): string => {
+-        if (opt.value === "OAUTH" && noOauthProviders.value) {
+-            return t("mcp.no_oauth_providers")
+-        }
+         return t(opt.hintKey)
+     }
+ 
+@@ -289,7 +293,7 @@
+             instructions: form.value.instructions || undefined,
+             serverType: form.value.serverType,
+             authType: form.value.authType,
+-            oauthProvider,
++            oauthProvider: usesBuiltInOidc.value ? undefined : oauthProvider,
+             oauthScopesSupported,
+             disabled: form.value.disabled,
+         }
+diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
+index f4a164d..6c20588 100644
+--- a/ui/src/translations/en.json
++++ b/ui/src/translations/en.json
+@@ -2304,7 +2304,8 @@
+       "scopes_supported": "Supported scopes",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes advertised in this server's Protected Resource Metadata document. Spec-compliant MCP clients constrain their authorize request to this list. Leave empty to omit the field and let clients fall back to the IdP's advertised scopes.",
+-      "no_oauth_providers": "No OIDC providers configured in this instance",
++      "no_oauth_providers": "No external OIDC providers configured in this instance",
++      "built_in_oidc_hint": "Protected by this instance's built-in OIDC server",
+       "delete_confirm": "Are you sure you want to delete this MCP server?",
+       "no_servers": "No MCP servers found. Create your first server to expose MCP Tool triggers to external AI agents.",
+       "server_id": "Server ID",

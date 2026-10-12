@@ -29,3 +29,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0190	0190-oidc-owner-management-rate.patch	core	—（R-OIDC-SERVER）	owner分页管理/单次交互撤销/有界清理/共享DB注册限速	9	新写;RFC6749/7591+OWASP CSRF;维护者批准重编号0190;本轮稳定需求边界重建	上游提供等价生命周期或R-OIDC-SERVER弃用
 0200	0200-client-secret-hash.patch	core	—（R-OIDC-SERVER）	confidential client版本化PBKDF2哈希/启动历史secret迁移/真实DI与PG验证	7	新写;RFC6749+PBKDF2-HMAC-SHA256	上游提供等价secret安全存储或R-OIDC-SERVER弃用
 0211	0211-oidc-pending-quota-status.patch	core	—（R-OIDC-SERVER）	pending quota明确429/非quotaDB故障503/PG并发饱和验收	2	新写;RFC7591+生产审计PG测试	上游提供等价注册quota错误语义或R-OIDC-SERVER弃用
+0220	0220-mcp-built-in-oidc-ui.patch	core	kestra-oidc-provider / MCP 管理 UI	MCP编辑页明确内置OIDC保护、隐藏外部provider空下拉、管理页不显示PWA安装横幅	3	手工适配;R-OIDC-SERVER UI例外	上游MCP UI原生表达内置OIDC且管理操作不被PWA横幅遮挡
