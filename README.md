@@ -2,19 +2,23 @@
 
 面向**第三方独立扩展项目**的 kestra 增强镜像与扩展契约提供方。
 
-镜像 = 上游 kestra OSS（版本由 `patches/BASE` pin，当前 **v2.0.5** @ `172dd0f3`）+ 薄 patch。
-加固形态（no-plugins 谱系）：镜像不携带任何插件/扩展 jar，插件集由部署侧精确控制。
+当前镜像基于 **Kestra OSS v2.0.5**，提供后端引擎、API、Web UI、内置 OAuth2/OIDC
+及 OAuth2-only MCP。`no-plugins` 变体不预装插件或外部扩展 jar，由部署方控制插件集。
 
-**镜像内容物**：保留 BASE 的后端引擎、API 与原版 UI。构建先执行上游 UI 的
-`npm ci && npm run build`，再打包可执行 jar；8080 同时提供 API 和 `/ui/`。
-此前漏打 UI 是构建缺陷，不能将 `/ui/` 的 404 当作正常边界。
+| 你的使用场景 | 从哪里开始 |
+|---|---|
+| 部署 Kestra 并使用 Web UI | 下方 Compose 示例与首次安装说明 |
+| 无人值守部署，启动时创建账号 | 首次安装环境变量 |
+| MCP 客户端连接并执行 flow 工具 | MCP 客户端接入与 flow 工具 |
+| 自己的应用使用内置 IdP | OAuth2/OIDC 消费方接入 |
+| 增加任务、触发器或 Runner 插件 | 插件与外部授权扩展 |
+| 开发外部细粒度授权组件 | jar 契约；先确认 classpath 承载限制 |
 
 ## 使用镜像
 
-OIDC 模式统一使用 OAuth2/OIDC，完全关闭 Basic Auth 链。REQ-0132 替换 UI 的
-认证守卫、401 跳转和退出；状态由服务端验证，不依赖 Basic Auth cookie/标志。
+OIDC 模式统一使用 OAuth2/OIDC，关闭 Basic Auth 链；UI 登录、刷新和退出使用服务端认证。
 旧登录/setup 页面在 OIDC 模式不进入凭据流程；用户名密码提交在 `/oidc/login`。
-部署与验收以 `docs/r-oidc-server.md` §0 为准，启用 Micronaut Security 并配置
+部署时启用 Micronaut Security 并配置
 `micronaut.security.redirect.unauthorized.url: /oauth/login/kestra` 与客户端注册。
 
 ### 下载
@@ -51,11 +55,10 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 | client secret | 部署方自行生成；配置值与注册表必须一致；当前 client 表保存 secret 原值，应限制数据库访问 |
 | redirect URI | 必须精确注册，例如 `http://localhost:8080/oauth/callback/kestra`；含协议、域名、端口和路径 |
 | 外部项目 client | 每个应用单独注册 client ID/secret/回调；不要复用 UI client 的凭据与回调 |
-| 测试账号 | CI 使用 `tester / Passw0rd!`、`kestra-ui / local-ui-secret`，分别通过真实表单/环境变量初始化；不是镜像默认凭据 |
 
 UI 使用 **OIDC Authorization Code + PKCE S256**，服务端 confidential client 换 token，
 浏览器用 HttpOnly 认证 cookie。OIDC 模式完全停用 Basic Auth；不在 UI Basic Auth
-表单填写 OIDC 用户。当前本机测试账号存在，是此前初始化了本机数据库，不代表新部署自带。
+表单填写 OIDC 用户。新部署没有默认用户名或密码。
 
 ### compose 示例（内置 OIDC + UI）
 
@@ -86,7 +89,6 @@ services:
     volumes:
       - kestra-data:/app/storage
       - ./plugins:/app/plugins   # 插件 jar（重启生效）
-      - ./libs:/app/libs         # classpath 契约 jar（重启生效；状态见「扩展能力」表）
     environment:
       KESTRA_OIDC_UI_CLIENT_SECRET: "${KESTRA_OIDC_UI_CLIENT_SECRET:?Set a UI client secret}"
       KESTRA_OIDC_BOOTSTRAP_USERNAME: "${KESTRA_OIDC_BOOTSTRAP_USERNAME:-}"
@@ -331,6 +333,48 @@ Bearer access token；UI 使用 OAuth2 callback 建立的 HttpOnly JWT cookie。
 可复现验收入口：`scripts/blackbox-ui-oidc.sh <image>`（实际初始化、UI 链与 token
 持久化检查）、`scripts/blackbox-ui-browser.cjs`（CI Chromium 登录/刷新/导航/退出）。
 
+### MCP 客户端接入与 flow 工具
+
+MCP 只接受 OAuth2 Bearer access token；Basic Auth、ID token、IdP/UI cookie 均不能调用
+MCP。MCP 资源 URL 为 `kestra.url` 加 `/api/v1/{tenant}/mcp/{server-id}`，部署配置的
+`kestra.url` 必须是客户端可访问的稳定绝对 HTTP(S) 地址。当前 MCP SDK 验收基线为
+Java `io.modelcontextprotocol.sdk:mcp:1.1.3`、协议 `2025-06-18`；外部 GUI 客户端
+兼容性尚未验证。
+
+启用 OAuth2 后，MCP 客户端按下列顺序工作：
+
+1. 向 MCP 地址发送 initialize；未带 Bearer 时收到 `401` 和 RFC9728
+   `resource_metadata` 挑战。
+2. 从 resource metadata/discovery 获取授权服务器和 MCP resource，调用动态注册取得
+   临时 public `client_id`（无 secret）。
+3. 生成 PKCE S256 verifier/challenge，打开浏览器授权；用户登录并确认客户端回调、
+   申请 scope 和当前用户归属。拒绝或过期会删除 pending client。
+4. 使用 authorization code、client ID、精确回调和 verifier 换 resource-bound token。
+5. 使用 `Authorization: Bearer <access_token>` 初始化 MCP、列工具和调用工具；客户端
+   不保存 client secret。access token、refresh token 和 PKCE verifier 需要由客户端安全保存。
+
+当前 flow 工具声明两个能力：`mcp:flows:read`（工具定义与返回输出）和
+`mcp:executions:write`（触发执行）；复合调用必须同时获得二者，write 不包含 delete。
+用户授权页可以收窄申请范围，服务端不会自动扩权；scope 不足的调用不会创建 execution。
+外部 RBAC jar 尚未交付，当前是能力级控制，不能据此宣称具体 flow/namespace 数据隔离。
+
+owner 可以通过 OIDC 会话访问 `/oidc/clients?page=1&size=20` 查看自己的 client，
+获取 detail 中的短期管理 interaction，再 POST `/oidc/clients/{client-id}/revoke`
+撤销或删除。其他用户返回 404/403；撤销立即阻断 token、refresh 和已有 MCP session。
+这些接口不是 RFC7592 管理协议，也没有 secret 返回。
+
+真实可重复验收：
+
+```bash
+bash scripts/blackbox-mcp-oauth.sh ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins \
+  "$PWD/.work/verify"
+```
+
+该门自行启动 PostgreSQL 和 Kestra，执行生产首装、浏览器登录/CSRF、DCR/consent、
+resource-bound token、实际 Java MCP SDK initialize/list/call、只读 scope 拒绝、
+用户 B 隔离、跨 resource 拒绝、owner 撤销后 session/refresh 拒绝以及 RBAC 缺失时
+无 execution 副作用。外部 SDK probe 没有运行环境时会明确 skip，不计作通过。
+
 ## 相对上游原始镜像的扩展能力
 
 | 能力 | 状态 | 对集成方的意义 |
@@ -365,6 +409,14 @@ classpath 承载（manifest 注入）实施前，契约 jar 挂载 `/app/libs` *
 约定，集成方可按下列规则**先行构建**。
 
 ## jar 契约的构建与命名规则
+
+### 插件与外部授权扩展
+
+任务/触发器/Runner 插件通过 `/app/plugins` 部署侧挂载，重启后生效；镜像构建期不
+烘焙插件或外部 jar。外部细粒度授权组件使用约定的 `kestra-rbac-authorizer.jar`，
+但当前 classpath 承载机制仍是契约占位，挂载 `/app/libs` 在承载实现前不会生效。
+R-EE-RBAC 组件未来需同时覆盖 REST 与 MCP 实际执行路径；没有组件时 MCP 能力门
+仍可限制大类 scope，但不能提供具体资源/namespace 隔离。
 
 | 契约文件名 | 用途 |
 |---|---|
