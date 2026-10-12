@@ -2,7 +2,7 @@
 
 > **最新规划裁定**：MCP 认证面重新接收，目标 OAuth2-only + 用户归属动态 client；
 > public DCR pending 经用户确认后绑定 owner，token 与资源执行身份一致，不共享
-> 用户数据。现有实现不具备这些能力。方案与动刀前证据门见
+> 动态 client。0150–0190 已交付用户归属、授权与资源认证；具体数据隔离仍须外部 RBAC。契约见
 > [mcp-oauth-integration.md](mcp-oauth-integration.md)；旧 MCP 除外记述是历史范围。
 
 > 本表回答「补什么」。「怎么生效」见 `docs/extension-mechanisms.md`。
@@ -31,13 +31,13 @@
 > REQ-0132 已实现 UI 独立 OIDC 认证状态（服务端 configs 验证）、统一 401/退出、
 > 旧认证端点拒绝；新增前端定向用例、后端禁用用例与黑盒刷新/导航/退出断言。
 > 新版本 DoD 仍以本地重放与对应新 CI 全绿为准。
-> REQ-0133 已接收：首次安装引导/环境变量一次性初始化 OIDC 用户与 UI client，
+> REQ-0133 已交付：首次安装引导/环境变量一次性初始化 OIDC 用户与 UI client，
 > 属 R-OIDC-SERVER 认证基础设施；实现与安全验收契约先写入 r-oidc-server.md §0。
 > REQ-0133 已实现：网页引导/环境变量初始化共用事务，自动注册 UI client，完成状态
 > 持久化；本地空库两路径与浏览器首装登录实测通过，最终以对应新 CI 为准。
 > 维护者追加再审：单个数据库标记不足以防删除攻击；安装身份绑定独立持久化凭据，
 > 任一存在都不能重开，异常失败关闭。见 r-oidc-server.md §0 加固契约与恢复边界。
-> REQ-0134 已接收：RFC7591 标准 public client 动态注册，支持公开 OAuth2 消费方
+> REQ-0134 已交付：RFC7591 标准 public client 动态注册，支持公开 OAuth2 消费方
 > （包括 MCP 客户端）无 secret + 强制 S256；仅协议基础设施，MCP 业务面仍不接收。
 > 先闭合注册开关、回调校验、总量限制和同批首装全链验收，见 r-oidc-server.md §0。
 
@@ -71,7 +71,7 @@
 |---|---|---|---|---|
 | 认证方式 | 仅自研 Basic Auth（cookie）。认证过滤器链不在 OSS 构建（S6）。 | SSO OIDC + SCIM + 服务账号 `[docs]` | 认证链与授权服务器：**预留扩展点 R-OIDC-SERVER**（patch 路线，2026-10-07 裁定——协议稳定+实现标准 ⇒ 大粒度薄层；前置裁定②：链一体化进 patch，外部 IdP 场景走内置链配置）。加 REQ-0011 做 UI 引导（已实施） | 仓已立项；0011 已实施；R-OIDC-SERVER 已预留 |
 | 登录引导 | `/api/v1/configs`（MiscController）只暴露 `isBasicAuthInitialized`。vanilla 实测 `edition:"OSS"` `[live]` | 同端点给出 SSO 状态 | REQ-0011：`oidcAuthEnabled` 字段 + security-enabled 视为已配置 | 已实施 |
-| 用户归属 MCP OAuth2 接入 | BASE MCP route/Basic/SDK1.1.3已核验；0180关闭MCP Basic及商业占位 | 不作为方案依据 | 0150/0160/0170/0180/0190本地实现owner/consent/resource Bearer/scope/管理限速；外部RBAC与数据隔离未交付 | 14 patch重放与镜像SDK门本地通过，待review/真CI；见mcp-oauth-integration.md |
+| 用户归属 MCP OAuth2 接入 | BASE MCP route/Basic/SDK1.1.3已核验；0180关闭MCP Basic及商业占位 | 不作为方案依据 | 0150–0190 已交付owner/consent/resource Bearer/scope/管理限速；外部RBAC与数据隔离未交付 | 16 patch 重放与真实 CI 协议/浏览器/SDK 门通过；见mcp-oauth-integration.md |
 | SCIM | 无（`ProblemFormatExclusion.java` javadoc 明言归 EE） | 有 `[src+docs]` | —（EE 产品功能） | 不补足 |
 | 服务账号/API token | 无 | 有 `[docs]` | 机器身份走 OIDC JWT（R-EE-RBAC §3） | 不补足 |
 
@@ -115,7 +115,7 @@ OQ-RBAC 1-4（r-ee-rbac.md §9）。
 |---|---|---|---|
 | R-CLASSPATH-MERGE | 通道② jar 承载机制（S6）。已立案待实施；选型 b + 定位裁定 2026-10-07。JVM 语义三组实证与设计约束见机制文档 §4 | 实施指令（认证链 jar 与 R-EE-RBAC 的共同前置） | 构建期仅注入 manifest Class-Path 条目元数据（jar 一律运行时挂载——构建期零外部扩展 jar）。manifest 条目 = 镜像↔部署契约。加 OQ2 剩余实证（bean 索引可见性）。零 patch 文件 |
 | R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 SecurityRule/Authorizer bean | 消费仓指名（kestra-oidc-provider 侧或未来授权扩展仓）+ 行为证据 + R-CLASSPATH-MERGE 落地 | 外部 classpath jar（S6）。预期零 overlay patch。实证含 SecurityRule 从 jar 注册。展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md) |
-| R-OIDC-SERVER | OAuth2/OIDC 授权服务器（Micronaut 生态标准实现，内嵌 webserver 形态）。**实施中：REQ-0100~0130 已落地本地全绿（2026-10-09）**；2026-10-07 裁定：预留扩展点（patch 路线）——协议稳定性 + 实现标准性 ⇒ 大粒度仍为薄层（新文件为主，BASE 升级冲突面小）；区别于 jar 路线的外部扩展实现；体现「overlay 先行，jar 路线跟随」模式 | 实施指令（维护者；不绑外部时序——基本原则） | patch 集（授权码流/PKCE/discovery/JWKS/token/client 与用户存储等，按 §3 需求对齐拆分）。**前置裁定（2026-10-07）**：② 链一体化进 patch（`kestra-auth-chain` 契约退役；外部 IdP 场景走内置链配置）；③ 持久化 = 同 datasource 新表（postgres 起步，migration 进 patch——源码级 MigrationScript bean，F2 自动执行；h2/mysql 留待需求）。四项前置全部闭合（2026-10-07）：① 宪章修订 ② 链一体化 ③ 新表 postgres ④ 安全清单即验收基准。**展开文档（裁定/证据/剥离清单/安全清单/实施顺序）：[docs/r-oidc-server.md](r-oidc-server.md)**；④ **测试先行门（2026-10-07 增，安全敏感裁定）**——CI 增定向测试步（`:webserver:test --tests` 包前缀过滤，不跑上游全量）+ 镜像级 OIDC 流程黑盒（discovery/授权码+PKCE/token/JWKS/refresh/MCP 动态注册）；安全专项清单（redirect_uri 精确匹配、code 一次性、PKCE、alg=none 与混淆拒绝、JWKS 轮换、secret 哈希存储与日志不泄露、匿名面最小化、vanilla 回归）动刀前先评审；每需求 patch 与其测试同批落仓、门绿为 DoD；`[dsh]` 13/13 安全面测试可作移植底稿 |
+| R-OIDC-SERVER | OAuth2/OIDC 授权服务器（Micronaut 生态标准实现，内嵌 webserver 形态）。**已交付：0100–0134、0150–0200、0211；真实 CI 全绿（2026-10-12）**；2026-10-07 裁定：预留扩展点（patch 路线）——协议稳定性 + 实现标准性 ⇒ 大粒度仍为薄层（新文件为主，BASE 升级冲突面小）；区别于 jar 路线的外部扩展实现；体现「overlay 先行，jar 路线跟随」模式 | 实施指令（维护者；不绑外部时序——基本原则） | patch 集（授权码流/PKCE/discovery/JWKS/token/client 与用户存储等，按 §3 需求对齐拆分）。**前置裁定（2026-10-07）**：② 链一体化进 patch（`kestra-auth-chain` 契约退役；外部 IdP 场景走内置链配置）；③ 持久化 = 同 datasource 新表（postgres 起步，migration 进 patch——源码级 MigrationScript bean，F2 自动执行；h2/mysql 留待需求）。四项前置全部闭合（2026-10-07）：① 宪章修订 ② 链一体化 ③ 新表 postgres ④ 安全清单即验收基准。**展开文档（裁定/证据/剥离清单/安全清单/实施顺序）：[docs/r-oidc-server.md](r-oidc-server.md)**；④ **测试先行门（2026-10-07 增，安全敏感裁定）**——CI 增定向测试步（`:webserver:test --tests` 包前缀过滤，不跑上游全量）+ 镜像级 OIDC 流程黑盒（discovery/授权码+PKCE/token/JWKS/refresh/MCP 动态注册）；安全专项清单（redirect_uri 精确匹配、code 一次性、PKCE、alg=none 与混淆拒绝、JWKS 轮换、secret 哈希存储与日志不泄露、匿名面最小化、vanilla 回归）动刀前先评审；每需求 patch 与其测试同批落仓、门绿为 DoD；`[dsh]` 13/13 安全面测试可作移植底稿 |
 
 ## 5. 复现命令（BASE 树内执行）
 

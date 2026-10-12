@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kestra-overlay build: clone upstream at pinned SHA -> apply thin patches ->
-# compile webserver (executableJar) -> stage extension jars -> build image.
+# compile UI/webserver (executableJar) -> build immutable candidate image.
 # Usage: ./scripts/build.sh [--apply-only]
 #
 # Delivery shape (mechanism facts, docs/extension-mechanisms.md F1): upstream
@@ -9,8 +9,8 @@
 # copied into the image as docker/app/kestra. Patches therefore touch only
 # sources compiled into that jar (webserver controllers/filters/rooter/
 # services). Dockerfile/Dockerfile.base are unmodified from upstream.
-# Extension jars are injected by build-extensions.sh per extensions.tsv
-# (never vendored as binaries in this repo).
+# build-extensions.sh validates the registry; the no-plugins image bakes zero
+# external extension jars. Deployment-side mounts supply those artifacts.
 set -euo pipefail
 
 RELEASE="$(sed -n 1p patches/BASE)"
@@ -25,7 +25,7 @@ IMAGE_BASE="$(cat patches/IMAGE_BASE)"
 
 echo "== kestra-overlay: upstream=$UPSTREAM_REPO base=$BASE =="
 if [ ! -d "$WORK/.git" ]; then
-  git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$WORK"
+  git clone --depth 1 --branch "$RELEASE" "$UPSTREAM_REPO" "$WORK"
 fi
 git -C "$WORK" checkout -q "$BASE"
 git -C "$WORK" checkout -q -b overlay

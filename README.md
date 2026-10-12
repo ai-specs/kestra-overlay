@@ -41,7 +41,8 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 
 正式 release/commit/latest tag 仅在 MCP、OIDC 和浏览器镜像验收通过后更新；所有
 验收引用同一个不可变候选 digest。基础运行镜像固定于 `patches/IMAGE_BASE` 的
-多架构 OCI index digest。候选失败不会覆盖正式部署 tag。
+多架构 OCI index digest。候选失败不会覆盖正式部署 tag；旧提交重跑在晋级前
+核对 main HEAD，避免覆盖新版本。
 
 ### OIDC 账号与 OAuth client 契约
 
@@ -252,8 +253,8 @@ docker compose up -d
 
 ### 其他项目接入内置 IdP
 
-**MCP 用户归属本地验收完成，待维护者review与真CI**：0150/0160/0170/0180/0190
-提供owner/consent、resource Bearer、复合scope、OAuth-only与owner管理/共享限速。
+MCP 接入提供用户归属与 consent、resource Bearer、复合 scope、OAuth-only、
+owner 管理和共享注册限速，已通过真实 SDK 与浏览器镜像验收。
 外部RBAC jar和REST适配未交付，不能宣称具体资源隔离。客户端先动态注册取得短期待绑定
 client_id，再打开浏览器；用户登录并明确同意后，client 原子绑定该用户，签发
 用户身份的 token，以该用户权限调用 MCP。拒绝删除申请，未确认超时清理；正式
@@ -284,7 +285,8 @@ kestra:
 默认关闭；启用后 discovery 发布 `registration_endpoint`。须先完成生产首次安装。
 使用 README 的 `/oidc/**` 匿名规则时注册无需预共享凭据；部署侧应限制注册请求速率。
 `max-clients` 是全部 client 的上限（含首装 UI client），并发注册不能突破；达到上限
-返回 429。服务端不抓取客户端提供的 URL，仅保存校验后的回调元数据。
+返回 429；pending 额度与请求速率超限也返回 429，数据库故障返回 503。
+服务端不抓取客户端提供的 URL，仅保存校验后的回调元数据。
 
 ```bash
 curl --fail-with-body -X POST 'http://localhost:8080/oidc/register' \

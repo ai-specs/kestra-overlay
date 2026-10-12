@@ -2,10 +2,10 @@
 
 > **发布治理修复（2026-10-11）**：基础镜像以 `patches/IMAGE_BASE` OCI index digest
 > 固定。构建只推唯一候选 tag，验收全部使用候选 digest；MCP/OIDC/浏览器门全部成功
-> 后才推广 release/commit/latest tag。禁止验收前更新可部署正式 tag；发布串行化防
+> 后才推广 release/commit/latest tag。禁止验收前更新可部署正式 tag；发布串行化，并在晋级前核对 main HEAD，防
 > 旧 run 覆盖新版本，不改上游 Dockerfile，用 build-arg 固定基础层。
 
-> **MCP 用户归属机制（本地实现与验收，待review/真CI）**：0150/0160/0170/0180/0190
+> **MCP 用户归属机制（已交付，真实 CI 验收通过）**：0150/0160/0170/0180/0190
 > 提供DCR pending、owner/consent、resource Bearer、能力门、OAuth-only及管理限速。
 > DCR pending 只提供可发起授权的 client_id；
 > 登录确认时事务绑定不可变 owner、权限授权与 code，后续 token/refresh/MCP 执行
@@ -17,8 +17,8 @@
 > 不能绕过。承载缺席可休眠只适用于未启用授权，启用后组件异常必须失败关闭。
 > 当前只有MCP-only SPI与scope gate，外部RBAC jar及REST适配未交付。
 > 缺bean镜像门、异常Authorizer handler→gate→queue单元门各自验证失败关闭，
-> 不等同完整REST/MCP数据隔离。镜像撤销existing session/refresh证据来自
-> `.work/final-verify-blackbox.log`，复跑命令见README；不依赖先前交互浏览器状态。
+> 不等同完整REST/MCP数据隔离。镜像撤销 existing session/refresh 由 CI 的 `scripts/blackbox-mcp-oauth.sh`
+> 验收，复跑命令见 README；不依赖先前交互浏览器状态。
 
 > 三个根本问题：改一个架构能力——要不要重新编译？要不要重启？要不要外部 jar？
 > 证据：BASE（v2.0.5 @ 172dd0f37）源码（含上游自述 docs/architecture/）+ dsh 实证

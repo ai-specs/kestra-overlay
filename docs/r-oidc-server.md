@@ -1,4 +1,4 @@
-# R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（需求与实施准备文档）
+# R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
@@ -7,10 +7,11 @@
 confidential client 服务端仅保存版本化哈希，UI client 配置仍持原 secret；迁移旧
 明文后不回退明文存储，public 空 secret 语义不变。实现和 PG 回归同批。
 
-最新本地实施：0150/0160/0170/0180/0190补owner/pending/consent、MCP资源认证、能力门、
+当前已交付：0150/0160/0170/0180/0190补owner/pending/consent、MCP资源认证、能力门、
 OAuth-only与管理/DB限速；详见mcp-oauth-integration.md与README配置/API段。
 扩大镜像门覆盖生产创建B用户、真实第二server、撤销后已有session/refresh及RBAC缺bean；
-异常Authorizer为真实handler→gate→queue单元路径，非生产外部jar。待review/真CI。
+异常 Authorizer 由真实 handler→gate→queue 单元路径验证，非生产外部 jar。
+协议、MCP 与两种首次安装浏览器镜像门已通过真实 CI。
 
 **最新用户归属裁定（维护者多轮澄清，优先于下述已交付记录）**：选定“DCR 返回
 短期 pending client_id→浏览器登录确认→原子绑定用户 owner→授权码/token→以该
@@ -19,7 +20,7 @@ OAuth-only与管理/DB限速；详见mcp-oauth-integration.md与README配置/API
 完整可行性、标准衔接、抢占边界、数据隔离及实施门见
 [面向集成方的 MCP OAuth2 文档](mcp-oauth-integration.md)。历史REQ-0134仅全局public
 DCR；当前0150/0190已增加pending/owner/consent与管理，不宣称外部RBAC数据隔离。
-MCP 认证面已由维护者重新接收为下一阶段范围（OAuth2-only，删除 Basic Auth），
+MCP 认证面已由维护者重新接收并交付（OAuth2-only，删除 Basic Auth），
 不得将旧“MCP 全面除外”覆盖此裁定；具体动刀仍须消费仓/BASE 行为证据与验收定稿。
 **能力/资源授权最新分层**：本仓预制 MCP 资源大类 read/write/delete scope 门，
 write 不含 delete，用户二次授权只能收窄，执行门独立于外部 RBAC。R-EE-RBAC

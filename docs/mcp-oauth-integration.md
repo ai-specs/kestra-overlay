@@ -2,14 +2,15 @@
 
 ## 交付状态与结论
 
-发布镜像复现（2026-10-11）：GHCR tag重新pull得到
-`sha256:f08f2ee611e8b9d0705f7d2fa9cf067b8d558cbc2003b60f77f6535cd97e7d00`。
-纯README配置/环境首装、不创建flow/server：管理API证明default存在、kestra不存在；
-kestra为OAuth配置name而非MCP id。default完整challenge metadata HTTP200且JSON.resource
-精确匹配。完整镜像门从challenge发现resource后授权/token，JWT aud采用RFC7519允许的
-字符串形式，规范化为单元素集合后精确断言通过。此前测试仅接受数组造成假失败。
-unknown server不应广告不存在metadata，本地修复返回404并折回0160；不增kestra别名，
-不放宽base/tenant/canonical。可复跑`MCP_PRISTINE_PROBE=1 bash scripts/blackbox-mcp-oauth.sh IMAGE VERIFY`。
+当前能力已通过生产镜像的协议、浏览器与真实 SDK 验收。发布流程固定候选 digest，
+全部验收通过后才晋级正式 tag；复现入口见 README，CI 见
+[生产审计修复验收](https://github.com/ai-specs/kestra-overlay/actions/runs/38238619410)。
+
+默认 MCP server ID 为 `default`；`kestra` 是 OAuth 客户端配置名称。
+401 challenge 指向完整 RFC9728 metadata URL，文档中的 `resource` 是授权请求应使用的
+精确资源值；未知 server 返回 404，不发布无效 metadata。JWT `aud` 可采用标准允许的
+字符串或数组形式，客户端应规范化后精确校验。可执行
+`MCP_PRISTINE_PROBE=1 bash scripts/blackbox-mcp-oauth.sh IMAGE VERIFY` 核对首装默认端点。
 
 ### 2026-10-09 实施裁决与 BASE 核验
 
@@ -32,7 +33,6 @@ unknown server不应广告不存在metadata，本地修复返回404并折回0160
   RBAC 启用但 bean
   缺席/异常时拒绝。未启用只有能力控制，不宣称 namespace 或数据隔离。
 - session 必须绑定用户/client/resource；缓存权限视图不得跨主体泄露能力。
-- 根仓最终停在 review-ready，不 commit/push；开发树允许按 SOP 增量提交生成 patch。
 
 可复现源码证据（在 BASE 或应用现有 patch 的树内执行）：
 
@@ -55,7 +55,8 @@ git show HEAD:platform/build.gradle
 
 真实调用链：McpToolController → session/context → McpServerHandlerTransport →
 Streamable transport/SDK → McpToolService → executableScope → ExecutionCommand queue →
-执行结果订阅 → ExecutionOutputService。工具发现使用 findWithNoAcl；默认 access-control
+执行结果订阅 → ExecutionOutputService。以下描述 BASE 的待补缺口，非当前 overlay 行为。
+BASE 工具发现使用 findWithNoAcl；默认 access-control
 返回 global，不能作为 RBAC。现有 context 的 equals/hashCode 排除 userId，session 和
 handler 授权视图需要重新校验。执行队列目前只带 trigger/labels/inputs，不带可信主体。
 
@@ -64,8 +65,7 @@ handler 授权视图需要重新校验。执行队列目前只带 trigger/labels
 后续 owner 管理/共享注册 rate 独立编号 REQ-0190，按维护者批准在0180后应用；
 SQL migration 仍为2.0.97。理由是管理补充基于0170策略后的中间态，避免提前应用
 产生同文件上下文依赖；最终集合满足 registration controller 的 rate bean 依赖。
-0170差分覆盖1b12376→4ac62c1，0190覆盖4ac62c1→6a8b629，0180覆盖6a8b629→6617cf0；
-这些提交差分由git生成，14 patch顺序重放与严格hunk重叠检查已通过。
+patch 按需求增量提交生成；当前 16 个 patch 的顺序重放与严格 provenance 检查已通过。
 迁移不得修改既有 SQL checksum；新增 bean+SQL。迁移先将历史 client 标为 inactive legacy，
 不批量撤销 token/code；配置匹配的系统 client 经已初始化 setup 精确识别后恢复。
 识别与其余 legacy client 的 code/token 物理撤销在同一 setup 事务完成；system 历史
@@ -84,7 +84,7 @@ TTL/全局与 owner 额度/多副本并发；同意/拒绝/清理抢占与 CSRF/
 scope 双层检查；Authorizer 缺席/异常无副作用；跨主体 session/缓存；真实 SDK 初始化、
 工具发现和调用；浏览器确认页显示实际回调、当前用户及执行风险。外部 GUI 兼容未验证。
 
-本文契约已由0150/0160/0170/0180/0190在本地实现并验收，待维护者review与真CI。
+本文契约已由 0150–0190 交付并通过真实 CI；0200/0211 补齐 secret 存储与配额错误语义。
 owner/pending/consent、resource Bearer、复合scope和生命周期具备；不能作为具体
 namespace/业务数据隔离声明。外部RBAC jar与REST统一适配未交付。
 

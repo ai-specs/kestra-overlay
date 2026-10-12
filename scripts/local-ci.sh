@@ -29,7 +29,7 @@ APPLY_ONLY=0; [ "${1:-}" = "--apply-only" ] && APPLY_ONLY=1
 
 echo "== local-ci: upstream=$UPSTREAM_REPO base=${BASE:0:12} verify=$WORK =="
 if [ ! -d "$WORK/.git" ]; then
-  git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$WORK"
+  git clone --depth 1 --branch "$RELEASE" "$UPSTREAM_REPO" "$WORK"
 fi
 # 验证树是一次性草稿：丢弃任何残留状态后固定在 BASE（绝不用于开发）
 git -C "$WORK" checkout -q --detach "$BASE" 2>/dev/null || true
@@ -63,5 +63,14 @@ echo "== executable jar =="
 (cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts)
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 (cd "$WORK" && ./gradlew executableJar --console=plain -x test -x check)
+
+# Stage the same executable as build.sh so a subsequent local Docker build
+# cannot silently reuse an older docker/app/kestra left in the verify tree.
+EXE="$(ls -t "$WORK"/build/executable/* | head -1)"
+mkdir -p "$WORK/docker/app/storage"
+cp "$EXE" "$WORK/docker/app/kestra"
+chmod +x "$WORK/docker/app/kestra"
+touch "$WORK/docker/app/storage/.gitkeep"
+bash "$REPO/scripts/build-extensions.sh" "$WORK"
 
 echo "== local-ci ALL GREEN（可组织 patch 提交推送，真 CI 为最终门）=="
