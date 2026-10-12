@@ -47,19 +47,6 @@ Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉
 你可以在页面中创建第一个用户，也可以使用环境变量完成初始化。
 两种方式都不需要手工执行 SQL。
 
-| 项目 | 说明 |
-|---|---|
-| OIDC 用户 | 首次安装时设置。用户名也是 OIDC `sub`。密码不会从服务端注册信息中取回。 |
-| OAuth 配置名 `kestra` | 决定 `/oauth/login/kestra` 和 `/oauth/callback/kestra` 路径。它不是 client ID。 |
-| UI client ID `kestra-ui` | 示例中的 UI client ID。你可以修改它。配置和注册信息必须使用同一个值。 |
-| client secret | 由部署方生成并保存在客户端配置中。服务端不能返回原值。 |
-| redirect URI | 必须完全匹配。例如 `http://localhost:8080/oauth/callback/kestra`。 |
-| 外部应用 client | 每个应用使用独立的 client ID、secret 和 redirect URI。不要复用 UI client。 |
-
-UI 使用 Authorization Code 和 PKCE S256。
-服务端使用 confidential client 换取 token。
-浏览器使用 HttpOnly cookie 保存登录状态。
-
 ### compose 示例（内置 OIDC + UI）
 
 下例用于本机 `http://localhost:8080`。启动前设置部署方生成的
