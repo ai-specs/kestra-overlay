@@ -145,10 +145,10 @@ index 0000000..bf3be71
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
 new file mode 100644
-index 0000000..9f633c0
+index 0000000..1832510
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,58 @@
 +package io.kestra.webserver.mcp;
 +
 +import java.util.Map;
@@ -199,10 +199,12 @@ index 0000000..9f633c0
 +            request.setAttribute("io.kestra.mcp.identity", Map.of("subject", claims.getSubject(), "client_id", stored.clientId(), "resource", resource, "scopes", stored.scopes()));
 +            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), Map.of("client_id", stored.clientId(), "resource", resource, "scope", stored.scopes())));
 +            return true;
-+        }).subscribeOn(Schedulers.boundedElastic()).onErrorReturn(false)
++        }).subscribeOn(Schedulers.boundedElastic()).onErrorResume(McpResourceUrl.UnknownResourceException.class,
++            exception -> Mono.empty()).onErrorReturn(false)
 +            .flatMapMany(authenticated -> authenticated ? chain.proceed(request)
 +                : Mono.just(HttpResponse.unauthorized().header("WWW-Authenticate",
-+                    "Bearer resource_metadata=\"" + resources.metadata("main", server.get()) + "\"").body(Map.of("error", "invalid_token"))));
++                    "Bearer resource_metadata=\"" + resources.metadata("main", server.get()) + "\"").body(Map.of("error", "invalid_token"))))
++            .switchIfEmpty(Mono.just(HttpResponse.notFound()));
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java
@@ -246,7 +248,7 @@ index 0000000..e231218
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java
 new file mode 100644
-index 0000000..25726fa
+index 0000000..7cfecf7
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java
 @@ -0,0 +1,81 @@
@@ -262,6 +264,9 @@ index 0000000..25726fa
 +@Singleton
 +@io.micronaut.context.annotation.Requires(property = "kestra.oidc.enabled", value = "true")
 +public class McpResourceUrl {
++    public static class UnknownResourceException extends IllegalArgumentException {
++        public UnknownResourceException() { super("Unknown resource"); }
++    }
 +    private final URI base;
 +    private final BeanProvider<io.kestra.mcp.McpServerCache> servers;
 +
@@ -284,11 +289,8 @@ index 0000000..25726fa
 +        final String[] parts = suffix.split("/");
 +        if (!io.kestra.core.tenant.TenantService.MAIN_TENANT.equals(parts[2])
 +            || !resource(parts[2], parts[4]).toString().equals(value)) throw new IllegalArgumentException("Invalid resource");
-+        try {
-+            if (servers.get().get(parts[2], parts[4]).isEmpty()) throw new IllegalArgumentException("Unknown resource");
-+        } catch (RuntimeException exception) {
-+            throw new IllegalArgumentException("Unknown resource");
-+        }
++        if (!servers.isPresent()) throw new UnknownResourceException();
++        if (servers.get().get(parts[2], parts[4]).isEmpty()) throw new UnknownResourceException();
 +        return candidate;
 +    }
 +
@@ -939,10 +941,10 @@ index 0000000..1d4a40e
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java
 new file mode 100644
-index 0000000..b5d6bf6
+index 0000000..0dfc9a0
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,52 @@
 +package io.kestra.webserver.oidc;
 +
 +import io.kestra.webserver.mcp.McpResourceUrl;
@@ -961,6 +963,7 @@ index 0000000..b5d6bf6
 +        final var cache = new io.kestra.mcp.McpServerCache(repository, queue, new io.kestra.mcp.McpConfig(null,
 +            new io.kestra.mcp.McpConfig.ServerCacheConfig(10L, java.time.Duration.ofMinutes(5)), java.time.Duration.ofMinutes(5)));
 +        org.mockito.Mockito.when(provider.get()).thenReturn(cache);
++        org.mockito.Mockito.when(provider.isPresent()).thenReturn(true);
 +        org.mockito.Mockito.when(repository.get("main", "first")).thenReturn(java.util.Optional.of(
 +            org.mockito.Mockito.mock(io.kestra.core.mcp.models.McpServer.class)));
 +        org.mockito.Mockito.when(repository.get("main", "second")).thenReturn(java.util.Optional.of(

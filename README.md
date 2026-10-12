@@ -300,6 +300,13 @@ HTTP（localhost/127.0.0.1/[::1]），禁止 fragment、userinfo、通配符和�
 MCP只接受resource-bound access token，拒绝Basic、ID token与IdP/UI cookie；OIDC关闭时
 MCP失败关闭，普通REST认证保留上游模式。SDK基线为Java MCP 1.1.3，实测协议2025-06-18；
 不声称外部GUI兼容。`kestra.url`是公开资源基址，不从Host/Forwarded推导。
+首装自动创建的MCP server id为`default`，地址为`${kestra.url}/api/v1/main/mcp/default`
+（基址末尾斜线只保留一个）；`kestra`是默认OAuth客户端配置name，不是MCP server id。
+管理API `/api/v1/main/mcp-servers/default` 可核对存在/disabled状态；disabled=true必须
+由认证管理API启用后才可连接，空库未创建McpToolTrigger flow时tools/list为空。
+测试fixture显式通过生产API创建flow及`other-server`，不是首装默认资源。
+客户端先读取401 WWW-Authenticate中的resource_metadata，再取JSON.resource作为
+authorize/token的resource；不可用基址、无tenant路径或自行猜`kestra`别名替代。
 `kestra.oidc.mcp-scopes`限定可授权能力（默认上述两项）；`kestra.mcp.execution.enabled=false`
 关闭执行。pending TTL为`registration.pending-ttl-minutes`（1–120，默认30），
 `max-pending-clients`默认100、`max-clients`默认1000、`max-clients-per-user`默认20。
@@ -309,6 +316,10 @@ owner浏览器会话可GET `/oidc/clients?page=1&size=20`、GET `/oidc/clients/{
 均无secret且只返回owner记录；detail返回五分钟单次interaction（每用户最多20）。
 POST `/oidc/clients/{id}/revoke` JSON `{action:"revoke"|"delete",interaction:"..."}`
 要求ACTIVE用户、当前IdP会话与同源Origin；interaction原子消费，重放403、他人404。
+Origin必须精确为OIDC issuer的`scheme://authority`（不含路径），例如
+issuer `https://kestra.example.org` 对应`Origin: https://kestra.example.org`。
+管理调用使用浏览器登录IdP cookie、detail返回的interaction与该Origin，JSON提交；
+单凭MCP access token不能管理client，curl不得遗漏cookie/Origin/interaction。
 管理没有独立UI，也不是RFC7592；撤销立即阻断token、refresh和已有MCPsession后续调用。
 `bash scripts/blackbox-mcp-oauth.sh IMAGE /absolute/verify-tree`自建PG、生产首装、
 UI cookie+CSRF创建flow，并强制执行SDK正反向、B用户、跨真实server、撤销session/refresh
@@ -335,6 +346,37 @@ Bearer access token；UI 使用 OAuth2 callback 建立的 HttpOnly JWT cookie。
 
 ### MCP 客户端接入与 flow 工具
 
+本机默认 MCP 地址是 **`http://localhost:8080/api/v1/main/mcp/default`**。
+`main` 是当前 OSS tenant，`default` 是首装自动创建的 server ID；`kestra` 是 OAuth
+客户端配置名称，不能替代 server ID。自定义 server 先在 Web UI 的 MCP Servers 中
+创建，再使用它的实际 ID。不存在的 server 返回 404，不提供授权发现信息。
+
+连接前登录 Web UI，打开 MCP Servers 中的 `default`，检查 Enabled 开关并保存。
+脚本管理方式是先 GET `/api/v1/main/mcp-servers/default`，保留其可编辑字段，再 PUT
+同一路径，将 `authType` 设为 `OAUTH`、`disabled` 设为 `false`。管理请求使用有效的
+UI 认证 cookie，写请求还须 `X-CSRF-TOKEN`；MCP resource-bound token 不用于管理 REST。
+
+要暴露 flow 工具，在 UI 创建并保存下面的 flow（core 插件包含这些类型）：
+
+```yaml
+id: mcp-example
+namespace: examples.mcp
+tasks:
+  - id: result
+    type: io.kestra.plugin.core.debug.Return
+    format: verified
+triggers:
+  - id: mcp
+    type: io.kestra.plugin.core.trigger.McpToolTrigger
+    mcpServer: default
+    toolName: run-example
+    title: Run example flow
+    toolDescription: Execute the example flow and return its result
+```
+
+尚未配置工具时 `tools/list` 可以为空；这不等于 token 无效。客户端应从下面的发现
+流程取得资源值，不猜基址、尾随斜线或省略 tenant 的别名。
+
 MCP 只接受 OAuth2 Bearer access token；Basic Auth、ID token、IdP/UI cookie 均不能调用
 MCP。MCP 资源 URL 为 `kestra.url` 加 `/api/v1/{tenant}/mcp/{server-id}`，部署配置的
 `kestra.url` 必须是客户端可访问的稳定绝对 HTTP(S) 地址。当前 MCP SDK 验收基线为
@@ -352,6 +394,18 @@ Java `io.modelcontextprotocol.sdk:mcp:1.1.3`、协议 `2025-06-18`；外部 GUI 
 4. 使用 authorization code、client ID、精确回调和 verifier 换 resource-bound token。
 5. 使用 `Authorization: Bearer <access_token>` 初始化 MCP、列工具和调用工具；客户端
    不保存 client secret。access token、refresh token 和 PKCE verifier 需要由客户端安全保存。
+
+例如上述地址的挑战应指向
+`http://localhost:8080/.well-known/oauth-protected-resource/api/v1/main/mcp/default`。
+该 URL 必须返回 JSON，其中 `resource` 为完整 MCP 地址；将此值同时传给 authorize
+和 token 请求。MCP access token 的 `aud` 必须与其精确匹配。JWT 标准允许 `aud`
+是字符串或数组，消费方需要按标准解析；未传 resource 签发的普通 OIDC token 不可调用 MCP。
+
+`POST /oidc/consent` 是浏览器授权交互：除了同一 IdP 会话 cookie 与页面返回的单次
+`interaction`，还要求 `Origin` 精确等于 issuer 的 `scheme://authority`，例如
+`Origin: http://localhost:8080`（不含路径、末尾斜线）。浏览器提交会自动带上 Origin；
+脚本应显式携带，遗漏/跨源返回 403。owner 管理 POST 使用同样的 Origin 要求，
+但提交管理 detail 返回的 interaction 和 JSON action；授权 form interaction 不能混用。
 
 当前 flow 工具声明两个能力：`mcp:flows:read`（工具定义与返回输出）和
 `mcp:executions:write`（触发执行）；复合调用必须同时获得二者，write 不包含 delete。

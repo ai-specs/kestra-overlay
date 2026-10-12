@@ -86,6 +86,7 @@ for attempt in $(seq 1 60); do
 done
 [ "$READY" = 1 ] || { echo 'FAIL MCP instance startup'; exit 1; }
 node "$REPO/scripts/blackbox-mcp-oauth.mjs" "$BASE" "$TEMP_DIR"
+if [ "${MCP_PRISTINE_PROBE:-0}" = 1 ]; then exit 0; fi
 PG_PORT=$(docker port "$PG" 5432/tcp | sed 's/.*://')
 (cd "$WORK" && OIDC_FIXTURE_JDBC="jdbc:postgresql://127.0.0.1:$PG_PORT/kestra" \
   ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.OidcSecondUserFixtureTest --console=plain)

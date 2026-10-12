@@ -2,6 +2,15 @@
 
 ## 交付状态与结论
 
+发布镜像复现（2026-10-11）：GHCR tag重新pull得到
+`sha256:f08f2ee611e8b9d0705f7d2fa9cf067b8d558cbc2003b60f77f6535cd97e7d00`。
+纯README配置/环境首装、不创建flow/server：管理API证明default存在、kestra不存在；
+kestra为OAuth配置name而非MCP id。default完整challenge metadata HTTP200且JSON.resource
+精确匹配。完整镜像门从challenge发现resource后授权/token，JWT aud采用RFC7519允许的
+字符串形式，规范化为单元素集合后精确断言通过。此前测试仅接受数组造成假失败。
+unknown server不应广告不存在metadata，本地修复返回404并折回0160；不增kestra别名，
+不放宽base/tenant/canonical。可复跑`MCP_PRISTINE_PROBE=1 bash scripts/blackbox-mcp-oauth.sh IMAGE VERIFY`。
+
 ### 2026-10-09 实施裁决与 BASE 核验
 
 本轮接收基线为 BASE v2.0.5 (`172dd0f3760fb1255d3b22bd1fd07ce31b173fa3`)、
