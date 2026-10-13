@@ -58,7 +58,7 @@
 | S3 | `EditionProvider` 版本判定注入 | `KestraContext.java:150`；`PluginAutoInstallService.java:89`；`McpServerController.java:144`；`ProblemFactory.java:39`（全部调用点见 §5） | 无 |
 | S4 | 按 distribution 声明接口 bean（「各发行版声明自己拥有的路径」） | `webserver/errors/ProblemFormatExclusion.java:12` | 无（现成范例留档） |
 | S5 | `io.kestra.ee.*` 包名空间与分发过滤 | `PluginController.java:388,400,696`；`Makefile:85`；`core/models/ui/PluginDistribution.java:8` | 不使用（不分发 EE 插件） |
-| S6 | classpath jar 补 bean/过滤器链（EE 的交付形态本身） | `webserver/build.gradle:25` 仅有 `micronaut-security-csrf` ⇒ 认证过滤器链不在 OSS 构建；OSS 认证=自研 `BasicAuthService` cookie `[docs]`；外部同包 `@Controller`/`@Filter` 可注册 `[dsh]`（13/13 全绿） | **两个活跃 jar 消费的主通道**：认证链 jar + R-EE-RBAC SecurityRule jar。承载 = R-CLASSPATH-MERGE（构建期仅注入 manifest 条目；jar 一律运行时挂载；缺席静默休眠）。授权服务器不走此通道——R-OIDC-SERVER 为 patch 路线预留扩展点（2026-10-07 裁定） |
+| S6 | classpath jar 补 bean/过滤器链（EE 的交付形态本身） | `webserver/build.gradle:25` 仅有 `micronaut-security-csrf` ⇒ 认证过滤器链不在 OSS 构建；OSS 认证=自研 `BasicAuthService` cookie `[docs]`；外部同包 `@Controller`/`@Filter` 可注册 `[dsh]`（13/13 全绿） | **授权 jar 的承载通道**：消费仓 `ai-specs/kestra-plugin-rbac`；认证链已内置 patch，不再消费外部 jar。承载 = R-CLASSPATH-MERGE（构建期仅注入 manifest 条目；jar 一律运行时挂载；缺席静默休眠）。授权服务器不走此通道——R-OIDC-SERVER 为 patch 路线预留扩展点（2026-10-07 裁定） |
 | S7 | 插件体系：`plugins/` 扫描 + `PluginClassLoader`（extends URLClassLoader，反射实例化，不进 Micronaut） | `core/plugins/`（RegistryScanner 等）；`PluginClassLoader.java:19` | 无活跃插件客户（`extensions.tsv`） |
 | S8 | `Optional`/`BeanProvider` 缺席容忍：EE bean 缺席 ⇒ OSS 默认行为 | `MiscController.java:72`；`DefaultStartupHook.java:25-39`；`KestraContext.java:149` | REQ-0011 依赖此模式（OIDC 部署下 BasicAuthService 缺席） |
 | S9 | protected 方法覆写点（javadoc 自述「EE 覆写此方法放行」） | `KestraBeansFactory.java:112-118`；`AiServiceManager.java:115-137`；`FlowValidator.java:204`（同款 `JsonSchemaGenerator.java:170`） | 无（分类学留档：扩展仓子类 bean `@Replaces` 覆写，经 classpath jar） |
@@ -80,7 +80,7 @@
 | 能力 | OSS 行为 | EE 行为 | 补足方式 | 状态 |
 |---|---|---|---|---|
 | 端点级认证门 | 无过滤器链（见 A）。OSS 主源码零授权钩子（无 SecurityRule/intercept-url-map 类，2026-10-07 复扫） | 规则链 `[docs]` | 部署面：micronaut-security `intercept-url-map`（`/**→isAuthenticated()`）。生效前提 = 认证链 jar 进镜像（R-CLASSPATH-MERGE 前置） | 部署面（kestra-oidc-provider 侧） |
-| RBAC | OSS 零授权钩子。EE IAM API 面（users/roles/permissions/groups/service-accounts/me）在 vanilla 实例全部 404 `[live]` ⇒ 判定面整体在 EE jar，无可解禁开关 | 资源×动作×namespace 绑定；五内置角色；三类主体（详见 r-ee-rbac.md §2） | 扩展仓 jar 提供 SecurityRule/Authorizer bean（S6）。预期零 overlay patch。需求文档：[docs/r-ee-rbac.md](r-ee-rbac.md) | **reserved** R-EE-RBAC |
+| RBAC | OSS 零授权钩子。EE IAM API 面（users/roles/permissions/groups/service-accounts/me）在 vanilla 实例全部 404 `[live]` ⇒ 判定面整体在 EE jar，无可解禁开关 | 资源×动作×namespace 绑定；五内置角色；三类主体（详见 r-ee-rbac.md §2） | 扩展仓 jar 提供角色模型、操作解析和 Authorizer bean（S6）；overlay 提供最小 typed SPI 与失败关闭激活门。需求文档：[docs/r-ee-rbac.md](r-ee-rbac.md) | **实施中** R-EE-RBAC |
 
 ## 3. 当前闭环视图
 
@@ -113,9 +113,17 @@ OQ-RBAC 1-4（r-ee-rbac.md §9）。
 
 | rid | 扩展点 | 触发条件（形态绑定） | 预期形态 |
 |---|---|---|---|
-| R-CLASSPATH-MERGE | 通道② jar 承载机制（S6）。已立案待实施；选型 b + 定位裁定 2026-10-07。JVM 语义三组实证与设计约束见机制文档 §4 | 实施指令（认证链 jar 与 R-EE-RBAC 的共同前置） | 构建期仅注入 manifest Class-Path 条目元数据（jar 一律运行时挂载——构建期零外部扩展 jar）。manifest 条目 = 镜像↔部署契约。加 OQ2 剩余实证（bean 索引可见性）。零 patch 文件 |
-| R-EE-RBAC | 端点/资源级授权：扩展仓 jar 提供 SecurityRule/Authorizer bean | 消费仓指名（kestra-oidc-provider 侧或未来授权扩展仓）+ 行为证据 + R-CLASSPATH-MERGE 落地 | 外部 classpath jar（S6）。预期零 overlay patch。实证含 SecurityRule 从 jar 注册。展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md) |
 | R-OIDC-SERVER | OAuth2/OIDC 授权服务器（Micronaut 生态标准实现，内嵌 webserver 形态）。**已交付：0100–0134、0150–0200、0211；真实 CI 全绿（2026-10-12）**；2026-10-07 裁定：预留扩展点（patch 路线）——协议稳定性 + 实现标准性 ⇒ 大粒度仍为薄层（新文件为主，BASE 升级冲突面小）；区别于 jar 路线的外部扩展实现；体现「overlay 先行，jar 路线跟随」模式 | 实施指令（维护者；不绑外部时序——基本原则） | patch 集（授权码流/PKCE/discovery/JWKS/token/client 与用户存储等，按 §3 需求对齐拆分）。**前置裁定（2026-10-07）**：② 链一体化进 patch（`kestra-auth-chain` 契约退役；外部 IdP 场景走内置链配置）；③ 持久化 = 同 datasource 新表（postgres 起步，migration 进 patch——源码级 MigrationScript bean，F2 自动执行；h2/mysql 留待需求）。四项前置全部闭合（2026-10-07）：① 宪章修订 ② 链一体化 ③ 新表 postgres ④ 安全清单即验收基准。**展开文档（裁定/证据/剥离清单/安全清单/实施顺序）：[docs/r-oidc-server.md](r-oidc-server.md)**；④ **测试先行门（2026-10-07 增，安全敏感裁定）**——CI 增定向测试步（`:webserver:test --tests` 包前缀过滤，不跑上游全量）+ 镜像级 OIDC 流程黑盒（discovery/授权码+PKCE/token/JWKS/refresh/MCP 动态注册）；安全专项清单（redirect_uri 精确匹配、code 一次性、PKCE、alg=none 与混淆拒绝、JWKS 轮换、secret 哈希存储与日志不泄露、匿名面最小化、vanilla 回归）动刀前先评审；每需求 patch 与其测试同批落仓、门绿为 DoD；`[dsh]` 13/13 安全面测试可作移植底稿 |
+
+### 本阶段已激活能力（2026-10-13）
+
+以下能力已退出 reserved 登记，镜像与消费仓组合的完成状态分别由本仓 CI 与部署
+monorepo 验收确定；这里不跟踪独立扩展仓的业务实现进度。
+
+| rid | 扩展能力 | 接收依据 | 实施形态 |
+|---|---|---|---|
+| R-CLASSPATH-MERGE | 通道② jar 承载机制（S6）。承载 scripts 已实施、本地 executable 冒烟通过，外部 bean 完整 server 探针通过，真实 CI 待验收；选型 b + 定位裁定 2026-10-07。JVM 语义三组实证与设计约束见机制文档 §4 | 实施指令（认证链 jar 与 R-EE-RBAC 的共同前置） | 构建期仅注入 manifest Class-Path 条目元数据（jar 一律运行时挂载——构建期零外部扩展 jar）。manifest 条目 = 镜像↔部署契约。加 OQ2 剩余实证（bean 索引可见性）。零 patch 文件 |
+| R-EE-RBAC | 端点/资源级授权：消费仓 `ai-specs/kestra-plugin-rbac` 已指名，统一授权 SPI 与激活门实施中 | 缺 jar 时 REST 未受控与 MCP 主体角色丢失证据见 r-ee-rbac §11；承载为 R-CLASSPATH-MERGE | 外部 classpath jar（S6）承载业务模型和操作解析；overlay 只补 typed SPI、可信主体传递与失败关闭门。独立插件构建后由 monorepo Compose 组合验收。展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md) |
 
 ## 5. 复现命令（BASE 树内执行）
 

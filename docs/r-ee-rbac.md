@@ -1,9 +1,9 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
-> **状态**：reserved·已细化（2026-10-07）。开工仍需 AGENTS.md §2 入口 B 四要件。
-> 本轮0170已提供MCP-only typed Principal/FlowResource READ/EXECUTE SPI与失败关闭gate；
-> 缺bean镜像门与异常bean零队列副作用单元路径已验收。没有真实外部RBAC jar，
-> REST适配与具体资源隔离仍未交付，不能把这些测试等同完整R-EE-RBAC。
+> **状态**：实施中（2026-10-13）。消费仓已指定为 `ai-specs/kestra-plugin-rbac`。
+> 独立 jar 承载业务角色模型与 REST 操作解析；overlay 提供统一授权 SPI、REST
+> 失败关闭门、REST 执行前 gate、MCP 可信主体传递及逐操作激活点，构建期只注入 classpath 元数据。
+> 真实 jar、镜像和 CI 验收全部完成前，不宣称完整细粒度资源隔离已交付。
 > **归属**：`docs/oss-ee-gap.md` §2-B 行 / §4 R-EE-RBAC 行的展开。
 > **一句话**：让任何下游能以 EE 同构方式（外部组件 + 配置）在 OSS 上获得**每请求
 > (资源， 动作， namespace) 级**的授权判定。补的是授权判定钩子这个架构能力，
@@ -166,3 +166,26 @@ grep -n "micronaut-security" webserver/build.gradle                  # 仅 csrf
 
 文档源：kestra.io/docs/enterprise/auth（索引）、…/auth/rbac、…/auth/service-accounts
 （2026-10-07 抓取；`.md` 后缀取纯文本）。
+
+## 11. 本阶段实施接收（2026-10-13）
+
+入口 B 四要件：
+
+- 消费仓：`ai-specs/kestra-plugin-rbac`，以 monorepo submodule 组织。
+- 行为证据：现有 `McpCapabilityGate` 仅有 MCP READ/EXECUTE 扩展 SPI；
+  REST `FlowController.createFlow` 与 `ExecutionController.createExecution` 在认证后
+  直接调用业务服务，未消费资源授权组件；外部 jar 缺席时无法约束 REST。
+  `selfrun` 使用 `java -jar`，未声明 Class-Path 时 `/app/libs` jar 不进入应用上下文。
+- 最小面：构建脚本注入 manifest 元数据；overlay typed SPI、常驻失败关闭门、
+  可信角色传递和执行前授权激活点。角色、绑定、资源路由解析与权限模型属于外部仓。
+- 归属行：差异表 §2-B 与 §4 的 R-EE-RBAC / R-CLASSPATH-MERGE。
+
+部署统一开关为 `kestra.rbac.enabled`。未知、无法确定完整资源集合或无法安全解析
+的路径必须拒绝，支持路径以消费仓覆盖清单及真实镜像验收为准。
+使用本次 CI 推送并验收后的 commit hash 标签或 OCI digest，不能依赖复用的版本
+标签判断代码是否更新；monorepo 固定镜像与插件提交组合。
+
+本阶段实证发现 REST `createExecution` 在选择 revision 与 namespace meta 处理后才
+获得实际 runtime flow；因此仅在 HTTP 入口解析作者源码不能证明覆盖实际输入/输出读取。
+overlay 在 `readExecutionInputs` 之前消费真实 runtime flow、execution ID 和可信主体，
+执行资源权限与外部依赖计划检查。该点不包含角色模型或业务路由策略。

@@ -50,12 +50,14 @@ if [ "$APPLY_ONLY" = "1" ]; then
   exit 0
 fi
 
+python3 -m unittest discover -s "$REPO/scripts/tests" -v
+
 echo "== scoped tests (filter: $TESTS) =="
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
   export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || true)"
 fi
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
-  --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
+  --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
 
 echo "== executable jar =="
@@ -70,6 +72,7 @@ EXE="$(ls -t "$WORK"/build/executable/* | head -1)"
 mkdir -p "$WORK/docker/app/storage"
 cp "$EXE" "$WORK/docker/app/kestra"
 chmod +x "$WORK/docker/app/kestra"
+python3 "$REPO/scripts/merge-classpath.py" "$WORK/docker/app/kestra" "$REPO/extensions.tsv"
 touch "$WORK/docker/app/storage/.gitkeep"
 bash "$REPO/scripts/build-extensions.sh" "$WORK"
 

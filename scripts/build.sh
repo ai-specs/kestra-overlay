@@ -50,9 +50,11 @@ if [ "${1:-}" = "--apply-only" ]; then
   exit 0
 fi
 
+python3 -m unittest discover -s "$PWD/scripts/tests" -v
+
 echo "== scoped OIDC acceptance tests =="
 (cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
-  --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
+  --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
 
 echo "== build upstream UI assets =="
@@ -69,6 +71,7 @@ EXE="$(ls -t "$WORK"/build/executable/* | head -1)"
 mkdir -p "$WORK/docker/app"
 cp "$EXE" "$WORK/docker/app/kestra"
 chmod +x "$WORK/docker/app/kestra"
+python3 "$PWD/scripts/merge-classpath.py" "$WORK/docker/app/kestra" "$PWD/extensions.tsv"
 # Pre-create the storage dir with kestra ownership: the upstream image has no /app/storage,
 # so a named volume mounted there initializes root-owned and the uid-1000 process crashes
 # with AccessDenied on first boot (third-party test 2026-10-09). COPY docker / carries the
@@ -87,8 +90,8 @@ if ! docker buildx inspect kestra-overlay-builder >/dev/null 2>&1; then
   docker buildx create --name kestra-overlay-builder --driver docker-container --use
 fi
 docker buildx use kestra-overlay-builder
-# Image lineage: zero plugin/extension jars are baked (extensions.tsv has no
-# active plugin/classpath rows; build-extensions.sh leaves $WORK/plugins empty)
+# Image lineage: zero plugin/extension jars are baked (classpath rows inject
+# only manifest metadata; build-extensions.sh leaves $WORK/plugins empty)
 # — the same content family as upstream's slim/no-plugins variants. Main tag
 # suffix "-no-plugins" (maintainer naming ruling 2026-10-07). One deliberate
 # difference from the upstream no-plugins variant: we bake NO Kestra config,

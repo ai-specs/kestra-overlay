@@ -43,7 +43,7 @@
 | 通道 | 是什么 | 重编译 kestra？ | 要外部 jar？ | 要重启？ | 生效时机 | 对应 |
 |---|---|---|---|---|---|---|
 | ① 源码 patch | 改上游源码（webserver M 面） | **要**（overlay CI 重编 executableJar + 重建镜像） | 否 | **要** | 构建期 | 本仓 1 个 patch（REQ-0011）；预留 R-OIDC-SERVER（授权服务器，patch 路线——2026-10-07 裁定） |
-| ② classpath jar | 扩展 jar 与 fat jar 同 classpath，bean 进 Micronaut 上下文 | 否（扩展仓独立编译，带 micronaut 注解处理 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体可烤进或运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b，见 §4） | **要**（F2） | 启动期 | R-EE-RBAC SecurityRule jar（契约 `kestra-rbac-authorizer.jar`）。认证链不走此通道——前置裁定②与 R-OIDC-SERVER 一体化进 patch（2026-10-07） |
+| ② classpath jar | 扩展 jar 与 fat jar 同 classpath，bean 进 Micronaut 上下文 | 否（扩展仓独立编译，带 micronaut 注解处理 bean 索引） | **要 manifest 条目**（构建期注入；jar 本体仅运行时挂载，缺席=静默休眠——R-CLASSPATH-MERGE 选型 b，见 §4） | **要**（F2） | 启动期 | R-EE-RBAC SecurityRule jar（契约 `kestra-rbac-authorizer.jar`）。认证链不走此通道——前置裁定②与 R-OIDC-SERVER 一体化进 patch（2026-10-07） |
 | ③ plugins/ 插件 jar | `KESTRA_PLUGINS_PATH` 目录（默认 /app/plugins；部署注入 = `-v ./plugins:/app/plugins` 或 `-e KESTRA_PLUGINS_PATH=/挂载点`，重启生效——F4 ①） | 否 | 要（jar 放目录/经 API 装） | **分形态**：auto-install 开 → 否（API 装即时注册）；关 → 要 | 启动期；auto-install 开时即时 | 无活跃插件客户（`extensions.tsv`） |
 | ④ 部署配置 | yml/env（`KESTRA_CONFIGURATION`→`MICRONAUT_CONFIG_FILES`） | 否 | 否 | **要**（配置绑定在 bean 创建期） | 启动期 | kestra-oidc-provider 端点门（前提 = 认证链 jar 进镜像） |
 | ⑤ 运行时 settings | settings 存储（API 写入的键值） | 否 | 否 | **否**（按调用读库） | 即时 | REQ-0011 兜底语义（settings 缺席 → fallback） |
@@ -187,11 +187,12 @@ required"）。OSS 源码里处处是为 EE 预留的挂接点（差异表 §1 S
 架构事实（OSS webserver 构建里只有 csrf，`webserver/build.gradle:25`——认证链本来就靠
 jar 带入）。
 
-## 4. R-CLASSPATH-MERGE 立案（选型 b + 定位裁定，2026-10-07；实施待指令）
+## 4. R-CLASSPATH-MERGE 承载（选型 b；2026-10-13 本地验证）
 
 已落地通道：①（REQ-0011 单 patch）+ ④（部署配置）；③ 无客户。
-通道② 的镜像承载是「EE 同构交付」的核心缺口：kestra-oidc-provider 认证链 jar 与
-R-EE-RBAC SecurityRule jar 都卡在这里（差异表 §1-S6 统一口径）。
+通道② 的承载 scripts 已实施，消费仓为 `ai-specs/kestra-plugin-rbac`，
+部署契约为运行时挂载 `kestra-rbac-authorizer.jar`；认证链已一体化进 patch，
+不消费本通道。外部 bean 发现由本仓契约探针验证；真实 RBAC jar 的业务组合验收属于部署 monorepo。
 
 **方案（选型 b）**：build.sh 对构建产物做 zip 级后处理，向 executable jar 的 manifest
 注入 `Class-Path: libs/x.jar …`。零 patch 文件。不动上游 build 面。不改 Dockerfile。
@@ -236,15 +237,41 @@ selfrun，丢 `KESTRA_PLUGINS_PATH`/`KESTRA_CONFIGURATION` 管线，触碰 build
    「意外遮蔽上游」整类风险排除。代价：「用扩展 jar 替换同名类」走不通——S6 同包策略
    只加新类名，不受影响。
 
-### 实施步骤（两步，先本地后 CI）
+### 承载实施与本地证据（2026-10-13）
 
-1. 本地机制验证（不跑 gradle）：JVM 语义已实证（上三组）。剩余 = 对真实 webserver
-   executable jar 做 manifest 注入冒烟 + selfrun 前缀完整性核对。
-2. CI 端到端：build.sh 按 `extensions.tsv` classpath 行注入 manifest 条目；运行时挂载
-   探针 jar（含 `@Context` 生命周期 bean，启动打日志）验证 bean 装载（F2 面）；
-   闭环 OQ2 剩余项。
+`build.sh` 与 `local-ci.sh` 在 executable 暂存到 `docker/app/kestra` 后调用
+`scripts/merge-classpath.py`，从 `extensions.tsv` 的 classpath 行追加
+`libs/NAME.jar`。已有 Class-Path 保留顺序、去重追加；只改主 manifest 段，
+按 UTF-8 字节折行（每物理行最多 72 字节，续行首字节为空格）。
+辅助工具以 ZIP append 模式保留原 local header/压缩数据及 selfrun 前缀，
+中央目录移除旧 manifest 引用后写入唯一新 manifest；其他属性、命名段、ZIP
+注释与执行权限保留。重复执行字节不变。零外部 jar 字节读入或暂存，
+不修改上游 Dockerfile/entrypoint。辅助测试加入两条构建脚本的编译前门及 workflow 的 patch-verify 门。
 
-- **OQ2（半闭环）**：同包同名类遮蔽方向已实证（实验 3：主 jar 赢，良性）。剩余 =
+本轮使用 `.work/verify/docker/app/kestra`（真实 selfrun 构建产物，相关 fat jar
+在 `.work/verify/build/libs/kestra-2.0.5.jar`）的临时副本验证：75,717 个非
+manifest 项的原始 local header 与压缩数据哈希一致，前缀/ZIP 注释一致、
+重复注入哈希一致。完全没有 `libs/kestra-rbac-authorizer.jar` 时，经 shell
+执行 executable `--help` 返回 Usage、exit 0，无 ClassNotFoundException /
+NoClassDefFoundError。原有 Prometheus meter 警告仍出现；此证据仅证明真实
+CLI 启动缺 jar 休眠，不能代替完整 server 启动或外部 bean 发现验收。
+selfrun 的 polyglot 前缀没有 shebang，冒烟使用 bash 的 exec 格式回退执行它。
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+bash -n scripts/build.sh scripts/local-ci.sh scripts/build-extensions.sh
+./scripts/check-patches.sh
+PATH="$(/usr/libexec/java_home -v 25)/bin:$PATH" python3 scripts/tests/smoke_classpath.py \
+  .work/verify/docker/app/kestra extensions.tsv
+```
+
+辅助测试覆盖多条目、重复项、原 Class-Path、字节折行（含 UTF-8）、原属性与命名段、
+前缀、执行权限、ZIP 数据、幂等、无末尾空行修复、URI 安全文件名及非法路径拒绝。前文“同 FQN 主 jar 优先”
+为既有 JVM 实证，本轮未复测；工具不合并类文件，也不改变主 jar 优先顺序。
+剩余闭环：本仓注册表/差异表/manifest 状态、外部契约探针的 Micronaut bean 发现、
+本仓 CI/镜像验收。独立 RBAC jar 的构建归消费仓，实际部署组合验收归 monorepo。
+
+- **OQ2（本地完整 server 探针已闭环，候选镜像 CI 待验收）**：同包同名类遮蔽方向已实证（实验 3：主 jar 赢，良性）。剩余 =
   bean 索引（`META-INF/services` 的 BeanDefinitionReference 条目）经 Class-Path 的可见性
   端到端——`ClassLoader.getResources` 对多 jar 同名 service 条目并列返回，预期成立，
   随实施步骤 2 确认。
@@ -263,3 +290,20 @@ sed -n '40,70p' core/src/main/java/io/kestra/core/migration/MigrationRunner.java
 ```
 
 升级 BASE 后本文与差异表一并复扫（AGENTS.md §6-3）。
+
+### 外部 bean 契约探针（2026-10-13 本地镜像）
+
+`scripts/blackbox-classpath.sh` 使用真实宿主编译契约和 Micronaut 注解处理器构建
+临时探针 jar，不读取或构建业务扩展仓。挂载该 jar 到本轮本地镜像后，完整 server
+启动出现 `RBAC-CLASSPATH-PROBE-DISCOVERED`，无 token REST 返回 401。
+探针实现三个授权 SPI 且始终拒绝，验证 bean 索引发现与承载，不提供角色模型。
+该探针同时纳入候选镜像 CI，正式交付仍以真实 CI 门为准。
+
+```bash
+bash scripts/blackbox-classpath.sh "$PWD/.work/verify" \
+  "$PWD/.work/verify/docker/app/kestra" kestra-overlay:rbac-contract
+```
+
+本轮完整 `scripts/local-ci.sh` 通过：146 项定向测试，144 通过、2 个受控镜像
+fixture/SDK 实例测试按预期跳过，零失败；UI 构建与认证单测、executable 构建通过。
+受控跳过由已有镜像黑盒与部署 monorepo 验收分别负责实际运行，不能视为通过。

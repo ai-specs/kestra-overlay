@@ -1,0 +1,602 @@
+# 需求: REQ-0230 REST/MCP统一typed授权SPI、REST失败关闭门与可信roles传递
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；R-EE-RBAC架构激活面 + Micronaut 4.10.26/security 4.15.2契约；不包含角色模型或路由权限策略
+# 触达上游文件: 11 个（详见diff）
+# 移除条件: 上游OSS提供等价统一授权SPI、可信主体传递与失败关闭执行门
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
+index 741ed00..6e3c3d7 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
+@@ -159,6 +159,8 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
+ @Slf4j
+ @Controller("/api/v1/{tenant}/executions")
+ public class ExecutionController {
++    @Inject private io.kestra.webserver.rbac.RbacExecutionGate rbacExecutionGate;
++
+     private static final Duration AVERAGE_DURATION_LOOKBACK = Duration.ofDays(30);
+ 
+     @Nullable
+@@ -1033,7 +1035,11 @@ public class ExecutionController {
+         // Same reason for the Micronaut propagated context: it carries the server request and its
+         // authentication, which the CREATE event listeners need to attribute the execution to its author.
+         final PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
+-        return flowInputOutput.readExecutionInputs(resolvedFlow, executionId, contributed, inputs)
++        return rbacExecutionGate.authorize(io.micronaut.http.context.ServerRequestContext.currentRequest()
++                .flatMap(request -> request.getAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION,
++                    io.micronaut.security.authentication.Authentication.class)).orElse(null), tenantId, resolvedFlow, executionId, Boolean.TRUE.equals(wait))
++            .flatMap(allowed -> allowed ? Mono.defer(() -> flowInputOutput.readExecutionInputs(resolvedFlow, executionId, contributed, inputs))
++                : Mono.error(new HttpStatusException(HttpStatus.FORBIDDEN, "Execution authorization denied")))
+             .flatMap(executionInputs ->
+             {
+                 List<Check> failed = flowService.getFailedChecks(resolvedFlow, executionInputs);
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java
+new file mode 100644
+index 0000000..dd45e13
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java
+@@ -0,0 +1,20 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.concurrent.CompletionStage;
++
++/** Shared REST/MCP execution dependency resolver (name retained for binary compatibility).
++ * Resolve input/output resource reads from the actual runtime flow declaration before execution.
++ * Null/exception means unresolved (deny). An empty list explicitly declares no extra resource reads.
++ * FLOW READ/EXECUTE and EXECUTION CREATE/ACCESS_OUTPUTS are independently enforced by the gate.
++ * This contract does not authorize or sandbox tasks executed later by the workflow engine.
++ */
++public interface McpAuthorizationResolver {
++    /** flowSource is JacksonMapper.ofYaml() serialization of the ProcessedFlow.flow() used for
++     * input validation, preserving runtime defaults, variables, checks and labels. It is an internal
++     * Flow declaration, not uploaded author YAML: tenantId may be null in OSS; tenant is authoritative
++     * transport identity. On FlowWithException, the authored Flow is supplied (matching validation).
++     */
++    record Invocation(String tenant, String namespace, String flowId, String executionId, String flowSource) {}
++    CompletionStage<List<RbacAuthorizer.Requirement>> resolve(RbacAuthorizer.Principal principal, Invocation invocation);
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacAuthorizer.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacAuthorizer.java
+new file mode 100644
+index 0000000..6be8038
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacAuthorizer.java
+@@ -0,0 +1,18 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.concurrent.CompletionStage;
++
++/** Public overlay contract. Policy and role interpretation belong to the consumer jar. */
++public interface RbacAuthorizer {
++    enum Action { READ, LIST, CREATE, UPDATE, DELETE, EXECUTE, ACCESS_OUTPUTS }
++    enum Kind { FLOW, EXECUTION, TRIGGER, NAMESPACE, KVSTORE, SECRET, NAMESPACE_FILE,
++        LOG, METRIC, DASHBOARD, BLUEPRINT, MCP_SERVER, AI, SYSTEM }
++    enum Scope { INSTANCE, TENANT, NAMESPACE }
++    record Principal(String subject, List<String> roles, String clientId, String audience, List<String> scopes) {
++        public Principal { roles = List.copyOf(roles); scopes = List.copyOf(scopes); }
++    }
++    record Resource(Kind kind, Scope scope, String tenant, String namespace, String id) {}
++    record Requirement(Resource resource, Action action) {}
++    CompletionStage<Boolean> authorize(Principal principal, Resource resource, Action action);
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacConfiguration.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacConfiguration.java
+new file mode 100644
+index 0000000..753d032
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacConfiguration.java
+@@ -0,0 +1,14 @@
++package io.kestra.webserver.rbac;
++
++import io.micronaut.context.annotation.Value;
++import jakarta.inject.Singleton;
++
++@Singleton
++public class RbacConfiguration {
++    private final boolean enabled;
++    public RbacConfiguration(@Value("${kestra.rbac.enabled:false}") boolean enabled,
++        @Value("${kestra.mcp.rbac.enabled:false}") boolean legacyEnabled) {
++        this.enabled = enabled;
++    }
++    public boolean enabled() { return enabled; }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacExecutionGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacExecutionGate.java
+new file mode 100644
+index 0000000..7a43e81
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacExecutionGate.java
+@@ -0,0 +1,44 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import java.util.List;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.serializers.JacksonMapper;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.security.authentication.Authentication;
++import jakarta.inject.Singleton;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++/** Authorize the actual runtime declaration before inputs/checks/commands; contains no policy. */
++@Singleton
++public class RbacExecutionGate {
++    private final RbacConfiguration configuration;
++    private final RbacGate gate;
++    private final BeanProvider<McpAuthorizationResolver> resolvers;
++    public RbacExecutionGate(RbacConfiguration configuration, RbacGate gate, BeanProvider<McpAuthorizationResolver> resolvers) {
++        this.configuration=configuration; this.gate=gate; this.resolvers=resolvers;
++    }
++    public Mono<Boolean> authorize(Authentication authentication, String tenant, Flow flow, String executionId, boolean outputs) {
++        if (!configuration.enabled()) return Mono.just(true);
++        return Mono.defer(() -> {
++            if (authentication == null) return Mono.just(false);
++            var principal=new RbacAuthorizer.Principal(authentication.getName(),List.copyOf(authentication.getRoles()),null,null,List.of());
++            var resource=new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW,RbacAuthorizer.Scope.NAMESPACE,tenant,flow.getNamespace(),flow.getId());
++            var execution=new RbacAuthorizer.Resource(RbacAuthorizer.Kind.EXECUTION,RbacAuthorizer.Scope.NAMESPACE,tenant,flow.getNamespace(),executionId);
++            return gate.authorize(principal,resource,RbacAuthorizer.Action.READ)
++                .flatMap(allowed -> allowed ? gate.authorize(principal,resource,RbacAuthorizer.Action.EXECUTE) : Mono.just(false))
++                .flatMap(allowed -> allowed ? gate.authorize(principal,execution,RbacAuthorizer.Action.CREATE) : Mono.just(false))
++                .flatMap(allowed -> allowed && outputs ? gate.authorize(principal,execution,RbacAuthorizer.Action.ACCESS_OUTPUTS) : Mono.just(allowed))
++                .flatMap(allowed -> allowed ? dependencies(principal,tenant,flow,executionId) : Mono.just(false));
++        }).timeout(Duration.ofSeconds(10)).defaultIfEmpty(false).onErrorReturn(false);
++    }
++    public Mono<Boolean> dependencies(RbacAuthorizer.Principal principal,String tenant,Flow flow,String executionId) {
++        return Mono.defer(() -> {
++            if (!resolvers.isUnique()) return Mono.just(false);
++            return Mono.fromCallable(() -> new McpAuthorizationResolver.Invocation(tenant,flow.getNamespace(),flow.getId(),executionId,JacksonMapper.ofYaml().writeValueAsString(flow)))
++                .flatMap(invocation -> Mono.fromCompletionStage(resolvers.get().resolve(principal,invocation)))
++                .flatMap(requirements -> Flux.fromIterable(requirements).concatMap(requirement -> gate.authorize(principal,requirement.resource(),requirement.action())).all(Boolean.TRUE::equals));
++        }).timeout(Duration.ofSeconds(10)).defaultIfEmpty(false).onErrorReturn(false);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
+new file mode 100644
+index 0000000..78087d1
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
+@@ -0,0 +1,42 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import io.micronaut.context.BeanProvider;
++import jakarta.inject.Singleton;
++import reactor.core.publisher.Mono;
++
++@Singleton
++public class RbacGate {
++    private final BeanProvider<RbacAuthorizer> authorizers;
++    public RbacGate(BeanProvider<RbacAuthorizer> authorizers) { this.authorizers = authorizers; }
++    public Mono<Boolean> authorize(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
++        RbacAuthorizer.Action action) {
++        return authorize(principal, resource, action, false);
++    }
++    public Mono<Boolean> authorize(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
++        RbacAuthorizer.Action action, boolean completeQuery) {
++        return Mono.defer(() -> {
++            if (principal == null || principal.subject() == null || principal.subject().isBlank()
++                || action == null || !(valid(resource) || queryDomain(resource, action, completeQuery)) || !authorizers.isUnique()) return Mono.just(false);
++            return Mono.fromCompletionStage(authorizers.get().authorize(principal, resource, action));
++        }).timeout(Duration.ofSeconds(5)).defaultIfEmpty(false).onErrorReturn(false);
++    }
++    private static boolean queryDomain(RbacAuthorizer.Resource resource, RbacAuthorizer.Action action, boolean completeQuery) {
++        return completeQuery && resource != null && resource.kind() != null && resource.scope() == RbacAuthorizer.Scope.TENANT
++            && resource.tenant() != null && !resource.tenant().isBlank() && resource.namespace() == null && resource.id() == null
++            && (action == RbacAuthorizer.Action.LIST || action == RbacAuthorizer.Action.READ);
++    }
++    static boolean valid(RbacAuthorizer.Resource resource) {
++        if (resource == null || resource.kind() == null || resource.scope() == null) return false;
++        if (resource.scope() == RbacAuthorizer.Scope.INSTANCE) return resource.kind() == RbacAuthorizer.Kind.SYSTEM
++            && resource.tenant() == null && resource.namespace() == null && resource.id() == null;
++        if (resource.scope() == RbacAuthorizer.Scope.TENANT) return resource.tenant() != null && !resource.tenant().isBlank()
++            && resource.namespace() == null && tenantKind(resource.kind());
++        return resource.scope() == RbacAuthorizer.Scope.NAMESPACE && resource.tenant() != null && !resource.tenant().isBlank()
++            && resource.namespace() != null && !resource.namespace().isBlank();
++    }
++    private static boolean tenantKind(RbacAuthorizer.Kind kind) {
++        return kind == RbacAuthorizer.Kind.SYSTEM || kind == RbacAuthorizer.Kind.MCP_SERVER
++            || kind == RbacAuthorizer.Kind.AI || kind == RbacAuthorizer.Kind.DASHBOARD || kind == RbacAuthorizer.Kind.BLUEPRINT;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestAuthorizationResolver.java
+new file mode 100644
+index 0000000..70965f8
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestAuthorizationResolver.java
+@@ -0,0 +1,22 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletionStage;
++
++/** Resolve all actual operations before invocation. Unknown/unsafe routes return no plan (deny).
++ * A collection plan must cover its complete query domain; a batch covers every side effect.
++ * No response post-filtering or permission model is implemented by the overlay.
++ */
++public interface RestAuthorizationResolver {
++    enum Coverage { SINGLE, COMPLETE_QUERY, COMPLETE_BATCH }
++    record Request(String method, String path, Map<String, List<String>> query, String contentType,
++        byte[] body, String controller, String handler, List<String> parameterTypes) {
++        public Request { query = query.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, e -> List.copyOf(e.getValue()))); body = body.clone(); parameterTypes = List.copyOf(parameterTypes); }
++        @Override public byte[] body() { return body.clone(); }
++    }
++    record Plan(List<RbacAuthorizer.Requirement> requirements, Coverage coverage) {
++        public Plan { requirements = List.copyOf(requirements); }
++    }
++    CompletionStage<Plan> resolve(RbacAuthorizer.Principal principal, Request request);
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+new file mode 100644
+index 0000000..e4fc901
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+@@ -0,0 +1,100 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.*;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.filter.*;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.RouteAttributes;
++import io.kestra.webserver.errors.ProblemFactory;
++import jakarta.inject.Singleton;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++/** Independent gate: an earlier SecurityRule ALLOWED cannot bypass this filter. */
++@Singleton
++@Filter("/**")
++public class RestRbacFilter implements HttpServerFilter {
++    private final RbacConfiguration configuration;
++    private final BeanProvider<RestAuthorizationResolver> resolvers;
++    private final RbacGate gate;
++    private final ProblemFactory problems;
++    public RestRbacFilter(RbacConfiguration configuration, BeanProvider<RestAuthorizationResolver> resolvers,
++        RbacGate gate, ProblemFactory problems) {
++        this.configuration = configuration; this.resolvers = resolvers; this.gate = gate; this.problems = problems;
++    }
++    @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
++    @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++        if (!configuration.enabled() || protocol(request)) return chain.proceed(request);
++        Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
++        return Mono.defer(() -> {
++            if (!resolvers.isUnique()) return Mono.just(false);
++            var route = RouteAttributes.getRouteMatch(request).orElse(null);
++            if (!(route instanceof io.micronaut.web.router.MethodBasedRouteMatch<?, ?> methodRoute)) return Mono.just(false);
++            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()),
++                string(authentication, "client_id"), string(authentication, "aud"), List.of());
++            Map<String, List<String>> query = new LinkedHashMap<>();
++            request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
++            String controller = methodRoute.getDeclaringType().getName();
++            String handler = methodRoute.getMethodName();
++            return body(request).flatMap(bytes -> Mono.fromCompletionStage(resolvers.get().resolve(principal,
++                new RestAuthorizationResolver.Request(request.getMethodName(), request.getPath(), query,
++                    request.getContentType().map(Object::toString).orElse(null), bytes, controller, handler, java.util.Arrays.stream(methodRoute.getArgumentTypes()).map(Class::getName).toList()))))
++                .flatMap(plan -> {
++                    if (plan.coverage() == null || plan.requirements().isEmpty()) return Mono.just(false);
++                    return Flux.fromIterable(plan.requirements()).concatMap(requirement -> gate.authorize(principal,
++                        requirement.resource(), requirement.action(), plan.coverage() == RestAuthorizationResolver.Coverage.COMPLETE_QUERY)).all(Boolean.TRUE::equals);
++                });
++        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).timeout(Duration.ofSeconds(10)).defaultIfEmpty(false).onErrorReturn(false)
++            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
++    }
++    private Mono<byte[]> body(HttpRequest<?> request) {
++        if (!(request instanceof ServerHttpRequest<?> server)) {
++            return Mono.just(request.getBody(byte[].class).orElse(new byte[0]));
++        }
++        return Mono.using(() -> server.byteBody().split(io.micronaut.http.body.ByteBody.SplitBackpressureMode.NEW), split -> Mono.fromCompletionStage(split.buffer())
++            .map(available -> { try (available) { return available.toByteArray(); } }), split -> split.close());
++    }
++    private static String string(Authentication authentication, String name) {
++        Object value = authentication.getAttributes().get(name); return value instanceof String s ? s : null;
++    }
++    private MutableHttpResponse<?> error(HttpRequest<?> request, HttpStatus status) {
++        return HttpResponse.status(status).contentType(MediaType.APPLICATION_JSON_PROBLEM_TYPE)
++            .body(problems.detailForStatus(request, null, status.getCode(), null, List.of()));
++    }
++    private static boolean protocol(HttpRequest<?> request) {
++        String path = request.getPath();
++        if (path.contains("%") || path.contains("..") || path.contains("//")) return false;
++        var route = RouteAttributes.getRouteMatch(request).orElse(null);
++        if (!(route instanceof io.micronaut.web.router.MethodBasedRouteMatch<?, ?> method)) return false;
++        if (io.micronaut.security.oauth2.routes.OauthController.class.isAssignableFrom(method.getDeclaringType())) {
++            return path.matches("/oauth/(login|callback)/[^/]+")
++                && (method.getMethodName().equals("login") || method.getMethodName().equals("callback"));
++        }
++        if (io.micronaut.security.oauth2.routes.EndSessionController.class.isAssignableFrom(method.getDeclaringType())) {
++            return path.equals("/oauth/logout") && method.getMethodName().equals("endSession");
++        }
++        String controller = method.getDeclaringType().getName();
++        if (controller.equals("io.kestra.webserver.controllers.RootController")) return path.equals("/ping");
++        if (controller.equals("io.kestra.webserver.controllers.api.MiscController")) return path.equals("/api/v1/configs/login");
++        if (controller.equals("io.kestra.webserver.controllers.api.UiController")) return path.equals("/ui") || path.startsWith("/ui/");
++        if (controller.equals("io.kestra.webserver.mcp.McpResourceMetadataController")) return path.startsWith("/.well-known/oauth-protected-resource");
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcDiscoveryController")) return path.equals("/.well-known/openid-configuration");
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcLoginController")) return path.equals("/oidc/login") || path.equals("/oidc/logout");
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcProviderController")) return java.util.Set.of(
++            "/oidc/jwks", "/oidc/authorize", "/oidc/token", "/oidc/consent", "/oidc/userinfo", "/oidc/introspect", "/oidc/revoke").contains(path);
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcOwnedClientController")) return path.equals("/oidc/clients")
++            || path.matches("/oidc/clients/[^/]+(/revoke)?");
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcRegistrationController")) return path.equals("/oidc/register");
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcSetupController")) return path.equals("/oidc/setup");
++        if (controller.equals("io.kestra.webserver.controllers.api.McpToolController")) return path.matches("/api/v1/[^/]+/mcp/[^/]+");
++        return false;
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java
+new file mode 100644
+index 0000000..fbe4079
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java
+@@ -0,0 +1,122 @@
++package io.kestra.webserver.rbac;
++
++import java.util.*;
++import java.util.concurrent.CompletableFuture;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.*;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.MethodBasedRouteMatch;
++import io.micronaut.web.router.RouteAttributes;
++import io.kestra.webserver.errors.ProblemFactory;
++import io.kestra.mcp.McpSessionFactory;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class RbacActivationTest {
++    final RbacAuthorizer.Principal alice = new RbacAuthorizer.Principal("alice", List.of("reader"), "ui", "api", List.of());
++    final RbacAuthorizer.Resource flow = new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW, RbacAuthorizer.Scope.NAMESPACE, "main", "private.ns", "flow");
++    @SuppressWarnings("unchecked") <T> BeanProvider<T> provider(T bean) {
++        BeanProvider<T> provider = mock(BeanProvider.class);
++        when(provider.isUnique()).thenReturn(bean != null); when(provider.get()).thenReturn(bean); return provider;
++    }
++    @Test void missingAmbiguousNullAndExceptionalDecisionsDeny() {
++        var missing = new RbacGate(provider(null)); assertFalse(missing.authorize(alice, flow, RbacAuthorizer.Action.READ).block());
++        var auth = mock(RbacAuthorizer.class); var provider = provider(auth); var gate = new RbacGate(provider);
++        when(auth.authorize(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
++        assertFalse(gate.authorize(alice, flow, RbacAuthorizer.Action.READ).block());
++        when(auth.authorize(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(new IllegalStateException()));
++        assertFalse(gate.authorize(alice, flow, RbacAuthorizer.Action.READ).block());
++        when(auth.authorize(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(true));
++        assertTrue(gate.authorize(alice, flow, RbacAuthorizer.Action.READ).block());
++        var queryDomain=new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW,RbacAuthorizer.Scope.TENANT,"main",null,null);
++        assertFalse(gate.authorize(alice,queryDomain,RbacAuthorizer.Action.LIST).block());
++        assertTrue(gate.authorize(alice,queryDomain,RbacAuthorizer.Action.LIST,true).block());
++        assertFalse(gate.authorize(alice,queryDomain,RbacAuthorizer.Action.DELETE,true).block());
++        assertFalse(gate.authorize(alice, new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW, RbacAuthorizer.Scope.NAMESPACE,"main",null,"flow"),RbacAuthorizer.Action.READ).block());
++        when(provider.isUnique()).thenReturn(false); assertFalse(gate.authorize(alice,flow,RbacAuthorizer.Action.READ).block());
++    }
++    @SuppressWarnings({"rawtypes", "unchecked"}) HttpRequest<?> request(String path, boolean authenticated) {
++        var request = HttpRequest.POST(path, "namespace: private.ns\nid: flow");
++        if (authenticated) request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("alice", List.of("reader"), Map.of("client_id", "ui")));
++        MethodBasedRouteMatch route = mock(MethodBasedRouteMatch.class);
++        when(route.getDeclaringType()).thenReturn(RbacActivationTest.class); when(route.getMethodName()).thenReturn("createFlow");
++        when(route.getArgumentTypes()).thenReturn(new Class[]{String.class}); RouteAttributes.setRouteMatch(request, route);
++        return request;
++    }
++    @Test void unauthenticatedIs401MissingComponentIs403AndDisabledPasses() {
++        var chain = mock(ServerFilterChain.class); when(chain.proceed(any())).thenReturn(Mono.just(HttpResponse.ok()));
++        var filter = new RestRbacFilter(new RbacConfiguration(true,false),provider(null),new RbacGate(provider(null)),mock(ProblemFactory.class));
++        assertEquals(HttpStatus.UNAUTHORIZED,Mono.from(filter.doFilter(request("/api/v1/main/flows",false),chain)).block().getStatus());
++        var response=Mono.from(filter.doFilter(request("/api/v1/main/flows",true),chain)).block();
++        assertEquals(HttpStatus.FORBIDDEN,response.getStatus());assertEquals(MediaType.APPLICATION_JSON_PROBLEM_TYPE,response.getContentType().orElseThrow());verifyNoInteractions(chain);
++        var disabled = new RestRbacFilter(new RbacConfiguration(false,false),provider(null),new RbacGate(provider(null)),mock(ProblemFactory.class));
++        assertEquals(HttpStatus.OK,Mono.from(disabled.doFilter(request("/api/v1/main/flows",false),chain)).block().getStatus());
++        assertFalse(new RbacConfiguration(false,true).enabled());
++    }
++    @Test void allBatchRequirementsAreCheckedBeforeInvocationAndUnknownPlanDenies() {
++        var auth=mock(RbacAuthorizer.class);when(auth.authorize(any(),any(),any())).thenAnswer(invocation -> CompletableFuture.completedFuture(invocation.getArgument(2) != RbacAuthorizer.Action.DELETE));
++        var resolver=mock(RestAuthorizationResolver.class);
++        when(resolver.resolve(any(),any())).thenReturn(CompletableFuture.completedFuture(new RestAuthorizationResolver.Plan(List.of(
++            new RbacAuthorizer.Requirement(flow,RbacAuthorizer.Action.UPDATE),new RbacAuthorizer.Requirement(flow,RbacAuthorizer.Action.DELETE)),RestAuthorizationResolver.Coverage.COMPLETE_BATCH)));
++        var chain=mock(ServerFilterChain.class);when(chain.proceed(any())).thenReturn(Mono.just(HttpResponse.ok()));
++        var filter=new RestRbacFilter(new RbacConfiguration(true,false),provider(resolver),new RbacGate(provider(auth)),mock(ProblemFactory.class));
++        assertEquals(HttpStatus.FORBIDDEN,Mono.from(filter.doFilter(request("/api/v1/main/flows/bulk",true),chain)).block().getStatus());verifyNoInteractions(chain);
++        when(resolver.resolve(any(),any())).thenReturn(CompletableFuture.completedFuture(null));
++        assertEquals(HttpStatus.FORBIDDEN,Mono.from(filter.doFilter(request("/api/v1/main/unknown",true),chain)).block().getStatus());
++        when(resolver.resolve(any(),any())).thenReturn(CompletableFuture.completedFuture(new RestAuthorizationResolver.Plan(List.of(new RbacAuthorizer.Requirement(flow,RbacAuthorizer.Action.CREATE)),RestAuthorizationResolver.Coverage.SINGLE)));
++        assertEquals(HttpStatus.OK,Mono.from(filter.doFilter(request("/api/v1/main/flows",true),chain)).block().getStatus());
++        verify(resolver,atLeastOnce()).resolve(argThat(p -> p.subject().equals("alice") && p.roles().equals(List.of("reader"))),argThat(r -> new String(r.body()).contains("private.ns") && r.parameterTypes().equals(List.of("java.lang.String"))));
++    }
++    @Test void mcpUsesSameRolesAndUnifiedAuthorizerForRealSubOperations() {
++        var auth=mock(RbacAuthorizer.class);when(auth.authorize(any(),any(),any())).thenReturn(CompletableFuture.completedFuture(true));
++        var gate=new McpCapabilityGate(true,true,false,provider(null),new RbacConfiguration(true,false),new RbacGate(provider(auth)));
++        var context=new McpSessionFactory().build("main","default","session","alice","ui","api",List.of(McpCapabilityGate.FLOW_READ,McpCapabilityGate.EXECUTION_WRITE),List.of("reader"));
++        assertTrue(gate.execute(context,"main","private.ns","flow").block());assertTrue(gate.outputs(context,"main","private.ns","execution").block());
++        verify(auth).authorize(argThat(p -> p.subject().equals("alice") && p.roles().equals(List.of("reader"))),eq(flow),eq(RbacAuthorizer.Action.EXECUTE));
++        verify(auth).authorize(any(),argThat(r -> r.kind()==RbacAuthorizer.Kind.EXECUTION && r.namespace().equals("private.ns") && r.id().equals("execution")),eq(RbacAuthorizer.Action.ACCESS_OUTPUTS));
++        when(auth.authorize(any(),any(),eq(RbacAuthorizer.Action.ACCESS_OUTPUTS))).thenReturn(CompletableFuture.completedFuture(false));assertFalse(gate.outputs(context,"main","private.ns","execution").block());
++        var missingScope=new McpSessionFactory().build("main","default","session","alice","ui","api",List.of(McpCapabilityGate.FLOW_READ),List.of("reader"));assertFalse(gate.execute(missingScope,"main","private.ns","flow").block());
++    }
++    @Test void unresolvedInputOutputDependenciesDenyAndLegacyRemainsUnchanged() {
++        var flow=io.kestra.core.models.flows.Flow.builder().namespace("ns").id("flow").tasks(List.of())
++            .inputs(List.of(io.kestra.core.models.flows.input.StringInput.builder().id("secret").type(io.kestra.core.models.flows.Type.STRING).build())).build();
++        var unified=new McpCapabilityGate(true,true,false,provider(null),new RbacConfiguration(true,false),new RbacGate(provider(null)));
++        var context=new McpSessionFactory().build("main","default","session","alice","ui","api",List.of(McpCapabilityGate.FLOW_READ,McpCapabilityGate.EXECUTION_WRITE),List.of("reader"));
++        assertFalse(unified.preflight(context,"main","exec",flow).block()); assertTrue(new McpCapabilityGate(true,true,false,null).preflight(context,"main","exec",flow).block());
++        var resolver=mock(McpAuthorizationResolver.class);
++        when(resolver.resolve(any(),any())).thenAnswer(invocation -> {
++            var declaration=(McpAuthorizationResolver.Invocation)invocation.getArgument(1);
++            assertTrue(declaration.flowSource().contains("inputs:"));assertEquals("main",declaration.tenant());
++            return CompletableFuture.completedFuture(List.of());
++        });
++        try {
++            var field=McpCapabilityGate.class.getDeclaredField("mcpResolvers");field.setAccessible(true);field.set(unified,provider(resolver));
++        } catch (ReflectiveOperationException exception) { throw new AssertionError(exception); }
++        assertTrue(unified.preflight(context,"main","exec",flow).block());
++        doReturn(CompletableFuture.completedFuture(null)).when(resolver).resolve(any(),any());
++        assertFalse(unified.preflight(context,"main","exec",flow).block());
++    }
++    @SuppressWarnings({"rawtypes", "unchecked"})
++    @Test void exactOauthLoginAndCallbackAreProtocolButUnknownPathsAreNot() {
++        var filter=new RestRbacFilter(new RbacConfiguration(true,false),provider(null),new RbacGate(provider(null)),mock(ProblemFactory.class));
++        var chain=mock(ServerFilterChain.class);when(chain.proceed(any())).thenReturn(Mono.just(HttpResponse.ok()));
++        for (String action:List.of("login","callback")) {
++            var request=HttpRequest.GET("/oauth/"+action+"/kestra");
++            MethodBasedRouteMatch route=mock(MethodBasedRouteMatch.class);when(route.getDeclaringType()).thenReturn(io.micronaut.security.oauth2.routes.DefaultOauthController.class);
++            when(route.getMethodName()).thenReturn(action);RouteAttributes.setRouteMatch(request,route);
++            assertEquals(HttpStatus.OK,Mono.from(filter.doFilter(request,chain)).block().getStatus());
++        }
++        assertEquals(HttpStatus.UNAUTHORIZED,Mono.from(filter.doFilter(HttpRequest.GET("/oauth/business"),chain)).block().getStatus());
++        assertEquals(HttpStatus.UNAUTHORIZED,Mono.from(filter.doFilter(HttpRequest.GET("/api/v1/main/executions/webhook/private/flow/key"),chain)).block().getStatus());
++    }
++    @Test void requestAndPrincipalCollectionsAreImmutableCopies() {
++        var values=new ArrayList<>(List.of("private.ns"));var bytes=new byte[]{1};
++        var request=new RestAuthorizationResolver.Request("GET","/flows",Map.of("namespace",values),null,bytes,"C","m",List.of());
++        values.add("other.ns");bytes[0]=2;assertEquals(List.of("private.ns"),request.query().get("namespace"));assertEquals(1,request.body()[0]);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacExecutionActivationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacExecutionActivationTest.java
+new file mode 100644
+index 0000000..59525e3
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacExecutionActivationTest.java
+@@ -0,0 +1,42 @@
++package io.kestra.webserver.rbac;
++
++import java.util.*;
++import io.kestra.webserver.controllers.api.ExecutionController;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.runners.FlowInputOutput;
++import io.kestra.core.runners.FlowMetaStoreInterface;
++import io.kestra.core.services.FlowService;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class RbacExecutionActivationTest {
++    void set(Object target,String name,Object value) throws Exception {
++        var field=ExecutionController.class.getDeclaredField(name);field.setAccessible(true);field.set(target,value);
++    }
++    @Test void productionCreateExecutionCapturesIdentityBeforeSubscriptionAndDeniesBeforeInputsOrQueue() throws Exception {
++        var controller=new ExecutionController();var flowService=mock(FlowService.class);var inputs=mock(FlowInputOutput.class);
++        var queue=mock(DispatchQueueInterface.class);var meta=mock(FlowMetaStoreInterface.class);var tenant=mock(TenantService.class);
++        var gate=mock(RbacExecutionGate.class);var flow=Flow.builder().namespace("private.ns").id("flow").tasks(List.of()).build();
++        when(tenant.resolveTenant()).thenReturn("main");when(flowService.getFlowIfExecutableOrThrow(any(),any(),any(),any())).thenReturn(flow);
++        when(meta.findByIdForRuntime(any(),any(),any(),any())).thenReturn(Optional.empty());
++        when(gate.authorize(any(),any(),any(),any(),anyBoolean())).thenReturn(Mono.just(false));
++        set(controller,"modelValidator",mock(io.kestra.core.models.validations.ModelValidator.class));set(controller,"flowService",flowService);set(controller,"flowInputOutput",inputs);set(controller,"executionCommandQueue",queue);
++        set(controller,"flowMetaStore",meta);set(controller,"tenantService",tenant);set(controller,"rbacExecutionGate",gate);
++        var request=HttpRequest.POST("/api/v1/main/executions/private.ns/flow","");
++        var identity=Authentication.build("alice",List.of("reader"));request.setAttribute(SecurityFilter.AUTHENTICATION,identity);
++        java.util.function.Supplier<org.reactivestreams.Publisher<?>> invocation=() -> controller.createExecution("private.ns","flow",null,null,true,Optional.empty(),Optional.empty(),Optional.empty(),Optional.empty());
++        var publisher=ServerRequestContext.with(request,invocation);
++        var exception=assertThrows(HttpStatusException.class,() -> Mono.from(publisher).block());assertEquals(HttpStatus.FORBIDDEN,exception.getStatus());
++        verify(gate).authorize(eq(identity),eq("main"),argThat(actual -> actual.getNamespace().equals("private.ns") && actual.getId().equals("flow")),anyString(),eq(true));verifyNoInteractions(inputs,queue);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
+new file mode 100644
+index 0000000..a283c12
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
+@@ -0,0 +1,86 @@
++package io.kestra.webserver.rbac;
++
++import java.util.*;
++import java.util.concurrent.CompletableFuture;
++import java.net.http.HttpClient;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.annotation.*;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.rbac.enabled",value="true")
++@Property(name="micronaut.security.enabled",value="true")
++@Property(name="micronaut.security.filter.enabled",value="true")
++@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
++@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
++@Property(name="rbac.http.probe",value="true")
++class RbacHttpProbeTest {
++    @Inject EmbeddedServer server;
++    @Test void realNettyGatePreservesBodyAndClosesUnknownAndAnonymousWebhook() throws Exception {
++        var client=HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
++        var response=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/rbac-probe"))
++            .header("X-Probe-Identity","alice").header("Content-Type","text/plain")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofString("namespace: private.ns")).build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertEquals(200,response.statusCode(),response.body());assertEquals("namespace: private.ns",response.body());
++        for (String path:List.of("/api/v1/main/unknown","/api/v1/main/executions/webhook/private/flow/key")) {
++            var anonymous=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve(path)).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++            assertEquals(401,anonymous.statusCode(),anonymous.body());
++            var unknown=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve(path)).header("X-Probe-Identity","alice").GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++            assertEquals(403,unknown.statusCode(),unknown.body());assertTrue(unknown.headers().firstValue("content-type").orElse("").contains("application/problem+json"));
++        }
++    }
++    @Test void forbiddenExecutionExceptionUsesActualProblemPipeline() throws Exception {
++        var response=HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/rbac-probe/denied"))
++            .header("X-Probe-Identity","alice").header("Content-Type","text/plain")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofString("namespace: private.ns")).build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertEquals(403,response.statusCode(),response.body());assertTrue(response.headers().firstValue("content-type").orElse("").contains("application/problem+json"));
++        assertTrue(response.body().contains("403"));
++    }
++    @Test void chunkedBodyIsIdenticalForResolverAndController() throws Exception {
++        String payload="namespace: private.ns\n"+"x".repeat(262144);
++        var client=HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
++        var response=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/rbac-probe/chunked"))
++            .header("X-Probe-Identity","alice").header("Content-Type","text/plain")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8))))
++            .build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertEquals(200,response.statusCode(),response.body());assertEquals(payload,response.body());
++    }
++    @Controller("/rbac-probe") @Requires(property="rbac.http.probe",value="true")
++    static class ProbeController {
++        @Post("/denied") @Consumes("text/plain") String denied(@Body String body) { throw new io.micronaut.http.exceptions.HttpStatusException(io.micronaut.http.HttpStatus.FORBIDDEN,"Execution authorization denied"); }
++        @Post("/chunked") @Consumes("text/plain") @Produces("text/plain") String chunked(@Body String body) { return body; }
++        @Post(consumes="text/plain",produces="text/plain") String echo(@Body String body) { return body; }
++    }
++    @Singleton @Requires(property="rbac.http.probe",value="true")
++    static class ProbeAuthentication implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            return "alice".equals(request.getHeaders().get("X-Probe-Identity"))
++                ? Mono.just(Authentication.build("alice",List.of("reader"))) : Mono.empty();
++        }
++    }
++    @Singleton @Requires(property="rbac.http.probe",value="true")
++    static class ProbeResolver implements RestAuthorizationResolver {
++        public java.util.concurrent.CompletionStage<Plan> resolve(RbacAuthorizer.Principal principal, Request request) {
++            String expected=request.path().equals("/rbac-probe/chunked") ? "namespace: private.ns\n"+"x".repeat(262144) : "namespace: private.ns";
++            if (!request.path().startsWith("/rbac-probe") || !new String(request.body(),java.nio.charset.StandardCharsets.UTF_8).equals(expected)) return CompletableFuture.completedFuture(null);
++            return CompletableFuture.completedFuture(new Plan(List.of(new RbacAuthorizer.Requirement(
++                new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW,RbacAuthorizer.Scope.NAMESPACE,"main","private.ns","probe"),RbacAuthorizer.Action.CREATE)),Coverage.SINGLE));
++        }
++    }
++    @Singleton @Requires(property="rbac.http.probe",value="true")
++    static class ProbeAuthorizer implements RbacAuthorizer {
++        public java.util.concurrent.CompletionStage<Boolean> authorize(Principal principal,Resource resource,Action action) {
++            return CompletableFuture.completedFuture(principal.subject().equals("alice") && principal.roles().equals(List.of("reader")));
++        }
++    }
++}

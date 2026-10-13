@@ -15,4 +15,4 @@
 #                承载依赖 R-CLASSPATH-MERGE：本仓构建期仅注入 manifest 条目元数据，
 #                jar 本体部署侧挂载 /app/libs；未落地前报 PENDING（占位先行）
 #   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）——不入表（见登记规则）
-kestra-rbac-authorizer	classpath	授权线休眠占位：真实jar/角色模型/REST适配未交付。0170仅本仓MCP-only typed Authorizer SPI与失败关闭gate；不等同统一REST/MCP隔离。约定文件名=kestra-rbac-authorizer.jar，承载仍依赖R-CLASSPATH-MERGE。交付方未指名（r-ee-rbac §7）
+kestra-rbac-authorizer	classpath	消费仓ai-specs/kestra-plugin-rbac；部署侧挂载/app/libs/kestra-rbac-authorizer.jar，构建期仅注入manifest Class-Path元数据。统一REST/MCP授权实施与验收中，尚未宣称完整资源隔离。

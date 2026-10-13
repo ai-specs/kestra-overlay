@@ -18,6 +18,8 @@ jobs:
         run: ./scripts/check-patches.sh
       - name: Patch provenance checker regression fixtures
         run: ./scripts/check-patches-fixture.sh
+      - name: Executable manifest Class-Path harness regression tests
+        run: python3 -m unittest discover -s scripts/tests -v
       - name: Verify thin patches apply cleanly on pinned BASE (no compile)
         run: ./scripts/build.sh --apply-only
   build-push:
@@ -61,6 +63,10 @@ jobs:
         env:
           WORK: ${{ github.workspace }}/.work/verify
         run: ./scripts/build.sh
+      - name: Independent classpath authorization SPI bean discovery probe
+        env:
+          CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
+        run: bash ./scripts/blackbox-classpath.sh "${{ github.workspace }}/.work/verify" "${{ github.workspace }}/.work/verify/docker/app/kestra" "$CANDIDATE_IMAGE"
       - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
         env:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}

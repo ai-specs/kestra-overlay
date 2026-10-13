@@ -1,7 +1,7 @@
 # 需求: REQ-0160 MCP resource/audience/Bearer 与可信身份传播
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
-# 来源: 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 来源: 可信roles从已验证claims贯穿Authentication/context/factory； 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 25 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 diff --git a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
@@ -18,10 +18,10 @@ index 9903d69..d936d67 100644
      }
  
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
-index e93c3ee..fb03331 100644
+index e93c3ee..a044504 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
 +++ b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
-@@ -11,11 +11,14 @@ import lombok.EqualsAndHashCode;
+@@ -11,11 +11,15 @@ import lombok.EqualsAndHashCode;
   */
  @Data
  @Builder
@@ -34,24 +34,26 @@ index e93c3ee..fb03331 100644
 +    private final String clientId;
 +    private final String resource;
 +    private final java.util.List<String> scopes;
++    private final java.util.List<String> roles;
      private String sessionId;
  
      @Override
-@@ -25,6 +28,9 @@ public class KestraMcpTransportContext implements McpTransportContext {
+@@ -25,6 +29,10 @@ public class KestraMcpTransportContext implements McpTransportContext {
              case "serverId" -> serverId;
              case "sessionId" -> sessionId;
              case "userId" -> userId;
 +            case "clientId" -> clientId;
 +            case "resource" -> resource;
 +            case "scopes" -> scopes;
++            case "roles" -> roles;
              default -> null;
          };
      }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-index 2bef821..e39e618 100644
+index 2bef821..c8d3137 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-@@ -204,12 +204,21 @@ public class McpServerHandlerTransport {
+@@ -204,12 +204,22 @@ public class McpServerHandlerTransport {
      private record HandlerKey(
          String tenantId,
          String serverId,
@@ -60,7 +62,7 @@ index 2bef821..e39e618 100644
 +        String userId,
 +        String clientId,
 +        String resource,
-+        List<String> capabilities) {
++        List<String> capabilities, List<String> roles) {
          public static HandlerKey from(KestraMcpTransportContext kestraMcpTransportContext, AccessScope scope) {
              return new HandlerKey(
                  kestraMcpTransportContext.getTenantId(),
@@ -71,21 +73,26 @@ index 2bef821..e39e618 100644
 +                kestraMcpTransportContext.getClientId(),
 +                kestraMcpTransportContext.getResource(),
 +                kestraMcpTransportContext.getScopes() == null ? List.of()
-+                    : kestraMcpTransportContext.getScopes().stream().distinct().sorted().toList()
++                    : kestraMcpTransportContext.getScopes().stream().distinct().sorted().toList(),
++                kestraMcpTransportContext.getRoles() == null ? List.of() : kestraMcpTransportContext.getRoles().stream().distinct().sorted().toList()
              );
          }
      }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
-index d7e2233..eb87652 100644
+index d7e2233..40e0a1f 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
-@@ -7,12 +7,16 @@ import jakarta.inject.Singleton;
+@@ -7,12 +7,21 @@ import jakarta.inject.Singleton;
  
  @Singleton
  public class McpSessionFactory {
 -    public KestraMcpTransportContext build(String tenantId, String serverId, @Nullable String sessionId, @Nullable String callerId) {
++    public KestraMcpTransportContext build(String tenantId, String serverId, String sessionId, String callerId,
++        String clientId, String resource, java.util.List<String> scopes) {
++        return build(tenantId, serverId, sessionId, callerId, clientId, resource, scopes, java.util.List.of());
++    }
 +    public KestraMcpTransportContext build(String tenantId, String serverId, @Nullable String sessionId, @Nullable String callerId,
-+        @Nullable String clientId, @Nullable String resource, @Nullable java.util.List<String> scopes) {
++        @Nullable String clientId, @Nullable String resource, @Nullable java.util.List<String> scopes, @Nullable java.util.List<String> roles) {
          return KestraMcpTransportContext.builder()
              .tenantId(tenantId)
              .serverId(serverId)
@@ -93,15 +100,16 @@ index d7e2233..eb87652 100644
              .userId(callerId)
 +            .clientId(clientId)
 +            .resource(resource)
++            .roles(roles == null ? java.util.List.of() : java.util.List.copyOf(roles))
 +            .scopes(scopes == null ? java.util.List.of() : java.util.List.copyOf(scopes))
              .build();
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
-index 5195153..ab43f72 100644
+index 5195153..d82b6cd 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
-@@ -81,9 +81,11 @@ public class McpToolController {
+@@ -81,9 +81,12 @@ public class McpToolController {
              return Mono.just(HttpResponse.status(HttpStatus.SERVICE_UNAVAILABLE));
          }
  
@@ -112,7 +120,8 @@ index 5195153..ab43f72 100644
 +        var transportContext = sessionFactory.build(tenantId, id, request.getHeaders().get(HttpHeaders.MCP_SESSION_ID),
 +            (String) identity.getOrDefault("subject", accessControl.callerId(request).orElse(null)),
 +            (String) identity.get("client_id"), (String) identity.get("resource"),
-+            (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()));
++            (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()),
++            (java.util.List<String>) identity.getOrDefault("roles", java.util.List.of()));
  
          return handlerRegistry.getServerHandler(transportContext).handleRequest(request, transportContext);
      }
@@ -145,10 +154,10 @@ index 0000000..bf3be71
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
 new file mode 100644
-index 0000000..1832510
+index 0000000..f93f721
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,59 @@
 +package io.kestra.webserver.mcp;
 +
 +import java.util.Map;
@@ -196,8 +205,9 @@ index 0000000..1832510
 +            if (header == null || !header.startsWith("Bearer ") || header.substring(7).isBlank()) throw new IllegalArgumentException("Invalid authentication");
 +            final var claims = tokens.validateResourceAccessToken(header.substring(7), resource);
 +            final var stored = tokens.findByValue(header.substring(7)).orElseThrow();
-+            request.setAttribute("io.kestra.mcp.identity", Map.of("subject", claims.getSubject(), "client_id", stored.clientId(), "resource", resource, "scopes", stored.scopes()));
-+            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), Map.of("client_id", stored.clientId(), "resource", resource, "scope", stored.scopes())));
++            final var roles = claims.getStringListClaim("roles") == null ? java.util.List.<String>of() : java.util.List.copyOf(claims.getStringListClaim("roles"));
++            request.setAttribute("io.kestra.mcp.identity", Map.of("subject", claims.getSubject(), "client_id", stored.clientId(), "resource", resource, "scopes", stored.scopes(), "roles", roles));
++            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), roles, Map.of("client_id", stored.clientId(), "resource", resource, "scope", stored.scopes())));
 +            return true;
 +        }).subscribeOn(Schedulers.boundedElastic()).onErrorResume(McpResourceUrl.UnknownResourceException.class,
 +            exception -> Mono.empty()).onErrorReturn(false)

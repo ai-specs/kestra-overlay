@@ -13,7 +13,7 @@
 | MCP 客户端连接并执行 flow 工具 | MCP 客户端接入与 flow 工具 |
 | 自己的应用使用内置 IdP | 外部应用使用 OIDC |
 | 增加任务、触发器或 Runner 插件 | 插件与外部授权扩展 |
-| 开发外部细粒度授权组件 | jar 契约；先确认 classpath 承载限制 |
+| 开发外部细粒度授权组件 | 下方 classpath jar 与授权 SPI 契约 |
 
 ## 部署镜像
 
@@ -418,14 +418,42 @@ services:
 
 ### 外部授权扩展
 
-外部细粒度授权扩展预留契约文件名为 `kestra-rbac-authorizer.jar`。当前镜像提供 MCP
-能力级 scope 控制和 Authorizer SPI；具体 flow、namespace 或业务数据的细粒度隔离，
-需要外部 RBAC 扩展实现。该扩展必须同时覆盖 REST 与 MCP 的实际执行路径；仅挂载一个
-未实现对应入口的 jar 不能产生授权效果。
+外部细粒度授权扩展使用契约文件名 `kestra-rbac-authorizer.jar`，部署侧挂载到
+`/app/libs/kestra-rbac-authorizer.jar`，重启后加入应用 classpath 与 Micronaut 上下文。
+镜像构建只声明 classpath 条目，不包含扩展 jar。
+扩展须针对所部署镜像的公开 SPI 构建，并带有 Micronaut 注解处理生成的 bean 索引。
 
-当前 classpath 承载通道仍未交付，因此 `/app/libs` 挂载的授权 jar 不会自动生效。不要
-把 `/app/libs` 当作当前版本的可用扩展入口；需要交付该能力时，应以新的镜像契约和版本
-说明为准。
+```yaml
+services:
+  kestra:
+    volumes:
+      - ./libs:/app/libs:ro
+```
+
+启用统一授权时，在现有 `KESTRA_CONFIGURATION` 中合并：
+
+```yaml
+kestra:
+  rbac:
+    enabled: true
+```
+
+扩展实现 `io.kestra.webserver.rbac` 下的三个接口：
+
+- `RbacAuthorizer`：消费可信主体与资源、动作，返回授权决定。
+- `RestAuthorizationResolver`：在 REST 业务操作前解析完整资源操作计划；查询和批量
+  计划必须覆盖实际查询域或全部副作用。
+- `McpAuthorizationResolver`：在 REST/MCP 执行前解析实际 flow 输入、输出的额外资源读取。
+
+角色、主体绑定、namespace 规则和支持的业务路径由扩展项目定义。统一开关启用时，
+缺组件、组件异常、身份丢失或资源计划无法确定会拒绝请求；REST 拒绝返回
+`403 application/problem+json`。MCP 仍独立要求能力 scope 与资源授权同时允许。
+未设置统一开关时，不启用该扩展授权门。
+
+镜像、扩展 jar 和部署配置分别发布。先取得通过 CI 的镜像与契约，再由扩展项目独立
+构建 jar，最后在部署项目的 Compose 中组合。镜像选择 commit hash 标签或 digest，
+扩展选择声明兼容该契约的固定版本；挂载 jar 不代表所有业务路径均已受支持，
+具体支持范围和权限配置以扩展项目说明为准。
 
 ### 配置与边界
 

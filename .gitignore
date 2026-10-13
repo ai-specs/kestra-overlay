@@ -7,3 +7,7 @@ extensions/
 .work/
 # 一次性会话交接文件：仅用于下一次 AI 会话，读完即删，绝不入库
 HANDOFF-NEXT-SESSION.md
+
+# Python harness cache
+__pycache__/
+*.py[cod]

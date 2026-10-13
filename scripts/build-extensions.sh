@@ -20,8 +20,7 @@
 #                 (deployments volume-mount /app/plugins + restart)
 #   classpath  -> channel ②: jar must be on the application classpath (beans
 #                 join the Micronaut context). Delivery depends on
-#                 R-CLASSPATH-MERGE (docs/extension-mechanisms.md §4): until
-#                 it lands these are reported PENDING and NOT injected — the
+#                 R-CLASSPATH-MERGE (docs/extension-mechanisms.md §4): metadata is injected by build/local-ci; jar bodies are NOT staged — the
 #                 plugins/ slot cannot carry @Controller/@Filter beans (F3).
 #   standalone -> separate process/image built by its own repo CI; not baked
 #                 into the kestra image.
@@ -59,11 +58,10 @@ awk -F'\t' '/^#/ || /^$/ {next} {print $1 "\t" $2}' "$REGISTRY" | while IFS="$(p
       echo "$name|standalone" >> "$MANIFEST_TMP"
       ;;
     classpath)
-      # Channel ② delivery is gated on R-CLASSPATH-MERGE; the plugins/ slot
-      # cannot carry controller/filter beans, so staging there would be a
-      # silent no-op — report PENDING instead (2026-10-07 cleanup).
-      echo "  - $name: PENDING R-CLASSPATH-MERGE (channel-2 jar not deliverable yet; plugins/ slot cannot carry @Controller/@Filter)"
-      echo "$name|classpath-pending" >> "$MANIFEST_TMP"
+      # Channel ② metadata is injected into the staged executable by the caller.
+      # Jar bodies remain deployment-owned; plugins/ cannot carry these beans.
+      echo "  - $name: runtime mount /app/libs/$name.jar (manifest contract injected by build/local-ci; zero jar bytes staged)"
+      echo "$name|classpath-runtime-mount" >> "$MANIFEST_TMP"
       ;;
     plugin)
       src="$(printenv "EXT_JAR_$(echo "$name" | tr 'a-z' 'A-Z' | tr '-' '_')" 2>/dev/null || true)"
