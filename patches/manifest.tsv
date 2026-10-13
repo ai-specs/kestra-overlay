@@ -30,3 +30,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0220	0220-mcp-built-in-oidc-ui.patch	core	kestra-oidc-provider / MCP 管理 UI	MCP编辑页明确内置OIDC保护、隐藏外部provider空下拉、管理页不显示PWA安装横幅	3	手工适配;R-OIDC-SERVER UI例外	上游MCP UI原生表达内置OIDC且管理操作不被PWA横幅遮挡
 0230	0230-rbac-authorization-spi.patch	core	ai-specs/kestra-plugin-rbac	统一typed Authorizer/REST与MCP计划resolver、REST failclosed gate、roles/session/cache隔离、scope独立门与完整预授权	11	新写;R-EE-RBAC+Micronaut 4.10.26/security 4.15.2	上游OSS提供等价统一授权SPI与失败关闭执行门
 0240	0240-exact-namespace-scope.patch	core	ai-specs/kestra-plugin-rbac	Exact与子树union、统一JDBC/log翻译、Namespace候选分页前过滤、MCP匹配与缓存兼容	7	新写;入口B用户生产目标+R-EE-RBAC公开查询契约	上游OSS提供等价Exact scope表达、统一查询翻译与Namespace候选过滤
+0250	0250-rbac-typed-operation-contract.patch	core	ai-specs/kestra-plugin-rbac	Versioned typed RBAC operation/query/aggregate contract	2	新写;R-EE-RBAC typed contract	上游提供等价稳定 typed 授权契约

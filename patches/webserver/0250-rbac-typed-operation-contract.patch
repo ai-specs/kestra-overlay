@@ -1,0 +1,81 @@
+# 需求: REQ-0250 提供版本化 typed RBAC operation 契约，隔离上游路由适配与外部策略
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；R-EE-RBAC typed operation 架构与上游升级稳定性要求
+# 触达上游文件: 4 个（新增公开契约与契约测试）
+# 移除条件: 上游 OSS 提供等价稳定 typed 授权 operation、query scope 和 aggregate 契约
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+@@ -0,0 +1,61 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Objects;
++
++/** Versioned typed authorization contract. Route adapters own OSS-specific parsing. */
++public final class TypedAuthorization {
++    public static final int CONTRACT_VERSION = 1;
++    private TypedAuthorization() {}
++
++    public enum Source { REST, MCP, INTERNAL, DASHBOARD_AGGREGATE }
++    public enum Resource { FLOW, EXECUTION, NAMESPACE, LOG, METRIC, TRIGGER, KVSTORE,
++        NAMESPACE_FILE, METADATA }
++    public enum Action { READ, LIST, CREATE, UPDATE, DELETE, EXECUTE, ACCESS_OUTPUTS }
++    public enum Coverage { SINGLE, COMPLETE_QUERY, COMPLETE_BATCH }
++    public enum Aggregate { NONE, EXECUTION, LOG, TRIGGER, FLOW_DESCRIPTION }
++    public enum SideEffect { READ_ONLY, STORAGE_WRITE, QUEUE_WRITE, EXTERNAL }
++
++    public record QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
++        List<String> excludedNamespaces, boolean complete, boolean paginated) {
++        public QueryDomain {
++            exactNamespaces = clean(exactNamespaces);
++            namespaceSubtrees = clean(namespaceSubtrees);
++            excludedNamespaces = clean(excludedNamespaces);
++            if (!complete && paginated) throw new IllegalArgumentException("Paginated domain must be complete");
++        }
++        public static QueryDomain unrestricted() { return new QueryDomain(List.of(), List.of(), List.of(), true, false); }
++        private static List<String> clean(List<String> values) {
++            return values == null ? List.of() : List.copyOf(values.stream().filter(Objects::nonNull).toList());
++        }
++    }
++
++    public record Operation(int contractVersion, Source source, Resource resource, Action action,
++        String tenant, String namespace, String resourceId, QueryDomain queryDomain,
++        Coverage coverage, Aggregate aggregate, SideEffect sideEffect) {
++        public Operation {
++            if (contractVersion != CONTRACT_VERSION) throw new IllegalArgumentException("Unsupported contract version");
++            if (source == null || resource == null || action == null || coverage == null || aggregate == null || sideEffect == null)
++                throw new IllegalArgumentException("Typed authorization fields are required");
++            if (tenant == null || tenant.isBlank()) throw new IllegalArgumentException("Tenant is required");
++            queryDomain = queryDomain == null ? QueryDomain.unrestricted() : queryDomain;
++            if (coverage == Coverage.COMPLETE_QUERY && !queryDomain.complete()) throw new IllegalArgumentException("Complete query required");
++        }
++    }
++
++    public record Decision(boolean allowed, QueryDomain scope, String reason, int contractVersion) {
++        public Decision {
++            if (contractVersion != CONTRACT_VERSION) throw new IllegalArgumentException("Unsupported contract version");
++            if (scope == null) scope = QueryDomain.unrestricted();
++            reason = reason == null ? "" : reason;
++        }
++        public static Decision deny(String reason) { return new Decision(false, QueryDomain.unrestricted(), reason, CONTRACT_VERSION); }
++        public static Decision allow(QueryDomain scope) { return new Decision(true, scope, "", CONTRACT_VERSION); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
+@@ -0,0 +1,12 @@
++package io.kestra.webserver.rbac;
++
++import java.util.concurrent.CompletionStage;
++import io.kestra.webserver.rbac.TypedAuthorization.Decision;
++import io.kestra.webserver.rbac.TypedAuthorization.Operation;
++
++/** Consumer policy contract. The plugin receives typed operations, never OSS route details. */
++public interface TypedAuthorizationResolver {
++    CompletionStage<Decision> authorize(RbacAuthorizer.Principal principal, Operation operation);
++}
