@@ -179,7 +179,7 @@ new file mode 100644
 index 0000000..13218bd
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,219 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.ArrayList;
@@ -224,7 +224,8 @@ index 0000000..13218bd
 +            || route.path().contains("\\") || List.of(route.path().split("/")).stream().anyMatch(segment -> segment.equals(".") || segment.equals("..")))
 +            return List.of();
 +        String tenant = request.variable("tenant");
-+        if (tenant == null && route.controller().endsWith(".MiscController")) tenant = "main";
++        if (tenant == null && Set.of("io.kestra.webserver.controllers.api.MiscController",
++            "io.kestra.webserver.controllers.api.PluginController").contains(route.controller())) tenant = "main";
 +        if (!"main".equals(tenant)) return List.of();
 +        String namespace = request.variable("namespace");
 +        String id = request.variable("id");
@@ -839,7 +840,7 @@ new file mode 100644
 index 0000000..c972d6e
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,66 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.nio.charset.StandardCharsets;
@@ -895,6 +896,8 @@ index 0000000..c972d6e
 +        assertThat(unknown.coverage()).isEqualTo(Coverage.COMPLETE_BATCH);
 +        assertThat(unknown.sideEffect()).isEqualTo(SideEffect.EXTERNAL);
 +        assertThat(adapter.resolve(request("FlowController", "getFlow", "GET", Map.of("tenant", "other", "namespace", "team", "id", "flow"), "", Map.of()))).isEmpty();
++        assertThat(adapter.resolve(request("PluginController", "getPluginIcons", "GET", Map.of(), "", Map.of())).getFirst().resource())
++            .isEqualTo(Resource.METADATA);
 +    }
 +
 +    private OssRestOperationAdapter.Request request(String controller, String handler, String method,
