@@ -179,7 +179,7 @@ new file mode 100644
 index 0000000..13218bd
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,234 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.ArrayList;
@@ -234,6 +234,11 @@ index 0000000..13218bd
 +            return switch (route.controller()) {
 +                case "io.kestra.webserver.controllers.api.FlowController" -> flow(request, tenant, namespace, id);
 +                case "io.kestra.webserver.controllers.api.ExecutionController" -> execution(request, tenant, namespace, id);
++                case "io.kestra.webserver.controllers.api.OutputController" -> switch (handler) {
++                    case "getExecutionOutputs", "getTaskRunOutputs", "getTaskOutputsInformation" ->
++                        ownedExecution(request, tenant, Resource.EXECUTION, Action.ACCESS_OUTPUTS);
++                    default -> administrative(tenant);
++                };
 +                case "io.kestra.webserver.controllers.api.NamespaceController" -> switch (handler) {
 +                    case "searchNamespaces", "autocompleteNamespaces" -> query(Resource.NAMESPACE, tenant, null);
 +                    case "getNamespace" -> single(Resource.NAMESPACE, Action.READ, tenant, request.variable("id"), null);
@@ -359,7 +364,7 @@ index 0000000..13218bd
 +        String executionId = request.variable("executionId");
 +        var execution = executions.findByIdWithoutAcl(tenant, executionId).orElse(null);
 +        if (execution == null || !tenant.equals(execution.getTenantId())) return List.of();
-+        if (action == Action.ACCESS_OUTPUTS && !executionFile(request, execution)) return List.of();
++        if (action == Action.ACCESS_OUTPUTS && request.route().controller().endsWith(".ExecutionController") && !executionFile(request, execution)) return List.of();
 +        return single(resource, action, tenant, execution.getNamespace(), executionId);
 +    }
 +
@@ -850,7 +855,7 @@ new file mode 100644
 index 0000000..c972d6e
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,81 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.nio.charset.StandardCharsets;
@@ -889,6 +894,11 @@ index 0000000..c972d6e
 +        var operations = adapter.resolve(request("ExecutionController", "getExecution", "GET", Map.of("tenant", "main", "executionId", "execution"), "", Map.of()));
 +        assertThat(operations).hasSize(1);
 +        assertThat(operations.getFirst().namespace()).isEqualTo("team.actual");
++        var outputs = adapter.resolve(request("OutputController", "getTaskOutputsInformation", "GET",
++            Map.of("tenant", "main", "executionId", "execution"), "", Map.of()));
++        assertThat(outputs).hasSize(1);
++        assertThat(outputs.getFirst().namespace()).isEqualTo("team.actual");
++        assertThat(outputs.getFirst().action()).isEqualTo(Action.ACCESS_OUTPUTS);
 +        String prefix = io.kestra.core.storages.StorageContext.forExecution(execution).getExecutionStorageURI().getPath();
 +        assertThat(adapter.resolve(request("ExecutionController", "downloadFileFromExecution", "GET",
 +            Map.of("tenant", "main", "executionId", "execution"), "", Map.of("path", List.of("kestra://" + prefix + "/artifact.txt"))))).hasSize(1);
