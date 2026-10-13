@@ -357,13 +357,13 @@ index 0000000..13218bd
 +        List<String> paths = request.route().query().get("path");
 +        if (paths == null || paths.size() != 1) return false;
 +        String raw = paths.getFirst();
-+        if (raw.contains("%") || raw.contains("\\") || raw.contains("//")) return false;
++        if (raw.contains("%") || raw.contains("\\")) return false;
 +        URI uri = URI.create(raw);
 +        if (!"kestra".equals(uri.getScheme()) || uri.isOpaque() || uri.getRawAuthority() != null
 +            || uri.getRawQuery() != null || uri.getRawFragment() != null || !uri.normalize().equals(uri)) return false;
 +        String prefix = io.kestra.core.storages.StorageContext.forExecution(execution).getExecutionStorageURI().getPath();
 +        prefix = prefix.endsWith("/") ? prefix : prefix + "/";
-+        return uri.getPath() != null && uri.getPath().startsWith(prefix) && uri.getPath().length() > prefix.length();
++        return uri.getPath() != null && !uri.getPath().contains("//") && uri.getPath().startsWith(prefix) && uri.getPath().length() > prefix.length();
 +    }
 +
 +    private List<Operation> metadata(String tenant) {
@@ -840,7 +840,7 @@ new file mode 100644
 index 0000000..c972d6e
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,69 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.nio.charset.StandardCharsets;
@@ -879,6 +879,9 @@ index 0000000..c972d6e
 +        var operations = adapter.resolve(request("ExecutionController", "getExecution", "GET", Map.of("tenant", "main", "executionId", "execution"), "", Map.of()));
 +        assertThat(operations).hasSize(1);
 +        assertThat(operations.getFirst().namespace()).isEqualTo("team.actual");
++        String prefix = io.kestra.core.storages.StorageContext.forExecution(execution).getExecutionStorageURI().getPath();
++        assertThat(adapter.resolve(request("ExecutionController", "downloadFileFromExecution", "GET",
++            Map.of("tenant", "main", "executionId", "execution"), "", Map.of("path", List.of("kestra://" + prefix + "/artifact.txt"))))).hasSize(1);
 +        assertThat(adapter.resolve(request("ExecutionController", "downloadFileFromExecution", "GET",
 +            Map.of("tenant", "main", "executionId", "execution"), "", Map.of("path", List.of("file:/etc/passwd"))))).isEmpty();
 +        assertThat(adapter.resolve(request("ExecutionController", "downloadFileFromExecution", "GET",
