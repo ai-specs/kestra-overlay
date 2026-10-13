@@ -179,7 +179,7 @@ new file mode 100644
 index 0000000..13218bd
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,229 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.ArrayList;
@@ -296,8 +296,18 @@ index 0000000..13218bd
 +        };
 +    }
 +
-+    private List<Operation> execution(Request request, String tenant, String namespace, String id) {
++    private List<Operation> execution(Request request, String tenant, String namespace, String id) throws Exception {
 +        return switch (request.route().handler()) {
++            case "getLatestExecutions" -> {
++                JsonNode filters = yaml.readTree(request.route().body());
++                if (filters == null || !filters.isArray() || filters.isEmpty()) yield List.of();
++                var operations = new ArrayList<Operation>();
++                for (JsonNode filter : filters) {
++                    if (!filter.path("namespace").isTextual() || !filter.path("id").isTextual()) yield List.of();
++                    operations.addAll(query(Resource.EXECUTION, tenant, filter.path("namespace").asText()));
++                }
++                yield operations;
++            }
 +            case "searchExecutions", "findDistinctFieldValues", "listExecutableDistinctNamespaces", "exportExecutions" -> query(Resource.EXECUTION, tenant, null);
 +            case "searchExecutionsByFlowId", "listFlowExecutionsByNamespace", "getExecutionAverageDuration" -> query(Resource.EXECUTION, tenant, namespace);
 +            case "getFlowFromExecution" -> single(Resource.FLOW, Action.READ, tenant, namespace, request.variable("flowId"));
@@ -840,7 +850,7 @@ new file mode 100644
 index 0000000..c972d6e
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,76 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.nio.charset.StandardCharsets;
@@ -901,6 +911,13 @@ index 0000000..c972d6e
 +        assertThat(adapter.resolve(request("FlowController", "getFlow", "GET", Map.of("tenant", "other", "namespace", "team", "id", "flow"), "", Map.of()))).isEmpty();
 +        assertThat(adapter.resolve(request("PluginController", "getPluginIcons", "GET", Map.of(), "", Map.of())).getFirst().resource())
 +            .isEqualTo(Resource.METADATA);
++        var latest = adapter.resolve(request("ExecutionController", "getLatestExecutions", "POST", Map.of("tenant", "main"),
++            "[{\"namespace\":\"team\",\"id\":\"flow\"}]", Map.of()));
++        assertThat(latest).hasSize(1);
++        assertThat(latest.getFirst().resource()).isEqualTo(Resource.EXECUTION);
++        assertThat(latest.getFirst().queryDomain().contains("team.child")).isFalse();
++        assertThat(adapter.resolve(request("ExecutionController", "getLatestExecutions", "POST", Map.of("tenant", "main"),
++            "[]", Map.of()))).isEmpty();
 +    }
 +
 +    private OssRestOperationAdapter.Request request(String controller, String handler, String method,
