@@ -59,6 +59,7 @@ fi
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
+python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 
 echo "== executable jar =="
 (cd "$WORK/ui" && npm ci && npm run build)

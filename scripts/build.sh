@@ -59,6 +59,7 @@ python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/tes
 (cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
+python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)

@@ -1,0 +1,1095 @@
+# 需求: REQ-0260 宿主解析当前 OSS 操作并在查询及副作用前消费 typed policy
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；现有 REST resolver 迫使扩展复制上游路由，dashboard fetchData 绕过 namespace ACL
+# 触达上游文件: 22 个（宿主适配、查询 ACL、dashboard 与自身探针）
+# 移除条件: 上游 OSS 提供等价宿主 typed operation 适配与查询授权执行入口
+diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
+index fb00a71..b983262 100644
+--- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
++++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
+@@ -27,4 +27,8 @@ public interface NamespaceAccessControl {
+     default boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
+         return namespaceScope(resource).namespaceAllowed(namespace);
+     }
++
++    default java.util.List<String> excludedNamespaces(QueryFilter.Resource resource) {
++        return java.util.List.of();
++    }
+ }
+diff --git a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
+index 4b7bfe4..cb86321 100644
+--- a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
++++ b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
+@@ -30,6 +30,10 @@ public interface LogDataStoreAccessControl {
+      */
+     AccessScope namespaceScope();
+ 
++    default java.util.List<String> excludedNamespaces() {
++        return java.util.List.of();
++    }
++
+     /**
+      * Invoked before a {@code deleteByQuery(tenantId, executionId, taskId, taskRunId, minLevel, attempt)}.
+      * Default no-op; EE publishes an audit event.
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java
+index b3d2ee6..a7b3699 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java
+@@ -564,7 +564,7 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcCrudRe
+ 
+                 // Apply Where filter
+                 selectConditionStep = where(selectConditionStep, filterService, descriptors.getWhere(), fieldsMapping)
+-                    .and(NORMAL_KIND_CONDITION);
++                    .and(NORMAL_KIND_CONDITION).and(aclCondition(Resource.EXECUTION));
+ 
+                 List<? extends ColumnDescriptor<Executions.Fields>> columnsWithoutDateWithOutAggs = columnsWithoutDate.values().stream()
+                     .filter(column -> column.getAgg() == null)
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
+index 5ee14ab..450a7a7 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
+@@ -565,7 +565,8 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
+             List<Field<Date>> dateFields = generateDateFields(descriptors, getFieldsMapping(), startDate, endDate, dateFields(), hasAgg ? null : DateUtils.GroupType.MINUTE);
+ 
+             // Init request
+-            SelectConditionStep<Record> selectConditionStep = select(context, filterService, columnsWithoutDate, dateFields, this.getFieldsMapping(), this.jdbcRepository.getTable(), tenantId);
++            SelectConditionStep<Record> selectConditionStep = select(context, filterService, columnsWithoutDate, dateFields, this.getFieldsMapping(), this.jdbcRepository.getTable(), tenantId)
++                .and(aclCondition());
+ 
+             // Apply Where filter
+             selectConditionStep = where(selectConditionStep, filterService, descriptors.getWhere(), getWhereMapping()).and(NORMAL_KIND_CONDITION);
+@@ -600,7 +601,7 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
+      */
+     protected Condition aclCondition() {
+         io.kestra.core.models.AccessScope scope = accessControl.namespaceScope();
+-        return switch (scope.kind()) {
++        Condition allowed = switch (scope.kind()) {
+             case GLOBAL -> DSL.trueCondition();
+             case DENY_ALL -> DSL.falseCondition();
+             case NAMESPACES -> {
+@@ -615,6 +616,8 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
+                 yield DSL.or(ors);
+             }
+         };
++        List<String> excluded = accessControl.excludedNamespaces();
++        return excluded.isEmpty() ? allowed : allowed.and(field("namespace").notIn(excluded));
+     }
+ 
+     @Override
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
+index 03cfa03..592b22d 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
+@@ -116,7 +116,7 @@ public abstract class AbstractJdbcRepository {
+     protected Condition aclCondition(Resource resource, String namespaceColumn) {
+         AccessScope scope = namespaceAccessControl().namespaceScope(resource);
+         Field<String> column = field(namespaceColumn, String.class);
+-        return switch (scope.kind()) {
++        Condition allowed = switch (scope.kind()) {
+             case GLOBAL -> DSL.noCondition();
+             case DENY_ALL -> DSL.falseCondition();
+             case NAMESPACES -> {
+@@ -131,6 +131,8 @@ public abstract class AbstractJdbcRepository {
+                 yield DSL.or(ors);
+             }
+         };
++        List<String> excluded = namespaceAccessControl().excludedNamespaces(resource);
++        return excluded.isEmpty() ? allowed : allowed.and(column.notIn(excluded));
+     }
+ 
+     protected Condition buildTenantCondition(String tenantId) {
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java
+index b64e71c..b1bd77e 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java
+@@ -233,7 +233,8 @@ public abstract class AbstractJdbcTriggerRepository extends AbstractJdbcCrudRepo
+                 );
+ 
+                 // Apply Where filter
+-                selectConditionStep = where(selectConditionStep, filterService, descriptors.getWhere(), fieldsMapping);
++                selectConditionStep = where(selectConditionStep, filterService, descriptors.getWhere(), fieldsMapping)
++                    .and(aclCondition(Resource.TRIGGER));
+ 
+                 List<? extends ColumnDescriptor<Triggers.Fields>> columnsWithoutDateWithOutAggs = columnsWithoutDate.values().stream()
+                     .filter(column -> column.getAgg() == null)
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
+index 6b5a77a..415f778 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
+@@ -96,6 +96,9 @@ public class DashboardController {
+     @Inject
+     private ChartDataService chartDataService;
+ 
++    @Inject
++    private io.kestra.webserver.rbac.TypedDashboardGate typedDashboardGate;
++
+     @Inject
+     protected TenantService tenantService;
+ 
+@@ -256,6 +259,7 @@ public class DashboardController {
+         if (chart instanceof DataChart dataChart) {
+             DataFilter<?, ?> dataChartDatas = dataChart.getData();
+             dataChartDatas.updateWhereWithGlobalFilters(filters, startDate, endDate);
++            typedDashboardGate.authorize(tenantId, dataChartDatas);
+ 
+             // StartDate & EndDate are only set in the globalFilter for JDBC
+             // TODO: Check if we can remove them from generate() for ElasticSearch as they are already set in the where property
+@@ -263,10 +267,12 @@ public class DashboardController {
+         } else if (chart instanceof DataChartKPI dataChartKPI) {
+             DataFilterKPI<?, ?> dataChartDatas = dataChartKPI.getData();
+             dataChartDatas.updateWhereWithGlobalFilters(filters, startDate, endDate);
++            typedDashboardGate.authorize(tenantId, dataChartDatas);
+ 
+             return PagedResults.of(new ArrayListTotal<>(this.chartDataService.generateKPI(tenantId, dataChartKPI, startDate, endDate), 1));
+         } else if (chart instanceof Markdown markdownChart) {
+             if (markdownChart.getSource() != null && markdownChart.getSource() instanceof FlowDescription flowDescription) {
++                typedDashboardGate.authorize(tenantId, flowDescription);
+                 Optional<Flow> optionalFlow = flowRepository.findById(tenantId, flowDescription.getNamespace(), flowDescription.getFlowId());
+                 if (optionalFlow.isPresent()) {
+                     Flow flow = optionalFlow.get();
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java
+index 8981235..3a53b9d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java
+@@ -171,7 +171,7 @@ public class NamespaceFileController {
+         Path dirPath = Path.of(Optional.ofNullable(encodedPath).map(URI::getPath).orElse("/"));
+ 
+         if (dirPath.toString().equals("/") && !namespaceStorage.exists(dirPath)) {
+-            namespaceStorage.createDirectory(dirPath);
++            return List.of();
+         } else if (!namespaceStorage.exists(dirPath)) {
+             throw new FileNotFoundException("Directory not found: " + dirPath);
+         }
+diff --git a/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java b/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java
+index c88846e..04c81ba 100644
+--- a/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java
++++ b/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java
+@@ -45,7 +45,7 @@ public class QueryFilterFormatBinder implements AnnotatedRequestArgumentBinder<Q
+     }
+ 
+     @VisibleForTesting
+-    static List<QueryFilter> getQueryFilters(Map<String, List<String>> queryParams, int maxDepth, int maxWidth) {
++    public static List<QueryFilter> getQueryFilters(Map<String, List<String>> queryParams, int maxDepth, int maxWidth) {
+         NodeBuilder root = new NodeBuilder();
+         for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
+             String key = entry.getKey();
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+new file mode 100644
+index 0000000..13218bd
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+@@ -0,0 +1,218 @@
++package io.kestra.webserver.rbac;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.net.URI;
++import com.fasterxml.jackson.core.JsonParser;
++import com.fasterxml.jackson.databind.DeserializationFeature;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import jakarta.inject.Singleton;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++@Singleton
++public final class OssRestOperationAdapter {
++    private final ExecutionRepositoryInterface executions;
++    private final ObjectMapper yaml = new ObjectMapper(new YAMLFactory())
++        .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION).enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
++
++    public OssRestOperationAdapter(ExecutionRepositoryInterface executions) {
++        this.executions = executions;
++    }
++
++    public record Request(RestAuthorizationResolver.Request route, Map<String, Object> variables) {
++        public Request {
++            variables = Map.copyOf(variables);
++        }
++        String variable(String key) {
++            Object value = variables.get(key);
++            return value instanceof String text ? text : null;
++        }
++    }
++
++    public List<Operation> resolve(Request request) {
++        if (request == null || request.route() == null) return List.of();
++        var route = request.route();
++        if (route.path() == null || route.path().contains("%") || route.path().contains("//")
++            || route.path().contains("\\") || List.of(route.path().split("/")).stream().anyMatch(segment -> segment.equals(".") || segment.equals("..")))
++            return List.of();
++        String tenant = request.variable("tenant");
++        if (tenant == null && route.controller().endsWith(".MiscController")) tenant = "main";
++        if (!"main".equals(tenant)) return List.of();
++        String namespace = request.variable("namespace");
++        String id = request.variable("id");
++        String handler = route.handler();
++        try {
++            return switch (route.controller()) {
++                case "io.kestra.webserver.controllers.api.FlowController" -> flow(request, tenant, namespace, id);
++                case "io.kestra.webserver.controllers.api.ExecutionController" -> execution(request, tenant, namespace, id);
++                case "io.kestra.webserver.controllers.api.NamespaceController" -> switch (handler) {
++                    case "searchNamespaces", "autocompleteNamespaces" -> query(Resource.NAMESPACE, tenant, null);
++                    case "getNamespace" -> single(Resource.NAMESPACE, Action.READ, tenant, request.variable("id"), null);
++                    case "getFlowDependenciesFromNamespace" -> query(Resource.FLOW, tenant, namespace);
++                    default -> administrative(tenant);
++                };
++                case "io.kestra.webserver.controllers.api.LogController" -> logs(request, tenant, namespace);
++                case "io.kestra.webserver.controllers.api.MetricController" -> handler.equals("searchByExecution")
++                    ? ownedExecution(request, tenant, Resource.METRIC, Action.READ)
++                    : Set.of("listFlowMetrics", "listTaskMetrics", "listTasksWithMetrics", "aggregateMetricsFromFlow", "aggregateMetricsFromTask").contains(handler)
++                        ? single(Resource.METRIC, Action.READ, tenant, namespace, request.variable("flowId")) : administrative(tenant);
++                case "io.kestra.webserver.controllers.api.KVController" -> keyValue(request, tenant, namespace);
++                case "io.kestra.webserver.controllers.api.NamespaceFileController" -> files(request, tenant, namespace);
++                case "io.kestra.webserver.controllers.api.TriggerController" -> switch (handler) {
++                    case "searchTriggers", "exportTriggers" -> query(Resource.TRIGGER, tenant, null);
++                    case "searchTriggersForFlow" -> query(Resource.TRIGGER, tenant, namespace);
++                    default -> administrative(tenant);
++                };
++                case "io.kestra.webserver.controllers.api.PluginController" -> Set.of("getSchemasFromType", "getPropertiesFromType", "getAllInputTypes",
++                    "getSchemaFromInputType", "listPlugins", "listTriggerPlugins", "getPluginIcons", "getPluginIcon", "getPluginIconSvg", "getPluginGroupIcons",
++                    "getPluginDocumentation", "getPluginDocumentationFromVersion", "getPluginVersions", "getPluginBySubgroups", "getPluginUiManifest", "getPluginUi").contains(handler)
++                        ? metadata(tenant) : administrative(tenant);
++                case "io.kestra.webserver.controllers.api.MiscController" -> Set.of("getConfiguration", "getUsages", "getExpressionFilters", "getExpressionFunctions").contains(handler)
++                    ? metadata(tenant) : administrative(tenant);
++                case "io.kestra.webserver.controllers.api.DashboardController" -> Set.of("searchDashboards", "getDashboard", "getDefaultDashboardDefinitions", "previewChart", "exportChart", "exportDashboardChart").contains(handler)
++                    ? metadata(tenant) : administrative(tenant);
++                case "io.kestra.webserver.controllers.api.McpServerController" -> switch (handler) {
++                    case "listMcps" -> query(Resource.MCP_SERVER, tenant, null);
++                    case "getMcp" -> single(Resource.MCP_SERVER, Action.READ, tenant, null, id);
++                    case "createMcp" -> single(Resource.MCP_SERVER, Action.CREATE, tenant, null, null);
++                    case "updateMcp", "toggleMcp" -> single(Resource.MCP_SERVER, Action.UPDATE, tenant, null, id);
++                    case "deleteMcp" -> single(Resource.MCP_SERVER, Action.DELETE, tenant, null, id);
++                    default -> administrative(tenant);
++                };
++                default -> administrative(tenant);
++            };
++        } catch (Exception invalid) {
++            return List.of();
++        }
++    }
++
++    private List<Operation> flow(Request request, String tenant, String namespace, String id) throws Exception {
++        return switch (request.route().handler()) {
++            case "getFlow", "listFlowRevisions", "getTaskFromFlow", "generateFlowGraph" -> single(Resource.FLOW, Action.READ, tenant, namespace, id);
++            case "searchFlows", "searchFlowsBySourceCode", "listDistinctNamespaces", "listDeprecated", "exportFlows", "exportFlowsByQuery" -> query(Resource.FLOW, tenant, null);
++            case "listFlowsByNamespace", "getFlowDependencies" -> query(Resource.FLOW, tenant, namespace);
++            case "createFlow", "updateFlow", "generateFlowGraphFromSource" -> {
++                JsonNode body = yaml.readTree(request.route().body());
++                if (body == null || !body.path("namespace").isTextual() || !body.path("id").isTextual() || body.has("tenantId")) yield List.of();
++                String bodyNamespace = body.path("namespace").asText();
++                String bodyId = body.path("id").asText();
++                if (namespace != null && (!namespace.equals(bodyNamespace) || !id.equals(bodyId))) yield List.of();
++                Action action = request.route().handler().equals("createFlow") ? Action.CREATE
++                    : request.route().handler().equals("updateFlow") ? Action.UPDATE : Action.READ;
++                yield single(Resource.FLOW, action, tenant, bodyNamespace, bodyId);
++            }
++            case "deleteFlow", "deleteRevisions" -> single(Resource.FLOW, Action.DELETE, tenant, namespace, id);
++            case "validateFlows", "validateTask", "validateTrigger" -> metadata(tenant);
++            default -> administrative(tenant);
++        };
++    }
++
++    private List<Operation> execution(Request request, String tenant, String namespace, String id) {
++        return switch (request.route().handler()) {
++            case "searchExecutions", "findDistinctFieldValues", "listExecutableDistinctNamespaces", "exportExecutions" -> query(Resource.EXECUTION, tenant, null);
++            case "searchExecutionsByFlowId", "listFlowExecutionsByNamespace", "getExecutionAverageDuration" -> query(Resource.EXECUTION, tenant, namespace);
++            case "getFlowFromExecution" -> single(Resource.FLOW, Action.READ, tenant, namespace, request.variable("flowId"));
++            case "getExecution", "getExecutionFlowGraph", "getFlowFromExecutionById", "followExecution", "followDependenciesExecutions" -> ownedExecution(request, tenant, Resource.EXECUTION, Action.READ);
++            case "downloadFileFromExecution", "getFileMetadatasFromExecution", "previewFileFromExecution" -> ownedExecution(request, tenant, Resource.EXECUTION, Action.ACCESS_OUTPUTS);
++            case "deleteExecution" -> ownedExecution(request, tenant, Resource.EXECUTION, Action.DELETE);
++            case "createExecution", "validateNewExecutionInputs" -> {
++                var operations = new ArrayList<>(single(Resource.FLOW, Action.READ, tenant, namespace, id));
++                operations.addAll(single(Resource.FLOW, Action.EXECUTE, tenant, namespace, id));
++                operations.addAll(single(Resource.EXECUTION, Action.CREATE, tenant, namespace, null));
++                yield operations;
++            }
++            default -> administrative(tenant);
++        };
++    }
++
++    private List<Operation> logs(Request request, String tenant, String namespace) {
++        return switch (request.route().handler()) {
++            case "searchLogs" -> query(Resource.LOG, tenant, null);
++            case "listLogsFromExecution", "downloadLogsFromExecution", "followLogsFromExecution" -> ownedExecution(request, tenant, Resource.LOG, Action.READ);
++            case "deleteLogsFromExecution" -> ownedExecution(request, tenant, Resource.LOG, Action.DELETE);
++            case "deleteLogsFromFlow" -> single(Resource.LOG, Action.DELETE, tenant, namespace, request.variable("flowId"));
++            default -> administrative(tenant);
++        };
++    }
++
++    private List<Operation> keyValue(Request request, String tenant, String namespace) {
++        return switch (request.route().handler()) {
++            case "listAllKeys" -> query(Resource.KVSTORE, tenant, namespace);
++            case "listKeysWithInheritence" -> query(Resource.KVSTORE, tenant, null);
++            case "getKeyValue" -> single(Resource.KVSTORE, Action.READ, tenant, namespace, request.variable("key"));
++            case "setKeyValue" -> single(Resource.KVSTORE, Action.UPDATE, tenant, namespace, request.variable("key"));
++            case "deleteKeyValue" -> single(Resource.KVSTORE, Action.DELETE, tenant, namespace, request.variable("key"));
++            default -> administrative(tenant);
++        };
++    }
++
++    private List<Operation> files(Request request, String tenant, String namespace) {
++        return switch (request.route().handler()) {
++            case "searchNamespaceFiles", "listNamespaceDirectoryFiles", "exportNamespaceFiles" -> query(Resource.NAMESPACE_FILE, tenant, namespace);
++            case "getFileContent", "getFileMetadatas", "getFileRevisions" -> single(Resource.NAMESPACE_FILE, Action.READ, tenant, namespace, request.route().query().getOrDefault("path", List.of("/")).getFirst());
++            case "createNamespaceDirectory", "createNamespaceFile", "moveFileDirectory" -> single(Resource.NAMESPACE_FILE, Action.UPDATE, tenant, namespace, null);
++            case "deleteFileDirectory" -> single(Resource.NAMESPACE_FILE, Action.DELETE, tenant, namespace, null);
++            default -> administrative(tenant);
++        };
++    }
++
++    private List<Operation> ownedExecution(Request request, String tenant, Resource resource, Action action) {
++        String executionId = request.variable("executionId");
++        var execution = executions.findByIdWithoutAcl(tenant, executionId).orElse(null);
++        if (execution == null || !tenant.equals(execution.getTenantId())) return List.of();
++        if (action == Action.ACCESS_OUTPUTS && !executionFile(request, execution)) return List.of();
++        return single(resource, action, tenant, execution.getNamespace(), executionId);
++    }
++
++    private boolean executionFile(Request request, io.kestra.core.models.executions.Execution execution) {
++        List<String> paths = request.route().query().get("path");
++        if (paths == null || paths.size() != 1) return false;
++        String raw = paths.getFirst();
++        if (raw.contains("%") || raw.contains("\\") || raw.contains("//")) return false;
++        URI uri = URI.create(raw);
++        if (!"kestra".equals(uri.getScheme()) || uri.isOpaque() || uri.getRawAuthority() != null
++            || uri.getRawQuery() != null || uri.getRawFragment() != null || !uri.normalize().equals(uri)) return false;
++        String prefix = io.kestra.core.storages.StorageContext.forExecution(execution).getExecutionStorageURI().getPath();
++        prefix = prefix.endsWith("/") ? prefix : prefix + "/";
++        return uri.getPath() != null && uri.getPath().startsWith(prefix) && uri.getPath().length() > prefix.length();
++    }
++
++    private List<Operation> metadata(String tenant) {
++        return single(Resource.METADATA, Action.READ, tenant, null, null);
++    }
++
++    private List<Operation> administrative(String tenant) {
++        return List.of(new Operation(CONTRACT_VERSION, Source.REST, Resource.SYSTEM, Action.EXECUTE, tenant, null, null,
++            QueryDomain.unrestricted(), Coverage.COMPLETE_BATCH, Aggregate.NONE, SideEffect.EXTERNAL));
++    }
++
++    private List<Operation> single(Resource resource, Action action, String tenant, String namespace, String id) {
++        return List.of(new Operation(CONTRACT_VERSION, Source.REST, resource, action, tenant, namespace, id,
++            domain(namespace, false), Coverage.SINGLE, Aggregate.NONE, effect(resource, action)));
++    }
++
++    private List<Operation> query(Resource resource, String tenant, String namespace) {
++        QueryDomain domain = domain(namespace, true);
++        return List.of(new Operation(CONTRACT_VERSION, Source.REST, resource, Action.LIST, tenant, namespace, null,
++            domain, Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY));
++    }
++
++    private QueryDomain domain(String namespace, boolean paginated) {
++        return namespace == null ? new QueryDomain(List.of(), List.of(), List.of(), true, paginated, DomainKind.GLOBAL)
++            : new QueryDomain(List.of(namespace), List.of(), List.of(), true, paginated);
++    }
++
++    private SideEffect effect(Resource resource, Action action) {
++        return switch (action) {
++            case READ, LIST, ACCESS_OUTPUTS -> SideEffect.READ_ONLY;
++            case EXECUTE -> SideEffect.QUEUE_WRITE;
++            default -> resource == Resource.EXECUTION ? SideEffect.QUEUE_WRITE : SideEffect.STORAGE_WRITE;
++        };
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
+index 78087d1..9488059 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
+@@ -8,7 +8,16 @@ import reactor.core.publisher.Mono;
+ @Singleton
+ public class RbacGate {
+     private final BeanProvider<RbacAuthorizer> authorizers;
++    private TypedAuthorizationGate typedGate;
++    private boolean typedEnabled;
+     public RbacGate(BeanProvider<RbacAuthorizer> authorizers) { this.authorizers = authorizers; }
++    @jakarta.inject.Inject
++    public RbacGate(BeanProvider<RbacAuthorizer> authorizers, TypedAuthorizationGate typedGate,
++        @io.micronaut.context.annotation.Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled) {
++        this.authorizers = authorizers;
++        this.typedGate = typedGate;
++        this.typedEnabled = typedEnabled;
++    }
+     public Mono<Boolean> authorize(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
+         RbacAuthorizer.Action action) {
+         return authorize(principal, resource, action, false);
+@@ -16,11 +25,30 @@ public class RbacGate {
+     public Mono<Boolean> authorize(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
+         RbacAuthorizer.Action action, boolean completeQuery) {
+         return Mono.defer(() -> {
++            if (typedEnabled) return typed(principal, resource, action, completeQuery);
+             if (principal == null || principal.subject() == null || principal.subject().isBlank()
+                 || action == null || !(valid(resource) || queryDomain(resource, action, completeQuery)) || !authorizers.isUnique()) return Mono.just(false);
+             return Mono.fromCompletionStage(authorizers.get().authorize(principal, resource, action));
+         }).timeout(Duration.ofSeconds(5)).defaultIfEmpty(false).onErrorReturn(false);
+     }
++    private Mono<Boolean> typed(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
++        RbacAuthorizer.Action action, boolean completeQuery) {
++        if (resource == null || resource.kind() == null || action == null) return Mono.just(false);
++        var kind = TypedAuthorization.Resource.valueOf(resource.kind().name());
++        String tenant = resource.tenant() == null && resource.scope() == RbacAuthorizer.Scope.INSTANCE ? "main" : resource.tenant();
++        var domain = resource.namespace() == null ? TypedAuthorization.QueryDomain.unrestricted()
++            : new TypedAuthorization.QueryDomain(java.util.List.of(resource.namespace()), java.util.List.of(), java.util.List.of(), true, false);
++        var source = principal != null && !principal.scopes().isEmpty() ? TypedAuthorization.Source.MCP : TypedAuthorization.Source.REST;
++        var operation = new TypedAuthorization.Operation(TypedAuthorization.CONTRACT_VERSION, source,
++            kind, TypedAuthorization.Action.valueOf(action.name()), tenant, resource.namespace(), resource.id(), domain,
++            completeQuery ? TypedAuthorization.Coverage.COMPLETE_QUERY : TypedAuthorization.Coverage.SINGLE,
++            TypedAuthorization.Aggregate.NONE, switch (action) {
++                case READ, LIST, ACCESS_OUTPUTS -> TypedAuthorization.SideEffect.READ_ONLY;
++                case EXECUTE, CREATE -> TypedAuthorization.SideEffect.QUEUE_WRITE;
++                default -> TypedAuthorization.SideEffect.STORAGE_WRITE;
++            });
++        return typedGate.authorize(principal, operation).map(TypedAuthorization.Decision::allowed);
++    }
+     private static boolean queryDomain(RbacAuthorizer.Resource resource, RbacAuthorizer.Action action, boolean completeQuery) {
+         return completeQuery && resource != null && resource.kind() != null && resource.scope() == RbacAuthorizer.Scope.TENANT
+             && resource.tenant() != null && !resource.tenant().isBlank() && resource.namespace() == null && resource.id() == null
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+index e4fc901..1d6e8a0 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+@@ -20,6 +20,7 @@ import reactor.core.publisher.Mono;
+ /** Independent gate: an earlier SecurityRule ALLOWED cannot bypass this filter. */
+ @Singleton
+ @Filter("/**")
++@io.micronaut.context.annotation.Requires(property = "kestra.rbac.typed.enabled", value = "false", defaultValue = "false")
+ public class RestRbacFilter implements HttpServerFilter {
+     private final RbacConfiguration configuration;
+     private final BeanProvider<RestAuthorizationResolver> resolvers;
+@@ -69,7 +70,7 @@ public class RestRbacFilter implements HttpServerFilter {
+         return HttpResponse.status(status).contentType(MediaType.APPLICATION_JSON_PROBLEM_TYPE)
+             .body(problems.detailForStatus(request, null, status.getCode(), null, List.of()));
+     }
+-    private static boolean protocol(HttpRequest<?> request) {
++    static boolean protocol(HttpRequest<?> request) {
+         String path = request.getPath();
+         if (path.contains("%") || path.contains("..") || path.contains("//")) return false;
+         var route = RouteAttributes.getRouteMatch(request).orElse(null);
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+new file mode 100644
+index 0000000..5c2f9bc
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+@@ -0,0 +1,100 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import com.fasterxml.jackson.databind.JsonNode;
++import io.kestra.core.serializers.JacksonMapper;
++import io.kestra.core.utils.PebbleUtil;
++import io.kestra.plugin.core.dashboard.data.*;
++import io.kestra.plugin.core.dashboard.chart.mardown.sources.FlowDescription;
++import io.micronaut.context.annotation.Value;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import jakarta.inject.Singleton;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++@Singleton
++public final class TypedDashboardGate {
++    private final RbacConfiguration configuration;
++    private final boolean typedEnabled;
++    private final TypedAuthorizationGate gate;
++
++    public TypedDashboardGate(RbacConfiguration configuration, @Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled,
++        TypedAuthorizationGate gate) {
++        this.configuration = configuration;
++        this.typedEnabled = typedEnabled;
++        this.gate = gate;
++    }
++
++    public void authorize(String tenant, Object datasource) {
++        if (!configuration.enabled() || !typedEnabled) return;
++        var request = ServerRequestContext.currentRequest().orElseThrow(() -> denied());
++        var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow(() -> denied());
++        var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++        Resource resource;
++        Aggregate aggregate;
++        String namespace = null;
++        String id = null;
++        if (datasource != null && (datasource.getClass() == Executions.class || datasource.getClass() == ExecutionsKPI.class)) {
++            resource = Resource.EXECUTION;
++            aggregate = Aggregate.EXECUTION;
++        } else if (datasource != null && (datasource.getClass() == Logs.class || datasource.getClass() == LogsKPI.class)) {
++            resource = Resource.LOG;
++            aggregate = Aggregate.LOG;
++        } else if (datasource != null && datasource.getClass() == Triggers.class) {
++            resource = Resource.TRIGGER;
++            aggregate = Aggregate.TRIGGER;
++        } else if (datasource instanceof FlowDescription flow) {
++            resource = Resource.FLOW;
++            aggregate = Aggregate.FLOW_DESCRIPTION;
++            namespace = flow.getNamespace();
++            id = flow.getFlowId();
++        } else {
++            throw denied();
++        }
++        JsonNode definition = JacksonMapper.ofJson().valueToTree(datasource);
++        if (hasExpression(definition)) throw denied();
++        QueryDomain domain = namespace == null ? queryDomain(definition.path("where"))
++            : new QueryDomain(List.of(namespace), List.of(), List.of(), true, false);
++        var operation = new Operation(CONTRACT_VERSION, Source.DASHBOARD_AGGREGATE, resource, Action.READ, tenant, namespace, id,
++            domain, namespace == null ? Coverage.COMPLETE_QUERY : Coverage.SINGLE, aggregate, SideEffect.READ_ONLY);
++        Decision decision = gate.authorize(principal, operation).block();
++        if (decision == null || !decision.allowed()) throw denied();
++        request.setAttribute(TypedNamespaceAccessControl.class.getName() + "." + resource.name(), decision.scope());
++    }
++
++    private QueryDomain queryDomain(JsonNode filters) {
++        var parsed = new java.util.ArrayList<io.kestra.core.models.QueryFilter>();
++        for (JsonNode filter : filters) {
++            if ("OR".equals(filter.path("type").asText())) continue;
++            if (!"NAMESPACE".equals(filter.path("field").asText())) continue;
++            io.kestra.core.models.QueryFilter.Op action = switch (filter.path("type").asText()) {
++                case "EQUAL_TO" -> io.kestra.core.models.QueryFilter.Op.EQUALS;
++                case "PREFIX" -> io.kestra.core.models.QueryFilter.Op.PREFIX;
++                case "NOT_EQUAL_TO" -> io.kestra.core.models.QueryFilter.Op.NOT_EQUALS;
++                case "IN" -> io.kestra.core.models.QueryFilter.Op.IN;
++                case "NOT_IN" -> io.kestra.core.models.QueryFilter.Op.NOT_IN;
++                default -> null;
++            };
++            if (action == null) continue;
++            Object value = filter.has("values")
++                ? java.util.stream.StreamSupport.stream(filter.path("values").spliterator(), false).map(JsonNode::asText).toList()
++                : filter.path("value").asText();
++            parsed.add(new io.kestra.core.models.QueryFilter(io.kestra.core.models.QueryFilter.Field.NAMESPACE, action, value, null, null));
++        }
++        return TypedQueryDomains.fromFilters(parsed, false);
++    }
++
++    private boolean hasExpression(JsonNode node) {
++        if (node.isTextual()) return PebbleUtil.containsOpeningBlockDelimiter(node.asText());
++        for (JsonNode child : node) if (hasExpression(child)) return true;
++        return false;
++    }
++
++    private HttpStatusException denied() {
++        return new HttpStatusException(HttpStatus.FORBIDDEN, "Dashboard datasource is not authorized");
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
+new file mode 100644
+index 0000000..aac1cd4
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
+@@ -0,0 +1,32 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.repositories.log.GlobalLogDataStoreAccessControl;
++import io.kestra.core.repositories.log.LogDataStoreAccessControl;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Replaces(GlobalLogDataStoreAccessControl.class)
++@Requires(property = "kestra.rbac.enabled", value = "true")
++@Requires(property = "kestra.rbac.typed.enabled", value = "true")
++public final class TypedLogAccessControl implements LogDataStoreAccessControl {
++    private final TypedNamespaceAccessControl namespaces;
++
++    public TypedLogAccessControl(TypedNamespaceAccessControl namespaces) {
++        this.namespaces = namespaces;
++    }
++
++    @Override
++    public AccessScope namespaceScope() {
++        return namespaces.namespaceScope(QueryFilter.Resource.LOG);
++    }
++
++    @Override
++    public List<String> excludedNamespaces() {
++        return namespaces.excludedNamespaces(QueryFilter.Resource.LOG);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+new file mode 100644
+index 0000000..ad213a0
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+@@ -0,0 +1,79 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.repositories.GlobalNamespaceAccessControl;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.RouteAttributes;
++import jakarta.inject.Singleton;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++@Singleton
++@Replaces(GlobalNamespaceAccessControl.class)
++@Requires(property = "kestra.rbac.enabled", value = "true")
++@Requires(property = "kestra.rbac.typed.enabled", value = "true")
++public final class TypedNamespaceAccessControl implements NamespaceAccessControl {
++    private final TypedAuthorizationGate gate;
++
++    public TypedNamespaceAccessControl(TypedAuthorizationGate gate) {
++        this.gate = gate;
++    }
++
++    public QueryDomain domain(QueryFilter.Resource resource) {
++        var request = ServerRequestContext.currentRequest().orElse(null);
++        if (request == null) return QueryDomain.unrestricted();
++        var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication == null || resource == null) return QueryDomain.empty();
++        String cacheKey = TypedNamespaceAccessControl.class.getName() + "." + resource.name();
++        var cached = request.getAttribute(cacheKey, QueryDomain.class).orElse(null);
++        if (cached != null) return cached;
++        try {
++            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++            var route = RouteAttributes.getRouteMatch(request).orElseThrow();
++            String tenant = (String) route.getVariableValues().get("tenant");
++            Resource kind = switch (resource) {
++                case FLOW, TEMPLATE -> Resource.FLOW;
++                case EXECUTION, TASK -> Resource.EXECUTION;
++                case NAMESPACE -> Resource.NAMESPACE;
++                case LOG -> Resource.LOG;
++                case TRIGGER -> Resource.TRIGGER;
++                case KV_METADATA -> Resource.KVSTORE;
++                case NAMESPACE_FILE_METADATA -> Resource.NAMESPACE_FILE;
++                default -> null;
++            };
++            if (kind == null || !"main".equals(tenant)) return QueryDomain.empty();
++            var operation = new Operation(CONTRACT_VERSION, Source.REST, kind, Action.LIST, tenant, null, null,
++                QueryDomain.unrestricted(), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
++            var decision = gate.authorize(principal, operation).block();
++            QueryDomain result = decision != null && decision.allowed() ? decision.scope() : QueryDomain.empty();
++            request.setAttribute(cacheKey, result);
++            return result;
++        } catch (Exception failure) {
++            return QueryDomain.empty();
++        }
++    }
++
++    @Override
++    public AccessScope namespaceScope(QueryFilter.Resource resource) {
++        QueryDomain scope = domain(resource);
++        return scope.kind() == DomainKind.GLOBAL ? AccessScope.global()
++            : AccessScope.namespaces(scope.namespaceSubtrees(), scope.exactNamespaces());
++    }
++
++    @Override
++    public List<String> excludedNamespaces(QueryFilter.Resource resource) {
++        return domain(resource).excludedNamespaces();
++    }
++
++    @Override
++    public boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
++        return domain(resource).contains(namespace);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
+new file mode 100644
+index 0000000..dca24ae
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
+@@ -0,0 +1,36 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import io.kestra.core.models.QueryFilter;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++public final class TypedQueryDomains {
++    private TypedQueryDomains() {}
++
++    public static QueryDomain fromFilters(List<QueryFilter> filters, boolean paginated) {
++        QueryDomain result = new QueryDomain(List.of(), List.of(), List.of(), true, paginated, DomainKind.GLOBAL);
++        for (QueryFilter filter : filters) result = result.intersect(fromFilter(filter, paginated));
++        return result;
++    }
++
++    private static QueryDomain fromFilter(QueryFilter filter, boolean paginated) {
++        if (filter.isNode()) {
++            if (filter.logical() == QueryFilter.Logical.AND) return fromFilters(filter.children(), paginated);
++            var domains = filter.children().stream().map(child -> fromFilter(child, paginated)).toList();
++            if (domains.stream().anyMatch(domain -> domain.kind() == DomainKind.GLOBAL || !domain.excludedNamespaces().isEmpty()))
++                return QueryDomain.unrestricted();
++            return new QueryDomain(domains.stream().flatMap(domain -> domain.exactNamespaces().stream()).distinct().toList(),
++                domains.stream().flatMap(domain -> domain.namespaceSubtrees().stream()).distinct().toList(), List.of(), true, paginated);
++        }
++        if (filter.field() != QueryFilter.Field.NAMESPACE) return QueryDomain.unrestricted();
++        List<String> values = filter.value() instanceof List<?> list ? list.stream().map(Object::toString).toList()
++            : List.of(String.valueOf(filter.value()));
++        return switch (filter.operation()) {
++            case EQUALS, IN -> new QueryDomain(values, List.of(), List.of(), true, paginated);
++            case PREFIX -> new QueryDomain(List.of(), values, List.of(), true, paginated);
++            case NOT_EQUALS, NOT_IN -> new QueryDomain(List.of(), List.of(), values, true, paginated, DomainKind.GLOBAL);
++            default -> QueryDomain.unrestricted();
++        };
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+new file mode 100644
+index 0000000..06722d6
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+@@ -0,0 +1,86 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import io.kestra.webserver.errors.ProblemFactory;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.*;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.filter.*;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.MethodBasedRouteMatch;
++import io.micronaut.web.router.RouteAttributes;
++import jakarta.inject.Singleton;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++@Singleton
++@Filter("/**")
++@Requires(property = "kestra.rbac.typed.enabled", value = "true")
++public final class TypedRestRbacFilter implements HttpServerFilter {
++    private final RbacConfiguration configuration;
++    private final OssRestOperationAdapter adapter;
++    private final TypedAuthorizationGate gate;
++    private final ProblemFactory problems;
++
++    public TypedRestRbacFilter(RbacConfiguration configuration, OssRestOperationAdapter adapter,
++        TypedAuthorizationGate gate, ProblemFactory problems) {
++        this.configuration = configuration;
++        this.adapter = adapter;
++        this.gate = gate;
++        this.problems = problems;
++    }
++
++    @Override
++    public int getOrder() {
++        return ServerFilterPhase.SECURITY.order() + 1;
++    }
++
++    @Override
++    public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++        if (!configuration.enabled() || RestRbacFilter.protocol(request)) return chain.proceed(request);
++        Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
++        return Mono.defer(() -> {
++            var route = RouteAttributes.getRouteMatch(request).orElse(null);
++            if (!(route instanceof MethodBasedRouteMatch<?, ?> methodRoute)) return Mono.just(false);
++            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++            Map<String, List<String>> query = new LinkedHashMap<>();
++            request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
++            return body(request).flatMap(bytes -> {
++                var operations = adapter.resolve(new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(
++                    request.getMethodName(), request.getPath(), query, request.getContentType().map(Object::toString).orElse(null), bytes,
++                    methodRoute.getDeclaringType().getName(), methodRoute.getMethodName(),
++                    java.util.Arrays.stream(methodRoute.getArgumentTypes()).map(Class::getName).toList()), methodRoute.getVariableValues()));
++                if (operations.isEmpty()) return Mono.just(false);
++                var filters = io.kestra.webserver.converters.QueryFilterFormatBinder.getQueryFilters(query, 3, 20);
++                var requestedDomain = TypedQueryDomains.fromFilters(filters, true);
++                return Flux.fromIterable(operations).concatMap(operation -> gate.authorize(principal,
++                    operation.coverage() == TypedAuthorization.Coverage.COMPLETE_QUERY
++                        ? new TypedAuthorization.Operation(operation.contractVersion(), operation.source(), operation.resource(), operation.action(),
++                            operation.tenant(), operation.namespace(), operation.resourceId(), operation.queryDomain().intersect(requestedDomain),
++                            operation.coverage(), operation.aggregate(), operation.sideEffect()) : operation))
++                    .all(TypedAuthorization.Decision::allowed);
++            });
++        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).timeout(Duration.ofSeconds(10))
++            .defaultIfEmpty(false).onErrorReturn(false)
++            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
++    }
++
++    private Mono<byte[]> body(HttpRequest<?> request) {
++        if (!(request instanceof ServerHttpRequest<?> server)) return Mono.just(request.getBody(byte[].class).orElse(new byte[0]));
++        return Mono.using(() -> server.byteBody().split(io.micronaut.http.body.ByteBody.SplitBackpressureMode.NEW),
++            split -> Mono.fromCompletionStage(split.buffer()).map(available -> {
++                try (available) { return available.toByteArray(); }
++            }), split -> split.close());
++    }
++
++    private MutableHttpResponse<?> error(HttpRequest<?> request, HttpStatus status) {
++        return HttpResponse.status(status).contentType(MediaType.APPLICATION_JSON_PROBLEM_TYPE)
++            .body(problems.detailForStatus(request, null, status.getCode(), null, List.of()));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
+new file mode 100644
+index 0000000..c972d6e
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
+@@ -0,0 +1,64 @@
++package io.kestra.webserver.rbac;
++
++import java.nio.charset.StandardCharsets;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import org.junit.jupiter.api.Test;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.*;
++
++class OssRestOperationAdapterTest {
++    private final ExecutionRepositoryInterface executions = mock(ExecutionRepositoryInterface.class);
++    private final OssRestOperationAdapter adapter = new OssRestOperationAdapter(executions);
++
++    @Test
++    void shouldUseMatchedResourceIdentityAndRejectConflictingYamlBeforeMutation() {
++        var create = adapter.resolve(request("FlowController", "createFlow", "POST", Map.of("tenant", "main"), "namespace: team\nid: flow", Map.of()));
++        assertThat(create).hasSize(1);
++        assertThat(create.getFirst().namespace()).isEqualTo("team");
++        assertThat(create.getFirst().action()).isEqualTo(Action.CREATE);
++        assertThat(adapter.resolve(request("FlowController", "updateFlow", "PUT", Map.of("tenant", "main", "namespace", "other", "id", "flow"),
++            "namespace: team\nid: flow", Map.of()))).isEmpty();
++        assertThat(adapter.resolve(request("FlowController", "createFlow", "POST", Map.of("tenant", "main"),
++            "namespace: team\nnamespace: other\nid: flow", Map.of()))).isEmpty();
++        verifyNoInteractions(executions);
++    }
++
++    @Test
++    void shouldResolveExecutionOwnerAndRejectForeignStoragePaths() {
++        var execution = Execution.builder().tenantId("main").namespace("team.actual").flowId("flow").id("execution").build();
++        when(executions.findByIdWithoutAcl("main", "execution")).thenReturn(Optional.of(execution));
++        var operations = adapter.resolve(request("ExecutionController", "getExecution", "GET", Map.of("tenant", "main", "executionId", "execution"), "", Map.of()));
++        assertThat(operations).hasSize(1);
++        assertThat(operations.getFirst().namespace()).isEqualTo("team.actual");
++        assertThat(adapter.resolve(request("ExecutionController", "downloadFileFromExecution", "GET",
++            Map.of("tenant", "main", "executionId", "execution"), "", Map.of("path", List.of("file:/etc/passwd"))))).isEmpty();
++        assertThat(adapter.resolve(request("ExecutionController", "downloadFileFromExecution", "GET",
++            Map.of("tenant", "main", "executionId", "execution"), "", Map.of("path", List.of("kestra:/other/file"))))).isEmpty();
++    }
++
++    @Test
++    void shouldPreserveCompleteQueryDomainAndRequireInstancePolicyForUnclassifiedRoutes() {
++        var list = adapter.resolve(request("FlowController", "listFlowsByNamespace", "GET", Map.of("tenant", "main", "namespace", "team"), "", Map.of())).getFirst();
++        assertThat(list.coverage()).isEqualTo(Coverage.COMPLETE_QUERY);
++        assertThat(list.queryDomain().contains("team")).isTrue();
++        assertThat(list.queryDomain().contains("team.child")).isFalse();
++        var unknown = adapter.resolve(request("FutureController", "unknownMutation", "POST", Map.of("tenant", "main"), "", Map.of())).getFirst();
++        assertThat(unknown.resource()).isEqualTo(Resource.SYSTEM);
++        assertThat(unknown.coverage()).isEqualTo(Coverage.COMPLETE_BATCH);
++        assertThat(unknown.sideEffect()).isEqualTo(SideEffect.EXTERNAL);
++        assertThat(adapter.resolve(request("FlowController", "getFlow", "GET", Map.of("tenant", "other", "namespace", "team", "id", "flow"), "", Map.of()))).isEmpty();
++    }
++
++    private OssRestOperationAdapter.Request request(String controller, String handler, String method,
++        Map<String, Object> variables, String body, Map<String, List<String>> query) {
++        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, "/api/v1/main/fixture", query,
++            "application/x-yaml", body.getBytes(StandardCharsets.UTF_8), "io.kestra.webserver.controllers.api." + controller,
++            handler, List.of()), variables);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
+index a283c12..573776d 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
+@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
+ @Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
+ @Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
+ @Property(name="rbac.http.probe",value="true")
++@Property(name="mcp.http.security.fixture",value="true")
+ class RbacHttpProbeTest {
+     @Inject EmbeddedServer server;
+     @Test void realNettyGatePreservesBodyAndClosesUnknownAndAnonymousWebhook() throws Exception {
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardGateTest.java
+new file mode 100644
+index 0000000..889dc23
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardGateTest.java
+@@ -0,0 +1,49 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import io.kestra.plugin.core.dashboard.data.Executions;
++import io.kestra.plugin.core.dashboard.data.IExecutions;
++import io.kestra.core.models.dashboards.filters.EqualTo;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import org.junit.jupiter.api.Test;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class TypedDashboardGateTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void shouldAuthorizeActualDatasourceFiltersAndRejectUnknownOrExpressionSources() {
++        BeanProvider<TypedAuthorizationResolver> policies = mock(BeanProvider.class);
++        when(policies.isUnique()).thenReturn(true);
++        var seen = new java.util.ArrayList<Operation>();
++        when(policies.get()).thenReturn((principal, operation) -> {
++            seen.add(operation);
++            return CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted()));
++        });
++        var gate = new TypedDashboardGate(new RbacConfiguration(true, false), true, new TypedAuthorizationGate(policies));
++        var request = HttpRequest.GET("/api/v1/main/dashboards/charts/preview");
++        request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("reader", List.of("reader")));
++        ServerRequestContext.with(request, () -> {
++            gate.authorize("main", Executions.builder().type("io.kestra.plugin.core.dashboard.data.Executions")
++                .where(List.of(EqualTo.<IExecutions.Fields>builder().field(IExecutions.Fields.NAMESPACE).value("team").build())).build());
++            assertThat(seen).hasSize(1);
++            assertThat(seen.getFirst().source()).isEqualTo(Source.DASHBOARD_AGGREGATE);
++            assertThat(seen.getFirst().queryDomain().contains("team")).isTrue();
++            assertThat(seen.getFirst().queryDomain().contains("team.child")).isFalse();
++            assertThatThrownBy(() -> gate.authorize("main", Map.of("sql", "select * from executions")))
++                .isInstanceOf(HttpStatusException.class);
++            assertThatThrownBy(() -> gate.authorize("main", Executions.builder().type("{{ secret('key') }}").build()))
++                .isInstanceOf(HttpStatusException.class);
++        });
++        assertThatThrownBy(() -> gate.authorize("main", Executions.builder().build())).isInstanceOf(HttpStatusException.class);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedQueryDomainsTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedQueryDomainsTest.java
+new file mode 100644
+index 0000000..855a530
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedQueryDomainsTest.java
+@@ -0,0 +1,28 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import io.kestra.core.models.QueryFilter;
++import org.junit.jupiter.api.Test;
++
++import static io.kestra.core.models.QueryFilter.*;
++import static org.assertj.core.api.Assertions.assertThat;
++
++class TypedQueryDomainsTest {
++    @Test
++    void shouldCombineNamespaceFiltersWithBooleanSemanticsAndExactExclusions() {
++        var union = new QueryFilter(null, null, null, Logical.OR,
++            List.of(leaf(Op.EQUALS, "team.exact"), leaf(Op.PREFIX, "team.tree")));
++        var domain = TypedQueryDomains.fromFilters(List.of(union, leaf(Op.NOT_EQUALS, "team.tree.hidden")), true);
++        assertThat(List.of("team.exact", "team.exact.child", "team.tree", "team.tree.child", "team.tree.hidden", "team.tree2")
++            .stream().filter(domain::contains).toList()).containsExactly("team.exact", "team.tree", "team.tree.child");
++        var impossible = TypedQueryDomains.fromFilters(List.of(leaf(Op.EQUALS, "team"), leaf(Op.EQUALS, "other")), true);
++        assertThat(impossible.contains("team")).isFalse();
++        var withOtherField = new QueryFilter(null, null, null, Logical.OR, List.of(leaf(Op.EQUALS, "team"),
++            new QueryFilter(Field.FLOW_ID, Op.EQUALS, "flow", null, null)));
++        assertThat(TypedQueryDomains.fromFilters(List.of(withOtherField), true).contains("other")).isTrue();
++    }
++
++    private QueryFilter leaf(Op operation, Object value) {
++        return new QueryFilter(Field.NAMESPACE, operation, value, null, null);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
+new file mode 100644
+index 0000000..ea4a75d
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
+@@ -0,0 +1,82 @@
++package io.kestra.webserver.rbac;
++
++import java.net.http.HttpClient;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "typed.rbac.http.probe", value = "true")
++class TypedRbacHttpProbeTest {
++    @Inject
++    EmbeddedServer server;
++    @Inject
++    io.kestra.core.repositories.FlowRepositoryInterface flows;
++
++    @Test
++    void shouldActivateTypedGateForRealRoutesAndDenyBeforeFlowPersistence() throws Exception {
++        var client = HttpClient.newHttpClient();
++        var read = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/configs"))
++            .header("X-Typed-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(read.statusCode()).isEqualTo(200);
++        var denied = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows"))
++            .header("X-Typed-Probe", "reader").header("Content-Type", "application/x-yaml")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofString("namespace: team\nid: denied\ntasks: []"))
++            .build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(denied.statusCode()).isEqualTo(403);
++        assertThat(denied.headers().firstValue("content-type").orElse("")).contains("application/problem+json");
++        assertThat(flows.findById("main", "team", "denied")).isEmpty();
++        for (String namespace : List.of("team", "team.child", "team2", "other")) {
++            flows.create(io.kestra.core.models.flows.GenericFlow.fromYaml("main", "namespace: " + namespace + "\nid: probe\ntasks: []"));
++        }
++        var search = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
++            .header("X-Typed-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(search.statusCode()).isEqualTo(200);
++        assertThat(search.body()).contains("\"total\":1", "\"namespace\":\"team\"")
++            .doesNotContain("team.child", "team2", "other");
++        var anonymous = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
++            .GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(anonymous.statusCode()).isEqualTo(401);
++    }
++
++    @Singleton
++    @Requires(property = "typed.rbac.http.probe", value = "true")
++    static class ProbeIdentity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            return "reader".equals(request.getHeaders().get("X-Typed-Probe"))
++                ? Mono.just(Authentication.build("reader", List.of("reader"))) : Mono.empty();
++        }
++    }
++
++    @Singleton
++    @Requires(property = "typed.rbac.http.probe", value = "true")
++    static class ProbePolicy implements TypedAuthorizationResolver {
++        public CompletionStage<Decision> authorize(RbacAuthorizer.Principal principal, Operation operation) {
++            return CompletableFuture.completedFuture(operation.resource() == Resource.METADATA
++                ? Decision.allow(QueryDomain.unrestricted()) : operation.action() == Action.LIST
++                    ? Decision.allow(new QueryDomain(List.of("team"), List.of(), List.of(), true, false))
++                    : Decision.deny("Read-only probe"));
++        }
++    }
++}

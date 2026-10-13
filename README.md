@@ -462,8 +462,16 @@ kestra:
 `Controller`、`Handler`、URL 路由或 chart YAML。插件只能消费已发布的公开 SPI、类型
 和配置契约；上游内部类、内部 URL 和部署模板不是插件接口。
 
-typed 契约的目标架构见本仓契约文档，但当前 typed 契约尚未发布。0250 仍需通过 CI，
-在 0250 的镜像、契约和产物发布前，不得把 typed 契约作为插件编译输入或部署验收结论。
+typed 契约与宿主适配见 [R-EE-RBAC](docs/r-ee-rbac.md)。必须选择包含 0250/0260、
+通过自身 CI 并完成发布的镜像；候选镜像不得作为插件正式编译输入或部署验收结论。
+
+消费 `TypedAuthorizationResolver` 时同时设置 `kestra.rbac.enabled: true` 和
+`kestra.rbac.typed.enabled: true`。插件接收版本化 Operation 并返回 Decision；宿主负责
+路由、实际 execution owner、query/filter 与 dashboard datasource 解析。旧 REST resolver
+在 typed 模式下不参与请求授权。执行输入/输出依赖继续使用 `McpAuthorizationResolver`。
+QueryDomain 的 GLOBAL 必须显式声明；受限空集合为空域，null scope 或未知版本拒绝。
+宿主将决定范围与请求域相交，在 SQL 分页、total 和 aggregate 前应用范围。
+当前启用开关不增加上游不存在的 EE 页面；具体角色策略与支持行为由扩展发布说明规定。
 
 交付顺序固定为：先构建 overlay 镜像并通过自身 CI，发布镜像并记录实际 commit 与
 digest；再由扩展仓使用该已发布产物独立编译插件 jar，并通过扩展仓 CI；最后由部署仓

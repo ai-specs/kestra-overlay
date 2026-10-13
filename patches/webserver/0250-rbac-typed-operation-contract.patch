@@ -2,13 +2,14 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
 # 来源: 新写；R-EE-RBAC typed operation 架构与上游升级稳定性要求
-# 触达上游文件: 4 个（新增公开契约与契约测试）
+# 触达上游文件: 5 个（公开契约、失败关闭执行门与契约测试）
 # 移除条件: 上游 OSS 提供等价稳定 typed 授权 operation、query scope 和 aggregate 契约
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
 new file mode 100644
+index 0000000..9f0f937
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,113 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.List;
@@ -21,23 +22,66 @@ new file mode 100644
 +
 +    public enum Source { REST, MCP, INTERNAL, DASHBOARD_AGGREGATE }
 +    public enum Resource { FLOW, EXECUTION, NAMESPACE, LOG, METRIC, TRIGGER, KVSTORE,
-+        NAMESPACE_FILE, METADATA }
++        NAMESPACE_FILE, METADATA, SYSTEM, MCP_SERVER, DASHBOARD, BLUEPRINT }
 +    public enum Action { READ, LIST, CREATE, UPDATE, DELETE, EXECUTE, ACCESS_OUTPUTS }
 +    public enum Coverage { SINGLE, COMPLETE_QUERY, COMPLETE_BATCH }
 +    public enum Aggregate { NONE, EXECUTION, LOG, TRIGGER, FLOW_DESCRIPTION }
 +    public enum SideEffect { READ_ONLY, STORAGE_WRITE, QUEUE_WRITE, EXTERNAL }
 +
++    public enum DomainKind { GLOBAL, RESTRICTED }
++
 +    public record QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
-+        List<String> excludedNamespaces, boolean complete, boolean paginated) {
++        List<String> excludedNamespaces, boolean complete, boolean paginated, DomainKind kind) {
 +        public QueryDomain {
 +            exactNamespaces = clean(exactNamespaces);
 +            namespaceSubtrees = clean(namespaceSubtrees);
 +            excludedNamespaces = clean(excludedNamespaces);
++            Objects.requireNonNull(kind, "Domain kind is required");
++            if (kind == DomainKind.GLOBAL && (!exactNamespaces.isEmpty() || !namespaceSubtrees.isEmpty()))
++                throw new IllegalArgumentException("Global domain cannot contain namespace grants");
 +            if (!complete && paginated) throw new IllegalArgumentException("Paginated domain must be complete");
 +        }
-+        public static QueryDomain unrestricted() { return new QueryDomain(List.of(), List.of(), List.of(), true, false); }
++        public QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
++            List<String> excludedNamespaces, boolean complete, boolean paginated) {
++            this(exactNamespaces, namespaceSubtrees, excludedNamespaces, complete, paginated, DomainKind.RESTRICTED);
++        }
++        public static QueryDomain unrestricted() {
++            return new QueryDomain(List.of(), List.of(), List.of(), true, false, DomainKind.GLOBAL);
++        }
++        public static QueryDomain empty() {
++            return new QueryDomain(List.of(), List.of(), List.of(), true, false);
++        }
++        public boolean contains(String namespace) {
++            return namespace != null && !excludedNamespaces.contains(namespace)
++                && (kind == DomainKind.GLOBAL || exactNamespaces.contains(namespace)
++                    || namespaceSubtrees.stream().anyMatch(root -> within(namespace, root)));
++        }
++        public QueryDomain intersect(QueryDomain other) {
++            Objects.requireNonNull(other, "Intersection domain is required");
++            var exclusions = java.util.stream.Stream.concat(excludedNamespaces.stream(), other.excludedNamespaces.stream()).distinct().toList();
++            boolean resultComplete = complete && other.complete;
++            boolean resultPaginated = paginated || other.paginated;
++            if (kind == DomainKind.GLOBAL && other.kind == DomainKind.GLOBAL)
++                return new QueryDomain(List.of(), List.of(), exclusions, resultComplete, resultPaginated, DomainKind.GLOBAL);
++            if (kind == DomainKind.GLOBAL)
++                return new QueryDomain(other.exactNamespaces, other.namespaceSubtrees, exclusions, resultComplete, resultPaginated);
++            if (other.kind == DomainKind.GLOBAL)
++                return new QueryDomain(exactNamespaces, namespaceSubtrees, exclusions, resultComplete, resultPaginated);
++            var exact = java.util.stream.Stream.concat(exactNamespaces.stream().filter(other::contains),
++                other.exactNamespaces.stream().filter(this::contains)).distinct().toList();
++            var subtrees = namespaceSubtrees.stream().flatMap(root -> other.namespaceSubtrees.stream()
++                .map(otherRoot -> within(root, otherRoot) ? root : within(otherRoot, root) ? otherRoot : null))
++                .filter(Objects::nonNull).distinct().toList();
++            return new QueryDomain(exact, subtrees, exclusions, resultComplete, resultPaginated);
++        }
++        private static boolean within(String namespace, String root) {
++            return namespace.equals(root) || namespace.startsWith(root + ".");
++        }
 +        private static List<String> clean(List<String> values) {
-+            return values == null ? List.of() : List.copyOf(values.stream().filter(Objects::nonNull).toList());
++            Objects.requireNonNull(values, "Namespace collection is required");
++            if (values.stream().anyMatch(value -> value == null || !value.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*")))
++                throw new IllegalArgumentException("Invalid namespace in domain");
++            return List.copyOf(values.stream().distinct().toList());
 +        }
 +    }
 +
@@ -49,23 +93,79 @@ new file mode 100644
 +            if (source == null || resource == null || action == null || coverage == null || aggregate == null || sideEffect == null)
 +                throw new IllegalArgumentException("Typed authorization fields are required");
 +            if (tenant == null || tenant.isBlank()) throw new IllegalArgumentException("Tenant is required");
-+            queryDomain = queryDomain == null ? QueryDomain.unrestricted() : queryDomain;
++            Objects.requireNonNull(queryDomain, "Query domain is required");
++            if (namespace != null && !namespace.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*"))
++                throw new IllegalArgumentException("Invalid namespace");
++            if (resourceId != null && resourceId.isBlank()) throw new IllegalArgumentException("Invalid resource ID");
++            if (namespace != null && !queryDomain.contains(namespace)) throw new IllegalArgumentException("Resource is outside query domain");
 +            if (coverage == Coverage.COMPLETE_QUERY && !queryDomain.complete()) throw new IllegalArgumentException("Complete query required");
++            if (coverage == Coverage.SINGLE && namespace == null && resource != Resource.METADATA && resource != Resource.SYSTEM
++                && resource != Resource.MCP_SERVER && resource != Resource.DASHBOARD && resource != Resource.BLUEPRINT)
++                throw new IllegalArgumentException("Single resource namespace is required");
++            if (aggregate != Aggregate.NONE && (coverage != Coverage.COMPLETE_QUERY && aggregate != Aggregate.FLOW_DESCRIPTION || sideEffect != SideEffect.READ_ONLY
++                || action != Action.READ && action != Action.LIST)) throw new IllegalArgumentException("Invalid aggregate operation");
++            if (aggregate == Aggregate.EXECUTION && resource != Resource.EXECUTION
++                || aggregate == Aggregate.LOG && resource != Resource.LOG
++                || aggregate == Aggregate.TRIGGER && resource != Resource.TRIGGER
++                || aggregate == Aggregate.FLOW_DESCRIPTION && resource != Resource.FLOW)
++                throw new IllegalArgumentException("Aggregate resource mismatch");
 +        }
 +    }
 +
 +    public record Decision(boolean allowed, QueryDomain scope, String reason, int contractVersion) {
 +        public Decision {
 +            if (contractVersion != CONTRACT_VERSION) throw new IllegalArgumentException("Unsupported contract version");
-+            if (scope == null) scope = QueryDomain.unrestricted();
++            Objects.requireNonNull(scope, "Decision scope is required");
++            if (allowed && !scope.complete()) throw new IllegalArgumentException("Decision scope must be complete");
 +            reason = reason == null ? "" : reason;
 +        }
-+        public static Decision deny(String reason) { return new Decision(false, QueryDomain.unrestricted(), reason, CONTRACT_VERSION); }
++        public static Decision deny(String reason) { return new Decision(false, QueryDomain.empty(), reason, CONTRACT_VERSION); }
 +        public static Decision allow(QueryDomain scope) { return new Decision(true, scope, "", CONTRACT_VERSION); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+new file mode 100644
+index 0000000..201c734
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+@@ -0,0 +1,34 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import io.micronaut.context.BeanProvider;
++import jakarta.inject.Singleton;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++@Singleton
++public final class TypedAuthorizationGate {
++    private final BeanProvider<TypedAuthorizationResolver> policies;
++
++    public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies) {
++        this.policies = policies;
++    }
++
++    public Mono<Decision> authorize(RbacAuthorizer.Principal principal, Operation operation) {
++        return Mono.defer(() -> {
++            if (principal == null || principal.subject() == null || principal.subject().isBlank()
++                || operation == null || !policies.isUnique()) return Mono.just(Decision.deny("Invalid authorization context"));
++            return Mono.fromCompletionStage(policies.get().authorize(principal, operation))
++                .map(decision -> {
++                    if (!decision.allowed()) return Decision.deny(decision.reason());
++                    QueryDomain effective = operation.queryDomain().intersect(decision.scope());
++                    if (operation.namespace() != null && !effective.contains(operation.namespace()))
++                        return Decision.deny("Resource is outside authorized scope");
++                    return Decision.allow(effective);
++                });
++        }).timeout(Duration.ofSeconds(5))
++            .defaultIfEmpty(Decision.deny("Missing authorization decision"))
++            .onErrorReturn(Decision.deny("Authorization failed"));
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
 new file mode 100644
+index 0000000..213990f
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
 @@ -0,0 +1,10 @@
@@ -78,4 +178,132 @@ new file mode 100644
 +/** Consumer policy contract. The plugin receives typed operations, never OSS route details. */
 +public interface TypedAuthorizationResolver {
 +    CompletionStage<Decision> authorize(RbacAuthorizer.Principal principal, Operation operation);
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
+new file mode 100644
+index 0000000..8243987
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
+@@ -0,0 +1,62 @@
++package io.kestra.webserver.rbac;
++
++import java.util.Arrays;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++
++class TypedAuthorizationContractTest {
++    @Test
++    void shouldDistinguishExplicitGlobalFromEmptyAndMissingScopes() {
++        assertThat(QueryDomain.unrestricted().contains("team.child")).isTrue();
++        assertThat(QueryDomain.empty().contains("team.child")).isFalse();
++        assertThat(Decision.deny("missing").scope().contains("team.child")).isFalse();
++        assertThatThrownBy(() -> Decision.allow(null)).isInstanceOf(NullPointerException.class);
++        assertThatThrownBy(() -> new QueryDomain(null, List.of(), List.of(), true, false)).isInstanceOf(NullPointerException.class);
++        assertThatThrownBy(() -> new QueryDomain(Arrays.asList("team", null), List.of(), List.of(), true, false))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> new QueryDomain(List.of("team.*"), List.of(), List.of(), true, false))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> operation(Resource.FLOW, "team", null, Aggregate.NONE, Coverage.SINGLE))
++            .isInstanceOf(NullPointerException.class);
++    }
++
++    @Test
++    void shouldIntersectUnionDomainsWithoutPromotingExactNamespaces() {
++        var requested = new QueryDomain(List.of("team.exact", "other"), List.of("team.tree"), List.of("team.tree.hidden"), true, true);
++        var grants = new QueryDomain(List.of("team.tree.child"), List.of("team"), List.of("team.exact"), true, false);
++        var intersection = requested.intersect(grants);
++        assertThat(intersection.paginated()).isTrue();
++        assertThat(List.of("team.exact", "team.exact.child", "team.tree", "team.tree.child", "team.tree.hidden", "team.tree2", "other")
++            .stream().filter(intersection::contains).toList()).containsExactly("team.tree", "team.tree.child");
++        var exact = new QueryDomain(List.of("team"), List.of(), List.of(), true, false);
++        assertThat(exact.intersect(grants).contains("team.child")).isFalse();
++        assertThat(QueryDomain.empty().intersect(QueryDomain.unrestricted()).contains("team")).isFalse();
++        assertThat(requested.intersect(QueryDomain.unrestricted())).isEqualTo(requested);
++        assertThat(QueryDomain.unrestricted().intersect(requested)).isEqualTo(requested);
++    }
++
++    @Test
++    void shouldRejectIncompleteOrInconsistentOperationsBeforePolicyEvaluation() {
++        var exact = new QueryDomain(List.of("team"), List.of(), List.of(), true, false);
++        assertThatThrownBy(() -> operation(Resource.FLOW, "other", exact, Aggregate.NONE, Coverage.SINGLE))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> operation(Resource.EXECUTION, null, exact, Aggregate.LOG, Coverage.COMPLETE_QUERY))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> operation(Resource.FLOW, null, exact, Aggregate.NONE, Coverage.SINGLE))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> Decision.allow(new QueryDomain(List.of("team"), List.of(), List.of(), false, false)))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> new Decision(true, exact, "", CONTRACT_VERSION + 1))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThat(operation(Resource.EXECUTION, null, exact, Aggregate.EXECUTION, Coverage.COMPLETE_QUERY).queryDomain())
++            .isEqualTo(exact);
++    }
++
++    private Operation operation(Resource resource, String namespace, QueryDomain domain, Aggregate aggregate, Coverage coverage) {
++        return new Operation(CONTRACT_VERSION, Source.REST, resource, Action.READ, "main", namespace, null,
++            domain, coverage, aggregate, SideEffect.READ_ONLY);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
+new file mode 100644
+index 0000000..773a35c
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
+@@ -0,0 +1,54 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import io.micronaut.context.BeanProvider;
++import org.junit.jupiter.api.Test;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.*;
++
++class TypedAuthorizationGateTest {
++    private final RbacAuthorizer.Principal principal = new RbacAuthorizer.Principal("subject", List.of("reader"), null, null, List.of());
++
++    @Test
++    void shouldDenyMissingIdentityPolicyAndDecisions() {
++        var policies = policies();
++        var gate = new TypedAuthorizationGate(policies);
++        assertThat(gate.authorize(principal, query()).block().allowed()).isFalse();
++        when(policies.isUnique()).thenReturn(true);
++        when(policies.get()).thenReturn((subject, operation) -> CompletableFuture.completedFuture(null));
++        assertThat(gate.authorize(principal, query()).block().allowed()).isFalse();
++        assertThat(gate.authorize(null, query()).block().allowed()).isFalse();
++        when(policies.get()).thenReturn((subject, operation) -> { throw new IllegalStateException("failure"); });
++        assertThat(gate.authorize(principal, query()).block().allowed()).isFalse();
++    }
++
++    @Test
++    void shouldConstrainPolicyScopeByActualQueryDomain() {
++        var policies = policies();
++        when(policies.isUnique()).thenReturn(true);
++        when(policies.get()).thenReturn((subject, operation) -> CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted())));
++        var gate = new TypedAuthorizationGate(policies);
++        Decision result = gate.authorize(principal, query()).block();
++        assertThat(result.allowed()).isTrue();
++        assertThat(result.scope().contains("team")).isTrue();
++        assertThat(result.scope().contains("team.child")).isFalse();
++        assertThat(result.scope().contains("other")).isFalse();
++        when(policies.get()).thenReturn((subject, operation) -> CompletableFuture.completedFuture(Decision.allow(QueryDomain.empty())));
++        var single = new Operation(CONTRACT_VERSION, Source.REST, Resource.FLOW, Action.READ, "main", "team", "flow",
++            query().queryDomain(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY);
++        assertThat(gate.authorize(principal, single).block().allowed()).isFalse();
++    }
++
++    private Operation query() {
++        return new Operation(CONTRACT_VERSION, Source.REST, Resource.FLOW, Action.LIST, "main", null, null,
++            new QueryDomain(List.of("team"), List.of(), List.of(), true, true), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
++    }
++
++    @SuppressWarnings("unchecked")
++    private BeanProvider<TypedAuthorizationResolver> policies() {
++        return mock(BeanProvider.class);
++    }
 +}

@@ -177,7 +177,7 @@ grep -n "micronaut-security" webserver/build.gradle                  # 仅 csrf
   直接调用业务服务，未消费资源授权组件；外部 jar 缺席时无法约束 REST。
   `selfrun` 使用 `java -jar`，未声明 Class-Path 时 `/app/libs` jar 不进入应用上下文。
 - 最小面：构建脚本注入 manifest 元数据；overlay typed SPI、常驻失败关闭门、
-  可信角色传递和执行前授权激活点。角色、绑定、资源路由解析与权限模型属于外部仓。
+  可信角色传递和执行前授权激活点。角色、绑定与权限模型属于外部仓；上游路由适配属于宿主。
 - 归属行：差异表 §2-B 与 §4 的 R-EE-RBAC / R-CLASSPATH-MERGE。
 
 部署统一开关为 `kestra.rbac.enabled`。未知、无法确定完整资源集合或无法安全解析
@@ -223,3 +223,36 @@ record 反射和序列化增加组件，消费方必须按发布产物核对兼�
 宿主定向探针 `NamespaceScopeContractTest` 验证 Exact/child/前缀碰撞、混合 union、
 空 scope、GLOBAL、二参构造、真实 H2 SQL 条件、独立 log 条件、MCP 缓存隔离，以及
 Namespace 分页、total 和强制候选。真实插件和 Compose 验收归消费仓与部署仓。
+
+## Typed 宿主适配：REQ-0250 / REQ-0260
+
+入口 B，消费仓为 `kestra-plugin-rbac`。普通 UI 的 Flow revisions/graph、Execution search、
+KV/file、Dashboard preview 必须使用稳定资源语义。旧 REST SPI 将 controller、handler 和 URL
+交给扩展解析，导致扩展随上游路由变化而修改。Dashboard Execution/Log/Trigger `fetchData`
+没有附加已有 namespace ACL，是聚合查询越权的实际路径。
+
+比较结果：复用 `NamespaceAccessControl`、独立 log ACL 和现有 runtime execution gate；
+增强查询排除条件与 dashboard fetchData 条件；新增宿主适配器消费版本化 typed policy。
+不新增角色模型、IAM API 或菜单产品功能。上游适配集中在 `OssRestOperationAdapter`，
+扩展只实现 `TypedAuthorizationResolver`，不读取 URL、controller、handler 或 chart 文本。
+
+`kestra.rbac.enabled: true` 和 `kestra.rbac.typed.enabled: true` 同时启用 typed REST 与查询门。
+typed 开关默认关闭，以保留旧已发布扩展兼容性；启用后旧 REST resolver 不参与请求授权。
+未知业务操作生成 SYSTEM/EXECUTE 完整批次操作，只能由扩展明确授予实例权限；普通角色
+必须拒绝该操作。实际执行 gate 和 MCP gate 在 typed 模式下消费同一 policy，MCP scope
+检查保持独立。输入/输出依赖解析继续使用已有公开 `McpAuthorizationResolver`。
+
+`QueryDomain` 明确区分 GLOBAL 与 RESTRICTED。受限空集合为空域；null scope、null 集合、
+集合中的 null、非法 namespace、不完整分页域和未知版本必须拒绝。宿主将 policy scope
+与实际查询域求交集。排除项表示精确 namespace，SQL 在分页、total 和聚合之前附加排除条件。
+Exact 不包含后代或同名前缀。Namespace 合成候选使用同一 predicate。
+
+Dashboard 在合并真实 global filters 后解析实际 datasource；只接受宿主 Execution、Log、
+Trigger 数据源及 FlowDescription，拒绝未知类型与表达式。实际 repository 执行范围受
+namespace/log ACL 限制；KPI 的分子和分母均使用 repository ACL。展示字段不进入授权。
+Namespace file 根目录只读列举不会创建目录。Execution 文件读取只接受实际 execution
+storage prefix 中的规范 `kestra:` URI，其他 scheme、跨 execution、编码和路径歧义拒绝。
+
+宿主自身探针包括真实 Netty、真实 H2 Flow 搜索、精确 namespace/child/前缀隔离、拒绝创建后
+无 Flow 持久化，以及 typed 缺组件/身份/异常、scope 交集与 datasource 检查。构建脚本必须
+校验专属 XML 无失败和跳过。通过源码探针不代表发布镜像或第三方 Compose/UI 已验收。
