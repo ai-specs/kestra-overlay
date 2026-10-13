@@ -9,8 +9,7 @@
 # (channel ③); classpath slot -> manifest Class-Path entries injected by
 # build.sh into the executable jar (metadata only, R-CLASSPATH-MERGE) with the
 # jar bodies mounted at /app/libs (channel ②). The plugin-slot staging path
-# below is retained as machinery only — the registry carries no rows using it,
-# and adding one requires revisiting the positioning ruling first.
+# is unavailable: all plugin bodies are supplied by the deployment.
 #
 # The extension registry lives in extensions.tsv (name | slot | note) — this
 # script is client-neutral machinery; downstream repos are data, not code
@@ -25,16 +24,9 @@
 #   standalone -> separate process/image built by its own repo CI; not baked
 #                 into the kestra image.
 #
-# Jar sources (for the legacy staging machinery) are prebuilt artifacts from
-# the extension repos; source priority per extension (first hit wins):
-#   1) EXT_JAR_<NAME_UPPER_UNDERSCORED> env var -> path to a jar file or a dir of jars
-#   2) $PWD/extensions/<name>/                   -> repo checkout; jars discovered under it
-#   3) otherwise                                  -> skipped, reported NOT INJECTED
-#
-# No binaries are vendored in this repo: jars come only from extension-repo
-# built artifacts (env var or extensions/ dir). The injection manifest is
-# written to $WORK/.overlay-extensions.json; the official Dockerfile bakes
-# whatever is staged under $WORK/plugins/ (expected: nothing).
+# This script reads only the local extension registry. It never reads sibling
+# repositories, environment-selected artifacts or extension jar bytes.
+# Every extension body is supplied by the deployment after this image is published.
 set -euo pipefail
 
 WORK="${1:?worktree path required}"
@@ -42,13 +34,18 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGISTRY="$REPO/extensions.tsv"
 PLUGINS_DIR="$WORK/plugins"
 mkdir -p "$PLUGINS_DIR"
+# Reject leftovers rather than allowing the upstream Dockerfile to bake them.
+if find "$PLUGINS_DIR" -type f -name '*.jar' -print -quit | grep -q .; then
+  echo 'FAIL: external plugin jars must not be present in the image build directory' >&2
+  exit 1
+fi
 
 [ -f "$REGISTRY" ] || { echo "FAIL: registry missing: $REGISTRY" >&2; exit 1; }
 
 MANIFEST_TMP="$WORK/.overlay-extensions.tmp"
 : > "$MANIFEST_TMP"
 
-echo "== extension injection (registry: extensions.tsv) =="
+echo "== extension deployment contracts (registry: extensions.tsv) =="
 
 # registry rows: name | slot | note (comments/blank lines skipped)
 awk -F'\t' '/^#/ || /^$/ {next} {print $1 "\t" $2}' "$REGISTRY" | while IFS="$(printf '\t')" read -r name slot; do
@@ -64,36 +61,8 @@ awk -F'\t' '/^#/ || /^$/ {next} {print $1 "\t" $2}' "$REGISTRY" | while IFS="$(p
       echo "$name|classpath-runtime-mount" >> "$MANIFEST_TMP"
       ;;
     plugin)
-      src="$(printenv "EXT_JAR_$(echo "$name" | tr 'a-z' 'A-Z' | tr '-' '_')" 2>/dev/null || true)"
-      jar_src=""
-      if [ -n "$src" ]; then
-        jar_src="$src"
-      elif [ -d "$REPO/extensions/$name" ]; then
-        jar_src="$REPO/extensions/$name"
-      fi
-      if [ -z "$jar_src" ]; then
-        echo "  - $name: NOT INJECTED (no artifacts; set EXT_JAR_* or extensions/$name)"
-        continue
-      fi
-      if [ -f "$jar_src" ]; then
-        cp "$jar_src" "$PLUGINS_DIR/"
-        echo "  + $name: staged jar $(basename "$jar_src")"
-      else
-        # dir: copy jars (one level: dir/*.jar and dir/build/libs/*.jar)
-        found=0
-        for j in "$jar_src"/*.jar "$jar_src"/build/libs/*.jar; do
-          if [ -f "$j" ]; then
-            cp "$j" "$PLUGINS_DIR/"
-            echo "  + $name: staged $(basename "$j")"
-            found=1
-          fi
-        done
-        if [ "$found" = "0" ]; then
-          echo "  - $name: NO jars found under $jar_src (extension build pending)"
-          continue
-        fi
-      fi
-      echo "$name|$PLUGINS_DIR" >> "$MANIFEST_TMP"
+      echo "  - $name: runtime mount /app/plugins (zero jar bytes staged)"
+      echo "$name|plugin-runtime-mount" >> "$MANIFEST_TMP"
       ;;
     *)
       echo "FAIL: unknown slot '$slot' for $name in extensions.tsv" >&2
@@ -122,4 +91,4 @@ rm -f "$MANIFEST_TMP"
 
 total=$(awk -F'\t' '/^#/ || /^$/ {next} {n++} END {print n+0}' "$REGISTRY")
 staged=$(ls "$PLUGINS_DIR" | wc -l | tr -d ' ')
-echo "== extension injection done: registry ${total} entries, staged plugin jars: ${staged} =="
+echo "== extension deployment contracts done: registry ${total} entries, staged plugin jars: ${staged} =="

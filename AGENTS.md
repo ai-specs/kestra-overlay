@@ -8,7 +8,7 @@
 
 kestra-overlay 是 **kestra 侧薄 overlay 构建仓**：CI 时克隆上游 kestra（BASE pin 固定
 release commit）→ 按序应用**需求对齐的薄 patch**（补足 OSS 相对 EE 故意阉割的**架构扩展能力**
-——见 `docs/oss-ee-gap.md`）→ 注入扩展仓 jar → 编译 webserver → 构建镜像推 ghcr。
+——见 `docs/oss-ee-gap.md`）→ 编译 webserver → 声明部署侧扩展挂载契约 → 构建镜像推 ghcr。
 **不携带上游代码，不跑上游全量 CI，不承载业务逻辑。**
 
 ### 长远目标（北极星，维护者裁定 2026-10-07）
@@ -96,8 +96,8 @@ jar**。铁律与推论（证据与机制全文见 `docs/extension-mechanisms.md
 | `patches/webserver/NNNN-slug.patch` | 需求对齐薄 patch（头部注释 + 统一 diff） | 命名 `^\d{4}-[a-z0-9-]+$`；编号即应用顺序（字典序） |
 | `patches/manifest.tsv` | patch 总账（含 reserved 待激活点） | 与 patch 文件一一对应，`check-patches.sh` 强校验 |
 | `scripts/build.sh` | 克隆上游→apply→编译 webserver→镜像→push | `--apply-only` = 验证门 |
-| `extensions.tsv` | 扩展仓注入注册表（name \| slot \| 说明；slot=plugin/classpath/standalone） | 骨架客户中立：下游是数据不是代码；与机制通道矩阵对应 |
-| `scripts/build-extensions.sh` | 按 extensions.tsv 收集注入（env > extensions/ > 跳过；classpath 槽未落地报 PENDING） | 本仓不 vendored 任何 jar 二进制 |
+| `extensions.tsv` | 扩展部署契约注册表（name \| slot \| 说明；slot=plugin/classpath/standalone） | 骨架客户中立：下游是数据不是代码；与机制通道矩阵对应 |
+| `scripts/build-extensions.sh` | 只读取本仓 extensions.tsv，声明运行时挂载契约；不读取扩展源码或 jar | 构建目录发现外部 jar 时拒绝构建 |
 | `scripts/check-patches.sh` | 本仓质量门（结构校验 + 可选 apply-check） | 改 patches 后必须本地跑；CI patch-verify 第一步 |
 | `docs/oss-ee-gap.md` | OSS↔EE 能力差异表 + reserved 登记簿 | 补足决策的唯一依据；BASE 升级后必须复扫 |
 | `docs/extension-mechanisms.md` | 扩展机制原理（编译/重启/外部 jar 三问的调查记录） | 「怎么生效」的事实源；含 OQ 开放问题清单（实施前必须闭环） |
@@ -261,3 +261,10 @@ manifest 已同步 → `check-patches.sh` 全 PASS → `--apply-check` 树级一
 - 每 patch 的增/删/改在 commit message 记录理由；被删 patch 的理由入 manifest 或 commit（git 历史即归档，不留 .bak）。
 - 本文件与 `docs/oss-ee-gap.md`、`patches/manifest.tsv` 与实际 patch 集**四者一致**，由
   `check-patches.sh` 部分强制、评审补足。
+
+## 10. 独立交付边界
+
+本仓不读取、checkout、编译或打包任何 kestra-plugin-* 项目。
+扩展注册表只声明公开 SPI 与部署文件名，不包含消费仓内部目录或构建指令。
+本仓 CI 的探针源码属于本仓测试，只验证公开契约，不引用真实业务插件。
+本仓镜像 CI 通过并发布后，独立插件才消费已发布产物；组合部署和跨仓验收归 monorepo。

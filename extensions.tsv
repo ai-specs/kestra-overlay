@@ -10,9 +10,9 @@
 # slot 语义（与 docs/extension-mechanisms.md §0 通道矩阵对应；taxonomy 含 standalone
 # 槽位供未来使用，当前无登记行）：
 #   plugin     → 通道③：jar 落 /app/plugins（部署侧 volume 挂载 + 重启；本仓构建期零
-#                jar——定位裁定 2026-10-07，脚本暂存路径仅保留为机械能力、无使用行）
+#                jar——插件槽只声明部署挂载，构建脚本不读取外部产物）
 #   classpath  → 通道②：jar 须进应用 classpath（bean 进 Micronaut 上下文）——
 #                承载依赖 R-CLASSPATH-MERGE：本仓构建期仅注入 manifest 条目元数据，
 #                jar 本体部署侧挂载 /app/libs；未落地前报 PENDING（占位先行）
 #   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）——不入表（见登记规则）
-kestra-rbac-authorizer	classpath	消费仓ai-specs/kestra-plugin-rbac；部署侧挂载/app/libs/kestra-rbac-authorizer.jar，构建期仅注入manifest Class-Path元数据。统一REST/MCP授权实施与验收中，尚未宣称完整资源隔离。
+kestra-rbac-authorizer	classpath	公开授权SPI的部署文件契约：/app/libs/kestra-rbac-authorizer.jar；构建期只注入manifest Class-Path元数据，不读取或构建扩展jar。
