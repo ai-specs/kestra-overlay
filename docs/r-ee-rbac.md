@@ -260,3 +260,10 @@ storage prefix 中的规范 `kestra:` URI，其他 scheme、跨 execution、编�
 REQ-0261 在现有 topology repository 的查询入口附加 source/destination 两端 Flow
 namespace ACL。未授权的依赖边不得进入图构造；H2 条件探针验证 Exact 不包含 child，
 且任一端越权都排除。该机制不改变依赖业务模型，不将策略放入宿主。
+
+REQ-0270 将 Dashboard 数据查询授权放在 `ChartDataService` 的实际 repository 调用前。
+公开 `DashboardQueryAccessControl` 提供默认 GLOBAL bean，宿主 typed adapter 替换该 bean。
+每次 `fetchData` 和 `fetchValue` 都必须先完成授权。百分比 KPI 的分子与分母分别生成
+operation；分子域额外交集 numerator 中的 namespace 条件，分母只使用实际 where 域。
+实际 SQL 范围继续由 namespace/log ACL 应用。未知 datasource 或表达式拒绝，普通
+策略不读取 chart 文本。执行顺序探针验证两次 operation 和拒绝时零 repository 调用。

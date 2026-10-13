@@ -33,3 +33,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0250	0250-rbac-typed-operation-contract.patch	core	ai-specs/kestra-plugin-rbac	Versioned typed RBAC operation/query/aggregate contract、显式scope与交集、失败关闭执行门及专属探针	5	新写;R-EE-RBAC typed contract	上游提供等价稳定 typed 授权契约
 0260	0260-rbac-typed-host-adapter.patch	core	ai-specs/kestra-plugin-rbac	OSS matched route与实际owner适配、typed REST执行门、namespace/log查询ACL、dashboard数据源授权与探针	22	新写;R-EE-RBAC typed host adapter	上游OSS提供等价typed适配及查询授权执行入口
 0261	0261-rbac-topology-query-scope.patch	core	ai-specs/kestra-plugin-rbac	依赖图SQL读取前对source/destination namespace应用已有ACL与H2探针	2	新写;R-EE-RBAC依赖图实际越权路径	上游OSS依赖图查询统一消费namespace ACL
+0270	0270-dashboard-query-authorization.patch	core	ai-specs/kestra-plugin-rbac	Dashboard实际查询前授权、KPI分子分母独立operation与SQL执行顺序探针	5	新写;typed KPI逐查询契约	上游OSS每个Dashboard实际查询提供等价授权激活点

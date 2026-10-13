@@ -127,19 +127,10 @@ index 6b5a77a..415f778 100644
      @Inject
      protected TenantService tenantService;
  
-@@ -256,6 +259,7 @@ public class DashboardController {
-         if (chart instanceof DataChart dataChart) {
-             DataFilter<?, ?> dataChartDatas = dataChart.getData();
-             dataChartDatas.updateWhereWithGlobalFilters(filters, startDate, endDate);
-+            typedDashboardGate.authorize(tenantId, dataChartDatas);
- 
-             // StartDate & EndDate are only set in the globalFilter for JDBC
-             // TODO: Check if we can remove them from generate() for ElasticSearch as they are already set in the where property
-@@ -263,10 +267,12 @@ public class DashboardController {
+@@ -263,10 +266,11 @@ public class DashboardController {
          } else if (chart instanceof DataChartKPI dataChartKPI) {
              DataFilterKPI<?, ?> dataChartDatas = dataChartKPI.getData();
              dataChartDatas.updateWhereWithGlobalFilters(filters, startDate, endDate);
-+            typedDashboardGate.authorize(tenantId, dataChartDatas);
  
              return PagedResults.of(new ArrayListTotal<>(this.chartDataService.generateKPI(tenantId, dataChartKPI, startDate, endDate), 1));
          } else if (chart instanceof Markdown markdownChart) {

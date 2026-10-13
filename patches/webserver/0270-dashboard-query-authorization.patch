@@ -1,0 +1,190 @@
+# 需求: REQ-0270 Dashboard每个实际数据查询在执行前生成typed operation
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；百分比KPI分子分母共享一次控制器授权，缺少每个实际查询的operation
+# 触达上游文件: 5 个（查询激活点、宿主typed适配与执行顺序探针）
+# 移除条件: 上游OSS每个Dashboard实际查询提供等价授权激活点
+diff --git a/core/src/main/java/io/kestra/core/services/ChartDataService.java b/core/src/main/java/io/kestra/core/services/ChartDataService.java
+index 368ead8..6457b64 100644
+--- a/core/src/main/java/io/kestra/core/services/ChartDataService.java
++++ b/core/src/main/java/io/kestra/core/services/ChartDataService.java
+@@ -30,11 +30,17 @@ import static io.kestra.core.utils.MathUtils.roundDouble;
+ @Singleton
+ public class ChartDataService {
+     private final List<QueryBuilderInterface<?>> queryBuilders;
++    private final DashboardQueryAccessControl accessControl;
+     private final Map<Class<? extends QueryBuilderInterface<?>>, QueryBuilderInterface<?>> queryBuilderByRepositoryClass = new ConcurrentHashMap<>();
+ 
+-    @Inject
+     public ChartDataService(List<QueryBuilderInterface<?>> queryBuilders) {
++        this(queryBuilders, new GlobalDashboardQueryAccessControl());
++    }
++
++    @Inject
++    public ChartDataService(List<QueryBuilderInterface<?>> queryBuilders, DashboardQueryAccessControl accessControl) {
+         this.queryBuilders = Objects.requireNonNull(queryBuilders, "queryBuilders must not be null");
++        this.accessControl = Objects.requireNonNull(accessControl, "Dashboard query access control is required");
+     }
+ 
+     public <F extends Enum<F>> ArrayListTotal<Map<String, Object>> generate(
+@@ -44,6 +50,7 @@ public class ChartDataService {
+         ZonedDateTime endDate,
+         Pageable pageable
+     ) throws IOException {
++        accessControl.beforeQuery(tenantId, dataChart.getData(), false);
+         return this.<F>queryBuilder(dataChart.getData().repositoryClass())
+             .fetchData(tenantId, dataChart.getData(), startDate, endDate, pageable);
+     }
+@@ -56,9 +63,12 @@ public class ChartDataService {
+     ) throws IOException {
+         QueryBuilderInterface<F> queryBuilder = this.queryBuilder(dataChart.getData().repositoryClass());
+ 
+-        Double filteredValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, dataChart.getData().getNumerator() != null);
++        boolean numerator = dataChart.getData().getNumerator() != null;
++        accessControl.beforeQuery(tenantId, dataChart.getData(), numerator);
++        Double filteredValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, numerator);
+ 
+         if (dataChart.getChartOptions() != null && dataChart.getChartOptions().getNumberType().equals(KpiOption.NumberType.PERCENTAGE)) {
++            accessControl.beforeQuery(tenantId, dataChart.getData(), false);
+             Double totalValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, false);
+             if (totalValue == null || totalValue == 0) {
+                 return List.of(Map.of("value", 0.0));
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+index 5c2f9bc..da945ec 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+@@ -17,7 +17,8 @@ import jakarta.inject.Singleton;
+ import static io.kestra.webserver.rbac.TypedAuthorization.*;
+ 
+ @Singleton
+-public final class TypedDashboardGate {
++@io.micronaut.context.annotation.Replaces(io.kestra.core.services.GlobalDashboardQueryAccessControl.class)
++public final class TypedDashboardGate implements io.kestra.core.services.DashboardQueryAccessControl {
+     private final RbacConfiguration configuration;
+     private final boolean typedEnabled;
+     private final TypedAuthorizationGate gate;
+@@ -30,6 +31,15 @@ public final class TypedDashboardGate {
+     }
+ 
+     public void authorize(String tenant, Object datasource) {
++        authorize(tenant, datasource, false);
++    }
++
++    @Override
++    public void beforeQuery(String tenant, IData<?> datasource, boolean numerator) {
++        authorize(tenant, datasource, numerator);
++    }
++
++    private void authorize(String tenant, Object datasource, boolean numerator) {
+         if (!configuration.enabled() || !typedEnabled) return;
+         var request = ServerRequestContext.currentRequest().orElseThrow(() -> denied());
+         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow(() -> denied());
+@@ -59,6 +69,7 @@ public final class TypedDashboardGate {
+         if (hasExpression(definition)) throw denied();
+         QueryDomain domain = namespace == null ? queryDomain(definition.path("where"))
+             : new QueryDomain(List.of(namespace), List.of(), List.of(), true, false);
++        if (numerator) domain = domain.intersect(queryDomain(definition.path("numerator")));
+         var operation = new Operation(CONTRACT_VERSION, Source.DASHBOARD_AGGREGATE, resource, Action.READ, tenant, namespace, id,
+             domain, namespace == null ? Coverage.COMPLETE_QUERY : Coverage.SINGLE, aggregate, SideEffect.READ_ONLY);
+         Decision decision = gate.authorize(principal, operation).block();
+diff --git a/core/src/main/java/io/kestra/core/services/DashboardQueryAccessControl.java b/core/src/main/java/io/kestra/core/services/DashboardQueryAccessControl.java
+new file mode 100644
+index 0000000..ea57e94
+--- /dev/null
++++ b/core/src/main/java/io/kestra/core/services/DashboardQueryAccessControl.java
+@@ -0,0 +1,7 @@
++package io.kestra.core.services;
++
++import io.kestra.plugin.core.dashboard.data.IData;
++
++public interface DashboardQueryAccessControl {
++    void beforeQuery(String tenant, IData<?> datasource, boolean numerator);
++}
+diff --git a/core/src/main/java/io/kestra/core/services/GlobalDashboardQueryAccessControl.java b/core/src/main/java/io/kestra/core/services/GlobalDashboardQueryAccessControl.java
+new file mode 100644
+index 0000000..c88f929
+--- /dev/null
++++ b/core/src/main/java/io/kestra/core/services/GlobalDashboardQueryAccessControl.java
+@@ -0,0 +1,10 @@
++package io.kestra.core.services;
++
++import io.kestra.plugin.core.dashboard.data.IData;
++import jakarta.inject.Singleton;
++
++@Singleton
++public class GlobalDashboardQueryAccessControl implements DashboardQueryAccessControl {
++    @Override
++    public void beforeQuery(String tenant, IData<?> datasource, boolean numerator) {}
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardQueryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardQueryTest.java
+new file mode 100644
+index 0000000..d68a06f
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardQueryTest.java
+@@ -0,0 +1,66 @@
++package io.kestra.webserver.rbac;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import io.kestra.core.models.dashboards.ColumnDescriptor;
++import io.kestra.core.models.dashboards.DataFilterKPI;
++import io.kestra.core.models.dashboards.filters.EqualTo;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import io.kestra.core.services.ChartDataService;
++import io.kestra.plugin.core.dashboard.chart.KPI;
++import io.kestra.plugin.core.dashboard.chart.kpis.KpiOption;
++import io.kestra.plugin.core.dashboard.data.ExecutionsKPI;
++import io.kestra.plugin.core.dashboard.data.IExecutions;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import org.junit.jupiter.api.Test;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class TypedDashboardQueryTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void shouldAuthorizeNumeratorAndDenominatorSeparatelyBeforeEachQuery() throws Exception {
++        BeanProvider<TypedAuthorizationResolver> policies = mock(BeanProvider.class);
++        when(policies.isUnique()).thenReturn(true);
++        var seen = new ArrayList<Operation>();
++        when(policies.get()).thenReturn((principal, operation) -> {
++            seen.add(operation);
++            return CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted()));
++        });
++        var gate = new TypedDashboardGate(new RbacConfiguration(true, false), true, new TypedAuthorizationGate(policies));
++        var repository = mock(ExecutionRepositoryInterface.class);
++        when(repository.fetchValue(anyString(), any(), any(), any(), anyBoolean())).thenAnswer(invocation -> {
++            assertThat(seen).hasSize(invocation.getArgument(4, Boolean.class) ? 1 : 2);
++            return invocation.getArgument(4, Boolean.class) ? 2.0 : 4.0;
++        });
++        var service = new ChartDataService(List.of(repository), gate);
++        var data = ExecutionsKPI.<ColumnDescriptor<IExecutions.Fields>>builder().type("io.kestra.plugin.core.dashboard.data.ExecutionsKPI")
++            .numerator(List.of(EqualTo.<IExecutions.Fields>builder().field(IExecutions.Fields.NAMESPACE).value("team").build())).build();
++        var chart = KPI.<IExecutions.Fields, DataFilterKPI<IExecutions.Fields, ? extends ColumnDescriptor<IExecutions.Fields>>>builder()
++            .data(data).chartOptions(KpiOption.builder().numberType(KpiOption.NumberType.PERCENTAGE).build()).build();
++        var request = HttpRequest.GET("/api/v1/main/dashboards/charts/preview");
++        request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("reader", List.of("reader")));
++        ServerRequestContext.with(request, () -> {
++            assertThatCode(() -> assertThat(service.generateKPI("main", chart, null, null).getFirst().get("value")).isEqualTo(50.0))
++                .doesNotThrowAnyException();
++            assertThat(seen).hasSize(2);
++            assertThat(seen.getFirst().queryDomain().contains("other")).isFalse();
++            assertThat(seen.getLast().queryDomain().contains("other")).isTrue();
++            assertThat(seen).allMatch(operation -> operation.source() == Source.DASHBOARD_AGGREGATE);
++        });
++        clearInvocations(repository);
++        when(policies.get()).thenReturn((principal, operation) -> CompletableFuture.completedFuture(Decision.deny("Denied query")));
++        ServerRequestContext.with(request, () -> {
++            assertThatThrownBy(() -> service.generateKPI("main", chart, null, null)).isInstanceOf(HttpStatusException.class);
++        });
++        verify(repository, never()).fetchValue(anyString(), any(), any(), any(), anyBoolean());
++    }
++}
