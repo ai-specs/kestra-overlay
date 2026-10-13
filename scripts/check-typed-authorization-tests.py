@@ -12,6 +12,7 @@ for suite, expected in {
     "TypedRbacHttpProbeTest": 1,
     "TypedTopologyScopeTest": 1,
     "TypedDashboardQueryTest": 1,
+    "AuthorizationInvocationContextTest": 1,
 }.items():
     report = ET.parse(results / f"TEST-io.kestra.webserver.rbac.{suite}.xml").getroot()
     if int(report.attrib["tests"]) != expected or any(

@@ -267,3 +267,11 @@ REQ-0270 将 Dashboard 数据查询授权放在 `ChartDataService` 的实际 rep
 operation；分子域额外交集 numerator 中的 namespace 条件，分母只使用实际 where 域。
 实际 SQL 范围继续由 namespace/log ACL 应用。未知 datasource 或表达式拒绝，普通
 策略不读取 chart 文本。执行顺序探针验证两次 operation 和拒绝时零 repository 调用。
+
+REQ-0280 不再根据缺少 `ServerRequestContext` 推断全域内部调用。HTTP filter 捕获实际
+请求来源，宿主执行器包装器使用 Micronaut `PropagatedContext` 传播来源和身份；上下文
+完全丢失且无显式内部标记时，namespace/log 查询 scope 为空。身份缺失不能被内部标记
+覆盖。runtime KV/file metadata façade 和定时 KV 清理入口显式声明宿主调用来源；HTTP
+调用该入口仍保留原请求。后台 scope 不等于 HTTP 主体权限，不向插件暴露线程名或路由。
+裸线程上下文丢失、线程池请求传播、明确内部调用、内部标记下HTTP身份缺失和真实H2查询
+探针必须通过。真实 Compose 仍需验证 engine、scheduler、MCP及关闭RBAC回归。
