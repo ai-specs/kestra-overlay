@@ -349,7 +349,6 @@ index 0000000..13218bd
 +        String executionId = request.variable("executionId");
 +        var execution = executions.findByIdWithoutAcl(tenant, executionId).orElse(null);
 +        if (execution == null || !tenant.equals(execution.getTenantId())) return List.of();
-+        if (action == Action.ACCESS_OUTPUTS && !executionFile(request, execution)) return List.of();
 +        return single(resource, action, tenant, execution.getNamespace(), executionId);
 +    }
 +
