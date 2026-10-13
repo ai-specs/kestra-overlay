@@ -10,9 +10,15 @@ PG="overlay-mcp-pg-$$"
 APP="overlay-mcp-app-$$"
 TEMP_DIR=$(mktemp -d)
 cleanup() {
+  local code=$?
+  if [ "$code" != 0 ]; then
+    docker inspect -f 'MCP acceptance container: status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$APP" 2>/dev/null || true
+    docker logs --tail 600 "$APP" 2>&1 | python3 -c 'import re,sys; [print("[redacted credential-bearing line]" if re.search(r"token|password|secret|cookie|authorization|Bearer|state=|code=|eyJ[A-Za-z0-9_-]+\.", line, re.I) else line, end="" if line.endswith("\n") else "\n") for line in sys.stdin]' || true
+  fi
   docker rm -f "$APP" "$PG" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   rm -rf "$TEMP_DIR"
+  return "$code"
 }
 trap cleanup EXIT
 docker network create "$NET" >/dev/null

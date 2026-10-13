@@ -2,7 +2,7 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
 # 来源: 新写；namespace ACL将上下文丢失解释为全域，违反HTTP缺失身份不可视为内部调用的契约
-# 触达上游文件: 14 个（来源上下文、宿主执行器传播、内部facade激活与探针）
+# 触达上游文件: 15 个（来源上下文、宿主执行器传播、内部facade和queue激活与探针）
 # 移除条件: 上游OSS提供等价请求授权上下文传播和显式内部调用机制
 diff --git a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
 index a83210e..d5f829c 100644
@@ -89,6 +89,15 @@ index 9cbc0d4..edc6366 100644
      public void purgeExpired() {
          log.info("Start cleaning expired KV store entries");
          List<String> tenants = findTenants();
+diff --git a/queue/src/main/java/io/kestra/queue/QueueService.java b/queue/src/main/java/io/kestra/queue/QueueService.java
+index 0aa05ba..d68b52d 100644
+--- a/queue/src/main/java/io/kestra/queue/QueueService.java
++++ b/queue/src/main/java/io/kestra/queue/QueueService.java
+@@ -74,3 +74,3 @@ public class QueueService {
+     public void execute(Runnable runnable) {
+-        this.subscriberExecutorService.execute(runnable);
++        this.subscriberExecutorService.execute(io.kestra.core.repositories.AuthorizationInvocationContext.internalTask().wrap(runnable));
+     }
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
 index ad213a0..9091c65 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
@@ -145,10 +154,10 @@ index ea4a75d..550da4e 100644
      @Singleton
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java
 new file mode 100644
-index 0000000..540d80d
+index 0000000..e695977
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,43 @@
 +package io.kestra.core.repositories;
 +
 +import java.util.Optional;
@@ -181,6 +190,15 @@ index 0000000..540d80d
 +
 +    public static boolean isInternal() {
 +        return current().map(AuthorizationInvocationContext::internal).orElse(false) && currentRequest().isEmpty();
++    }
++
++    public static PropagatedContext captureHostTask() {
++        var origin = captureHostInvocation().find(AuthorizationInvocationContext.class).orElseThrow();
++        return PropagatedContext.empty().plus(origin);
++    }
++
++    public static PropagatedContext internalTask() {
++        return PropagatedContext.empty().plus(new AuthorizationInvocationContext(null, true));
 +    }
 +}
 diff --git a/core/src/main/java/io/kestra/core/repositories/InternalInvocation.java b/core/src/main/java/io/kestra/core/repositories/InternalInvocation.java
@@ -226,7 +244,7 @@ index 0000000..35dc2e5
 +}
 diff --git a/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java b/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java
 new file mode 100644
-index 0000000..660f091
+index 0000000..6b7c062
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java
 @@ -0,0 +1,50 @@
@@ -256,12 +274,12 @@ index 0000000..660f091
 +
 +        @Override
 +        public Runnable instrument(Runnable task) {
-+            return AuthorizationInvocationContext.captureHostInvocation().wrap(task);
++            return AuthorizationInvocationContext.captureHostTask().wrap(task);
 +        }
 +
 +        @Override
 +        public <Result> Callable<Result> instrument(Callable<Result> task) {
-+            return AuthorizationInvocationContext.captureHostInvocation().wrap(task);
++            return AuthorizationInvocationContext.captureHostTask().wrap(task);
 +        }
 +    }
 +
@@ -271,12 +289,12 @@ index 0000000..660f091
 +
 +        @Override
 +        public Runnable instrument(Runnable task) {
-+            return AuthorizationInvocationContext.captureHostInvocation().wrap(task);
++            return AuthorizationInvocationContext.captureHostTask().wrap(task);
 +        }
 +
 +        @Override
 +        public <Result> Callable<Result> instrument(Callable<Result> task) {
-+            return AuthorizationInvocationContext.captureHostInvocation().wrap(task);
++            return AuthorizationInvocationContext.captureHostTask().wrap(task);
 +        }
 +    }
 +}
@@ -311,10 +329,10 @@ index 0000000..3e38fa6
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java
 new file mode 100644
-index 0000000..93d2298
+index 0000000..79b62e4
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,70 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.List;
@@ -340,6 +358,7 @@ index 0000000..93d2298
 +import static org.mockito.Mockito.*;
 +
 +class AuthorizationInvocationContextTest {
++    private record TransactionProbe() implements io.micronaut.core.propagation.PropagatedContextElement {}
 +    @Test
 +    @SuppressWarnings("unchecked")
 +    void shouldDenyLostContextAndPropagateActualRequestWithoutPromotingItToInternal() throws Exception {
@@ -367,6 +386,10 @@ index 0000000..93d2298
 +                () -> pool.submit(() -> access.domain(QueryFilter.Resource.FLOW)));
 +            assertThat(future.get(5, TimeUnit.SECONDS).contains("other")).isFalse();
 +            assertThat(pool.submit(AuthorizationInvocationContext::isInternal).get(5, TimeUnit.SECONDS)).isTrue();
++            try (var ignored = PropagatedContext.getOrEmpty().plus(new TransactionProbe()).propagate()) {
++                assertThat(pool.submit(() -> PropagatedContext.getOrEmpty().find(TransactionProbe.class).isPresent()).get(5, TimeUnit.SECONDS))
++                    .isFalse();
++            }
 +        }
 +        var internal = PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(null, true));
 +        try (var ignored = internal.propagate()) {

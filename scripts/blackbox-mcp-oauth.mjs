@@ -87,7 +87,7 @@ async function authorize(scope, filename) {
   result=await request(`/oidc/authorize?${query}`);
   const page=await result.text();
   const interaction=page.match(/name="interaction" value="([^"]+)"/)?.[1];
-  check(result.status===200 && Boolean(interaction),'user consent required');
+  check(result.status===200 && Boolean(interaction),`user consent required (HTTP ${result.status}, title=${page.match(/<title>([^<]+)<\/title>/)?.[1] || 'none'})`);
   const choices=Object.fromEntries(scope.split(' ').map(value=>[`scope-${value}`,'yes']));
   result=await request('/oidc/consent',{...form({interaction,decision:'approve',...choices}),headers:{Origin:base,'Content-Type':'application/x-www-form-urlencoded'}});
   check(result.status===303,'consent binds owner');
