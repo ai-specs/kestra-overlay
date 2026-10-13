@@ -1,0 +1,86 @@
+# 需求: REQ-0290 Execution graph展开subflow前验证真实目标namespace范围
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；执行图展开使用findByIdWithSourceWithoutAcl，目标Flow owner范围未授权
+# 触达上游文件: 2 个（复用namespace ACL和真实GraphService展开探针）
+# 移除条件: 上游OSS展开subflow前统一验证目标资源namespace ACL
+diff --git a/core/src/main/java/io/kestra/core/services/GraphService.java b/core/src/main/java/io/kestra/core/services/GraphService.java
+index 8bfdbca..4ced57f 100644
+--- a/core/src/main/java/io/kestra/core/services/GraphService.java
++++ b/core/src/main/java/io/kestra/core/services/GraphService.java
+@@ -37,6 +37,8 @@ public class GraphService {
+     private FlowParsingService flowParsingService;
+     @Inject
+     private RunContextFactory runContextFactory;
++    @Inject
++    private io.kestra.core.repositories.NamespaceAccessControl namespaceAccessControl;
+ 
+     public FlowGraph flowGraph(FlowWithSource flow, List<String> expandedSubflows) throws IllegalVariableEvaluationException, FlowProcessingException {
+         return this.flowGraph(flow, expandedSubflows, null);
+@@ -97,6 +99,10 @@ public class GraphService {
+             subflowGraphTask = subflowGraphTask.withRenderedSubflowId(runContext);
+             ExecutableTask.SubflowId subflowId = subflowGraphTask.executableTask().subflowId();
+ 
++            if (!namespaceAccessControl.namespaceAllowed(io.kestra.core.models.QueryFilter.Resource.FLOW, subflowId.namespace())) {
++                throw new io.kestra.core.exceptions.ForbiddenException("Expanded subflow is outside the authorized namespace scope");
++            }
++
+             if (PebbleUtil.containsOpeningBlockDelimiter(subflowId.flowUid())) {
+                 throw new IllegalArgumentException(
+                     "Can't expand subflow task '" + task.getId() + "' because namespace and/or flowId contains dynamic values. This can only be viewed on an execution."
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExpandedSubflowAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExpandedSubflowAuthorizationTest.java
+new file mode 100644
+index 0000000..db6d671
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExpandedSubflowAuthorizationTest.java
+@@ -0,0 +1,50 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Optional;
++import io.kestra.core.exceptions.ForbiddenException;
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.models.flows.FlowWithSource;
++import io.kestra.core.models.hierarchies.SubflowGraphTask;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.core.services.FlowParsingService;
++import io.kestra.core.services.GraphService;
++import io.kestra.plugin.core.flow.Subflow;
++import org.junit.jupiter.api.Test;
++
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class ExpandedSubflowAuthorizationTest {
++    @Test
++    void shouldAuthorizeActualExpandedOwnerBeforeExecutionGraphAclBypass() throws Exception {
++        var service = new GraphService();
++        var flows = mock(FlowRepositoryInterface.class);
++        var parser = mock(FlowParsingService.class);
++        when(parser.parse(any(FlowWithSource.class), eq(false))).thenAnswer(invocation -> invocation.getArgument(0));
++        var parent = FlowWithSource.builder().tenantId("main").namespace("team").id("parent").revision(1)
++            .tasks(List.of(Subflow.builder().id("child").type("io.kestra.plugin.core.flow.Subflow").namespace("other").flowId("target").build()))
++            .build();
++        var child = FlowWithSource.builder().tenantId("main").namespace("other").id("target").revision(1).tasks(List.of()).build();
++        set(service, "flowRepository", flows);
++        set(service, "flowParsingService", parser);
++        set(service, "namespaceAccessControl", (NamespaceAccessControl) resource -> AccessScope.namespaces(List.of(), List.of("team")));
++        var execution = Execution.builder().tenantId("main").namespace("team").flowId("parent").id("execution").build();
++        var graph = service.flowGraph(parent, List.of(), execution);
++        String selected = graph.getNodes().stream().filter(node -> node instanceof SubflowGraphTask).findFirst().orElseThrow().getUid();
++        assertThatThrownBy(() -> service.flowGraph(parent, List.of(selected), execution)).isInstanceOf(ForbiddenException.class);
++        verifyNoInteractions(flows);
++        set(service, "namespaceAccessControl", (NamespaceAccessControl) resource -> AccessScope.namespaces(List.of(), List.of("team", "other")));
++        when(flows.findByIdWithSourceWithoutAcl("main", "other", "target", Optional.empty())).thenReturn(Optional.of(child));
++        assertThatCode(() -> service.flowGraph(parent, List.of(selected), execution)).doesNotThrowAnyException();
++        verify(flows).findByIdWithSourceWithoutAcl("main", "other", "target", Optional.empty());
++    }
++
++    private void set(GraphService service, String fieldName, Object value) throws Exception {
++        var field = GraphService.class.getDeclaredField(fieldName);
++        field.setAccessible(true);
++        field.set(service, value);
++    }
++}

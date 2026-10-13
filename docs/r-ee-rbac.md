@@ -278,3 +278,8 @@ REQ-0280 不再根据缺少 `ServerRequestContext` 推断全域内部调用。HT
 异步任务只复制授权来源，不复制 JDBC 连接、事务等执行上下文。queue subscriber 为明确
 后台入口，订阅创建发生在 HTTP 处理中时也不能继承请求的连接与短期身份。该隔离由
 上下文探针及真实 MCP 实例长连接/第二用户/SDK检查验证。
+
+REQ-0290 对 GraphService 的实际 subflow 展开目标，在读取 Flow source 前复用
+namespace ACL。Execution graph 原先的 WithoutAcl 读取不得绕过目标 owner 范围。
+未知或越权目标拒绝；允许两个 namespace 时保留正常展开。GraphService 探针验证
+拒绝发生在 repository 调用前，允许场景可以执行同一实际 source lookup。

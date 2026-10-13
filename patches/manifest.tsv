@@ -35,3 +35,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0261	0261-rbac-topology-query-scope.patch	core	ai-specs/kestra-plugin-rbac	依赖图SQL读取前对source/destination namespace应用已有ACL与H2探针	2	新写;R-EE-RBAC依赖图实际越权路径	上游OSS依赖图查询统一消费namespace ACL
 0270	0270-dashboard-query-authorization.patch	core	ai-specs/kestra-plugin-rbac	Dashboard实际查询前授权、KPI分子分母独立operation与SQL执行顺序探针	5	新写;typed KPI逐查询契约	上游OSS每个Dashboard实际查询提供等价授权激活点
 0280	0280-authorization-invocation-context.patch	core	ai-specs/kestra-plugin-rbac	HTTP来源传播、缺失上下文拒绝、宿主内部入口和queue标记与线程切换和真实H2探针	15	新写;typed身份缺失失败关闭契约	上游OSS提供等价请求授权上下文传播和显式内部调用机制
+0290	0290-expanded-subflow-authorization.patch	core	ai-specs/kestra-plugin-rbac	Execution graph展开subflow前对实际Flow owner范围授权与GraphService探针	2	新写;实际WithoutAcl展开越权读取路径	上游OSS展开subflow前统一验证目标资源namespace ACL
