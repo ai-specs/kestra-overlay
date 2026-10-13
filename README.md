@@ -457,6 +457,13 @@ kestra:
 
 ### 配置与边界
 
+Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
+`GlobalLogDataStoreAccessControl` bean。`AccessScope.namespaces(subtrees, exactNamespaces)`
+表达子树与精确 namespace 的并集；旧二参构造和单集合工厂保持子树语义。
+`namespaceAllowed` predicate 与 JDBC/log 查询使用相同语义，Namespace 合成候选在
+分页与计数前过滤。默认 GLOBAL 行为保持原样。角色、可信请求上下文、后台调用策略
+和详情/写操作授权由扩展负责；完整契约见 [R-EE-RBAC](docs/r-ee-rbac.md)。
+
 - `KESTRA_CONFIGURATION` 是部署配置入口；配置变更和插件挂载都需要重启。
 - `/app/plugins` 只承载插件类型，不承载 Controller、Filter 或其他 Web bean。
 - 镜像不烘焙业务扩展 jar；部署方负责扩展文件、版本匹配和运行时挂载。

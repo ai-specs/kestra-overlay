@@ -1,0 +1,310 @@
+# 需求: REQ-0240 Exact namespace scope与合成候选分页前过滤
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；入口B用户生产目标，R-EE-RBAC公共查询契约；不包含角色或后台身份策略
+# 触达上游文件: 7 个（详见diff）
+# 移除条件: 上游OSS提供等价Exact scope表达、统一查询翻译与Namespace候选过滤
+diff --git a/core/src/main/java/io/kestra/core/models/AccessScope.java b/core/src/main/java/io/kestra/core/models/AccessScope.java
+index 732d078..d14e6c3 100644
+--- a/core/src/main/java/io/kestra/core/models/AccessScope.java
++++ b/core/src/main/java/io/kestra/core/models/AccessScope.java
+@@ -16,9 +16,10 @@ import java.util.List;
+  * </ul>
+  *
+  * @param kind the kind of restriction.
+- * @param namespaces the allowed namespaces (only meaningful for {@link Kind#NAMESPACES}).
++ * @param namespaces the allowed namespace subtrees (only meaningful for {@link Kind#NAMESPACES}).
++ * @param exactNamespaces the allowed namespaces without descendants.
+  */
+-public record AccessScope(Kind kind, List<String> namespaces) {
++public record AccessScope(Kind kind, List<String> namespaces, List<String> exactNamespaces) {
+ 
+     public enum Kind {
+         GLOBAL,
+@@ -28,6 +29,11 @@ public record AccessScope(Kind kind, List<String> namespaces) {
+ 
+     public AccessScope {
+         namespaces = namespaces == null ? List.of() : List.copyOf(namespaces);
++        exactNamespaces = exactNamespaces == null ? List.of() : List.copyOf(exactNamespaces);
++    }
++
++    public AccessScope(Kind kind, List<String> namespaces) {
++        this(kind, namespaces, List.of());
+     }
+ 
+     public static AccessScope global() {
+@@ -45,4 +51,20 @@ public record AccessScope(Kind kind, List<String> namespaces) {
+     public static AccessScope namespaces(List<String> namespaces) {
+         return (namespaces == null || namespaces.isEmpty()) ? denyAll() : new AccessScope(Kind.NAMESPACES, namespaces);
+     }
++
++    /** Returns the union of namespace subtrees and exact namespaces; empty inputs deny all. */
++    public static AccessScope namespaces(List<String> namespaces, List<String> exactNamespaces) {
++        AccessScope scope = new AccessScope(Kind.NAMESPACES, namespaces, exactNamespaces);
++        return scope.namespaces().isEmpty() && scope.exactNamespaces().isEmpty() ? denyAll() : scope;
++    }
++
++    /** Matches exact names and dot-delimited subtrees; GLOBAL retains unrestricted semantics. */
++    public boolean namespaceAllowed(String namespace) {
++        return switch (kind) {
++            case GLOBAL -> true;
++            case DENY_ALL -> false;
++            case NAMESPACES -> namespace != null && (exactNamespaces.contains(namespace)
++                || namespaces.stream().anyMatch(granted -> namespace.equals(granted) || namespace.startsWith(granted + ".")));
++        };
++    }
+ }
+diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
+index fb6b70e..fb00a71 100644
+--- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
++++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
+@@ -22,4 +22,9 @@ public interface NamespaceAccessControl {
+      * @return the namespaces the current caller may see for {@code resource}: global, a set, or none.
+      */
+     AccessScope namespaceScope(QueryFilter.Resource resource);
++
++    /** Applies the same scope to synthesized namespace candidates before pagination and counting. */
++    default boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
++        return namespaceScope(resource).namespaceAllowed(namespace);
++    }
+ }
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
+index bd49dd2..5ee14ab 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
+@@ -609,6 +609,9 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
+                     ors.add(field("namespace").eq(namespace));
+                     ors.add(field("namespace").startsWith(namespace + "."));
+                 }
++                for (String namespace : scope.exactNamespaces()) {
++                    ors.add(field("namespace").eq(namespace));
++                }
+                 yield DSL.or(ors);
+             }
+         };
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
+index 2b42eea..03cfa03 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
+@@ -125,6 +125,9 @@ public abstract class AbstractJdbcRepository {
+                     ors.add(column.eq(namespace));
+                     ors.add(column.startsWith(namespace + "."));
+                 }
++                for (String namespace : scope.exactNamespaces()) {
++                    ors.add(column.eq(namespace));
++                }
+                 yield DSL.or(ors);
+             }
+         };
+@@ -864,4 +867,4 @@ public abstract class AbstractJdbcRepository {
+             .toList();
+ 
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolScope.java b/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
+index 14ebad2..e4bf7e2 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
+@@ -14,12 +14,7 @@ public final class McpToolScope {
+      * grant on {@code team.a} does not cover the sibling {@code team.archive}.
+      */
+     public static boolean allows(AccessScope scope, String namespace) {
+-        return switch (scope.kind()) {
+-            case GLOBAL -> true;
+-            case DENY_ALL -> false;
+-            case NAMESPACES -> namespace != null && scope.namespaces().stream()
+-                .anyMatch(granted -> namespace.equals(granted) || namespace.startsWith(granted + "."));
+-        };
++        return scope.namespaceAllowed(namespace);
+     }
+ 
+     /**
+@@ -30,7 +25,8 @@ public final class McpToolScope {
+         return switch (scope.kind()) {
+             case GLOBAL -> "*";
+             case DENY_ALL -> "-";
+-            case NAMESPACES -> String.join(",", scope.namespaces().stream().sorted().toList());
++            case NAMESPACES -> "subtrees:" + scope.namespaces().stream().distinct().sorted().toList()
++                + ";exact:" + scope.exactNamespaces().stream().distinct().sorted().toList();
+         };
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
+index 2ca4e4a..b4a147c 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
+@@ -13,6 +13,7 @@ import io.kestra.core.models.namespaces.NamespaceInterface;
+ import io.kestra.core.models.topologies.FlowTopologyGraph;
+ import io.kestra.core.repositories.ArrayListTotal;
+ import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.repositories.NamespaceAccessControl;
+ import io.kestra.core.tenant.TenantService;
+ import io.kestra.core.topologies.FlowTopologyService;
+ import io.kestra.webserver.converters.QueryFilterFormat;
+@@ -55,6 +56,9 @@ public class NamespaceController<N extends Namespace> {
+     @Inject
+     private Searchable<Namespace> namespaceSearchable;
+ 
++    @Inject
++    private NamespaceAccessControl namespaceAccessControl;
++
+     protected Comparator<String> sorter(Pageable pageable) {
+         return Optional.of(pageable.getSort().getOrderBy())
+             .map(o -> o.isEmpty() ? null : o.getFirst().getDirection())
+@@ -66,11 +70,13 @@ public class NamespaceController<N extends Namespace> {
+         // Force included namespaces are always returned, while the others are filtered + trimmed based on the query + pageable.
+         Map<Boolean, List<String>> fetchedNamespacesByForceInclude = flowRepository.findDistinctNamespace(tenantService.resolveTenant()).stream()
+             .flatMap(n -> NamespaceInterface.asTree(n).stream())
++            .filter(n -> namespaceAccessControl.namespaceAllowed(QueryFilter.Resource.NAMESPACE, n))
+             .collect(Collectors.groupingBy(forceIncludeIds::contains));
+         List<String> filteredFetchedNamespaces = Optional.ofNullable(fetchedNamespacesByForceInclude.get(false)).orElse(Collections.emptyList()).stream()
+             .filter(n -> q == null || Strings.CI.contains(n, q))
+             .toList();
+-        List<String> systemFlowNamespace = q == null || Strings.CI.contains(systemFlowsConfiguration.namespace(), q)
++        List<String> systemFlowNamespace = namespaceAccessControl.namespaceAllowed(QueryFilter.Resource.NAMESPACE, systemFlowsConfiguration.namespace())
++            && (q == null || Strings.CI.contains(systemFlowsConfiguration.namespace(), q))
+             ? List.of(systemFlowsConfiguration.namespace())
+             : Collections.emptyList();
+ 
+@@ -147,6 +153,7 @@ public class NamespaceController<N extends Namespace> {
+         )
+             .flatMap(n -> NamespaceInterface.asTree(n).stream())
+             .distinct()
++            .filter(n -> namespaceAccessControl.namespaceAllowed(QueryFilter.Resource.NAMESPACE, n))
+             .map(id -> (Namespace) Namespace.builder().id(id).build())
+             .toList();
+         return PagedResults.of((ArrayListTotal<N>) namespaceSearchable.filter(allNamespaces, page, size, sort, filters));
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
+new file mode 100644
+index 0000000..7e37f3a
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
+@@ -0,0 +1,126 @@
++
++package io.kestra.webserver.rbac;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.sql.DriverManager;
++import java.util.List;
++
++import io.kestra.core.contexts.configuration.SystemFlowsConfiguration;
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.namespaces.Namespace;
++import io.kestra.core.repositories.ArrayListTotal;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.core.repositories.log.LogDataStoreAccessControl;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.jdbc.repository.AbstractJdbcLogDataStore;
++import io.kestra.jdbc.repository.AbstractJdbcRepository;
++import io.kestra.mcp.McpToolScope;
++import io.kestra.webserver.controllers.api.NamespaceController;
++import io.kestra.webserver.utils.PageableUtils;
++import io.kestra.webserver.utils.Searchable;
++import org.jooq.Condition;
++import org.jooq.SQLDialect;
++import org.jooq.impl.DSL;
++import org.junit.jupiter.api.Test;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.CALLS_REAL_METHODS;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++class NamespaceScopeContractTest {
++    @Test
++    void shouldPreserveExactSubtreeUnionAndLegacySemanticsAcrossConsumers() throws Exception {
++        AccessScope mixed = AccessScope.namespaces(List.of("team.tree"), List.of("team.exact"));
++        List<String> candidates = List.of("team.exact", "team.exact.child", "team.exact2", "team.tree", "team.tree.child", "team.tree2");
++        assertScope(mixed, candidates, List.of("team.exact", "team.tree", "team.tree.child"));
++        assertScope(AccessScope.namespaces(List.of(), List.of("team.exact")), candidates, List.of("team.exact"));
++        assertScope(new AccessScope(AccessScope.Kind.NAMESPACES, List.of("team.tree")), candidates, List.of("team.tree", "team.tree.child"));
++        assertScope(new AccessScope(AccessScope.Kind.NAMESPACES, List.of(), List.of()), candidates, List.of());
++        assertScope(AccessScope.namespaces(null, null), candidates, List.of());
++        assertScope(AccessScope.denyAll(), candidates, List.of());
++        assertScope(AccessScope.global(), candidates, candidates);
++        assertThat(McpToolScope.cacheKey(AccessScope.namespaces(List.of(), List.of("team.exact"))))
++            .isNotEqualTo(McpToolScope.cacheKey(AccessScope.namespaces(List.of("team.exact"))))
++            .isEqualTo(McpToolScope.cacheKey(AccessScope.namespaces(List.of(), List.of("team.exact", "team.exact"))));
++    }
++
++    private void assertScope(AccessScope scope, List<String> candidates, List<String> expected) throws Exception {
++        NamespaceAccessControl accessControl = resource -> scope;
++        assertThat(candidates.stream().filter(namespace -> accessControl.namespaceAllowed(QueryFilter.Resource.NAMESPACE, namespace)).toList())
++            .containsExactlyElementsOf(expected);
++        assertThat(candidates.stream().filter(namespace -> McpToolScope.allows(scope, namespace)).toList())
++            .containsExactlyElementsOf(expected);
++        AbstractJdbcRepository repository = new AbstractJdbcRepository() {
++            @Override
++            protected NamespaceAccessControl namespaceAccessControl() {
++                return accessControl;
++            }
++        };
++        AbstractJdbcLogDataStore logs = mock(AbstractJdbcLogDataStore.class, CALLS_REAL_METHODS);
++        setField(AbstractJdbcLogDataStore.class, logs, "accessControl", (LogDataStoreAccessControl) () -> scope);
++        Method jdbcAcl = AbstractJdbcRepository.class.getDeclaredMethod("aclCondition", QueryFilter.Resource.class);
++        jdbcAcl.setAccessible(true);
++        Method logAcl = AbstractJdbcLogDataStore.class.getDeclaredMethod("aclCondition");
++        logAcl.setAccessible(true);
++        for (Condition condition : List.of((Condition) jdbcAcl.invoke(repository, QueryFilter.Resource.FLOW), (Condition) logAcl.invoke(logs))) {
++            try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++                var context = DSL.using(connection, SQLDialect.H2);
++                context.execute("create table candidates (namespace varchar(255), position int)");
++                for (int index = 0; index < candidates.size(); index++) {
++                    context.insertInto(DSL.table("candidates"), DSL.field("namespace"), DSL.field("position"))
++                        .values(candidates.get(index), index).execute();
++                }
++                assertThat(context.select(DSL.field("namespace", String.class)).from("candidates")
++                    .where(condition).orderBy(DSL.field("position")).fetch(0, String.class))
++                    .containsExactlyElementsOf(expected);
++            }
++        }
++    }
++
++    @Test
++    void shouldFilterSynthesizedAndForcedCandidatesBeforePaginationAndTotal() throws Exception {
++        NamespaceController<Namespace> controller = controller(AccessScope.namespaces(List.of(), List.of("team.exact", "other.exact")));
++        var first = controller.searchNamespaces(1, 1, List.of("id:asc"), false, null);
++        var second = controller.searchNamespaces(2, 1, List.of("id:asc"), false, null);
++        assertThat(first.getTotal()).isEqualTo(2);
++        assertThat(first.getResults()).extracting(Namespace::getId).containsExactly("other.exact");
++        assertThat(second.getTotal()).isEqualTo(2);
++        assertThat(second.getResults()).extracting(Namespace::getId).containsExactly("team.exact");
++        Method namespaces = NamespaceController.class.getDeclaredMethod("getNamespaces", io.micronaut.data.model.Pageable.class, String.class, List.class, boolean.class);
++        namespaces.setAccessible(true);
++        @SuppressWarnings("unchecked")
++        ArrayListTotal<Namespace> forced = (ArrayListTotal<Namespace>) namespaces.invoke(controller, PageableUtils.from(1, 1), null,
++            List.of("team", "system", "team.exact.child", "team.exact"), false);
++        assertThat(forced).extracting(Namespace::getId).containsExactly("other.exact", "team.exact");
++        assertThat(forced.getTotal()).isEqualTo(2);
++        var denied = controller(AccessScope.denyAll()).searchNamespaces(1, 10, null, false, null);
++        assertThat(denied.getResults()).isEmpty();
++        assertThat(denied.getTotal()).isZero();
++        var global = controller(AccessScope.global()).searchNamespaces(1, 50, null, false, null);
++        assertThat(global.getResults()).extracting(Namespace::getId).contains("team", "system", "team.exact.child");
++    }
++
++    private NamespaceController<Namespace> controller(AccessScope scope) throws Exception {
++        NamespaceController<Namespace> controller = new NamespaceController<>();
++        FlowRepositoryInterface flows = mock(FlowRepositoryInterface.class);
++        when(flows.findDistinctNamespace("main")).thenReturn(List.of("team.exact", "team.exact.child", "team.exact2", "other.exact"));
++        TenantService tenants = mock(TenantService.class);
++        when(tenants.resolveTenant()).thenReturn("main");
++        setField(NamespaceController.class, controller, "flowRepository", flows);
++        setField(NamespaceController.class, controller, "tenantService", tenants);
++        setField(NamespaceController.class, controller, "systemFlowsConfiguration", new SystemFlowsConfiguration("system"));
++        setField(NamespaceController.class, controller, "namespaceAccessControl", (NamespaceAccessControl) resource -> scope);
++        setField(NamespaceController.class, controller, "namespaceSearchable", Searchable.<Namespace>builder().sortableExtractor("id", Namespace::getId).build());
++        return controller;
++    }
++
++    private static void setField(Class<?> declaringType, Object target, String name, Object value) throws Exception {
++        Field field = declaringType.getDeclaredField(name);
++        field.setAccessible(true);
++        field.set(target, value);
++    }
++}

@@ -53,6 +53,9 @@ fi
 python3 -m unittest discover -s "$PWD/scripts/tests" -v
 
 echo "== scoped OIDC acceptance tests =="
+(cd "$WORK" && ./gradlew :webserver:test --tests io.kestra.webserver.rbac.NamespaceScopeContractTest \
+  --tests io.kestra.mcp.McpToolScopeTest --console=plain)
+python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)

@@ -189,3 +189,37 @@ grep -n "micronaut-security" webserver/build.gradle                  # 仅 csrf
 获得实际 runtime flow；因此仅在 HTTP 入口解析作者源码不能证明覆盖实际输入/输出读取。
 overlay 在 `readExecutionInputs` 之前消费真实 runtime flow、execution ID 和可信主体，
 执行资源权限与外部依赖计划检查。该点不包含角色模型或业务路由策略。
+## Namespace 查询契约：REQ-0240
+
+入口 B，消费扩展仓 `kestra-plugin-rbac`。用户生产目标要求普通用户只看到授权
+namespace 的列表、分页、计数和统计，并支持多角色权限并集。旧 `AccessScope`
+只能表达子树：Exact `team.a` 会错误匹配 `team.a.child`；只读枚举数据库后传入
+旧 scope 仍有同样问题。Namespace search/autocomplete 在仓库 ACL 之后补充父级和
+system namespace，未授权候选会进入分页和 total。这两条失败路径是接收依据。
+
+最小宿主面为 scope 数据表达、统一 JDBC 与独立 log-store 条件翻译，以及 Namespace
+控制器合成候选过滤。宿主不得包含角色、主体绑定、管理员或后台身份策略。
+
+`AccessScope` 保留 `GLOBAL`、`NAMESPACES`、`DENY_ALL`。三参构造为
+`AccessScope(Kind, List<String> namespaces, List<String> exactNamespaces)`；旧二参构造
+及 `namespaces(List)` 保留子树语义。`namespaces(subtrees, exact)` 返回两者并集；
+两集合为空时拒绝全部。集合复制为不可变列表。Exact 只比较相等；子树匹配自身及
+点分隔后代，不匹配前缀碰撞。`GLOBAL` 不改变默认 OSS 行为。
+
+`AccessScope.namespaceAllowed(id)` 提供统一匹配；
+`NamespaceAccessControl.namespaceAllowed(resource, id)` 是基于当前 scope 的 default
+方法。Namespace search/autocomplete 在父级展开之后、分页和 total 之前过滤全部候选，
+包括 system 与强制 IDs；强制 IDs 不得绕过 predicate。候选来源保持原状，不承诺发现
+只有 KV/file 或尚无 flow 的 namespace。详情及写操作仍须由 REST 计划授权。
+
+MCP scope 匹配使用同一 predicate，缓存键区分 Exact 和子树集合，防止跨 scope
+共享工具缓存。没有新增 enum，已有 switch 仍穷尽全部 kind。旧构造调用描述符保留；
+record 反射和序列化增加组件，消费方必须按发布产物核对兼容性。
+
+插件可以替换 `GlobalNamespaceAccessControl` 和 `GlobalLogDataStoreAccessControl`，
+按可信请求身份生成资源 scope。未登录、上下文丢失和后台 engine 行为由插件
+决定。此契约不提供写操作授权、任务沙箱或请求上下文传播保证。
+
+宿主定向探针 `NamespaceScopeContractTest` 验证 Exact/child/前缀碰撞、混合 union、
+空 scope、GLOBAL、二参构造、真实 H2 SQL 条件、独立 log 条件、MCP 缓存隔离，以及
+Namespace 分页、total 和强制候选。真实插件和 Compose 验收归消费仓与部署仓。
