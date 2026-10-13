@@ -1,0 +1,105 @@
+# 需求: REQ-0261 依赖图查询在SQL读取前约束两端flow owner namespace
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；Flow/Namespace dependencies 的 topology repository 未消费现有namespace ACL
+# 触达上游文件: 2 个（topology查询激活与真实H2条件探针）
+# 移除条件: 上游OSS依赖图查询统一消费namespace ACL
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java
+index e6db099..eb9dc27 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java
+@@ -14,6 +14,11 @@ import io.kestra.core.repositories.FlowTopologyRepositoryInterface;
+ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRepository implements FlowTopologyRepositoryInterface {
+     protected final io.kestra.jdbc.AbstractJdbcRepository<FlowTopology> jdbcRepository;
+ 
++    private Condition topologyAccess() {
++        return aclCondition(io.kestra.core.models.QueryFilter.Resource.FLOW, "source_namespace")
++            .and(aclCondition(io.kestra.core.models.QueryFilter.Resource.FLOW, "destination_namespace"));
++    }
++
+     public AbstractJdbcFlowTopologyRepository(io.kestra.jdbc.AbstractJdbcRepository<FlowTopology> jdbcRepository) {
+         this.jdbcRepository = jdbcRepository;
+     }
+@@ -47,7 +52,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
+                     .using(configuration)
+                     .select(VALUE_FIELD)
+                     .from(this.jdbcRepository.getTable())
+-                    .where(DSL.or(ors));
++                    .where(DSL.or(ors)).and(topologyAccess());
+ 
+                 return this.jdbcRepository.fetch(from);
+             });
+@@ -73,7 +78,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
+                     .using(configuration)
+                     .select(VALUE_FIELD)
+                     .from(this.jdbcRepository.getTable())
+-                    .where(DSL.or(ors));
++                    .where(DSL.or(ors)).and(topologyAccess());
+ 
+                 return this.jdbcRepository.fetch(from);
+             });
+@@ -96,7 +101,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
+                     .using(configuration)
+                     .select(VALUE_FIELD)
+                     .from(this.jdbcRepository.getTable())
+-                    .where(tenantSource.and(tenantDest).and(sourceCondition));
++                    .where(tenantSource.and(tenantDest).and(sourceCondition)).and(topologyAccess());
+ 
+                 return this.jdbcRepository.fetch(from);
+             });
+@@ -120,7 +125,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
+                     .using(configuration)
+                     .select(VALUE_FIELD)
+                     .from(this.jdbcRepository.getTable())
+-                    .where(DSL.or(ors));
++                    .where(DSL.or(ors)).and(topologyAccess());
+ 
+                 return this.jdbcRepository.fetch(from);
+             });
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedTopologyScopeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedTopologyScopeTest.java
+new file mode 100644
+index 0000000..8f8f28c
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedTopologyScopeTest.java
+@@ -0,0 +1,41 @@
++package io.kestra.webserver.rbac;
++
++import java.sql.DriverManager;
++import java.util.List;
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.jdbc.repository.AbstractJdbcFlowTopologyRepository;
++import org.jooq.Condition;
++import org.jooq.SQLDialect;
++import org.jooq.impl.DSL;
++import org.junit.jupiter.api.Test;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++class TypedTopologyScopeTest {
++    @Test
++    void shouldRequireBothTopologyOwnersInsideScopeBeforeQuery() throws Exception {
++        var repository = new AbstractJdbcFlowTopologyRepository(null) {
++            @Override
++            protected NamespaceAccessControl namespaceAccessControl() {
++                return resource -> AccessScope.namespaces(List.of(), List.of("team"));
++            }
++        };
++        var method = AbstractJdbcFlowTopologyRepository.class.getDeclaredMethod("topologyAccess");
++        method.setAccessible(true);
++        Condition condition = (Condition) method.invoke(repository);
++        try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var sql = DSL.using(connection, SQLDialect.H2);
++            sql.execute("create table topology (source_namespace varchar(255), destination_namespace varchar(255))");
++            for (String source : List.of("team", "team.child", "other")) {
++                for (String destination : List.of("team", "team.child", "other")) {
++                    sql.insertInto(DSL.table("topology"), DSL.field("source_namespace"), DSL.field("destination_namespace"))
++                        .values(source, destination).execute();
++                }
++            }
++            assertThat(sql.selectCount().from("topology").where(condition).fetchOne(0, Integer.class)).isEqualTo(1);
++            assertThat(sql.select(DSL.field("source_namespace", String.class)).from("topology").where(condition).fetch(0, String.class))
++                .containsExactly("team");
++        }
++    }
++}

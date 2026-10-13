@@ -256,3 +256,7 @@ storage prefix 中的规范 `kestra:` URI，其他 scheme、跨 execution、编�
 宿主自身探针包括真实 Netty、真实 H2 Flow 搜索、精确 namespace/child/前缀隔离、拒绝创建后
 无 Flow 持久化，以及 typed 缺组件/身份/异常、scope 交集与 datasource 检查。构建脚本必须
 校验专属 XML 无失败和跳过。通过源码探针不代表发布镜像或第三方 Compose/UI 已验收。
+
+REQ-0261 在现有 topology repository 的查询入口附加 source/destination 两端 Flow
+namespace ACL。未授权的依赖边不得进入图构造；H2 条件探针验证 Exact 不包含 child，
+且任一端越权都排除。该机制不改变依赖业务模型，不将策略放入宿主。
