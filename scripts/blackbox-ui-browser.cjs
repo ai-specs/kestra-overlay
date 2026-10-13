@@ -59,9 +59,17 @@ async function main() {
         const saveResponse = page.waitForResponse(response =>
             response.url().includes('/api/v1/main/mcp-servers/default') && response.request().method() === 'PUT');
         await page.getByRole('button', {name: 'Save', exact: true}).click();
-        if ((await (await saveResponse).status()) < 200) throw new Error('MCP editor save failed');
+        const savedResponse = await saveResponse;
+        if (savedResponse.status() < 200 || savedResponse.status() >= 300) throw new Error(`MCP editor save failed (${savedResponse.status()})`);
         console.log('MCP EDITOR BUILT-IN OIDC AND PWA REGRESSION GREEN');
-        await page.goto(`${base}/oidc/logout`);
+        // The logout endpoint intentionally redirects while clearing the OIDC session. Chromium
+        // reports that redirect as ERR_ABORTED when the navigation is superseded; wait for the
+        // redirect target and keep the authentication assertions below.
+        try {
+            await page.goto(`${base}/oidc/logout`, {waitUntil: 'domcontentloaded'});
+        } catch (error) {
+            if (!String(error?.message || error).includes('ERR_ABORTED')) throw error;
+        }
         await page.waitForURL(`${base}/oidc/login?**`);
         const deniedStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
         if (deniedStatus !== 401) throw new Error(`logged-out API returned ${deniedStatus}`);
