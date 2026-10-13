@@ -34,8 +34,8 @@ mkdir -p "$TASK_WORK/classes" "$TASK_WORK/libs"
     -d "$TASK_WORK/classes" "$REPO/scripts/tests/classpath-probe/RbacProbe.java"
 "$JAVA_HOME/bin/jar" --create --file "$TASK_WORK/libs/kestra-rbac-authorizer.jar" -C "$TASK_WORK/classes" .
 "$JAVA_HOME/bin/jar" tf "$TASK_WORK/libs/kestra-rbac-authorizer.jar" > "$TASK_WORK/entries"
-rg -q 'RbacProbe.*Definition' "$TASK_WORK/entries"
-rg -q 'META-INF/micronaut/' "$TASK_WORK/entries"
+grep -q 'RbacProbe.*Definition' "$TASK_WORK/entries"
+grep -q 'META-INF/micronaut/' "$TASK_WORK/entries"
 if [ "$IMAGE" = --compile-only ]; then
     if [ -n "${RBAC_PROBE_OUTPUT:-}" ]; then cp "$TASK_WORK/libs/kestra-rbac-authorizer.jar" "$RBAC_PROBE_OUTPUT"; fi
     echo 'PASS: independent probe compiled against real overlay SPI with Micronaut bean index'
@@ -82,7 +82,7 @@ for attempt in $(seq 1 60); do
     sleep 1
 done
 docker logs "$CONTAINER" > "$TASK_WORK/startup.log" 2>&1
-rg -q 'RBAC-CLASSPATH-PROBE-DISCOVERED' "$TASK_WORK/startup.log"
+grep -q 'RBAC-CLASSPATH-PROBE-DISCOVERED' "$TASK_WORK/startup.log"
 STATUS="$(curl --silent --output "$TASK_WORK/error.json" --write-out '%{http_code}' "http://127.0.0.1:$PORT/api/v1/main/flows/search")"
 [ "$STATUS" = 401 ]
 echo 'PASS: annotation-processed external jar discovered via executable Class-Path; anonymous REST stays 401'
