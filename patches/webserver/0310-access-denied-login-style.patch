@@ -1,0 +1,96 @@
+# 需求: REQ-0310 授权拒绝页与OIDC登录页使用一致的视觉风格
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；用户要求拒绝页统一登录页布局、颜色和返回登录按钮
+# 触达上游文件: 1 个（AccessDenied.vue）
+# 移除条件: 上游OSS提供与登录页一致的独立授权拒绝页面
+diff --git a/ui/src/components/errors/AccessDenied.vue b/ui/src/components/errors/AccessDenied.vue
+index 67160a9..03f7abb 100644
+--- a/ui/src/components/errors/AccessDenied.vue
++++ b/ui/src/components/errors/AccessDenied.vue
+@@ -1,9 +1,13 @@
+ <template>
+-    <main role="main" class="text-center p-5">
+-        <h1>403 — Access denied</h1>
+-        <p>This account has no permission to access this page.</p>
+-        <button type="button" data-testid="return-to-login" @click="returnToLogin">返回登录 / Return to login</button>
+-    </main>
++    <div class="access-denied-page">
++        <main role="main" aria-labelledby="access-denied-title">
++            <div class="logo" aria-label="Kestra">K</div>
++            <h1 id="access-denied-title">Access denied</h1>
++            <p class="status">403</p>
++            <p class="description">This account does not have permission to access this page. Sign in with another account to continue.</p>
++            <button type="button" data-testid="return-to-login" @click="returnToLogin">返回登录 / Return to login</button>
++        </main>
++    </div>
+ </template>
+ 
+ <script setup lang="ts">
+@@ -14,3 +18,66 @@
+         if (!Authentication.isOidc()) window.location.assign("/ui/login")
+     }
+ </script>
++
++<style scoped>
++    .access-denied-page {
++        position: fixed;
++        inset: 0;
++        overflow-y: auto;
++        background: #f8f7fc;
++        color: #252336;
++        font-family: system-ui, sans-serif;
++    }
++
++    main {
++        width: min(360px, calc(100vw - 48px));
++        margin: 12vh auto;
++        text-align: center;
++    }
++
++    .logo {
++        display: inline-grid;
++        place-items: center;
++        width: 54px;
++        height: 54px;
++        border-radius: 12px;
++        background: #8405ff;
++        color: white;
++        font-size: 32px;
++        font-weight: 700;
++    }
++
++    h1 {
++        margin: 24px 0 16px;
++        font-size: 26px;
++        font-weight: 600;
++    }
++
++    .status {
++        margin: 0 0 16px;
++        color: #625d75;
++        font-size: 14px;
++    }
++
++    .description {
++        margin: 0 0 32px;
++        font-size: 16px;
++        line-height: 1.5;
++    }
++
++    button {
++        width: 100%;
++        padding: 12px;
++        border: 0;
++        border-radius: 6px;
++        background: #8405ff;
++        color: white;
++        font: inherit;
++        cursor: pointer;
++    }
++
++    button:focus-visible {
++        outline: 3px solid #252336;
++        outline-offset: 3px;
++    }
++</style>
