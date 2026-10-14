@@ -8,7 +8,7 @@ permissions:
   packages: write
 concurrency:
   group: overlay-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   patch-verify:
     runs-on: ubuntu-24.04
