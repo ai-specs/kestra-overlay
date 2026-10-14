@@ -283,3 +283,20 @@ REQ-0290 对 GraphService 的实际 subflow 展开目标，在读取 Flow source
 namespace ACL。Execution graph 原先的 WithoutAcl 读取不得绕过目标 owner 范围。
 未知或越权目标拒绝；允许两个 namespace 时保留正常展开。GraphService 探针验证
 拒绝发生在 repository 调用前，允许场景可以执行同一实际 source lookup。
+
+### REQ-0300：UI、usage 与 MCP 读取反馈提案
+
+消费项目为 `kestra-plugin-rbac`。用户实际报告登录落在缺少 tenant 的 dashboard 空白页、
+usage 显示全局统计、MCP 只读页面被统一拒绝，以及零授权账号无法退出换号。
+现有机制已经提供可信 principal、typed operation 和 namespace ACL，无需新增插件业务模型。
+
+接收范围：UI 在首次资源加载前规范 tenant 路径；配置 API 拒绝后显示独立 403 页面，
+退出动作复用宿主 OIDC 撤销会话和清除 cookie；usage 使用 tenant 报告入口及现有 Flow/
+Execution ACL；MCP listTools 分类为完整 Flow 查询。MCP server READ/LIST grants 归插件
+配置，配置写入仍需单独授权。宿主不得因允许连接页面而允许服务配置写入。
+
+此改动复用已发布 SPI，不改变版本和编译契约。宿主以独立操作分类探针验证，部署仓必须
+验证每个角色的实际登录、规范路径、usage 统计范围、MCP 读取/修改拒绝/工具范围，以及
+未知角色拒绝后点击返回登录并以另一账号成功登录。跨域多角色必须检查 A 写、B 读、B 写
+拒绝和域外拒绝，拒绝检查须核对持久化。状态：提案已接收，源码已实现；镜像发布和组合
+验收尚未完成，不得将本节视为部署通过证据。

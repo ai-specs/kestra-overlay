@@ -25,7 +25,7 @@ async function main() {
         await page.locator('input[name=username]').fill('tester');
         await page.locator('input[name=password]').fill('Passw0rd!');
         await page.locator('button[type=submit]').click();
-        await page.waitForURL(`${base}/ui/dashboards`);
+        await page.waitForURL(`${base}/ui/main/dashboards`);
         await page.getByRole('heading').filter({hasText: 'Overview'}).waitFor();
         await page.reload();
         await page.getByRole('heading').filter({hasText: 'Overview'}).waitFor();

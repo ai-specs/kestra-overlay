@@ -307,3 +307,11 @@ bash scripts/blackbox-classpath.sh "$PWD/.work/verify" \
 本轮完整 `scripts/local-ci.sh` 通过：146 项定向测试，144 通过、2 个受控镜像
 fixture/SDK 实例测试按预期跳过，零失败；UI 构建与认证单测、executable 构建通过。
 受控跳过由已有镜像黑盒与部署 monorepo 验收分别负责实际运行，不能视为通过。
+
+### 资源查询适配的复用边界
+
+usage HTTP 入口必须使用 tenant 报告方法，不能调用面向后台采集的全实例报告。tenant
+报告的 Flow 查询和 Execution statistics 查询分别消费现有 namespace ACL。MCP server
+工具列表实际读取的是 Flow，typed adapter 必须把它分类为完整 Flow 查询。服务配置的
+READ/LIST 与 CREATE/UPDATE/DELETE 是不同授权，不因工具列表允许而授予配置写权限。
+REQ-0300 提案、发布与组合验收状态见 `r-ee-rbac.md`；本节只说明机制，不作为通过证据。

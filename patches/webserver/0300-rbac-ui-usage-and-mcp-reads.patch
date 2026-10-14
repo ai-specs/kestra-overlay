@@ -1,0 +1,158 @@
+# 需求: REQ-0300 登录后规范tenant路径、零授权退出入口、usage与MCP工具列表按实际资源域授权
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；用户报告空白dashboard、全局usage泄露、受限MCP页面拒绝和零授权账号无法退出
+# 触达上游文件: 7 个（UI认证与拒绝页面、统计查询入口、typed资源适配和独立探针）
+# 移除条件: 上游OSS提供等价规范登录路径、独立拒绝退出入口和usage/MCP工具查询授权
+diff --git a/ui/src/components/errors/AccessDenied.vue b/ui/src/components/errors/AccessDenied.vue
+new file mode 100644
+index 0000000..67160a9
+--- /dev/null
++++ b/ui/src/components/errors/AccessDenied.vue
+@@ -0,0 +1,16 @@
++<template>
++    <main role="main" class="text-center p-5">
++        <h1>403 — Access denied</h1>
++        <p>This account has no permission to access this page.</p>
++        <button type="button" data-testid="return-to-login" @click="returnToLogin">返回登录 / Return to login</button>
++    </main>
++</template>
++
++<script setup lang="ts">
++    import * as Authentication from "../../utils/authentication"
++
++    async function returnToLogin() {
++        await Authentication.logout()
++        if (!Authentication.isOidc()) window.location.assign("/ui/login")
++    }
++</script>
+diff --git a/ui/src/main.ts b/ui/src/main.ts
+index 86046b2..bcddd74 100644
+--- a/ui/src/main.ts
++++ b/ui/src/main.ts
+@@ -35,6 +35,9 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
+ 
+ // Fail closed: an error probing the pre-auth endpoints is no evidence that setup is needed.
+ const handleAuthError = (to: {fullPath: string}, error: unknown) => {
++    if ((error as {response?: {status?: number}} | null)?.response?.status === 403) {
++        return {name: "access-denied", replace: true}
++    }
+     if ((error as {response?: {status?: number}} | null)?.response?.status === 401) {
+         if (Authentication.isOidc()) {
+             Authentication.login()
+@@ -89,6 +92,15 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+         return // Prevent navigation if the path and query are the same
+     }
+ 
++    if (to.name === "access-denied") {
++        const response = await fetch("/api/v1/configs/login")
++        if (response.ok) Authentication.configureOidc((await response.json()).oidcAuthEnabled === true)
++        return
++    }
++    if (to.name && !to.meta?.anonymous && !to.params.tenant) {
++        return {name: to.name, params: {...to.params, tenant: "main"}, query: to.query, hash: to.hash, replace: true}
++    }
++
+     try {
+         const miscStore = useMiscStore()
+         if(!httpClient) {
+diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
+index e243b34..6bd429e 100644
+--- a/ui/src/routes/routes.ts
++++ b/ui/src/routes/routes.ts
+@@ -11,6 +11,7 @@ import {NAMESPACE_PARENT_ROUTE, createNamespaceTabRoutes} from "../utils/namespa
+ export type KestraRouteRecord = RouteRecordRaw & {ossOnly?: boolean}
+ 
+ const routes: KestraRouteRecord[] = [
++    {name: "access-denied", path: "/access-denied", component: () => import("../components/errors/AccessDenied.vue"), meta: {anonymous: true, layout: FullScreenLayout}},
+     //Initial
+     {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
+ 
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+index 438f276..9516ceb 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+@@ -214,7 +214,7 @@ public class MiscController {
+     @Operation(tags = { "Misc" }, summary = "Retrieve instance usage information")
+     public ApiUsage getUsages() {
+         ZonedDateTime now = ZonedDateTime.now();
+-        FeatureUsageReport.UsageEvent event = featureUsageReport.report(now.toInstant(), Reportable.TimeInterval.of(now.minus(Duration.ofDays(1)), now));
++        FeatureUsageReport.UsageEvent event = featureUsageReport.report(now.toInstant(), Reportable.TimeInterval.of(now.minus(Duration.ofDays(1)), now), "main");
+         return ApiUsage.builder()
+             .flows(event.getFlows())
+             .executions(event.getExecutions())
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+index 978faf8..df43b5f 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+@@ -79,11 +79,14 @@ public final class OssRestOperationAdapter {
+                     "getSchemaFromInputType", "listPlugins", "listTriggerPlugins", "getPluginIcons", "getPluginIcon", "getPluginIconSvg", "getPluginGroupIcons",
+                     "getPluginDocumentation", "getPluginDocumentationFromVersion", "getPluginVersions", "getPluginBySubgroups", "getPluginUiManifest", "getPluginUi").contains(handler)
+                         ? metadata(tenant) : administrative(tenant);
+-                case "io.kestra.webserver.controllers.api.MiscController" -> Set.of("getConfiguration", "getUsages", "getExpressionFilters", "getExpressionFunctions").contains(handler)
+-                    ? metadata(tenant) : administrative(tenant);
++                case "io.kestra.webserver.controllers.api.MiscController" -> handler.equals("getUsages")
++                    ? java.util.stream.Stream.concat(query(Resource.FLOW, tenant, null).stream(), query(Resource.EXECUTION, tenant, null).stream()).toList()
++                    : Set.of("getConfiguration", "getExpressionFilters", "getExpressionFunctions").contains(handler)
++                        ? metadata(tenant) : administrative(tenant);
+                 case "io.kestra.webserver.controllers.api.DashboardController" -> Set.of("searchDashboards", "getDashboard", "getDefaultDashboardDefinitions", "previewChart", "exportChart", "exportDashboardChart").contains(handler)
+                     ? metadata(tenant) : administrative(tenant);
+                 case "io.kestra.webserver.controllers.api.McpServerController" -> switch (handler) {
++                    case "listTools" -> query(Resource.FLOW, tenant, null);
+                     case "listMcps" -> query(Resource.MCP_SERVER, tenant, null);
+                     case "getMcp" -> single(Resource.MCP_SERVER, Action.READ, tenant, null, id);
+                     case "createMcp" -> single(Resource.MCP_SERVER, Action.CREATE, tenant, null, null);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
+index f5a35ea..85ebe09 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
+@@ -72,6 +72,22 @@ class OssRestOperationAdapterTest {
+             "[]", Map.of()))).isEmpty();
+     }
+ 
++    @Test
++    void usageRequiresBothResourceDomainsAndToolListingUsesFlowDomain() {
++        var usage = adapter.resolve(request("MiscController", "getUsages", "GET", Map.of("tenant", "main"), "", Map.of()));
++        assertThat(usage).extracting(Operation::resource).containsExactly(Resource.FLOW, Resource.EXECUTION);
++        assertThat(usage).allMatch(operation -> operation.coverage() == Coverage.COMPLETE_QUERY);
++        var tools = adapter.resolve(request("McpServerController", "listTools", "GET", Map.of("tenant", "main", "id", "default"), "", Map.of()));
++        assertThat(tools).hasSize(1);
++        assertThat(tools.getFirst().resource()).isEqualTo(Resource.FLOW);
++        assertThat(tools.getFirst().coverage()).isEqualTo(Coverage.COMPLETE_QUERY);
++        for (String handler : List.of("updateMcp", "toggleMcp", "deleteMcp")) {
++            var mutation = adapter.resolve(request("McpServerController", handler, "PUT", Map.of("tenant", "main", "id", "default"), "", Map.of()));
++            assertThat(mutation.getFirst().resource()).isEqualTo(Resource.MCP_SERVER);
++            assertThat(mutation.getFirst().action()).isIn(Action.UPDATE, Action.DELETE);
++        }
++    }
++
+     private OssRestOperationAdapter.Request request(String controller, String handler, String method,
+         Map<String, Object> variables, String body, Map<String, List<String>> query) {
+         return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, "/api/v1/main/fixture", query,
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
+index 550da4e..705334a 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
+@@ -40,6 +40,9 @@ class TypedRbacHttpProbeTest {
+         var read = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/configs"))
+             .header("X-Typed-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
+         assertThat(read.statusCode()).isEqualTo(200);
++        var mcp = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/mcp-servers"))
++            .header("X-Typed-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(mcp.statusCode()).isEqualTo(200);
+         var denied = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows"))
+             .header("X-Typed-Probe", "reader").header("Content-Type", "application/x-yaml")
+             .POST(java.net.http.HttpRequest.BodyPublishers.ofString("namespace: team\nid: denied\ntasks: []"))
+@@ -55,6 +58,12 @@ class TypedRbacHttpProbeTest {
+         assertThat(search.statusCode()).isEqualTo(200);
+         assertThat(search.body()).contains("\"total\":1", "\"namespace\":\"team\"")
+             .doesNotContain("team.child", "team2", "other");
++        var usage = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/usages/all"))
++            .header("X-Typed-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(usage.statusCode()).isEqualTo(200);
++        var usageJson = io.kestra.core.serializers.JacksonMapper.ofJson().readTree(usage.body());
++        assertThat(usageJson.path("flows").path("count").asLong()).isEqualTo(1);
++        assertThat(usageJson.path("flows").path("namespacesCount").asLong()).isEqualTo(1);
+         var anonymous = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
+             .GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
+         assertThat(anonymous.statusCode()).isEqualTo(401);
