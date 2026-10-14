@@ -38,7 +38,7 @@ async function main() {
         const apiStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
         if (apiStatus !== 200) throw new Error(`authenticated API returned ${apiStatus}`);
         const csrf = await page.locator('meta[name="csrf-token"]').getAttribute('content');
-        const mcpPayload = {id: 'default', serverType: 'PRIVATE', authType: 'OAUTH', disabled: false};
+        const mcpPayload = {id: 'default', description: 'OIDC browser acceptance initial', serverType: 'PRIVATE', authType: 'OAUTH', disabled: false};
         const mcpStatus = await page.evaluate(async ({csrf, payload}) => {
             const headers = {'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrf || ''};
             const existing = await fetch('/api/v1/main/mcp-servers/default');
@@ -49,6 +49,9 @@ async function main() {
         }, {csrf, payload: mcpPayload});
         if (mcpStatus < 200 || mcpStatus >= 300) throw new Error(`MCP server setup returned ${mcpStatus}`);
         await page.goto(`${base}/ui/main/admin/mcp-servers/edit/default/edit`);
+        const description = page.locator('textarea[placeholder="Description"]');
+        await description.waitFor();
+        await page.waitForFunction(() => document.querySelector('textarea[placeholder="Description"]')?.value === 'OIDC browser acceptance initial');
         await page.getByText("Protected by this instance's built-in OIDC server").waitFor();
         if (await page.getByText('Select a configured OIDC provider').count()) {
             throw new Error('built-in OIDC MCP editor still exposes external provider selector');
@@ -56,11 +59,13 @@ async function main() {
         if (await page.getByText('Install Kestra').count()) {
             throw new Error('PWA install prompt obscures the MCP administration page');
         }
-        await page.locator('textarea').first().fill('OIDC browser acceptance saved');
+        await description.fill('OIDC browser acceptance saved');
         const [savedResponse] = await Promise.all([
             page.waitForResponse(response => response.url().includes('/api/v1/main/mcp-servers/default') && response.request().method() === 'PUT'),
             page.getByRole('button', {name: 'Save', exact: true}).click(),
         ]);
+        const submitted = savedResponse.request().postDataJSON();
+        if (submitted.description !== 'OIDC browser acceptance saved') throw new Error('MCP editor submitted an unexpected description');
         if (savedResponse.status() < 200 || savedResponse.status() >= 300) throw new Error(`MCP editor save failed (${savedResponse.status()})`);
         const persistedDescription = await page.evaluate(async () => (await (await fetch('/api/v1/main/mcp-servers/default')).json()).description);
         if (persistedDescription !== 'OIDC browser acceptance saved') throw new Error('MCP editor save did not persist description');
