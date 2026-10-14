@@ -6,7 +6,7 @@ results = pathlib.Path(sys.argv[1])
 for suite, expected in {
     "TypedAuthorizationContractTest": 3,
     "TypedAuthorizationGateTest": 2,
-    "OssRestOperationAdapterTest": 3,
+    "OssRestOperationAdapterTest": 4,
     "TypedQueryDomainsTest": 1,
     "TypedDashboardGateTest": 1,
     "TypedRbacHttpProbeTest": 1,
