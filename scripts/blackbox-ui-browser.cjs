@@ -56,11 +56,14 @@ async function main() {
         if (await page.getByText('Install Kestra').count()) {
             throw new Error('PWA install prompt obscures the MCP administration page');
         }
-        const saveResponse = page.waitForResponse(response =>
-            response.url().includes('/api/v1/main/mcp-servers/default') && response.request().method() === 'PUT');
-        await page.getByRole('button', {name: 'Save', exact: true}).click();
-        const savedResponse = await saveResponse;
+        await page.locator('textarea').first().fill('OIDC browser acceptance saved');
+        const [savedResponse] = await Promise.all([
+            page.waitForResponse(response => response.url().includes('/api/v1/main/mcp-servers/default') && response.request().method() === 'PUT'),
+            page.getByRole('button', {name: 'Save', exact: true}).click(),
+        ]);
         if (savedResponse.status() < 200 || savedResponse.status() >= 300) throw new Error(`MCP editor save failed (${savedResponse.status()})`);
+        const persistedDescription = await page.evaluate(async () => (await (await fetch('/api/v1/main/mcp-servers/default')).json()).description);
+        if (persistedDescription !== 'OIDC browser acceptance saved') throw new Error('MCP editor save did not persist description');
         console.log('MCP EDITOR BUILT-IN OIDC AND PWA REGRESSION GREEN');
         // The logout endpoint intentionally redirects while clearing the OIDC session. Chromium
         // reports that redirect as ERR_ABORTED when the navigation is superseded; wait for the
