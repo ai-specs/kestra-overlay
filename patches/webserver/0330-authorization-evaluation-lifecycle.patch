@@ -79,7 +79,7 @@ index 685d8f4..d1e6ba5 100644
 -            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
 +            .collectMap(Map.Entry::getKey, Map.Entry::getValue));
      }
-
+ 
      private static boolean acceptsFileUpload(Type type) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java
 new file mode 100644
@@ -306,11 +306,11 @@ index 201c734..9e098fe 100644
  public final class TypedAuthorizationGate {
      private final BeanProvider<TypedAuthorizationResolver> policies;
 +    private AuthorizationEvaluations evaluations;
-
+ 
      public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies) {
          this.policies = policies;
      }
-
+ 
 +    @jakarta.inject.Inject
 +    public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies, AuthorizationEvaluations evaluations) {
 +        this(policies);
@@ -382,7 +382,7 @@ index 06722d6..0fef9e6 100644
 -            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
 +        });
      }
-
+ 
      private Mono<byte[]> body(HttpRequest<?> request) {
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 new file mode 100644
@@ -540,10 +540,10 @@ index 0000000..415af8f
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
 new file mode 100644
-index 0000000..5983ab1
+index 0000000..5b8a415
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,138 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.net.http.HttpClient;
@@ -552,6 +552,7 @@ index 0000000..5983ab1
 +import java.util.concurrent.CompletableFuture;
 +import java.util.concurrent.CompletionStage;
 +import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicBoolean;
 +import java.util.concurrent.atomic.AtomicReference;
 +import io.kestra.core.junit.annotations.KestraTest;
 +import io.kestra.core.repositories.FlowRepositoryInterface;
@@ -625,18 +626,49 @@ index 0000000..5983ab1
 +        }
 +    }
 +
++    @Test
++    void shouldReadSingleFlowWithoutGrantingCollectionListing() throws Exception {
++        flows.create(GenericFlow.fromYaml("main", "namespace: evaluation.detail\nid: single\ntasks: []"));
++        flows.create(GenericFlow.fromYaml("main", "namespace: evaluation.detail\nid: other\ntasks: []"));
++        policy.namespace.set("evaluation.detail");
++        policy.detailOnly.set(true);
++        try {
++            var client = HttpClient.newHttpClient();
++            for (var target : List.of("/api/v1/main/flows/evaluation.detail/single", "/api/v1/main/flows/evaluation.detail/other", "/api/v1/main/flows/search", "/api/v1/main/flows/evaluation.outside/single")) {
++                var response = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve(target))
++                    .header("X-Evaluation-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++                if (target.equals("/api/v1/main/flows/evaluation.detail/single")) {
++                    assertThat(response.statusCode()).isEqualTo(200);
++                    assertThat(response.body()).contains("evaluation.detail");
++                } else assertThat(response.statusCode()).isEqualTo(403);
++            }
++            assertThat(flows.findById("main", "evaluation.detail", "single", Optional.empty())).isEmpty();
++        } finally {
++            policy.detailOnly.set(false);
++        }
++    }
++
 +    @Singleton
 +    @Requires(property = "evaluation.http.probe", value = "true")
 +    static class SnapshotPolicy implements AuthorizationEvaluationProviderV1 {
 +        final AtomicReference<String> namespace = new AtomicReference<>("evaluation.a");
 +        final AtomicInteger begins = new AtomicInteger();
 +        final AtomicInteger closes = new AtomicInteger();
++        final AtomicBoolean detailOnly = new AtomicBoolean();
 +
 +        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
 +            begins.incrementAndGet();
 +            String snapshot = namespace.get();
 +            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
 +                public CompletionStage<Decision> authorize(Operation operation) {
++                    if (detailOnly.get()) {
++                        boolean allowed = operation.resource() == Resource.METADATA
++                            || operation.resource() == Resource.FLOW && operation.action() == Action.READ && snapshot.equals(operation.namespace())
++                                && "single".equals(operation.resourceId());
++                        return CompletableFuture.completedFuture(allowed
++                            ? Decision.allow(new QueryDomain(List.of(snapshot), List.of(), List.of(), true, false))
++                            : Decision.deny("Collection listing is not granted"));
++                    }
 +                    namespace.set("evaluation.b");
 +                    return CompletableFuture.completedFuture(operation.action() == Action.LIST || operation.resource() == Resource.METADATA
 +                        ? Decision.allow(new QueryDomain(List.of(snapshot), List.of(), List.of(), true, false))

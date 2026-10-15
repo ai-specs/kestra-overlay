@@ -482,6 +482,15 @@ REST、MCP、实际 flow 声明与生命周期检查，必需测试无失败；�
 策略在线修改时，完整复合操作不能拼接来自不同策略版本的允许结果。策略表、revision、
 缓存、管理员及 grant 均归消费项目，本宿主只负责操作评估的生命周期。
 
+组合反馈（2026-10-15）：插件通过管理 API 新建仅 FLOW/READ 角色并绑定已登录账号，
+读取已存在且授权的 Flow 详情得到 404，管理员同路径为 200。根因是单条 JDBC Flow 读取
+复用集合查询的 READ/LIST 范围。宿主在已有 NamespaceAccessControl 增加默认兼容的
+`resourceReadAllowed(resource,tenant,namespace,id)`，仅精确详情读取使用它，列表、总数和
+聚合继续使用原查询域。评估模式用当前同一快照执行 SINGLE/READ，检查精确 ID 和范围；
+缺身份、域外及其他 ID 继续拒绝。插件角色模型不变，不要求业务插件解析宿主查询路径。
+真实 HTTP＋SQL 探针覆盖 READ-only 详情 200、列表 403、其他 ID／域外 403 和无上下文
+仓库读取为空。该修复尚待新提交 CI 与组合复验。
+
 ### 可复现的机制缺口
 
 固定 BASE 加当前补丁后，TypedRestRbacFilter 对计划中的 operation 逐个调用 gate；

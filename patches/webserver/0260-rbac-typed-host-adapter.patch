@@ -2,19 +2,23 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
 # 来源: 新写；现有 REST resolver 迫使扩展复制上游路由，dashboard fetchData 绕过 namespace ACL
-# 触达上游文件: 22 个（宿主适配、查询 ACL、dashboard 与自身探针）
+# 触达上游文件: 23 个（宿主适配、查询 ACL、精确资源读取、dashboard 与自身探针）
 # 移除条件: 上游 OSS 提供等价宿主 typed operation 适配与查询授权执行入口
 diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-index fb00a71..b983262 100644
+index fb00a71..64c507e 100644
 --- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 +++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-@@ -27,4 +27,8 @@ public interface NamespaceAccessControl {
+@@ -27,4 +27,12 @@ public interface NamespaceAccessControl {
      default boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
          return namespaceScope(resource).namespaceAllowed(namespace);
      }
 +
 +    default java.util.List<String> excludedNamespaces(QueryFilter.Resource resource) {
 +        return java.util.List.of();
++    }
++
++    default boolean resourceReadAllowed(QueryFilter.Resource resource, String tenantId, String namespace, String resourceId) {
++        return namespaceAllowed(resource, namespace);
 +    }
  }
 diff --git a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
@@ -45,6 +49,58 @@ index b3d2ee6..a7b3699 100644
  
                  List<? extends ColumnDescriptor<Executions.Fields>> columnsWithoutDateWithOutAggs = columnsWithoutDate.values().stream()
                      .filter(column -> column.getAgg() == null)
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java
+index eeb3813..17e2422 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java
+@@ -143,7 +143,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+                     integer -> context
+                         .select(VALUE_FIELD, NAMESPACE_FIELD, TENANT_ID_FIELD)
+                         .from(jdbcRepository.getTable())
+-                        .where(this.defaultFilter(tenantId, true))
++                        .where(this.singleReadFilter(tenantId, true, namespace, id))
+                         .and(NAMESPACE_FIELD.eq(namespace))
+                         .and(field("id", String.class).eq(id))
+                         .and(
+@@ -153,7 +153,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+                     () -> context
+                         .select(VALUE_FIELD, NAMESPACE_FIELD, TENANT_ID_FIELD)
+                         .from(fromLastRevision(true))
+-                        .where(this.defaultFilter(tenantId, Boolean.TRUE.equals(allowDeleted)))
++                        .where(this.singleReadFilter(tenantId, Boolean.TRUE.equals(allowDeleted), namespace, id))
+                         .and(NAMESPACE_FIELD.eq(namespace))
+                         .and(field("id", String.class).eq(id))
+                 );
+@@ -209,6 +209,11 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+         return super.defaultFilter(tenantId, allowDeleted).and(aclCondition(Resource.FLOW));
+     }
+ 
++    private Condition singleReadFilter(String tenantId, boolean allowDeleted, String namespace, String id) {
++        return super.defaultFilter(tenantId, allowDeleted).and(namespaceAccessControl().resourceReadAllowed(Resource.FLOW, tenantId, namespace, id)
++            ? DSL.noCondition() : DSL.falseCondition());
++    }
++
+     // "executable" filtering stays independent of read-ACL and is scoped by the EXECUTION grant instead,
+     // since users with execute-but-not-read permission are exactly who these two methods serve.
+     protected Condition defaultExecutionFilter(String tenantId) {
+@@ -232,7 +237,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+                             TENANT_ID_FIELD
+                         )
+                         .from(jdbcRepository.getTable())
+-                        .where(this.defaultFilter(tenantId, true))
++                        .where(this.singleReadFilter(tenantId, true, namespace, id))
+                         .and(NAMESPACE_FIELD.eq(namespace))
+                         .and(field("id", String.class).eq(id))
+                         .and(REVISION_FIELD.eq(integer))
+@@ -246,7 +251,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+                                 TENANT_ID_FIELD
+                             )
+                             .from(fromLastRevision(true))
+-                            .where(this.defaultFilter(tenantId, Boolean.TRUE.equals(allowDeleted)))
++                            .where(this.singleReadFilter(tenantId, Boolean.TRUE.equals(allowDeleted), namespace, id))
+                             .and(NAMESPACE_FIELD.eq(namespace))
+                             .and(field("id", String.class).eq(id))
+                     );
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 index 5ee14ab..450a7a7 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
@@ -114,7 +170,7 @@ index b64e71c..b1bd77e 100644
                  List<? extends ColumnDescriptor<Triggers.Fields>> columnsWithoutDateWithOutAggs = columnsWithoutDate.values().stream()
                      .filter(column -> column.getAgg() == null)
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
-index 6b5a77a..415f778 100644
+index 6b5a77a..5d5262f 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
 @@ -96,6 +96,9 @@ public class DashboardController {
@@ -127,11 +183,7 @@ index 6b5a77a..415f778 100644
      @Inject
      protected TenantService tenantService;
  
-@@ -263,10 +266,11 @@ public class DashboardController {
-         } else if (chart instanceof DataChartKPI dataChartKPI) {
-             DataFilterKPI<?, ?> dataChartDatas = dataChartKPI.getData();
-             dataChartDatas.updateWhereWithGlobalFilters(filters, startDate, endDate);
- 
+@@ -267,6 +270,7 @@ public class DashboardController {
              return PagedResults.of(new ArrayListTotal<>(this.chartDataService.generateKPI(tenantId, dataChartKPI, startDate, endDate), 1));
          } else if (chart instanceof Markdown markdownChart) {
              if (markdownChart.getSource() != null && markdownChart.getSource() instanceof FlowDescription flowDescription) {
@@ -167,7 +219,7 @@ index c88846e..04c81ba 100644
              String key = entry.getKey();
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 new file mode 100644
-index 0000000..13218bd
+index 0000000..978faf8
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 @@ -0,0 +1,234 @@
@@ -624,10 +676,10 @@ index 0000000..aac1cd4
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
 new file mode 100644
-index 0000000..ad213a0
+index 0000000..657493d
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,105 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.List;
@@ -700,6 +752,32 @@ index 0000000..ad213a0
 +    @Override
 +    public List<String> excludedNamespaces(QueryFilter.Resource resource) {
 +        return domain(resource).excludedNamespaces();
++    }
++
++    @Override
++    public boolean resourceReadAllowed(QueryFilter.Resource resource, String tenantId, String namespace, String resourceId) {
++        if (gate.evaluationEnabled()) {
++            var owner = AuthorizationEvaluations.current();
++            if (owner == null) return io.kestra.core.repositories.AuthorizationInvocationContext.isInternal();
++            if (resource == null || namespace == null || resourceId == null || !java.util.Objects.equals(owner.tenant, tenantId)) return false;
++            Resource kind = switch (resource) {
++                case FLOW, TEMPLATE -> Resource.FLOW;
++                case EXECUTION, TASK -> Resource.EXECUTION;
++                case NAMESPACE -> Resource.NAMESPACE;
++                case LOG -> Resource.LOG;
++                case TRIGGER -> Resource.TRIGGER;
++                case KV_METADATA -> Resource.KVSTORE;
++                case NAMESPACE_FILE_METADATA -> Resource.NAMESPACE_FILE;
++                default -> null;
++            };
++            if (kind == null) return false;
++            var operation = new Operation(CONTRACT_VERSION, owner.principal.scopes().isEmpty() ? Source.REST : Source.MCP,
++                kind, Action.READ, owner.tenant, namespace, resourceId, new QueryDomain(List.of(namespace), List.of(), List.of(), true, false), Coverage.SINGLE,
++                Aggregate.NONE, SideEffect.READ_ONLY);
++            var decision = gate.authorize(owner.principal, operation).block();
++            return decision != null && decision.allowed() && decision.scope().contains(namespace);
++        }
++        return domain(resource).contains(namespace);
 +    }
 +
 +    @Override
@@ -843,7 +921,7 @@ index 0000000..06722d6
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
 new file mode 100644
-index 0000000..c972d6e
+index 0000000..f5a35ea
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
 @@ -0,0 +1,81 @@
