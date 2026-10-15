@@ -98,9 +98,9 @@ async function main() {
         await page.waitForURL(`${base}/oidc/login?**`);
         await page.locator('input[name=password]').waitFor();
         await page.waitForFunction(() => document.documentElement.dataset.i18nReady === 'en');
-        const deniedStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
+        const deniedStatus = (await context.request.get(`${base}/api/v1/configs`, {maxRedirects: 0})).status();
         if (deniedStatus !== 401) throw new Error(`logged-out API returned ${deniedStatus}`);
-        const setupStatus = await page.evaluate(async () => (await fetch('/oidc/setup')).status);
+        const setupStatus = (await context.request.get(`${base}/oidc/setup`, {maxRedirects: 0})).status();
         if (setupStatus !== 404) throw new Error(`completed setup remains open (${setupStatus})`);
         console.log('BROWSER OIDC LOGIN, REFRESH, NAVIGATION AND LOGOUT ALL GREEN');
     } finally {
