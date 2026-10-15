@@ -160,6 +160,7 @@ HASH_BEFORE=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential
 
 assert_status "anonymous API is denied" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
 assert_status "UI interception" 307 "$(request -H 'Accept: text/html' "$BASE/ui/")"
+assert_status "anonymous login translation asset" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ui/assets/oidc-login-i18n.js")"
 CLIENT_LOCATION=$(location "$TEMP_DIR/headers")
 [[ "$CLIENT_LOCATION" == /oauth/login/kestra* ]] || { echo 'FAIL: UI must start the OIDC client'; exit 1; }
 assert_status "OIDC client authorization redirect" 302 "$(request "$BASE$CLIENT_LOCATION")"
