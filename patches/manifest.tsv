@@ -37,4 +37,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0280	0280-authorization-invocation-context.patch	core	ai-specs/kestra-plugin-rbac	HTTP来源传播、缺失上下文拒绝、宿主内部入口和queue标记与线程切换和真实H2探针	15	新写;typed身份缺失失败关闭契约	上游OSS提供等价请求授权上下文传播和显式内部调用机制
 0290	0290-expanded-subflow-authorization.patch	core	ai-specs/kestra-plugin-rbac	Execution graph展开subflow前对实际Flow owner范围授权与GraphService探针	2	新写;实际WithoutAcl展开越权读取路径	上游OSS展开subflow前统一验证目标资源namespace ACL
 0300	0300-rbac-ui-usage-and-mcp-reads.patch	core	ai-specs/kestra-plugin-rbac	规范tenant登录路径、零授权退出页面、usage与MCP工具列表实际查询域及宿主探针	7	新写;用户真实UI失败与typed查询契约	上游OSS提供等价登录路径、拒绝退出入口与usage/MCP查询授权
-0310	0310-access-denied-login-style.patch	core	ai-specs/kestra-plugin-rbac	拒绝页与OIDC登录页统一布局颜色及按钮	1	新写;用户认证页面风格要求	上游OSS提供与登录页一致的独立拒绝页面
+0310	0310-access-denied-login-style.patch	core	ai-specs/kestra-plugin-rbac	拒绝页与OIDC登录页协调布局颜色及按钮，按页面用途移除K字母标志	1	新写;用户认证页面风格要求	上游OSS提供与登录页一致的独立拒绝页面
