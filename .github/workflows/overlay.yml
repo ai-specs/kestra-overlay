@@ -101,6 +101,7 @@ jobs:
         with:
           name: authentication-theme-browser
           path: .work/auth-theme-*.json
+          include-hidden-files: true
           if-no-files-found: error
   promote:
     needs: [build-push, oidc-blackbox]

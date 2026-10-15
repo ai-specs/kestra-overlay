@@ -13,21 +13,26 @@ export async function runAuthThemeChecks(page, cdp, base, record = async () => {
     const rows = [];
     let init;
     try {
+        await cdp('Page.enable', {});
         for (const width of [1280, 390]) {
             await cdp('Emulation.setDeviceMetricsOverride', {width, height: 844, deviceScaleFactor: 1, mobile: false});
             for (const test of cases) {
                 await cdp('Emulation.setEmulatedMedia', {features: [{name: 'prefers-color-scheme', value: test.system}]});
-                if (init) await cdp('Page.removeScriptToEvaluateOnNewDocument', {identifier: init});
-                ({identifier: init} = await cdp('Page.addScriptToEvaluateOnNewDocument', {source: `
-                    try {
-                        const theme = ${JSON.stringify(test.theme)};
-                        if (theme === null) localStorage.removeItem('theme'); else localStorage.setItem('theme', theme);
-                    } catch (_) {}
-                    ${test.blocked ? `const originalGet = Storage.prototype.getItem;
+                if (init) {
+                    await cdp('Page.removeScriptToEvaluateOnNewDocument', {identifier: init});
+                    init = undefined;
+                }
+                // Set the same-origin preference before navigation. CDP init scripts are
+                // needed only to simulate unavailable storage, not to select a theme.
+                await page.evaluate(theme => {
+                    if (theme === null) localStorage.removeItem('theme'); else localStorage.setItem('theme', theme);
+                }, test.theme);
+                if (test.blocked) ({identifier: init} = await cdp('Page.addScriptToEvaluateOnNewDocument', {source: `
+                    const originalGet = Storage.prototype.getItem;
                     Storage.prototype.getItem = function(key) {
                         if (key === 'theme') throw new DOMException('Test storage disabled', 'SecurityError');
                         return originalGet.call(this, key);
-                    };` : ''}
+                    };
                 `}));
                 for (const kind of test.loginOnly ? ['login'] : ['login', 'denied']) {
                     await page.goto(`${base}${kind === 'login' ? '/oidc/login?error=1' : '/ui/access-denied'}`);
