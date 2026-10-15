@@ -96,6 +96,8 @@ async function main() {
             if (!String(error?.message || error).includes('ERR_ABORTED')) throw error;
         }
         await page.waitForURL(`${base}/oidc/login?**`);
+        await page.locator('input[name=password]').waitFor();
+        await page.waitForFunction(() => document.documentElement.dataset.i18nReady === 'en');
         const deniedStatus = await page.evaluate(async () => (await fetch('/api/v1/configs')).status);
         if (deniedStatus !== 401) throw new Error(`logged-out API returned ${deniedStatus}`);
         const setupStatus = await page.evaluate(async () => (await fetch('/oidc/setup')).status);
