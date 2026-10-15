@@ -21,7 +21,7 @@ export async function runUiExtensionChecks(page, base, record = async () => {}) 
         await check('extension menu section expanded and interactive', true);
         await page.click('a[href="/ui/main/extensions/host-probe"]');
         await page.waitForFunction(() => location.pathname === '/ui/main/extensions/host-probe');
-        await page.waitForFunction(() => document.querySelector('[data-test="extension-container"]')?.shadowRoot?.querySelector('h1')?.textContent === 'Independent page probe');
+        await page.waitForFunction(() => document.querySelector('[data-test="extension-container"]')?.shadowRoot?.querySelector('h1')?.textContent === 'Independent page probe' && document.title.startsWith('Host extension probe |'));
         await check('menu opens independent module', true);
         await page.click('[aria-label="Host extension probe"] button');
         await page.waitForFunction(() => location.pathname === '/ui/main/extensions/host-probe/details');

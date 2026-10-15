@@ -405,6 +405,10 @@ owner 可以通过 OIDC 会话访问 `/oidc/clients?page=1&size=20` 查看自己
 
 ## 扩展契约
 
+REQ-0330／0340／0350 已随 `8d46953` 通过 CI `38732224758` 并正式发布，
+镜像摘要为 `sha256:f2b2cb7fc3bb3286148dbdce8a5e6bc70c59e152e74a3d42079e26cd0c169253`。
+这是宿主机制发布证据；独立插件和部署组合仍须各自验证。
+
 ### 插件
 
 任务、触发器和 Runner 插件通过部署侧挂载 `/app/plugins`，重启 Kestra 后生效。镜像不
@@ -477,7 +481,7 @@ kestra:
 
 ### OIDC 登录账号目录
 
-以下为 REQ-0350 的新契约，尚待正式发布门。内置 OIDC 开启时，classpath 扩展可以
+以下为 REQ-0350 的公开契约。内置 OIDC 开启时，classpath 扩展可以
 注入唯一的 `io.kestra.webserver.oidc.UserDirectoryV1`。它是服务器内受信能力，不提供
 匿名或独立管理 HTTP 端点；扩展控制器必须自行要求管理权，并经过宿主认证与 CSRF。
 公开目录不识别插件角色、应急管理员或授权绑定。

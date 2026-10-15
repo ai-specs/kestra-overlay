@@ -6,10 +6,10 @@
 # 移除条件: 上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 new file mode 100644
-index 0000000..3dfe8d3
+index 0000000..724cc46
 --- /dev/null
 +++ b/ui/src/components/extensions/ExtensionPage.vue
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,85 @@
 +<template>
 +    <TopNavBar :title="title" />
 +    <KsSkeleton v-if="loading" data-test="extension-loading" />
@@ -26,6 +26,7 @@ index 0000000..3dfe8d3
 +    import {createExtensionRequest, extensionPath, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
 +    import type {UiExtensionContextV1, UiExtensionDescriptorV1, UiExtensionModuleV1} from "../../extensions/protocol";
 +    import TopNavBar from "../layout/TopNavBar.vue";
++    import useRouteContext from "../../composables/useRouteContext";
 +
 +    const route = useRoute();
 +    const router = useRouter();
@@ -36,6 +37,7 @@ index 0000000..3dfe8d3
 +    const loading = ref(true);
 +    const failed = ref(false);
 +    const title = computed(() => descriptor.value?.titles[locale.value] ?? descriptor.value?.titles.en ?? String(route.params.extensionId));
++    useRouteContext(computed(() => ({title: title.value})));
 +    let lifecycle: ExtensionLifecycle | undefined;
 +    let generation = 0;
 +    let observer: MutationObserver | undefined;
@@ -444,22 +446,22 @@ index 0afc065..d4818fb 100644
 @@ -1,4 +1,5 @@
  import {computed} from "vue"
 +import {useUiExtensions} from "../../extensions/registry"
-
+ 
  import {useRoute, useRouter} from "vue-router"
  import type {
 @@ -58,7 +59,8 @@ export function useLeftMenu() {
      const $route = useRoute()
      const $router = useRouter()
-
+ 
 -    const {t} = useI18n({useScope: "global"})
 +    const {t, locale} = useI18n({useScope: "global"})
 +    const extensions = useUiExtensions()
-
+ 
      /**
       * Returns the names of all registered routes whose name starts with the given prefix.
 @@ -91,7 +93,7 @@ export function useLeftMenu() {
      }
-
+ 
      const menu = computed<MenuItem[]>(() => {
 -        const generated = [
 +        const generated: MenuItem[] = [
@@ -469,7 +471,7 @@ index 0afc065..d4818fb 100644
 @@ -399,6 +401,18 @@ export function useLeftMenu() {
              },
          ]
-
+ 
 +        if (extensions.value.length) generated.push({
 +            id: "extensions",
 +            title: t("plugins.names"),
@@ -487,23 +489,23 @@ index 0afc065..d4818fb 100644
                  item.id = item.title.toLowerCase().replaceAll(" ", "-")
 @@ -426,4 +440,4 @@ export function useLeftMenu() {
      })
-
+ 
      return {menu}
 -}
 \ No newline at end of file
 +}
 diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
-index 6bd429e..a696a90 100644
+index 6bd429e..04886ac 100644
 --- a/ui/src/routes/routes.ts
 +++ b/ui/src/routes/routes.ts
-@@ -11,6 +11,7 @@ import {NAMESPACE_PARENT_ROUTE, createNamespaceTabRoutes} from "../utils/namespa
- export type KestraRouteRecord = RouteRecordRaw & {ossOnly?: boolean}
-
- const routes: KestraRouteRecord[] = [
-+    {name: "extensions/page", path: "/:tenant/extensions/:extensionId/:pathMatch(.*)*", component: () => import("../components/extensions/ExtensionPage.vue")},
+@@ -14,6 +14,7 @@ const routes: KestraRouteRecord[] = [
      {name: "access-denied", path: "/access-denied", component: () => import("../components/errors/AccessDenied.vue"), meta: {anonymous: true, layout: FullScreenLayout}},
      //Initial
      {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
++    {name: "extensions/page", path: "/:tenant/extensions/:extensionId/:pathMatch(.*)*", component: () => import("../components/extensions/ExtensionPage.vue")},
+ 
+     {name: "ai",path: "/:tenant?/ai", component: () => import("../components/ai/copilot/CopilotPage.vue")},
+ 
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
 new file mode 100644
 index 0000000..b5e1295
