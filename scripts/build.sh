@@ -64,7 +64,7 @@ python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions/runtime.spec.ts)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions)
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 
 echo "== compile webserver executable jar (thin-patched upstream) =="

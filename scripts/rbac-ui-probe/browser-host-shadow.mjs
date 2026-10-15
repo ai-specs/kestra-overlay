@@ -1,4 +1,4 @@
-const task = await taskSpace(10);
+const task = await taskSpace(PROBE_SPACE_ID);
 const page = task.page("p2");
 const fs = await import("node:fs/promises");
 const root = PROBE_OUTPUT_DIR;

@@ -64,7 +64,7 @@ python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/buil
 
 echo "== executable jar =="
 (cd "$WORK/ui" && npm ci && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions/runtime.spec.ts)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions)
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 (cd "$WORK" && ./gradlew executableJar --console=plain -x test -x check)
 

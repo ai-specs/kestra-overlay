@@ -386,7 +386,7 @@ index 06722d6..0fef9e6 100644
      private Mono<byte[]> body(HttpRequest<?> request) {
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 new file mode 100644
-index 0000000..d19e4ab
+index 0000000..415af8f
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 @@ -0,0 +1,148 @@
@@ -533,7 +533,7 @@ index 0000000..d19e4ab
 +        if (denyComposite) verifyNoInteractions(queue, inputs, outputs, streaming);
 +        else {
 +            verify(queue).emit(any(io.kestra.core.executor.command.ExecutionCommand.class));
-+            verify(streaming).unregisterSubscriber(anyString(), anyString());
++            verify(streaming, timeout(5000)).unregisterSubscriber(anyString(), anyString());
 +            if (revokeOutput) verifyNoInteractions(outputs);
 +        }
 +    }

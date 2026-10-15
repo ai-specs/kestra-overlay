@@ -68,6 +68,16 @@ jobs:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
           RBAC_PROBE_OUTPUT: ${{ github.workspace }}/.work/host-extension-probe.jar
         run: bash ./scripts/blackbox-classpath.sh "${{ github.workspace }}/.work/verify" "${{ github.workspace }}/.work/verify/docker/app/kestra" "$CANDIDATE_IMAGE"
+      - name: Preserve scoped backend test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-scoped-tests
+          path: |
+            .work/verify/webserver/build/test-results/test/*.xml
+            .work/verify/webserver/build/reports/tests/test/
+          include-hidden-files: true
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
           name: host-owned-extension-probe

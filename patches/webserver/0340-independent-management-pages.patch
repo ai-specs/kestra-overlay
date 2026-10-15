@@ -2,7 +2,7 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；本地独立验证中，正式CI与发布待验收。
 # 来源: 新写；依据发布宿主页面装载失败与公开组件消费及ShadowRoot隔离探针。
-# 触达上游文件: 通用Java描述与controller、UI挂载和菜单路由、公开类型语言校验资源、独立测试，共21文件。
+# 触达上游文件: 通用Java描述与controller、UI挂载和菜单路由、公开类型语言样式工具、独立测试，共23文件。
 # 移除条件: 上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 new file mode 100644
@@ -409,6 +409,34 @@ index 0000000..5b9f469
 +        });
 +    }
 +}
+diff --git a/ui/src/extensions/sdk.spec.ts b/ui/src/extensions/sdk.spec.ts
+new file mode 100644
+index 0000000..009d80f
+--- /dev/null
++++ b/ui/src/extensions/sdk.spec.ts
+@@ -0,0 +1,22 @@
++import {describe, expect, it} from "vitest"
++import postcss from "postcss"
++import {prepareShadowStyles} from "../../../webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs"
++
++describe("published shadow stylesheet helper", () => {
++    it("isolates known root selectors and omits redundant font resources", () => {
++        const output = prepareShadowStyles("@font-face{font-family:Inter;src:url(font.woff2)}:root{--surface:red}html.dark{color:white}html.dark-2 body{background:black}html,body{margin:0}", postcss)
++        expect(output).not.toContain("@font-face")
++        expect(output).toContain(":host{--surface:red}")
++        expect(output).toContain(":host(.dark){color:white}")
++        expect(output).toContain(":host(.dark-2) .extension-body{background:black}")
++        expect(output).toContain(":host,.extension-body{margin:0}")
++    })
++    it("does not change declaration strings or external asset paths", () => {
++        expect(prepareShadowStyles('.label{content:"body html :root";background:url("body.png")}', postcss))
++            .toContain('content:"body html :root";background:url("body.png")')
++    })
++    it("rejects an absent parser or invalid CSS", () => {
++        expect(() => prepareShadowStyles("", null)).toThrow("PostCSS 8")
++        expect(() => prepareShadowStyles("body{", postcss)).toThrow()
++    })
++})
 diff --git a/ui/src/override/components/useLeftMenu.ts b/ui/src/override/components/useLeftMenu.ts
 index 0afc065..d4818fb 100644
 --- a/ui/src/override/components/useLeftMenu.ts
@@ -736,10 +764,10 @@ index 0000000..a67fdcb
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 new file mode 100644
-index 0000000..17f7be9
+index 0000000..927e127
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,46 @@
 +# Independent management page protocol V1
 +
 +Extract this directory from the published executable. Compile Java providers against the same
@@ -759,6 +787,13 @@ index 0000000..17f7be9
 +context.styles inside the root, inherit host fonts and consume resolved theme data. The initial
 +supported components are buttons, inputs and tables. Use routed details, inline confirmation,
 +and extension-owned vue-i18n pagination. Dialogs, popovers and complex dropdowns are unsupported.
++
++At build time apply `prepareShadowStyles(css,postcss)` from `shadow-styles.mjs` to CSS generated
++from the pinned public component package. Pass the consumer's PostCSS 8 parser; the helper has
++no dependency on host source or framework instances. It adapts known root selectors and removes
++font declarations. Put application content under `.extension-body`, set theme classes on the
++shadow host and inherit the loaded host font. A future component package requires new compatibility
++validation; this helper is not an adapter for arbitrary third-party stylesheets.
 +
 +Export `contractVersion=1` and `mount(container,context)` returning update/unmount. Mount and update
 +can be asynchronous. Unmount must be idempotent. The host aborts on navigation, serializes updates,
@@ -838,10 +873,10 @@ index 0000000..0269c3b
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
 new file mode 100644
-index 0000000..f582719
+index 0000000..93849a9
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,20 @@
 +{
 +  "contractVersion": 1,
 +  "fallbackLocale": "en",
@@ -858,6 +893,7 @@ index 0000000..f582719
 +  "themes": ["light", "dark", "dark-2"],
 +  "request": "Same-origin /api/v1/{tenant}/ path; query parameters allowed; encoded path separators and fragments forbidden; 401/403 returned unchanged",
 +  "styles": "Load context.styles inside an extension-owned ShadowRoot; inherit host font; document stylesheet injection is unsupported",
++  "styleBuildTool": "shadow-styles.mjs prepareShadowStyles(css, postcss); consumer supplies PostCSS 8; use .extension-body content root",
 +  "unsupportedComponents": ["dialog", "popover", "complex dropdown", "KsPagination"],
 +  "lifecycleTimeoutMs": 5000
 +}
@@ -914,6 +950,26 @@ index 0000000..db23815
 +export function resolveLocale(value) {
 +    const normalized = contract.localeAliases[value] ?? value;
 +    return supportedLocales.includes(normalized) ? normalized : fallbackLocale;
++}
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs
+new file mode 100644
+index 0000000..ade0cf9
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs
+@@ -0,0 +1,14 @@
++export function prepareShadowStyles(stylesheet, postcss) {
++    if (!postcss || typeof postcss.parse !== "function") throw new Error("A compatible PostCSS 8 parser is required");
++    const root = postcss.parse(stylesheet);
++    root.walkAtRules("font-face", rule => rule.remove());
++    root.walkRules(rule => {
++        rule.selector = rule.selector
++            .replace(/html\.dark-2\b/g, ":host(.dark-2)")
++            .replace(/html\.dark\b/g, ":host(.dark)")
++            .replace(/:root\b/g, ":host")
++            .replace(/\bhtml\b/g, ":host")
++            .replace(/\bbody\b/g, ".extension-body");
++    });
++    return root.toString();
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java
 new file mode 100644
