@@ -26,9 +26,13 @@ async function main() {
         await page.locator('input[name=password]').fill('Passw0rd!');
         await page.locator('button[type=submit]').click();
         await page.waitForURL(`${base}/ui/main/dashboards`);
-        await page.getByRole('heading').filter({hasText: 'Overview'}).waitFor();
+        // The header starts as Overview, then changes to Default Dashboard after
+        // the bundled definition loads. Wait for the final page and real charts.
+        await page.getByRole('heading').filter({hasText: 'Default Dashboard'}).waitFor();
+        await page.getByText('Success Ratio', {exact: true}).waitFor();
         await page.reload();
-        await page.getByRole('heading').filter({hasText: 'Overview'}).waitFor();
+        await page.getByRole('heading').filter({hasText: 'Default Dashboard'}).waitFor();
+        await page.getByText('Success Ratio', {exact: true}).waitFor();
         if ((await context.cookies()).some(cookie => cookie.name === 'kestraBasicAuthenticated')) {
             throw new Error('OIDC must not create a Basic Auth flag');
         }
