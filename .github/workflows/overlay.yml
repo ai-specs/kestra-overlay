@@ -95,6 +95,13 @@ jobs:
           "$RUNNER_TEMP/oidc-browser/node_modules/.bin/playwright" install --with-deps chromium
           bash ./scripts/blackbox-ui-oidc.sh "$CANDIDATE_IMAGE"
           BB_SETUP_MODE=env bash ./scripts/blackbox-ui-oidc.sh "$CANDIDATE_IMAGE"
+      - name: Publish authentication theme browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authentication-theme-browser
+          path: .work/auth-theme-*.json
+          if-no-files-found: error
   promote:
     needs: [build-push, oidc-blackbox]
     runs-on: ubuntu-24.04

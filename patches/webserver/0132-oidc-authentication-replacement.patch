@@ -4,8 +4,8 @@
 # 状态：core
 # 来源：新写；依据 OIDC Core、RFC6749/7636/9110；2026-10-09 维护者 UI 认证
 #   例外。未移植客户业务；vanilla 模式保留原链，OIDC 禁止兼容 Basic Auth cookie。
-# 触达上游文件（12）：UI 认证模块+测试、守卫/401/App/用量/退出；MiscController
-#   旧端点禁用、旧端点 filter+测试、OIDC 登录页与退出+测试。
+# 触达上游文件（13）：UI 认证模块+测试、守卫/401/App/用量/退出；MiscController
+#   旧端点禁用、旧端点 filter+测试、OIDC 登录页与退出+测试、独立认证页面主题适配。
 # 移除条件：上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用。
 diff --git a/ui/src/App.vue b/ui/src/App.vue
 index 0dc5c01..3218c96 100644
@@ -305,7 +305,7 @@ index 0000000..d0d82dc
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
-index 0a32216..6e8f3e3 100644
+index 0a32216..7af7c83 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 @@ -83,6 +83,8 @@ public class OidcLoginController {
@@ -317,20 +317,32 @@ index 0a32216..6e8f3e3 100644
              .cookie(io.micronaut.http.cookie.Cookie.of(OidcSessionService.SESSION_COOKIE_NAME, "")
                  .path("/")
                  .maxAge(java.time.Duration.ZERO));
-@@ -109,9 +111,18 @@ public class OidcLoginController {
+@@ -103,15 +105,29 @@ public class OidcLoginController {
+         return trimmed;
+     }
+ 
+-    /** The login form — self-contained HTML (no external assets), CSP-friendly. */
++    /** The login form uses no external assets and follows the browser UI theme preference. */
+     private String loginPageHtml(final String from, final boolean failed) {
+         final String safeFrom = from == null ? DEFAULT_LANDING : from;
          return """
              <!DOCTYPE html>
              <html lang="en">
 -            <head><meta charset="utf-8"><title>Sign in</title></head>
 +            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in | Kestra</title>
++            %s
 +            <style>
-+            body{margin:0;background:#f8f7fc;color:#252336;font-family:system-ui,sans-serif}
++            body{margin:0;background:var(--ks-bg-base);color:var(--ks-text-primary);font-family:system-ui,sans-serif}
 +            main{width:min(360px,calc(100vw - 48px));margin:12vh auto;text-align:center}
 +            h1{font-size:26px;font-weight:600;margin:24px 0 32px}
 +            label{display:block;text-align:left;font-size:14px}
-+            input:not([type=hidden]){box-sizing:border-box;width:100%%;padding:12px;margin-top:8px;border:1px solid #d8d5e3;border-radius:6px;font:inherit;background:white}
-+            button{width:100%%;padding:12px;border:0;border-radius:6px;background:#8405ff;color:white;font:inherit;cursor:pointer}
-+            .logo{display:inline-grid;place-items:center;width:54px;height:54px;background:#8405ff;color:white;border-radius:12px;font-size:32px;font-weight:700}
++            input:not([type=hidden]){box-sizing:border-box;width:100%%;padding:12px;margin-top:8px;border:1px solid var(--ks-border-default);border-radius:6px;font:inherit;background:var(--ks-bg-input);color:var(--ks-text-primary)}
++            button{width:100%%;padding:12px;border:0;border-radius:6px;background:var(--ks-btn-primary-bg-default);color:var(--ks-btn-primary-text);font:inherit;cursor:pointer}
++            button:hover{background:var(--ks-btn-primary-bg-hover)}
++            button:active{background:var(--ks-btn-primary-bg-active)}
++            input:focus-visible,button:focus-visible{outline:3px solid var(--ks-border-focus);outline-offset:3px}
++            .error{color:var(--ks-text-error);background:var(--ks-bg-input);padding:12px;border:1px solid var(--ks-border-default);border-radius:6px}
++            .logo{display:inline-grid;place-items:center;width:54px;height:54px;background:var(--ks-btn-primary-bg-default);color:var(--ks-btn-primary-text);border-radius:12px;font-size:32px;font-weight:700}
 +            </style></head>
              <body>
 -            <main style="font-family:system-ui,sans-serif;max-width:22rem;margin:12vh auto;">
@@ -338,6 +350,58 @@ index 0a32216..6e8f3e3 100644
              %s
              <form method="post" action="/oidc/login">
              <input type="hidden" name="from" value="%s">
+@@ -123,7 +139,8 @@ public class OidcLoginController {
+             </body>
+             </html>
+             """.formatted(
+-            failed ? "<p style=\"color:#b00;\">Invalid username or password.</p>" : "",
++            io.kestra.webserver.oidc.services.OidcPageTheme.head(),
++            failed ? "<p class=\"error\" role=\"alert\">Invalid username or password.</p>" : "",
+             htmlEscape(safeFrom)
+         );
+     }
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPageTheme.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPageTheme.java
+new file mode 100644
+index 0000000..ae28358
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPageTheme.java
+@@ -0,0 +1,36 @@
++package io.kestra.webserver.oidc.services;
++
++/** Browser theme bridge for standalone authentication pages. No identity or configuration is read. */
++public final class OidcPageTheme {
++    private OidcPageTheme() {}
++
++    /** Palette subset follows the pinned UI design system; keep its semantic token names. */
++    public static String head() {
++        return """
++            <style>
++            :root{color-scheme:light;--ks-bg-base:#f7f7f8;--ks-bg-input:#ffffff;--ks-text-primary:#08090a;--ks-text-secondary:#5f5f7c;--ks-text-error:#ed0011;--ks-border-default:#e9e9ee;--ks-border-focus:#631bf3;--ks-btn-primary-bg-default:#631bf3;--ks-btn-primary-bg-hover:#7738f5;--ks-btn-primary-bg-active:#5212d6;--ks-btn-primary-text:#ffffff}
++            html.dark{color-scheme:dark;--ks-bg-base:#14181f;--ks-bg-input:#14181f;--ks-text-primary:#ffffff;--ks-text-secondary:#cfd3d6;--ks-text-error:#ffacac;--ks-border-default:#2c303f}
++            html.dark-2{--ks-bg-base:#111115;--ks-bg-input:#111115;--ks-text-secondary:#adadbf;--ks-border-default:#2e2e3c;--ks-border-focus:#9869f7}
++            @media(prefers-color-scheme:dark){html:not(.light):not(.dark){color-scheme:dark;--ks-bg-base:#14181f;--ks-bg-input:#14181f;--ks-text-primary:#ffffff;--ks-text-secondary:#cfd3d6;--ks-text-error:#ffacac;--ks-border-default:#2c303f}}
++            </style>
++            <script>
++            (() => {
++                const root = document.documentElement;
++                const system = window.matchMedia('(prefers-color-scheme: dark)');
++                function apply() {
++                    let theme;
++                    try { theme = localStorage.getItem('theme'); } catch (_) { /* Storage can be unavailable. */ }
++                    if (!['light', 'dark', 'dark-2', 'syncWithSystem'].includes(theme)) theme = 'syncWithSystem';
++                    root.classList.remove('light', 'dark', 'dark-2', 'syncWithSystem');
++                    if (theme === 'syncWithSystem') root.classList.add(theme, system.matches ? 'dark' : 'light');
++                    else if (theme === 'dark-2') root.classList.add('dark', 'dark-2');
++                    else root.classList.add(theme);
++                }
++                apply();
++                system.addEventListener('change', apply);
++                window.addEventListener('storage', event => { if (event.key === 'theme' || event.key === null) apply(); });
++            })();
++            </script>
++            """;
++    }
++}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLegacyAuthFilterTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLegacyAuthFilterTest.java
 new file mode 100644
 index 0000000..7da23a1

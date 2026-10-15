@@ -1,11 +1,11 @@
 # 需求: REQ-0310 授权拒绝页与OIDC登录页使用一致的视觉风格
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；用户要求拒绝页统一视觉风格，按页面用途取舍元素，不复制 K 字母标志
+# 来源: 新写；用户要求认证页面兼容宿主主题，按页面用途取舍元素，不在拒绝页复制 K 字母标志
 # 触达上游文件: 1 个（AccessDenied.vue）
 # 移除条件: 上游OSS提供与登录页一致的独立授权拒绝页面
 diff --git a/ui/src/components/errors/AccessDenied.vue b/ui/src/components/errors/AccessDenied.vue
-index 67160a9..05d4940 100644
+index 67160a9..c6f9d06 100644
 --- a/ui/src/components/errors/AccessDenied.vue
 +++ b/ui/src/components/errors/AccessDenied.vue
 @@ -1,9 +1,12 @@
@@ -26,7 +26,7 @@ index 67160a9..05d4940 100644
  </template>
  
  <script setup lang="ts">
-@@ -14,3 +17,56 @@
+@@ -14,3 +17,64 @@
          if (!Authentication.isOidc()) window.location.assign("/ui/login")
      }
  </script>
@@ -36,8 +36,8 @@ index 67160a9..05d4940 100644
 +        position: fixed;
 +        inset: 0;
 +        overflow-y: auto;
-+        background: #f8f7fc;
-+        color: #252336;
++        background: var(--ks-bg-base);
++        color: var(--ks-text-primary);
 +        font-family: system-ui, sans-serif;
 +    }
 +
@@ -57,7 +57,7 @@ index 67160a9..05d4940 100644
 +
 +    .status {
 +        margin: 0 0 16px;
-+        color: #625d75;
++        color: var(--ks-text-secondary);
 +        font-size: 14px;
 +    }
 +
@@ -72,14 +72,22 @@ index 67160a9..05d4940 100644
 +        padding: 12px;
 +        border: 0;
 +        border-radius: 6px;
-+        background: #8405ff;
-+        color: white;
++        background: var(--ks-btn-primary-bg-default);
++        color: var(--ks-btn-primary-text);
 +        font: inherit;
 +        cursor: pointer;
 +    }
 +
++    button:hover {
++        background: var(--ks-btn-primary-bg-hover);
++    }
++
++    button:active {
++        background: var(--ks-btn-primary-bg-active);
++    }
++
 +    button:focus-visible {
-+        outline: 3px solid #252336;
++        outline: 3px solid var(--ks-border-focus);
 +        outline-offset: 3px;
 +    }
 +</style>

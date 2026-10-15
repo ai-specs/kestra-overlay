@@ -70,6 +70,14 @@ async function main() {
         const persistedDescription = await page.evaluate(async () => (await (await fetch('/api/v1/main/mcp-servers/default')).json()).description);
         if (persistedDescription !== 'OIDC browser acceptance saved') throw new Error('MCP editor save did not persist description');
         console.log('MCP EDITOR BUILT-IN OIDC AND PWA REGRESSION GREEN');
+        const {runAuthThemeChecks} = await import('./auth-theme-cases.mjs');
+        const themeSession = await context.newCDPSession(page);
+        const fs = require('node:fs');
+        fs.mkdirSync('.work', {recursive: true});
+        const themeReport = `.work/auth-theme-${process.env.BB_BROWSER_SETUP === '1' ? 'setup' : 'env'}.json`;
+        const themeRows = await runAuthThemeChecks(page, (method, params) => themeSession.send(method, params), base,
+            report => fs.writeFileSync(themeReport, JSON.stringify(report, null, 2)));
+        console.log(`AUTHENTICATION THEME MATRIX GREEN: ${themeRows.length} checks`);
         // The logout endpoint intentionally redirects while clearing the OIDC session. Chromium
         // reports that redirect as ERR_ABORTED when the navigation is superseded; wait for the
         // redirect target and keep the authentication assertions below.
