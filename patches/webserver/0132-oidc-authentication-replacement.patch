@@ -305,7 +305,7 @@ index 0000000..d0d82dc
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
-index 0a32216..8f6a09f 100644
+index 0a32216..be5d295 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 @@ -83,6 +83,8 @@ public class OidcLoginController {
@@ -358,7 +358,7 @@ index 0a32216..8f6a09f 100644
 +            <p><button type="submit" data-i18n="setup.login">Login</button></p>
              </form>
              </main>
-+            <script type="module" src="/ui/oidc-login-i18n.js"></script>
++            <script type="module" src="/ui/assets/oidc-login-i18n.js"></script>
              </body>
              </html>
              """.formatted(

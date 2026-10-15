@@ -2,7 +2,7 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
 # 来源: 新写；用户要求定制页面沿用上游国际化机制，复用现有翻译键
-# 触达上游文件: 2 个（Vite入口、独立登录翻译入口）
+# 触达上游文件: 3 个（Vite入口、独立登录翻译入口、静态资源缓存）
 # 移除条件: 上游OSS提供同等独立认证页面国际化入口
 diff --git a/ui/src/oidc-login-i18n.ts b/ui/src/oidc-login-i18n.ts
 new file mode 100644
@@ -39,7 +39,7 @@ index 0000000..dccef6b
 +    if (event.key === "lang" || event.key === null) void translate()
 +})
 diff --git a/ui/vite.config.js b/ui/vite.config.js
-index ce67332..a499750 100644
+index ce67332..7aa62a1 100644
 --- a/ui/vite.config.js
 +++ b/ui/vite.config.js
 @@ -54,6 +54,12 @@ export default defineConfig(({mode}) => {
@@ -49,9 +49,24 @@ index ce67332..a499750 100644
 +            rollupOptions: {
 +                input: {main: path.resolve(__dirname, "index.html"), "oidc-login-i18n": path.resolve(__dirname, "src/oidc-login-i18n.ts")},
 +                output: {
-+                    entryFileNames: chunk => chunk.name === "oidc-login-i18n" ? "oidc-login-i18n.js" : "assets/[name]-[hash].js",
++                    entryFileNames: chunk => chunk.name === "oidc-login-i18n" ? "assets/oidc-login-i18n.js" : "assets/[name]-[hash].js",
 +                },
 +            },
          },
          server: {
              watch: {
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
+index b54181e..d861b4a 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
+@@ -97,7 +97,9 @@ public class UiController {
+ 
+     private HttpResponse<?> respond(HttpRequest<?> request, String normalized, URL url) {
+         MediaType mediaType = mediaTypeFor(normalized);
+-        String cacheControl = normalized.startsWith(HASHED_ASSETS_PREFIX) ? HASHED_ASSETS_CACHE_CONTROL : DEFAULT_CACHE_CONTROL;
++        // The standalone authentication entry has a stable public URL; its imported chunks are hashed.
++        String cacheControl = normalized.equals("assets/oidc-login-i18n.js") ? "no-cache"
++            : normalized.startsWith(HASHED_ASSETS_PREFIX) ? HASHED_ASSETS_CACHE_CONTROL : DEFAULT_CACHE_CONTROL;
+ 
+         // One connection per request: the metadata and, when the body is needed, the stream both come
+         // from it. Opening a second one to read the entity tag doubled the per-request cost.

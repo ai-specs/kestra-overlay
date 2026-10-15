@@ -152,7 +152,7 @@ BASE 设计系统的必要颜色，不装载业务配置、身份或权限数据
 
 本次修订复用固定 BASE 的 `vue-i18n`、`translations/i18n.ts`、`languages.ts` 和
 现有 JSON 翻译目录。拒绝页使用 `errors.403.title`、`errors.403.content` 和 `setup.login`。
-独立登录页通过 Vite 入口 `/ui/oidc-login-i18n.js` 装载同一翻译机制，读取宿主保存的
+独立登录页通过 Vite 入口 `/ui/assets/oidc-login-i18n.js` 装载同一翻译机制，读取宿主保存的
 `localStorage.lang`；缺失、不支持或不可读取时使用英文。页面标题、标签、按钮、错误
 提示和 HTML 的 BCP 47 语言标记同步更新。表单字段名、提交路径、回跳校验和认证逻辑不变。
 入口只翻译页面，不启动业务 UI，不读取业务配置。无脚本时保留可提交的英文表单。
