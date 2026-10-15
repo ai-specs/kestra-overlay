@@ -6,8 +6,11 @@ export async function runUiExtensionChecks(page, base, record = async () => {}) 
         if (!passed) throw new Error(`Extension page check failed: ${name}`);
     };
     try {
+        await page.waitForSelector('a[href="/ui/main/extensions/host-probe"]', {state: 'attached'});
         const collapsed = await page.evaluate(() => Boolean(document.querySelector('a[href="/ui/main/extensions/host-probe"]')?.closest('[inert]')));
         if (collapsed) await page.click('button.ks-sidebar-section__title:has-text("Plugins")');
+        await page.waitForFunction(() => !document.querySelector('a[href="/ui/main/extensions/host-probe"]')?.closest('[inert]'));
+        await page.hover('a[href="/ui/main/extensions/host-probe"]');
         await page.waitForFunction(() => {
             const link = document.querySelector('a[href="/ui/main/extensions/host-probe"]');
             if (!link || link.closest('[inert]')) return false;
@@ -33,6 +36,13 @@ export async function runUiExtensionChecks(page, base, record = async () => {}) 
         await page.waitForFunction(() => location.pathname === '/ui/main/flows' && document.body.textContent.includes('Flows'));
         await check('navigation removes independent module', await page.evaluate(() => !document.querySelector('[data-test="extension-container"]')));
         report.completed = true;
+    } catch (failure) {
+        report.failure = String(failure);
+        report.document = await page.evaluate(() => {
+            const link = document.querySelector('a[href="/ui/main/extensions/host-probe"]');
+            return {path: location.pathname, generation: performance.timeOrigin, linkPresent: Boolean(link), inert: Boolean(link?.closest('[inert]'))};
+        }).catch(() => ({unavailable: true}));
+        throw failure;
     } finally {
         await record(report);
     }

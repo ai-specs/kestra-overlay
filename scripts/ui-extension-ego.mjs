@@ -9,6 +9,8 @@ await page.fill('input[name="password"]', "Passw0rd!");
 await page.click('button[type="submit"]');
 await page.waitForFunction(() => location.pathname === "/ui/main/dashboards" && document.body.textContent.includes("Dashboards"));
 await page.waitForSelector('a[href="/ui/main/extensions/host-probe"]', {state: "visible"});
+await page.goto(UI_EXTENSION_BASE + "/ui/main/admin/mcp-servers/edit/default/edit");
+await page.waitForSelector('textarea[placeholder="Description"]', {state: "visible"});
 console.log(await page.snapshot());
 const {runUiExtensionChecks} = await import(UI_EXTENSION_CASES);
 await runUiExtensionChecks(page, UI_EXTENSION_BASE, report => writeFile(UI_EXTENSION_REPORT, JSON.stringify(report, null, 2)));
