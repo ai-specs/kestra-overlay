@@ -323,3 +323,25 @@ REQ-0320 的 Vite 独立入口与业务 UI 使用同一 `vue-i18n` 初始化、�
 宿主在自己的构建中产出 `/ui/assets/oidc-login-i18n.js`，独立 OIDC 登录表单引用该入口；
 该机制不向插件暴露宿主内部源码，不作为外部管理页面共享组件契约。
 主题和国际化的实现、回退及验收要求见 `r-oidc-server.md`。发布状态以对应 CI 为准。
+
+### 独立管理页面与账号目录：调查边界（2026-10-15）
+
+当前 OSS 的模块联邦通道是任务 UI 插槽：`useFederatedModule.ts` 通过 PluginController
+取得 task type 的模块与资源，只支持 topology details／task drawer／task modal。
+它不能注册管理菜单或页面路由。`routes/routes.ts`、`utils/init.ts` 和
+`override/components/useLeftMenu.ts` 仍是构建期注册；classpath bean 承载不等于前端
+注册。UiController 能读 classpath 静态文件，但没有管理页面描述、版本和资源清单协议。
+
+公开 npm 的 `@kestra-io/design-system@0.5.0` tarball 已实际取得，具有编译 dist、组件、
+样式及语言相关 exports；尚未证明与本镜像 workspace 的 `0.0.0-dev` 对应。优先补兼容
+声明及独立消费探针，不复制宿主源码。REQ-0320 登录翻译入口不能代替管理页面上下文。
+
+首期外部管理控制器可复用可信 Authentication、`/api/.*` 的 cookie CSRF 和既有 typed
+SYSTEM 管理门；必须有实际 `tenant=main` 路由变量，且补独立控制器探针。细分委派权限
+不在这个结论内。MigrationRunner 聚合 MigrationScript 可供扩展自带 bean+SQL，插件
+业务数据库不需要新增 overlay migration patch。策略持久化与热更新仍由插件实现。
+
+账号目录内部服务不是公开扩展契约；账号生命周期和密码／会话由宿主负责，不允许插件
+直接写宿主表。最小公开目录 SPI 与管理页面注册／主题语言桥接分别记录在
+`r-oidc-server.md` 和 `r-ee-rbac.md` 的候选提案中；两项均未接收、未实现、未发布，
+没有新增 manifest 行或激活 patch。正式接收后才能形成发布契约。

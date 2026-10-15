@@ -79,9 +79,12 @@ API base 校准：`/api/v1/main/flows/search` → 200（会话有效）；`/conf
 
 ## 4. 非目标（AGENTS.md §2 拒绝清单约束）
 
+本节限定宿主业务实现范围。2026-10-15 新需求中的用户、角色和授权管理属于独立插件，
+不受本节历史产品非目标排除；宿主新增机制仍须单独接收。候选范围见本文末的管理页面提案。
+
 | 不做 | 理由 |
 |---|---|
-| 用户/组/服务账号/角色/绑定管理 CRUD（REST+UI+邀请流） | EE 产品功能 |
+| 在宿主实现用户/组/服务账号/角色/绑定业务 CRUD 与页面 | 业务功能归独立扩展；OIDC 账号目录机制按所属能力单独接收 |
 | SCIM 目录同步 | EE 产品功能 |
 | 审计日志 | EE 产品功能 |
 | impersonation | EE 产品功能 |
@@ -332,3 +335,88 @@ Execution ACL；MCP listTools 分类为完整 Flow 查询。MCP server READ/LIST
 
 部署仓仍须通过生产登录验证零授权账号的拒绝页面、退出与换号，并检查所选主题下的
 实际显示。源码和发布状态以对应提交、CI 与部署仓验收为准，本节不作为已部署证据。
+
+## 管理页面扩展契约候选提案（2026-10-15）
+
+**状态：未接收、未实现、未发布。** 消费项目为 `ai-specs/kestra-plugin-rbac`。本提案只
+定义通用 UI 装载与上下文机制，不在宿主实现用户、角色、grant 或绑定页面。现行一般 UI
+patch 拒绝规则仍有效；实施前必须按入口 B 明确接收这个通用激活点的例外，不能借认证
+页面的 REQ-0132 例外直接实施。此处记录候选不改变现有允许范围。
+
+### 用户行为与失败证据
+
+用户挂载独立 classpath jar 后，要从管理菜单打开插件角色列表，进入详情、保存并刷新。
+在固定 BASE `172dd0f37` 加当前补丁的源码中：
+
+- `ui/src/main.ts` 直接导入 `routes/routes.ts`，`utils/init.ts` 将该表传给 createRouter。
+  `override/components/useLeftMenu.ts` 生成静态菜单，IAM 项 locked，路由仍为 demo/IAM。
+  因此仅挂载 bean jar 不会把新页面加入宿主路由或菜单；直接路径落入通配错误页面。
+- `remoteComponents/useFederatedModule.ts` 已有模块联邦（运行时加载外部前端模块），
+  但以 task type、plugin group、`plugin-ui.js` 为输入。`packages/slot-contracts/src/index.ts`
+  仅有 topology details、task drawer、task modal；没有管理页面插槽或菜单注册。
+- `UiController.serve` 可读取 classpath `ui/` 文件，但不存在文件会回退 SPA HTML；这不是
+  页面注册协议，不能用 HTTP 200 证明插件入口已装载，也不能靠资源同名覆盖宿主页面。
+- 发布镜像 `sha256:878be36bcb1a2d15266f6c7c05921f77d836136604bd956a5318671c2f34186c`
+  的 executable 有 UI 静态资源，无管理页面扩展注册类型。对应 CI `38686689513` 成功；
+  这只证明现有机制，未证明本候选可用。
+
+源码复现：在固定 BASE 应用本仓补丁后检查上述文件，并搜索 `registerRemotes`、
+`createRouter`、`admin/iam` 与 KnownSlotsPropNames。这里是可复现的源码能力缺口，尚无
+“真实插件管理页装载失败”的浏览器探针；接收前须用本仓最小扩展探针补足运行证据。
+
+### 最小公开契约
+
+建议以 `UiExtensionProvider` 一类版本化 SPI 收集 classpath bean 描述：扩展 ID、契约
+版本、相对资源根、内容 hash、模块入口、样式及翻译资源清单、页面子路由和菜单条目。
+宿主限定路径 `/ui/{tenant}/extensions/{extensionId}/...`；扩展只能注册自己根路径下的
+页面，不覆盖 `/admin/iam`、认证或宿主路由。组件加载可复用联邦运行时，但不得要求
+注册假任务类型，或把 classpath jar 放入任务插件扫描槽。
+
+宿主提供固定 layout 中的页面挂载点及窄化上下文：契约版本、tenant、base URL、当前
+locale、主题语义、受支持语言、导航和已认证 API 请求能力。请求能力沿用 cookie、
+CSRF 与错误处理，不暴露 token、client secret 或内部 store。插件提交自己的翻译目录，
+宿主按扩展 ID 命名空间装载；主题和语言变化必须响应，不能仅在入口读取一次。
+
+已有公开 `@kestra-io/design-system@0.5.0`，实际 npm tarball 有 dist、组件 exports、
+styleBase 与语言相关入口。其存在缩小新增机制范围：优先发布宿主与该包的兼容清单，
+以独立消费探针核对样式、Vue/i18n 单例和主题变量，再决定是否需要很小的适配包。
+不复制宿主内部组件或翻译，不把整个 UI 工程作为扩展 SDK。宿主 workspace 的
+`0.0.0-dev` 不能作为精确兼容版本；构建发布门必须生成可核对的版本／hash 对照。
+
+静态资源只接受同源、扩展清单声明的相对路径，验证路径穿越、重复 ID、重复路由、版本、
+文件存在、MIME 和内容 hash。稳定入口重新验证，hash 分块可长期缓存。清单不得接受任意
+远程 URL 或可执行字符串。扩展代码具有同源脚本权限，属于部署可信 jar，不是脚本沙箱。
+
+菜单可见性可由扩展自己提供的受保护 capability API 决定；未知／失败隐藏条目并显示
+直接访问错误，不能决定 API 授权。宿主不保存角色名或调用插件业务表。资源放行仅限
+必要静态目录，不扩张 `/api/**`、OIDC 目录或受保护页面匿名规则。
+
+### 管理 API 机制的复用与限制
+
+首期仅实例管理员管理：扩展控制器路由必须带实际 `tenant=main`，已有
+`OssRestOperationAdapter.resolve` 默认分类为 SYSTEM/EXECUTE，经统一 typed gate 后
+只有插件明确映射的实例管理员获准。插件还须按当前策略在写事务内复核，防止并发撤权
+后的旧请求提交。`SecurityFilter.AUTHENTICATION` 提供可信 Authentication；`/api/.*`
+cookie 写请求复用 CsrfTokenFilter。不能仅靠 `@Secured` 或菜单判断管理权。
+
+此路径不需要新增宿主 USER/ROLE/BINDING 枚举，不允许真实 RBAC 插件识别宿主
+controller 或 handler。管理控制器／前端请求是插件自身 API，可自定义路径；宿主接口
+适配仍留在宿主。委派管理若将来需要细分动作，重新提出类型化资源契约，不通过全局
+绕过过滤器实现。首次复用前，宿主独立探针必须真实注册一个外部控制器并验证此行为。
+
+### 兼容、异常与验收
+
+这是新增可选机制；无扩展配置时保留原 UI。版本不符、重复 ID、资源缺失或描述非法
+时拒绝该注册并报告诊断，不回退成另一个页面。模块装载失败必须显示可理解的错误并
+保留宿主导航／退出。静态资源缺失返回真实 404，不能把 SPA HTML 当 JS 返回。
+升级时由 overlay 适配 router/layout/主题内部变化，插件只依赖已发布版本和组件包。
+
+宿主测试使用本仓最小 classpath 扩展：注册、菜单点击、详情、直接访问、刷新、上下文
+路径、locale／主题动态变化、窄屏、404、重复／缺失／未知契约、加载失败、扩展关闭、
+cookie 写 CSRF、普通用户拒绝和管理员允许。不得 checkout 真实插件仓。
+部署仓再用正式发布镜像和插件 jar 验证真实 CRUD、管理拒绝无副作用、登录／退出和
+与宿主管理页面一致的布局、表格、表单、按钮、错误及全部语言／主题。
+
+裁决建议：接收通用页面挂载点和偏好桥接的最小范围；收窄共享组件需求为已发布包的
+兼容声明；拒绝搬入业务页面、替换 EE edition、源码相邻依赖和通用动态 bean 装载。
+当前仅建议，须补运行探针和明确接收后才能实现与发布。
