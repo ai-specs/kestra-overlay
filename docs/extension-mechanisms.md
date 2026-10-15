@@ -336,12 +336,19 @@ REQ-0320 的 Vite 独立入口与业务 UI 使用同一 `vue-i18n` 初始化、�
 样式及语言相关 exports；尚未证明与本镜像 workspace 的 `0.0.0-dev` 对应。优先补兼容
 声明及独立消费探针，不复制宿主源码。REQ-0320 登录翻译入口不能代替管理页面上下文。
 
-首期外部管理控制器可复用可信 Authentication、`/api/.*` 的 cookie CSRF 和既有 typed
-SYSTEM 管理门；必须有实际 `tenant=main` 路由变量，且补独立控制器探针。细分委派权限
-不在这个结论内。MigrationRunner 聚合 MigrationScript 可供扩展自带 bean+SQL，插件
-业务数据库不需要新增 overlay migration patch。策略持久化与热更新仍由插件实现。
+当前源码对带实际 `tenant=main` 的未知控制器使用 typed SYSTEM 门，但外部控制器的
+分类稳定性与可信身份消费方式尚须公开确认，不能把 default 分支或 Authentication
+attribute 当成发布契约。认证和 `/api/.*` cookie CSRF 可以复用；授权异常仍按现有
+403 失败关闭，不能承诺进入插件控制器返回 503。独立控制器探针与公开说明是接收前提。
+MigrationRunner 聚合 MigrationScript 可承载扩展 bean+SQL，业务表不需 overlay patch。
 
-账号目录内部服务不是公开扩展契约；账号生命周期和密码／会话由宿主负责，不允许插件
-直接写宿主表。最小公开目录 SPI 与管理页面注册／主题语言桥接分别记录在
-`r-oidc-server.md` 和 `r-ee-rbac.md` 的候选提案中；两项均未接收、未实现、未发布，
-没有新增 manifest 行或激活 patch。正式接收后才能形成发布契约。
+动态策略还需要完整评估边界：当前 REST/runtime 逐 operation 调用及请求内查询 scope
+缓存不能保证一次完整计划使用同一策略快照。R-EE-RBAC 新增生命周期候选，provider
+只提供不透明句柄，策略存储和 revision 归扩展；没有运行探针、接收和发布证据。
+
+账号目录内部服务不是公开扩展契约；账号生命周期和密码／会话由宿主负责，受保护
+管理员与授权绑定归扩展，不允许插件直接写宿主表。目录线路不阻塞角色／授权线路。
+目录 SPI 记录在 `r-oidc-server.md`；管理页面及评估生命周期记录在 `r-ee-rbac.md`。
+页面优先验证独立 ESM mount/unmount 与纯数据偏好上下文，不传内部框架实例；模块
+联邦共享运行时须另有兼容证据。所有候选均未接收、未实现、未发布；没有新增 manifest
+行或激活 patch，也不修改 AGENTS.md 的 UI patch 例外。正式接收后才能实现。
