@@ -2,8 +2,21 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
 # 来源: 新写；用户要求定制页面沿用上游国际化机制，复用现有翻译键
-# 触达上游文件: 3 个（Vite入口、独立登录翻译入口、静态资源缓存）
+# 触达上游文件: 4 个（构建脚本、独立Vite配置、翻译入口、静态资源缓存）
 # 移除条件: 上游OSS提供同等独立认证页面国际化入口
+diff --git a/ui/package.json b/ui/package.json
+index 87dad2c..16b0153 100644
+--- a/ui/package.json
++++ b/ui/package.json
+@@ -16,7 +16,7 @@
+         "dev": "vite --host",
+         "prebuild": "node scripts/ensure-sdk.mjs",
+         "plugin-count:update": "node --experimental-strip-types ./scripts/update_plugin_catalog_count.ts",
+-        "build": "vite build --emptyOutDir",
++        "build": "vite build --emptyOutDir && vite build --config vite.oidc.config.js",
+         "build:design": "npm run build --workspace=@kestra-io/design-system",
+         "build:topology": "npm run build --workspace=@kestra-io/topology",
+         "build:sdk": "node scripts/ensure-sdk.mjs",
 diff --git a/ui/src/oidc-login-i18n.ts b/ui/src/oidc-login-i18n.ts
 new file mode 100644
 index 0000000..dccef6b
@@ -38,23 +51,40 @@ index 0000000..dccef6b
 +window.addEventListener("storage", event => {
 +    if (event.key === "lang" || event.key === null) void translate()
 +})
-diff --git a/ui/vite.config.js b/ui/vite.config.js
-index ce67332..7aa62a1 100644
---- a/ui/vite.config.js
-+++ b/ui/vite.config.js
-@@ -54,6 +54,12 @@ export default defineConfig(({mode}) => {
-         base: "",
-         build: {
-             outDir: "../webserver/src/main/resources/ui",
-+            rollupOptions: {
-+                input: {main: path.resolve(__dirname, "index.html"), "oidc-login-i18n": path.resolve(__dirname, "src/oidc-login-i18n.ts")},
-+                output: {
-+                    entryFileNames: chunk => chunk.name === "oidc-login-i18n" ? "assets/oidc-login-i18n.js" : "assets/[name]-[hash].js",
-+                },
+diff --git a/ui/vite.oidc.config.js b/ui/vite.oidc.config.js
+new file mode 100644
+index 0000000..f9cb24a
+--- /dev/null
++++ b/ui/vite.oidc.config.js
+@@ -0,0 +1,28 @@
++import {defineConfig} from "vite"
++import path from "node:path"
++
++// Keep the login graph independent of business UI and its chunk-merging plugins.
++export default defineConfig({
++    base: "./",
++    plugins: [{
++        name: "authentication-entry-boundary",
++        generateBundle() {
++            for (const id of this.getModuleIds()) {
++                if (/src\/(main\.ts|App\.vue|routes\/|stores\/|override\/)/.test(id)) {
++                    this.error(`Authentication translation entry imports business UI: ${id}`)
++                }
++            }
++        },
++    }],
++    build: {
++        outDir: "../webserver/src/main/resources/ui",
++        emptyOutDir: false,
++        rollupOptions: {
++            input: path.resolve(import.meta.dirname, "src/oidc-login-i18n.ts"),
++            output: {
++                entryFileNames: "assets/oidc-login-i18n.js",
++                chunkFileNames: "assets/oidc-[name]-[hash].js",
 +            },
-         },
-         server: {
-             watch: {
++        },
++    },
++})
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
 index b54181e..d861b4a 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
