@@ -126,6 +126,8 @@ services:
                 access: [isAnonymous()]
               - pattern: /ping
                 access: [isAnonymous()]
+              - pattern: /ui/assets/**
+                access: [isAnonymous()]
               - pattern: /api/v1/configs/login
                 access: [isAnonymous()]
               - pattern: /**
