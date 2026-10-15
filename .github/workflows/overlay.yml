@@ -66,7 +66,14 @@ jobs:
       - name: Independent classpath authorization SPI bean discovery probe
         env:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
+          RBAC_PROBE_OUTPUT: ${{ github.workspace }}/.work/host-extension-probe.jar
         run: bash ./scripts/blackbox-classpath.sh "${{ github.workspace }}/.work/verify" "${{ github.workspace }}/.work/verify/docker/app/kestra" "$CANDIDATE_IMAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-owned-extension-probe
+          path: .work/host-extension-probe.jar
+          include-hidden-files: true
+          if-no-files-found: error
       - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
         env:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
@@ -76,6 +83,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-owned-extension-probe
+          path: .work/host-extension-probe
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: "Image-level OIDC black-box (two phases: gated-off regression + full flow)"
@@ -88,6 +103,8 @@ jobs:
       - name: UI interception, password login, OIDC callback and authenticated UI/API
         env:
           BB_BROWSER: '1'
+          BB_UI_EXTENSION_PROBE: 'true'
+          BB_UI_EXTENSION_JAR: ${{ github.workspace }}/.work/host-extension-probe/host-extension-probe.jar
           NODE_PATH: ${{ runner.temp }}/oidc-browser/node_modules
           CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
         run: |
@@ -103,6 +120,8 @@ jobs:
           path: |
             .work/auth-theme-*.json
             .work/auth-i18n-*.json
+            .work/directory-http-*.json
+            .work/ui-extension-*.json
           include-hidden-files: true
           if-no-files-found: error
   promote:

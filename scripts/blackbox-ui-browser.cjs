@@ -74,6 +74,13 @@ async function main() {
         const persistedDescription = await page.evaluate(async () => (await (await fetch('/api/v1/main/mcp-servers/default')).json()).description);
         if (persistedDescription !== 'OIDC browser acceptance saved') throw new Error('MCP editor save did not persist description');
         console.log('MCP EDITOR BUILT-IN OIDC AND PWA REGRESSION GREEN');
+        if (process.env.BB_UI_EXTENSION_PROBE === 'true') {
+            const {runUiExtensionChecks} = await import('./ui-extension-cases.mjs');
+            const extensionFs = require('node:fs');
+            extensionFs.mkdirSync('.work', {recursive: true});
+            await runUiExtensionChecks(page, base, report => extensionFs.writeFileSync(
+                `.work/ui-extension-${process.env.BB_BROWSER_SETUP === '1' ? 'setup' : 'env'}.json`, JSON.stringify(report, null, 2)));
+        }
         const {runAuthThemeChecks} = await import('./auth-theme-cases.mjs');
         const themeSession = await context.newCDPSession(page);
         const fs = require('node:fs');

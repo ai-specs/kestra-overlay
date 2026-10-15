@@ -4,8 +4,9 @@
 # 来源: 新写；百分比KPI分子分母共享一次控制器授权，缺少每个实际查询的operation
 # 触达上游文件: 5 个（查询激活点、宿主typed适配与执行顺序探针）
 # 移除条件: 上游OSS每个Dashboard实际查询提供等价授权激活点
+# 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
 diff --git a/core/src/main/java/io/kestra/core/services/ChartDataService.java b/core/src/main/java/io/kestra/core/services/ChartDataService.java
-index 368ead8..6457b64 100644
+index 368ead8..1e2af8d 100644
 --- a/core/src/main/java/io/kestra/core/services/ChartDataService.java
 +++ b/core/src/main/java/io/kestra/core/services/ChartDataService.java
 @@ -30,11 +30,17 @@ import static io.kestra.core.utils.MathUtils.roundDouble;
@@ -14,7 +15,7 @@ index 368ead8..6457b64 100644
      private final List<QueryBuilderInterface<?>> queryBuilders;
 +    private final DashboardQueryAccessControl accessControl;
      private final Map<Class<? extends QueryBuilderInterface<?>>, QueryBuilderInterface<?>> queryBuilderByRepositoryClass = new ConcurrentHashMap<>();
- 
+
 -    @Inject
      public ChartDataService(List<QueryBuilderInterface<?>> queryBuilders) {
 +        this(queryBuilders, new GlobalDashboardQueryAccessControl());
@@ -25,80 +26,63 @@ index 368ead8..6457b64 100644
          this.queryBuilders = Objects.requireNonNull(queryBuilders, "queryBuilders must not be null");
 +        this.accessControl = Objects.requireNonNull(accessControl, "Dashboard query access control is required");
      }
- 
+
      public <F extends Enum<F>> ArrayListTotal<Map<String, Object>> generate(
-@@ -44,6 +50,7 @@ public class ChartDataService {
+@@ -44,8 +50,10 @@ public class ChartDataService {
          ZonedDateTime endDate,
          Pageable pageable
      ) throws IOException {
-+        accessControl.beforeQuery(tenantId, dataChart.getData(), false);
-         return this.<F>queryBuilder(dataChart.getData().repositoryClass())
-             .fetchData(tenantId, dataChart.getData(), startDate, endDate, pageable);
+-        return this.<F>queryBuilder(dataChart.getData().repositoryClass())
+-            .fetchData(tenantId, dataChart.getData(), startDate, endDate, pageable);
++        try (var scope = accessControl.openQuery(tenantId, dataChart.getData(), false)) {
++            return this.<F>queryBuilder(dataChart.getData().repositoryClass())
++                .fetchData(tenantId, dataChart.getData(), startDate, endDate, pageable);
++        }
      }
-@@ -56,9 +63,12 @@ public class ChartDataService {
+
+     public <F extends Enum<F>> List<Map<String, Object>> generateKPI(
+@@ -56,10 +64,17 @@ public class ChartDataService {
      ) throws IOException {
          QueryBuilderInterface<F> queryBuilder = this.queryBuilder(dataChart.getData().repositoryClass());
- 
+
 -        Double filteredValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, dataChart.getData().getNumerator() != null);
 +        boolean numerator = dataChart.getData().getNumerator() != null;
-+        accessControl.beforeQuery(tenantId, dataChart.getData(), numerator);
-+        Double filteredValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, numerator);
- 
++        Double filteredValue;
++        try (var scope = accessControl.openQuery(tenantId, dataChart.getData(), numerator)) {
++            filteredValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, numerator);
++        }
+
          if (dataChart.getChartOptions() != null && dataChart.getChartOptions().getNumberType().equals(KpiOption.NumberType.PERCENTAGE)) {
-+            accessControl.beforeQuery(tenantId, dataChart.getData(), false);
-             Double totalValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, false);
+-            Double totalValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, false);
++            Double totalValue;
++            try (var scope = accessControl.openQuery(tenantId, dataChart.getData(), false)) {
++                totalValue = queryBuilder.fetchValue(tenantId, dataChart.getData(), startDate, endDate, false);
++            }
              if (totalValue == null || totalValue == 0) {
                  return List.of(Map.of("value", 0.0));
-diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-index 5c2f9bc..da945ec 100644
---- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-+++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-@@ -17,7 +17,8 @@ import jakarta.inject.Singleton;
- import static io.kestra.webserver.rbac.TypedAuthorization.*;
- 
- @Singleton
--public final class TypedDashboardGate {
-+@io.micronaut.context.annotation.Replaces(io.kestra.core.services.GlobalDashboardQueryAccessControl.class)
-+public final class TypedDashboardGate implements io.kestra.core.services.DashboardQueryAccessControl {
-     private final RbacConfiguration configuration;
-     private final boolean typedEnabled;
-     private final TypedAuthorizationGate gate;
-@@ -30,6 +31,15 @@ public final class TypedDashboardGate {
-     }
- 
-     public void authorize(String tenant, Object datasource) {
-+        authorize(tenant, datasource, false);
-+    }
-+
-+    @Override
-+    public void beforeQuery(String tenant, IData<?> datasource, boolean numerator) {
-+        authorize(tenant, datasource, numerator);
-+    }
-+
-+    private void authorize(String tenant, Object datasource, boolean numerator) {
-         if (!configuration.enabled() || !typedEnabled) return;
-         var request = ServerRequestContext.currentRequest().orElseThrow(() -> denied());
-         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow(() -> denied());
-@@ -59,6 +69,7 @@ public final class TypedDashboardGate {
-         if (hasExpression(definition)) throw denied();
-         QueryDomain domain = namespace == null ? queryDomain(definition.path("where"))
-             : new QueryDomain(List.of(namespace), List.of(), List.of(), true, false);
-+        if (numerator) domain = domain.intersect(queryDomain(definition.path("numerator")));
-         var operation = new Operation(CONTRACT_VERSION, Source.DASHBOARD_AGGREGATE, resource, Action.READ, tenant, namespace, id,
-             domain, namespace == null ? Coverage.COMPLETE_QUERY : Coverage.SINGLE, aggregate, SideEffect.READ_ONLY);
-         Decision decision = gate.authorize(principal, operation).block();
+             }
 diff --git a/core/src/main/java/io/kestra/core/services/DashboardQueryAccessControl.java b/core/src/main/java/io/kestra/core/services/DashboardQueryAccessControl.java
 new file mode 100644
-index 0000000..ea57e94
+index 0000000..ba6b01a
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/services/DashboardQueryAccessControl.java
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,17 @@
 +package io.kestra.core.services;
 +
 +import io.kestra.plugin.core.dashboard.data.IData;
 +
 +public interface DashboardQueryAccessControl {
 +    void beforeQuery(String tenant, IData<?> datasource, boolean numerator);
++
++    default QueryScope openQuery(String tenant, IData<?> datasource, boolean numerator) {
++        beforeQuery(tenant, datasource, numerator);
++        return () -> {};
++    }
++
++    interface QueryScope extends AutoCloseable {
++        @Override
++        void close();
++    }
 +}
 diff --git a/core/src/main/java/io/kestra/core/services/GlobalDashboardQueryAccessControl.java b/core/src/main/java/io/kestra/core/services/GlobalDashboardQueryAccessControl.java
 new file mode 100644
@@ -116,6 +100,70 @@ index 0000000..c88f929
 +    @Override
 +    public void beforeQuery(String tenant, IData<?> datasource, boolean numerator) {}
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+index 5c2f9bc..2f16bcc 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+@@ -17,7 +17,8 @@ import jakarta.inject.Singleton;
+ import static io.kestra.webserver.rbac.TypedAuthorization.*;
+
+ @Singleton
+-public final class TypedDashboardGate {
++@io.micronaut.context.annotation.Replaces(io.kestra.core.services.GlobalDashboardQueryAccessControl.class)
++public final class TypedDashboardGate implements io.kestra.core.services.DashboardQueryAccessControl {
+     private final RbacConfiguration configuration;
+     private final boolean typedEnabled;
+     private final TypedAuthorizationGate gate;
+@@ -30,7 +31,27 @@ public final class TypedDashboardGate {
+     }
+
+     public void authorize(String tenant, Object datasource) {
+-        if (!configuration.enabled() || !typedEnabled) return;
++        authorize(tenant, datasource, false);
++    }
++
++    @Override
++    public void beforeQuery(String tenant, IData<?> datasource, boolean numerator) {
++        authorize(tenant, datasource, numerator);
++    }
++
++    @Override
++    public QueryScope openQuery(String tenant, IData<?> datasource, boolean numerator) {
++        var domain = authorize(tenant, datasource, numerator);
++        if (domain == null || !gate.evaluationEnabled()) return () -> {};
++        var scope = io.micronaut.core.propagation.PropagatedContext.getOrEmpty()
++            .plus(new io.kestra.core.repositories.AuthorizationQueryContext(domain)).propagate();
++        return scope::close;
++    }
++
++    record DatasourceDomain(AuthorizationEvaluations.Owner owner, Resource resource, QueryDomain domain) {}
++
++    private DatasourceDomain authorize(String tenant, Object datasource, boolean numerator) {
++        if (!configuration.enabled() || !typedEnabled) return null;
+         var request = ServerRequestContext.currentRequest().orElseThrow(() -> denied());
+         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow(() -> denied());
+         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+@@ -59,11 +80,19 @@ public final class TypedDashboardGate {
+         if (hasExpression(definition)) throw denied();
+         QueryDomain domain = namespace == null ? queryDomain(definition.path("where"))
+             : new QueryDomain(List.of(namespace), List.of(), List.of(), true, false);
++        if (numerator) domain = domain.intersect(queryDomain(definition.path("numerator")));
+         var operation = new Operation(CONTRACT_VERSION, Source.DASHBOARD_AGGREGATE, resource, Action.READ, tenant, namespace, id,
+             domain, namespace == null ? Coverage.COMPLETE_QUERY : Coverage.SINGLE, aggregate, SideEffect.READ_ONLY);
+         Decision decision = gate.authorize(principal, operation).block();
+         if (decision == null || !decision.allowed()) throw denied();
+-        request.setAttribute(TypedNamespaceAccessControl.class.getName() + "." + resource.name(), decision.scope());
++        if (gate.evaluationEnabled()) {
++            var owner = AuthorizationEvaluations.current();
++            if (owner == null || !owner.matches(principal, tenant)) throw denied();
++            return new DatasourceDomain(owner, resource, decision.scope());
++        } else {
++            request.setAttribute(TypedNamespaceAccessControl.class.getName() + "." + resource.name(), decision.scope());
++        }
++        return null;
+     }
+
+     private QueryDomain queryDomain(JsonNode filters) {
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardQueryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardQueryTest.java
 new file mode 100644
 index 0000000..d68a06f

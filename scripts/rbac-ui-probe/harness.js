@@ -1,0 +1,23 @@
+const container = document.querySelector("#extension");
+const controller = new AbortController();
+let handle;
+let context = {version: 1, tenant: "main", path: "roles", locale: "en", theme: "light", signal: controller.signal, navigate(path) {context = {...context, path}; return handle.update(context);}};
+window.probe = {errors: [], context, controller};
+window.addEventListener("error", event => window.probe.errors.push({message: event.message, source: event.filename}));
+window.addEventListener("unhandledrejection", event => window.probe.errors.push({message: String(event.reason)}));
+const sentinel = document.querySelector("#sentinel");
+window.probe.before = {font: getComputedStyle(sentinel).fontFamily, margin: getComputedStyle(document.body).margin};
+const module = await import("./extension.js");
+window.probe.module = module;
+window.probe.mount = async () => {handle = await module.mount(container, context); window.probe.handle = handle;};
+document.querySelector("#mount").onclick = window.probe.mount;
+document.querySelector("#update").onclick = async () => {
+    context = {...context, locale: "fr", theme: "dark"};
+    document.documentElement.className = "dark";
+    await handle.update(context);
+};
+document.querySelector("#unmount").onclick = () => handle.unmount();
+await window.probe.mount();
+window.probe.ready = true;
+window.probe.after = {font: getComputedStyle(sentinel).fontFamily, margin: getComputedStyle(document.body).margin};
+document.querySelector("#status").textContent = JSON.stringify({before: window.probe.before, after: window.probe.after}, null, 2);

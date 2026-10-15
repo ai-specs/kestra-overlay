@@ -457,7 +457,71 @@ kestra:
 扩展选择声明兼容该契约的固定版本；挂载 jar 不代表所有业务路径均已受支持，
 具体支持范围和权限配置以扩展项目说明为准。
 
-### 第三方扩展仓使用规则
+### 完整授权评估生命周期
+
+以下为 REQ-0330 的新契约，源码及本地测试已存在，正式发布仍须选择包含它且通过全部
+发布门的镜像；旧镜像不提供本接口。配置 `kestra.rbac.evaluation.enabled: true` 时，
+必须同时开启统一 RBAC 和 typed。默认 false，保留现有静态 provider 行为。
+
+扩展实现 `io.kestra.webserver.rbac.AuthorizationEvaluationProviderV1`：
+`begin(RbacAuthorizer.Principal, String tenant)` 返回
+`CompletionStage<AuthorizationEvaluationV1>`。评估对象提供
+`authorize(TypedAuthorization.Operation)` 与 `close()`，分别返回 Decision 与 Void
+的 CompletionStage。主体为宿主认证结果，扩展不得重新解析身份 header 或宿主 URL。
+
+宿主负责 REST 完整业务请求、MCP 单次完整工具操作、实际 Flow 声明的嵌套检查和必要
+查询范围的评估边界。扩展 begin 固定不可变策略快照，边界内不混合策略版本；新边界
+重新读取当前策略。句柄不得持有 JDBC 连接／事务，不进入队列，不是 worker 每个 task
+执行时的授权沙箱。晚到 begin 仍须释放；异常、超时、缺少或多个 provider 均失败关闭，
+不得退回逐 operation。旧接口保留，新接口只有 V1 显式启用后才使用。
+
+### OIDC 登录账号目录
+
+以下为 REQ-0350 的新契约，尚待正式发布门。内置 OIDC 开启时，classpath 扩展可以
+注入唯一的 `io.kestra.webserver.oidc.UserDirectoryV1`。它是服务器内受信能力，不提供
+匿名或独立管理 HTTP 端点；扩展控制器必须自行要求管理权，并经过宿主认证与 CSRF。
+公开目录不识别插件角色、应急管理员或授权绑定。
+
+`list(page,size)` 使用 1 起始页、1–100 页大小；`find(subject)` 返回 Optional。
+`create(username,name,email,password)` 原子创建账号及凭据，冲突不改旧密码；新账号无
+可信角色。`update`、`setActive`、`resetPassword` 要求当前 revision，返回递增 revision。
+账号 DTO 只含 subject、显示名、邮箱、active、revision，不返回凭据、哈希或 token。
+subject 等于当前不可修改的登录名；没有改名或物理删除接口。失败用 DirectoryException
+的 INVALID／NOT_FOUND／CONFLICT／UNAVAILABLE 区分，调用方映射到自己的稳定 API 错误。
+
+停用、启用与重置会推进认证版本并撤销现有 token，旧 UI/IdP 会话不能通过重新启用复活。
+资料更新不撤销会话。旧账号迁移默认版本 0；缺版本旧 token 仅在账号仍为 0 时兼容。
+登录、退出及协议端点保留独立校验，失效 UI 会话仍能退出和重新登录；外部 issuer 不按
+本地目录身份处理。目录操作失败不改变安装状态，不重开首次 setup。
+
+### 独立管理页面
+
+REQ-0340 的源码和本地测试已存在，正式使用必须选择包含该契约且通过全部发布门的
+镜像。Java 入口为 `io.kestra.webserver.ui.UiExtensionProviderV1`，返回 V1 descriptor：
+扩展ID、`ui-extensions/<id>` classpath根、ESM入口、styles清单、文件SHA-256/MIME、
+语言标题及可选capability API。重复ID、路径歧义、错误版本、缺文件或hash不符拒绝注册。
+资源限制为单文件16MiB、单扩展64MiB、注册总128MiB。classpath共享，不宣称来源沙箱。
+
+描述发现为 `/ui-extensions/{tenant}/manifest`，需宿主认证；有普通metadata权限的用户
+获得200空列表，显式SYSTEM管理允许时显示管理描述。资源在同一路径的`/{id}/{file}`
+下提供，继续经宿主授权；未声明资源返回404，不回退SPA HTML。扩展业务API带实际
+tenant时按宿主SYSTEM管理门处理，插件仍须检查自身管理权限；不能靠资源可读或菜单
+可见授权保存。关闭统一RBAC时沿用宿主现有认证边界，插件管理接口必须自行保持关闭。
+
+宿主提供 `/ui/{tenant}/extensions/{id}/...` 根路由与菜单组。ESM导出contractVersion=1和
+mount(container,context)，返回update／unmount。context提供tenant、根内路径、语言、
+解析后主题、styles、assetBase、AbortSignal及导航／同源request函数，不提供Vue、router、
+store、i18n实例或token。扩展自有ShadowRoot，只在根内装载styles，不向document注入
+全局CSS；卸载与abort释放监听和副作用。初期支持公开基础按钮、输入和表格，复杂弹出
+层及KsPagination不在兼容清单内，详情使用路由、确认使用页内区域。
+
+已发布executable中的 `META-INF/kestra/ui-sdk/v1/` 是独立前端消费入口，含协议类型、
+组件包精确版本／integrity、13种语言ID／回退与翻译完整性检查工具。插件从兼容正式
+镜像提取此目录，npm只消费声明的公开包，不读取相邻宿主源码。组件locale含下划线，
+使用SDK声明的别名映射。业务消息按locale包装JSON，运行check-translations.mjs；工具
+只检查完整性和占位符，不证明翻译质量，仍须浏览器检查实际文案及主题。
+
+### 独立仓消费边界
 
 第三方扩展仓必须优先依赖稳定的公开契约。overlay 负责适配上游实现细节、提供必要的
 激活点和承载能力；扩展仓负责业务模型、授权策略和业务 bean。插件不得解析或复制

@@ -1,0 +1,720 @@
+# 需求: REQ-0350，公开最小账号目录、原子创建与认证生命周期失效，不承载授权业务。
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；本地定向测试通过，正式 CI 与发布待验收。
+# 来源: 新写；依据 R-OIDC-SERVER 目录反馈与发布宿主组件探针；无客户角色或路径特例。
+# 触达上游文件: 新增公开 SPI、目录适配及版本迁移，修改登录/session/code激活点及测试，共11文件；发行与token验证演进归0150/0160。
+# 移除条件: 上游 OSS 提供等价公开账号目录与完整认证生命周期失效机制。
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java
+new file mode 100644
+index 0000000..67f8e08
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java
+@@ -0,0 +1,26 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Optional;
++
++public interface UserDirectoryV1 {
++    record User(String subject, String name, String email, boolean active, long revision) {}
++    record Page(List<User> items, long total, int page, int size) {
++        public Page { items = List.copyOf(items); }
++    }
++    enum Failure { INVALID, NOT_FOUND, CONFLICT, UNAVAILABLE }
++    final class DirectoryException extends RuntimeException {
++        private final Failure failure;
++        public DirectoryException(Failure failure) {
++            super("User directory: " + failure);
++            this.failure = failure;
++        }
++        public Failure failure() { return failure; }
++    }
++    Page list(int page, int size);
++    Optional<User> find(String subject);
++    User create(String username, String name, String email, String password);
++    User update(String subject, long revision, String name, String email);
++    User setActive(String subject, long revision, boolean active);
++    User resetPassword(String subject, long revision, String password);
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+new file mode 100644
+index 0000000..1981b8a
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+@@ -0,0 +1,45 @@
++package io.kestra.webserver.oidc.controllers;
++
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Mono;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.filter.HttpServerFilter;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.http.filter.ServerFilterPhase;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++
++@Filter("/**")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
++    private final OidcConfiguration configuration;
++    private final OidcIdentityLifecycle lifecycle;
++    public OidcIdentityLifecycleFilter(OidcConfiguration configuration, OidcIdentityLifecycle lifecycle) {
++        this.configuration = configuration; this.lifecycle = lifecycle;
++    }
++    @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
++    @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++        String path = request.getPath();
++        if (path.startsWith("/oauth/") || path.startsWith("/.well-known/") || path.startsWith("/ui/assets/")
++            || path.equals("/api/v1/configs/login") || java.util.Set.of("/oidc/login", "/oidc/logout", "/oidc/setup",
++                "/oidc/authorize", "/oidc/token", "/oidc/jwks", "/oidc/userinfo", "/oidc/introspect", "/oidc/revoke",
++                "/oidc/register", "/oidc/consent").contains(path)) return chain.proceed(request);
++        var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication == null) return chain.proceed(request);
++        var attributes = authentication.getAttributes();
++        if (!configuration.getIssuer().equals(String.valueOf(attributes.get("iss")))) return chain.proceed(request);
++        return Mono.fromCallable(() -> authentication.getName().equals(attributes.get("client_id")) && lifecycle.machineSubject(authentication.getName())
++                || lifecycle.matches(authentication.getName(), attributes.get(OidcIdentityLifecycle.CLAIM)))
++            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
++            .timeout(java.time.Duration.ofSeconds(5))
++            .onErrorReturn(false)
++            .flatMapMany(valid -> valid ? chain.proceed(request) : Mono.just(path.startsWith("/ui/")
++                ? HttpResponse.temporaryRedirect(java.net.URI.create("/oidc/logout")) : HttpResponse.unauthorized()));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
+index be5d295..9fd7db2 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
+@@ -65,14 +65,15 @@ public class OidcLoginController {
+         final String password = form.get("password");
+         final String from = sanitizeFrom(form.get("from"));
+
+-        if (!userService.validateCredentials(username, password)) {
++        final var authenticated = sessionService.authenticate(userService, username, password);
++        if (authenticated.isEmpty()) {
+             return HttpResponse.ok(loginPageHtml(from, true))
+                 .contentType(MediaType.TEXT_HTML_TYPE)
+                 .status(io.micronaut.http.HttpStatus.UNAUTHORIZED)
+                 .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
+         }
+
+-        final String sessionId = sessionService.create(username);
++        final String sessionId = authenticated.orElseThrow();
+         return HttpResponse.seeOther(URI.create(from == null ? DEFAULT_LANDING : from))
+             .cookie(sessionService.sessionCookie(request, sessionId))
+             .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_99OidcUserDirectoryMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_99OidcUserDirectoryMigration.java
+new file mode 100644
+index 0000000..923dc1c
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_99OidcUserDirectoryMigration.java
+@@ -0,0 +1,18 @@
++package io.kestra.webserver.oidc.migration;
++
++import java.util.List;
++import javax.sql.DataSource;
++import io.kestra.jdbc.migration.AbstractSQLMigrationScript;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.repository.type", value = "postgres")
++public final class V2_0_99OidcUserDirectoryMigration extends AbstractSQLMigrationScript {
++    private final DataSource source;
++    public V2_0_99OidcUserDirectoryMigration(DataSource source) { this.source = source; }
++    @Override public String scriptId() { return "2.0.99-oidc-server-user-directory"; }
++    @Override public String description() { return "Public OIDC directory and identity lifecycle versions"; }
++    @Override protected DataSource dataSource() { return source; }
++    @Override public List<String> sqlResources() { return List.of("/migrations/2.0.99-oidc-server-user-directory-postgres.sql"); }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
+index c283ea3..a574f2a 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
+@@ -47,6 +47,13 @@ public class OidcAuthorizationCodeService {
+     private final ObjectMapper objectMapper;
+     private final OidcConfiguration configuration;
+
++    public AuthorizationCode createForSession(long version, String clientId, String subject, String redirectUri,
++        List<String> scopes, String challenge, CodeChallengeMethod method, String nonce) {
++        AuthorizationCode code = create(clientId, subject, redirectUri, scopes, challenge, method, nonce);
++        new OidcIdentityLifecycle(dataSource).bindAuthorizationCode(code.getValue(), subject, version);
++        return code;
++    }
++
+     /** A stored authorization code. */
+     public record StoredCode(
+         String code, String clientId, String subject, String redirectUri, List<String> scopes,
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcIdentityLifecycle.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcIdentityLifecycle.java
+new file mode 100644
+index 0000000..768b75f
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcIdentityLifecycle.java
+@@ -0,0 +1,80 @@
++package io.kestra.webserver.oidc.services;
++
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.OptionalLong;
++import javax.sql.DataSource;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Singleton;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public final class OidcIdentityLifecycle {
++    public static final String CLAIM = "authentication_version";
++    private final DataSource source;
++    public OidcIdentityLifecycle(DataSource source) { this.source = DelegatingDataSource.unwrapDataSource(source); }
++    public OptionalLong activeVersion(String subject) {
++        try (var connection = source.getConnection()) { return activeVersion(connection, subject); }
++        catch (SQLException failure) { throw new IllegalStateException("Cannot validate identity lifecycle"); }
++    }
++    public static OptionalLong activeVersion(Connection connection, String subject) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT authentication_version FROM oidc_user WHERE username=? AND user_state='ACTIVE'")) {
++            statement.setString(1, subject);
++            try (var rows = statement.executeQuery()) { return rows.next() ? OptionalLong.of(rows.getLong(1)) : OptionalLong.empty(); }
++        }
++    }
++    public boolean matches(String subject, Object claim) {
++        if (claim != null && !(claim instanceof Number)) return false;
++        long version;
++        try { version = claim == null ? 0 : new java.math.BigDecimal(claim.toString()).longValueExact(); }
++        catch (ArithmeticException | NumberFormatException invalid) { return false; }
++        var active = activeVersion(subject);
++        return active.isPresent() && active.getAsLong() == version;
++    }
++
++    public boolean machineSubject(String subject) {
++        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
++            "SELECT EXISTS(SELECT 1 FROM oidc_client WHERE client_id=? AND client_kind='system' AND active),"
++            + "EXISTS(SELECT 1 FROM oidc_user WHERE username=?)")) {
++            statement.setString(1, subject); statement.setString(2, subject);
++            try (var rows = statement.executeQuery()) { return rows.next() && rows.getBoolean(1) && !rows.getBoolean(2); }
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot validate machine identity"); }
++    }
++
++    public void bindAuthorizationCode(String code, String subject, long version) {
++        try (var connection = source.getConnection()) {
++            connection.setAutoCommit(false);
++            try {
++                try (var lock = connection.prepareStatement("SELECT authentication_version FROM oidc_user WHERE username=? AND user_state='ACTIVE' FOR SHARE")) {
++                    lock.setString(1, subject);
++                    try (var rows = lock.executeQuery()) {
++                        if (!rows.next() || rows.getLong(1) != version) throw new io.kestra.webserver.oidc.OidcException(com.nimbusds.oauth2.sdk.OAuth2Error.INVALID_GRANT);
++                    }
++                }
++                try (var statement = connection.prepareStatement("UPDATE oidc_authorization_code SET authentication_version=? WHERE code=? AND subject=? AND NOT used")) {
++                    statement.setLong(1, version); statement.setString(2, code); statement.setString(3, subject);
++                    if (statement.executeUpdate() != 1) throw new io.kestra.webserver.oidc.OidcException(com.nimbusds.oauth2.sdk.OAuth2Error.INVALID_GRANT);
++                }
++                connection.commit();
++            } catch (RuntimeException | SQLException failure) { connection.rollback(); throw failure; }
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot bind authorization identity"); }
++    }
++    public OptionalLong authenticate(String subject, String password) {
++        if (subject == null || password == null) return OptionalLong.empty();
++        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
++            "SELECT u.authentication_version,a.credential FROM oidc_user u JOIN oidc_user_auth_method a ON a.user_id=u.username "
++            + "WHERE u.username=? AND u.user_state='ACTIVE' AND a.type='PASSWORD' AND a.state='ACTIVE'")) {
++            statement.setString(1, subject);
++            long version;
++            try (var rows = statement.executeQuery()) {
++                if (!rows.next() || !org.mindrot.jbcrypt.BCrypt.checkpw(password, rows.getString(2))) return OptionalLong.empty();
++                version = rows.getLong(1);
++            }
++            try (var update = connection.prepareStatement("UPDATE oidc_user SET last_login_at=now() WHERE username=? AND authentication_version=? AND user_state='ACTIVE'")) {
++                update.setString(1, subject); update.setLong(2, version);
++                return update.executeUpdate() == 1 ? OptionalLong.of(version) : OptionalLong.empty();
++            }
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot authenticate identity lifecycle"); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+index 7b0aee2..39b077a 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
+@@ -26,6 +26,13 @@ public class OidcOwnershipService {
+     public record ClientState(String kind, String owner, Instant expiresAt, String name, boolean active) {}
+     public record ConsentResult(Map<String, List<String>> parameters, String code) {}
+
++    public ConsentResult completeForSession(long version, String interaction, String subject, String sessionId,
++        boolean approve, List<String> selectedScopes) {
++        ConsentResult result = complete(interaction, subject, sessionId, approve, selectedScopes);
++        if (result.code() != null) new OidcIdentityLifecycle(source).bindAuthorizationCode(result.code(), subject, version);
++        return result;
++    }
++
+     public OidcOwnershipService(final DataSource source, final ObjectMapper mapper,
+         final int ownerMaximum) {
+         this(source, mapper, ownerMaximum, new io.kestra.webserver.oidc.OidcConfiguration());
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
+index 8e2e2a6..03461d7 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
+@@ -37,26 +37,48 @@ public class OidcSessionService {
+     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
+     private final SecureRandom secureRandom = new SecureRandom();
+     private final OidcConfiguration configuration;
++    private final OidcIdentityLifecycle lifecycle;
+
+-    @Inject
+     public OidcSessionService(final OidcConfiguration configuration) {
++        this(configuration, null);
++    }
++
++    @Inject
++    public OidcSessionService(final OidcConfiguration configuration, final OidcIdentityLifecycle lifecycle) {
+         this.configuration = configuration;
++        this.lifecycle = lifecycle;
+     }
+
+     /** A session entry. {@code oneShot} sessions exist only to complete one authorize flow. */
+-    public record Session(String id, String subject, Instant expiresAt, boolean oneShot) {}
++    public record Session(String id, String subject, Instant expiresAt, boolean oneShot, long authenticationVersion) {}
+
+     public String create(final String subject) {
+         return create(subject, false, configuration.getSessionTtl());
+     }
+
++    public Optional<String> authenticate(OidcUserService users, String subject, String password) {
++        if (lifecycle == null) return users.validateCredentials(subject, password) ? Optional.of(create(subject)) : Optional.empty();
++        var version = lifecycle.authenticate(subject, password);
++        if (version.isEmpty()) return Optional.empty();
++        String id = randomId();
++        sessions.put(id, new Session(id, subject, Instant.now().plus(configuration.getSessionTtl()), false, version.getAsLong()));
++        return Optional.of(id);
++    }
++
+     public String createOneShot(final String subject) {
+         return create(subject, true, ONE_SHOT_TTL);
+     }
+
++    public long authenticationVersion(String sessionId) {
++        Session session = sessions.get(sessionId);
++        if (session == null || session.expiresAt().isBefore(Instant.now())) throw new IllegalStateException("Expired login session");
++        return session.authenticationVersion();
++    }
++
+     private String create(final String subject, final boolean oneShot, final Duration ttl) {
+         final String id = randomId();
+-        sessions.put(id, new Session(id, subject, Instant.now().plus(ttl), oneShot));
++        long version = lifecycle == null ? 0 : lifecycle.activeVersion(subject).orElseThrow(() -> new IllegalStateException("Inactive login identity"));
++        sessions.put(id, new Session(id, subject, Instant.now().plus(ttl), oneShot, version));
+         return id;
+     }
+
+@@ -72,11 +94,16 @@ public class OidcSessionService {
+             sessions.remove(sessionId);
+             return Optional.empty();
+         }
++        if (lifecycle != null && !lifecycle.matches(session.subject(), session.authenticationVersion())) {
++            sessions.remove(sessionId);
++            return Optional.empty();
++        }
+         return Optional.of(session.subject());
+     }
+
+     /** Slides a regular session forward; one-shot sessions never extend. */
+     public boolean extend(final String sessionId) {
++        if (subject(sessionId).isEmpty()) return false;
+         if (sessionId == null || sessionId.isBlank()) {
+             return false;
+         }
+@@ -88,7 +115,7 @@ public class OidcSessionService {
+         if (session.oneShot()) {
+             return false;
+         }
+-        sessions.put(sessionId, new Session(session.id(), session.subject(), Instant.now().plus(configuration.getSessionTtl()), false));
++        sessions.put(sessionId, new Session(session.id(), session.subject(), Instant.now().plus(configuration.getSessionTtl()), false, session.authenticationVersion()));
+         return true;
+     }
+
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
+new file mode 100644
+index 0000000..c978feb
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
+@@ -0,0 +1,146 @@
++package io.kestra.webserver.oidc.services;
++
++import java.nio.charset.StandardCharsets;
++import java.sql.Connection;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.util.ArrayList;
++import java.util.Optional;
++import javax.sql.DataSource;
++import io.kestra.webserver.oidc.UserDirectoryV1;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
++import jakarta.inject.Singleton;
++import org.mindrot.jbcrypt.BCrypt;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++public final class OidcUserDirectory implements UserDirectoryV1 {
++    private final DataSource source;
++    public OidcUserDirectory(DataSource source) {
++        this.source = DelegatingDataSource.unwrapDataSource(source);
++    }
++    private interface Work<Result> { Result run(Connection connection) throws SQLException; }
++    private <Result> Result transaction(Work<Result> work) {
++        try (Connection connection = source.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
++            connection.setAutoCommit(false);
++            try {
++                Result result = work.run(connection);
++                connection.commit();
++                return result;
++            } catch (RuntimeException | SQLException failure) {
++                connection.rollback();
++                if (failure instanceof DirectoryException directory) throw directory;
++                if (failure instanceof SQLException sql && ("23505".equals(sql.getSQLState()) || "40001".equals(sql.getSQLState())))
++                    throw new DirectoryException(Failure.CONFLICT);
++                throw new DirectoryException(Failure.UNAVAILABLE);
++            }
++        } catch (SQLException failure) {
++            throw new DirectoryException(Failure.UNAVAILABLE);
++        }
++    }
++    private static String text(String value) {
++        if (value == null || value.isBlank() || value.length() > 256 || !value.equals(value.trim())
++            || value.codePoints().anyMatch(Character::isISOControl)) throw new DirectoryException(Failure.INVALID);
++        return value;
++    }
++    private static String hash(String password) {
++        if (password == null || password.length() < 8 || password.getBytes(StandardCharsets.UTF_8).length > 72)
++            throw new DirectoryException(Failure.INVALID);
++        return BCrypt.hashpw(password, BCrypt.gensalt());
++    }
++    private static User read(ResultSet rows) throws SQLException {
++        return new User(rows.getString("username"), rows.getString("name"), rows.getString("email"),
++            "ACTIVE".equals(rows.getString("user_state")), rows.getLong("directory_revision"));
++    }
++    private static Optional<User> find(Connection connection, String subject) throws SQLException {
++        try (var statement = connection.prepareStatement(
++            "SELECT username,name,email,user_state,directory_revision FROM oidc_user WHERE username=?")) {
++            statement.setString(1, subject);
++            try (var rows = statement.executeQuery()) { return rows.next() ? Optional.of(read(rows)) : Optional.empty(); }
++        }
++    }
++    @Override public Optional<User> find(String subject) {
++        text(subject);
++        return transaction(connection -> find(connection, subject));
++    }
++    @Override public Page list(int page, int size) {
++        if (page < 1 || size < 1 || size > 100 || page > 1_000_000) throw new DirectoryException(Failure.INVALID);
++        return transaction(connection -> {
++            long total;
++            try (var statement = connection.createStatement(); var rows = statement.executeQuery("SELECT count(*) FROM oidc_user")) {
++                rows.next(); total = rows.getLong(1);
++            }
++            var users = new ArrayList<User>();
++            try (var statement = connection.prepareStatement(
++                "SELECT username,name,email,user_state,directory_revision FROM oidc_user ORDER BY username LIMIT ? OFFSET ?")) {
++                statement.setInt(1, size); statement.setLong(2, (long)(page - 1) * size);
++                try (var rows = statement.executeQuery()) { while (rows.next()) users.add(read(rows)); }
++            }
++            return new Page(users, total, page, size);
++        });
++    }
++    @Override public User create(String username, String name, String email, String password) {
++        String subject = text(username);
++        String display = text(name == null ? subject : name);
++        String address = text(email == null ? (subject.contains("@") ? subject : subject + "@localhost") : email);
++        String credential = hash(password);
++        return transaction(connection -> {
++            try (var statement = connection.prepareStatement("INSERT INTO oidc_user(username,name,email,roles) VALUES (?,?,?,'[]'::jsonb)")) {
++                statement.setString(1, subject); statement.setString(2, display); statement.setString(3, address); statement.executeUpdate();
++            }
++            password(connection, subject, credential);
++            return find(connection, subject).orElseThrow();
++        });
++    }
++    private static void password(Connection connection, String subject, String credential) throws SQLException {
++        try (var statement = connection.prepareStatement("INSERT INTO oidc_user_auth_method(user_id,type,credential) VALUES (?,'PASSWORD',?) "
++            + "ON CONFLICT(user_id,type) DO UPDATE SET credential=EXCLUDED.credential,state='ACTIVE',updated_at=now()")) {
++            statement.setString(1, subject); statement.setString(2, credential); statement.executeUpdate();
++        }
++    }
++    private static void changed(Connection connection, String subject, int count) throws SQLException {
++        if (count != 1) throw new DirectoryException(find(connection, subject).isPresent() ? Failure.CONFLICT : Failure.NOT_FOUND);
++    }
++    @Override public User update(String subject, long revision, String name, String email) {
++        text(subject); text(name); text(email);
++        if (revision < 0) throw new DirectoryException(Failure.INVALID);
++        return transaction(connection -> {
++            try (var statement = connection.prepareStatement("UPDATE oidc_user SET name=?,email=?,email_verified=CASE WHEN email=? THEN email_verified ELSE false END,"
++                + "directory_revision=directory_revision+1,updated_at=now() WHERE username=? AND directory_revision=?")) {
++                statement.setString(1, name); statement.setString(2, email); statement.setString(3, email);
++                statement.setString(4, subject); statement.setLong(5, revision);
++                changed(connection, subject, statement.executeUpdate());
++            }
++            return find(connection, subject).orElseThrow();
++        });
++    }
++    @Override public User setActive(String subject, long revision, boolean active) {
++        return authenticationChange(subject, revision, active, null);
++    }
++    @Override public User resetPassword(String subject, long revision, String password) {
++        return authenticationChange(subject, revision, null, hash(password));
++    }
++    private User authenticationChange(String subject, long revision, Boolean active, String credential) {
++        text(subject);
++        if (revision < 0) throw new DirectoryException(Failure.INVALID);
++        return transaction(connection -> {
++            try (var statement = connection.prepareStatement("UPDATE oidc_user SET user_state=COALESCE(?,user_state),"
++                + "directory_revision=directory_revision+1,authentication_version=authentication_version+1,updated_at=now() "
++                + "WHERE username=? AND directory_revision=?")) {
++                statement.setString(1, active == null ? null : active ? "ACTIVE" : "INACTIVE");
++                statement.setString(2, subject); statement.setLong(3, revision);
++                changed(connection, subject, statement.executeUpdate());
++            }
++            if (credential != null) password(connection, subject, credential);
++            try (var statement = connection.prepareStatement("UPDATE oidc_token SET revoked=true WHERE subject=?")) {
++                statement.setString(1, subject); statement.executeUpdate();
++            }
++            try (var statement = connection.prepareStatement("UPDATE oidc_authorization_code SET used=true WHERE subject=?")) {
++                statement.setString(1, subject); statement.executeUpdate();
++            }
++            return find(connection, subject).orElseThrow();
++        });
++    }
++}
+diff --git a/webserver/src/main/resources/migrations/2.0.99-oidc-server-user-directory-postgres.sql b/webserver/src/main/resources/migrations/2.0.99-oidc-server-user-directory-postgres.sql
+new file mode 100644
+index 0000000..7a210b9
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.99-oidc-server-user-directory-postgres.sql
+@@ -0,0 +1,3 @@
++ALTER TABLE oidc_user ADD COLUMN IF NOT EXISTS directory_revision BIGINT NOT NULL DEFAULT 0;
++ALTER TABLE oidc_user ADD COLUMN IF NOT EXISTS authentication_version BIGINT NOT NULL DEFAULT 0;
++ALTER TABLE oidc_authorization_code ADD COLUMN IF NOT EXISTS authentication_version BIGINT NOT NULL DEFAULT 0;
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java
+new file mode 100644
+index 0000000..66e85d6
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java
+@@ -0,0 +1,214 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.Executors;
++import java.util.concurrent.atomic.AtomicInteger;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.nimbusds.oauth2.sdk.Scope;
++import io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.kestra.webserver.oidc.services.OidcJwkService;
++import io.kestra.webserver.oidc.services.OidcSessionService;
++import io.kestra.webserver.oidc.services.OidcTokenService;
++import io.kestra.webserver.oidc.services.OidcUserDirectory;
++import io.kestra.webserver.oidc.services.OidcUserService;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++
++class UserDirectoryContractTest extends OidcPostgresTestBase {
++    private OidcUserDirectory directory;
++    private OidcUserService users;
++    private String subject;
++    @BeforeEach void prepare() {
++        directory = new OidcUserDirectory(dataSource());
++        users = new OidcUserService(dataSource(), new ObjectMapper());
++        subject = "directory-" + UUID.randomUUID();
++    }
++    private UserDirectoryV1.User create() { return directory.create(subject, "Initial", "initial@example.invalid", "InitialPassword123!"); }
++    private void failure(UserDirectoryV1.Failure expected, Runnable action) {
++        assertEquals(expected, assertThrows(UserDirectoryV1.DirectoryException.class, action::run).failure());
++    }
++    @Test void duplicateCreatePreservesCredentialsAndRoles() {
++        create();
++        failure(UserDirectoryV1.Failure.CONFLICT, () -> directory.create(subject, "Other", "other@example.invalid", "OtherPassword123!"));
++        assertTrue(users.validateCredentials(subject, "InitialPassword123!"));
++        assertFalse(users.validateCredentials(subject, "OtherPassword123!"));
++        assertTrue(users.bySubject(subject).orElseThrow().roles().isEmpty());
++        assertEquals("Initial", directory.find(subject).orElseThrow().name());
++    }
++    @Test void profileUpdateHasCompareAndSetAndNoAuthenticationChange() {
++        var initial = create();
++        var lifecycle = new OidcIdentityLifecycle(dataSource());
++        var sessions = new OidcSessionService(new OidcConfiguration(), lifecycle);
++        String session = sessions.create(subject);
++        var changed = directory.update(subject, initial.revision(), "Changed", "changed@example.invalid");
++        assertEquals(initial.revision() + 1, changed.revision());
++        failure(UserDirectoryV1.Failure.CONFLICT, () -> directory.update(subject, initial.revision(), "Stale", "stale@example.invalid"));
++        assertEquals("Changed", directory.find(subject).orElseThrow().name());
++        assertEquals(subject, sessions.subject(session).orElseThrow());
++        assertTrue(lifecycle.matches(subject, 0L));
++        assertTrue(lifecycle.matches(subject, null));
++        assertFalse(lifecycle.matches(subject, 0.5));
++        assertFalse(lifecycle.matches(subject, "0"));
++    }
++    @Test void resetInvalidatesSessionCookieAndAllStoredTokens() throws Exception {
++        var initial = create();
++        var configuration = new OidcConfiguration();
++        var lifecycle = new OidcIdentityLifecycle(dataSource());
++        var sessions = new OidcSessionService(configuration, lifecycle);
++        String session = sessions.create(subject);
++        var tokens = new OidcTokenService(dataSource(), new ObjectMapper(), configuration, new OidcJwkService(dataSource()));
++        String client = "client-" + UUID.randomUUID();
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "INSERT INTO oidc_client(client_id,client_kind) VALUES (?,'system')")) {
++            statement.setString(1, client); statement.executeUpdate();
++        }
++        String access = tokens.issueAccessToken(client, subject, "Initial", null, List.of(), new Scope("openid")).getValue();
++        String refresh = tokens.issueRefreshToken(client, subject, new Scope("openid")).getValue();
++        var oldId = tokens.issueIdToken(client, subject, "Initial", null, List.of(), null);
++        var codes = new io.kestra.webserver.oidc.services.OidcAuthorizationCodeService(dataSource(), new ObjectMapper(), configuration);
++        String code = codes.create(client, subject, "http://localhost/callback", List.of("openid"), null, null, null).getValue();
++        var changed = directory.resetPassword(subject, initial.revision(), "NewPassword123!");
++        assertTrue(sessions.subject(session).isEmpty());
++        assertFalse(sessions.extend(session));
++        assertThrows(OidcException.class, () -> tokens.validateAccessToken(access));
++        assertThrows(OidcException.class, () -> tokens.validateRefreshToken(refresh, client));
++        assertThrows(OidcException.class, () -> codes.consume(code, client, "http://localhost/callback", null));
++        assertFalse(lifecycle.matches(subject, oldId.getJWTClaimsSet().getClaim(OidcIdentityLifecycle.CLAIM)));
++        assertTrue(users.validateCredentials(subject, "NewPassword123!"));
++        assertFalse(users.validateCredentials(subject, "InitialPassword123!"));
++        assertEquals(initial.revision() + 1, changed.revision());
++        assertEquals(1L, tokens.issueIdToken(client, subject, "Initial", null, List.of(), null).getJWTClaimsSet()
++            .getLongClaim(OidcIdentityLifecycle.CLAIM));
++        assertThrows(OidcException.class, () -> tokens.issueAuthorizationTokens(client, users.bySubject(subject).orElseThrow(),
++            new Scope("openid"), null, null, code));
++        assertThrows(OidcException.class, () -> codes.createForSession(0, client, subject,
++            "http://localhost/callback", List.of("openid"), null, null, null));
++    }
++    @Test void reactivationDoesNotReviveOldIdentity() {
++        var initial = create();
++        var lifecycle = new OidcIdentityLifecycle(dataSource());
++        var sessions = new OidcSessionService(new OidcConfiguration(), lifecycle);
++        String session = sessions.create(subject);
++        var inactive = directory.setActive(subject, initial.revision(), false);
++        assertFalse(users.validateCredentials(subject, "InitialPassword123!"));
++        var active = directory.setActive(subject, inactive.revision(), true);
++        assertTrue(active.active());
++        assertTrue(sessions.subject(session).isEmpty());
++        assertFalse(lifecycle.matches(subject, 0L));
++        assertTrue(lifecycle.matches(subject, 2L));
++    }
++    @Test void paginationAndSerializedResultsHaveNoSecrets() throws Exception {
++        long total = directory.list(1, 100).total();
++        create();
++        assertEquals(total + 1, directory.list(1, 100).total());
++        assertTrue(directory.list(1_000_000, 100).items().isEmpty());
++        String serialized = new ObjectMapper().writeValueAsString(directory.find(subject).orElseThrow());
++        assertFalse(serialized.contains("password"));
++        assertFalse(serialized.contains("roles"));
++        assertFalse(serialized.contains("credential"));
++        failure(UserDirectoryV1.Failure.INVALID, () -> directory.list(0, 20));
++        failure(UserDirectoryV1.Failure.INVALID, () -> directory.list(1, 101));
++    }
++    @Test void invalidAndMissingMutationsHaveNoSideEffects() {
++        failure(UserDirectoryV1.Failure.INVALID, () -> directory.create(subject, "Initial", "initial@example.invalid", "short"));
++        assertTrue(directory.find(subject).isEmpty());
++        var initial = create();
++        failure(UserDirectoryV1.Failure.INVALID, () -> directory.resetPassword(subject, initial.revision(), "界".repeat(25)));
++        assertTrue(users.validateCredentials(subject, "InitialPassword123!"));
++        failure(UserDirectoryV1.Failure.NOT_FOUND, () -> directory.setActive("missing-" + subject, 0, false));
++        failure(UserDirectoryV1.Failure.CONFLICT, () -> directory.resetPassword(subject, 99, "UnwantedPassword123!"));
++        assertTrue(users.validateCredentials(subject, "InitialPassword123!"));
++    }
++    @Test void concurrentWritersHaveOneWinner() {
++        var initial = create();
++        var successes = new AtomicInteger();
++        var conflicts = new AtomicInteger();
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            var start = new CompletableFuture<Void>();
++            var writes = List.of("First", "Second").stream().map(name -> CompletableFuture.runAsync(() -> {
++                start.join();
++                try { directory.update(subject, initial.revision(), name, "changed@example.invalid"); successes.incrementAndGet(); }
++                catch (UserDirectoryV1.DirectoryException failure) {
++                    assertEquals(UserDirectoryV1.Failure.CONFLICT, failure.failure()); conflicts.incrementAndGet();
++                }
++            }, executor)).toList();
++            start.complete(null);
++            CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new)).join();
++        }
++        assertEquals(1, successes.get()); assertEquals(1, conflicts.get());
++    }
++    @Test void cookieLifecycleFilterDeniesStaleButPreservesForeignIssuer() {
++        var initial = create();
++        var configuration = new OidcConfiguration();
++        var filter = new OidcIdentityLifecycleFilter(configuration, new OidcIdentityLifecycle(dataSource()));
++        var request = HttpRequest.GET("/api/v1/configs");
++        request.setAttribute(SecurityFilter.AUTHENTICATION,
++            Authentication.build(subject, List.of(), Map.of("iss", configuration.getIssuer(), OidcIdentityLifecycle.CLAIM, 0L)));
++        assertEquals(200, Mono.from(filter.doFilter(request, ignored -> Mono.just(HttpResponse.ok()))).block().code());
++        directory.resetPassword(subject, initial.revision(), "RotatedPassword123!");
++        assertEquals(401, Mono.from(filter.doFilter(request, ignored -> { throw new AssertionError("stale identity reached handler"); })).block().code());
++        for (String path : List.of("/oidc/logout", "/oidc/login", "/oauth/login/kestra", "/oauth/callback/kestra")) {
++            var protocol = HttpRequest.GET(path);
++            protocol.setAttribute(SecurityFilter.AUTHENTICATION, request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow());
++            assertEquals(200, Mono.from(filter.doFilter(protocol, ignored -> Mono.just(HttpResponse.ok()))).block().code());
++        }
++        var stalePage = HttpRequest.GET("/ui/main/flows");
++        stalePage.setAttribute(SecurityFilter.AUTHENTICATION, request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow());
++        assertEquals(307, Mono.from(filter.doFilter(stalePage, ignored -> { throw new AssertionError("stale page reached handler"); })).block().code());
++        request.setAttribute(SecurityFilter.AUTHENTICATION,
++            Authentication.build(subject, List.of(), Map.of("iss", "https://external.example.invalid")));
++        assertEquals(200, Mono.from(filter.doFilter(request, ignored -> Mono.just(HttpResponse.ok()))).block().code());
++    }
++    @Test void credentialFailureRollsBackAccountCreation() throws Exception {
++        String identifier = "probe_" + UUID.randomUUID().toString().replace("-", "");
++        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("CREATE FUNCTION " + identifier + "() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.user_id='"
++                + subject + "' THEN RAISE EXCEPTION 'controlled credential failure'; END IF; RETURN NEW; END $$");
++            statement.execute("CREATE TRIGGER " + identifier + " BEFORE INSERT ON oidc_user_auth_method FOR EACH ROW EXECUTE FUNCTION " + identifier + "()");
++            try {
++                failure(UserDirectoryV1.Failure.UNAVAILABLE, this::create);
++                assertTrue(directory.find(subject).isEmpty());
++            } finally {
++                statement.execute("DROP TRIGGER " + identifier + " ON oidc_user_auth_method");
++                statement.execute("DROP FUNCTION " + identifier + "()");
++            }
++        }
++    }
++    @Test void passwordCheckDoesNotUpgradeToANewerIdentityVersion() {
++        var initial = create();
++        var lifecycle = new OidcIdentityLifecycle(dataSource());
++        long authenticated = lifecycle.authenticate(subject, "InitialPassword123!").orElseThrow();
++        directory.resetPassword(subject, initial.revision(), "ChangedPassword123!");
++        assertFalse(lifecycle.matches(subject, authenticated));
++        var sessions = new OidcSessionService(new OidcConfiguration(), lifecycle);
++        assertTrue(sessions.authenticate(users, subject, "InitialPassword123!").isEmpty());
++        String fresh = sessions.authenticate(users, subject, "ChangedPassword123!").orElseThrow();
++        assertEquals(subject, sessions.subject(fresh).orElseThrow());
++    }
++    @Test void matchingClientAndUserNamesCannotBypassRevocation() throws Exception {
++        var initial = create();
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "INSERT INTO oidc_client(client_id,client_kind) VALUES (?,'system')")) {
++            statement.setString(1, subject); statement.executeUpdate();
++        }
++        var configuration = new OidcConfiguration();
++        var lifecycle = new OidcIdentityLifecycle(dataSource());
++        assertFalse(lifecycle.machineSubject(subject));
++        var filter = new OidcIdentityLifecycleFilter(configuration, lifecycle);
++        var request = HttpRequest.GET("/api/v1/configs");
++        request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build(subject, List.of(),
++            Map.of("iss", configuration.getIssuer(), "client_id", subject, OidcIdentityLifecycle.CLAIM, 0L)));
++        directory.resetPassword(subject, initial.revision(), "ChangedPassword123!");
++        assertEquals(401, Mono.from(filter.doFilter(request, ignored -> {throw new AssertionError("colliding identity bypassed lifecycle");})).block().code());
++    }
++}

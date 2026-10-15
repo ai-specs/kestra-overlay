@@ -1,0 +1,1076 @@
+# 需求: REQ-0330 完整授权评估生命周期
+# 消费扩展仓: kestra-plugin-rbac
+# 状态: core；定向测试通过，正式 CI 与发布待验收
+# 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档
+# 触达上游文件: 13 个（通用生命周期、typed gate、引用桥接与独立探针）
+# 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
+diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
+new file mode 100644
+index 0000000..82756d5
+--- /dev/null
++++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
+@@ -0,0 +1,35 @@
++package io.kestra.core.repositories;
++
++import java.util.Optional;
++import java.util.concurrent.Callable;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++
++public record AuthorizationEvaluationContext(Object reference) implements PropagatedContextElement {
++    public static Optional<AuthorizationEvaluationContext> current() {
++        return PropagatedContext.getOrEmpty().find(AuthorizationEvaluationContext.class);
++    }
++
++    public static PropagatedContext capture(reactor.util.context.ContextView context) {
++        var captured = PropagatedContext.empty();
++        var origin = ReactorPropagation.findContextElement(context, AuthorizationInvocationContext.class)
++            .or(AuthorizationInvocationContext::current).orElse(null);
++        if (origin != null) captured = captured.plus(origin);
++        var evaluation = ReactorPropagation.findContextElement(context, AuthorizationEvaluationContext.class)
++            .or(AuthorizationEvaluationContext::current).orElse(null);
++        if (evaluation != null) captured = captured.plus(evaluation);
++        var query = ReactorPropagation.findContextElement(context, AuthorizationQueryContext.class)
++            .or(() -> PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class)).orElse(null);
++        return query == null ? captured : captured.plus(query);
++    }
++
++    public static <Result> reactor.core.publisher.Mono<Result> call(Callable<Result> action) {
++        return reactor.core.publisher.Mono.deferContextual(context -> {
++            var captured = capture(context);
++            return reactor.core.publisher.Mono.fromCallable(() -> {
++                try (var scope = captured.propagate()) { return action.call(); }
++            });
++        });
++    }
++}
+diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationQueryContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationQueryContext.java
+new file mode 100644
+index 0000000..a8516e4
+--- /dev/null
++++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationQueryContext.java
+@@ -0,0 +1,5 @@
++package io.kestra.core.repositories;
++
++import io.micronaut.core.propagation.PropagatedContextElement;
++
++public record AuthorizationQueryContext(Object reference) implements PropagatedContextElement {}
+diff --git a/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java b/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
+index 685d8f4..d1e6ba5 100644
+--- a/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
++++ b/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
+@@ -172,8 +172,9 @@ public class FlowInputOutput {
+     private Mono<Map<String, Object>> readData(List<Input<?>> rawInputs, Execution execution, Publisher<CompletedPart> data, boolean uploadFiles) {
+         // Inline reusable-inputs references, then flatten FORMs so FILE part matching works against dotted leaf ids.
+         final List<Input<?>> inputs = Input.expandToLeaves(reusableInputsExpander.expand(execution.getTenantId(), execution.getNamespace(), rawInputs));
+-        return Flux.from(data)
+-            .publishOn(Schedulers.boundedElastic()).<Map.Entry<String, Object>> handle((input, sink) ->
++        return Mono.deferContextual(context -> Flux.from(io.micronaut.core.async.propagation.ReactivePropagation.propagate(
++            io.kestra.core.repositories.AuthorizationEvaluationContext.capture(context), Flux.from(data)
++                .publishOn(Schedulers.boundedElastic()))).<Map.Entry<String, Object>> handle((input, sink) ->
+             {
+                 if (input instanceof CompletedFileUpload fileUpload) {
+                     boolean oldStyleInput = false;
+@@ -235,7 +236,7 @@ public class FlowInputOutput {
+                     }
+                 }
+             })
+-            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
++            .collectMap(Map.Entry::getKey, Map.Entry::getValue));
+     }
+
+     private static boolean acceptsFileUpload(Type type) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java
+new file mode 100644
+index 0000000..f84407c
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java
+@@ -0,0 +1,8 @@
++package io.kestra.webserver.rbac;
++
++import java.util.concurrent.CompletionStage;
++
++/** Fixes one immutable policy snapshot for the supplied trusted identity and tenant; begin must eventually complete even after cancellation. */
++public interface AuthorizationEvaluationProviderV1 {
++    CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant);
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationV1.java
+new file mode 100644
+index 0000000..5471c85
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationV1.java
+@@ -0,0 +1,9 @@
++package io.kestra.webserver.rbac;
++
++import java.util.concurrent.CompletionStage;
++
++/** An opaque, boundary-owned snapshot; concurrent decisions must be safe, and close releases resources without rolling back business effects. */
++public interface AuthorizationEvaluationV1 {
++    CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation);
++    CompletionStage<Void> close();
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
+new file mode 100644
+index 0000000..3f6dbc6
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
+@@ -0,0 +1,165 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import java.util.List;
++import java.util.Objects;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.function.Supplier;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.context.annotation.Value;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.async.propagation.ReactivePropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import jakarta.inject.Singleton;
++import org.reactivestreams.Publisher;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++import reactor.util.context.ContextView;
++
++@Singleton
++public final class AuthorizationEvaluations {
++    private static final Logger LOGGER = LoggerFactory.getLogger(AuthorizationEvaluations.class);
++    private static final Duration TIMEOUT = Duration.ofSeconds(5);
++    private final boolean enabled;
++    private final BeanProvider<AuthorizationEvaluationProviderV1> providers;
++
++    public AuthorizationEvaluations(@Value("${kestra.rbac.evaluation.enabled:false}") boolean enabled,
++        RbacConfiguration configuration, @Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled,
++        BeanProvider<AuthorizationEvaluationProviderV1> providers) {
++        if (enabled && (!configuration.enabled() || !typedEnabled)) {
++            throw new IllegalArgumentException("Evaluation mode requires unified and typed authorization.");
++        }
++        this.enabled = enabled;
++        this.providers = providers;
++    }
++
++    public boolean enabled() { return enabled; }
++
++    public <Result> Flux<Result> boundary(RbacAuthorizer.Principal principal, String tenant,
++        Supplier<? extends Publisher<Result>> action) {
++        if (!enabled) return Flux.defer(action);
++        return Flux.defer(() -> {
++            if (!providers.isUnique() || principal == null || principal.subject() == null || principal.subject().isBlank()
++                || tenant == null || tenant.isBlank()) return Flux.error(denied());
++            var identity = new RbacAuthorizer.Principal(principal.subject(), List.copyOf(principal.roles()),
++                principal.clientId(), principal.audience(), List.copyOf(principal.scopes()));
++            var owner = new Owner(identity, tenant);
++            return Flux.usingWhen(Mono.just(owner), active -> active.acquire(providers.get()).flatMapMany(ignored -> {
++                var context = minimalContext().plus(new AuthorizationEvaluationContext(active));
++                return Flux.from(ReactivePropagation.propagate(context, Flux.defer(() -> {
++                    try (var scope = context.propagate()) { return Flux.from(action.get()); }
++                }))).contextWrite(current -> ReactorPropagation.addPropagatedContext(current, context));
++            }), Owner::finish, (active, failure) -> active.finish().onErrorResume(cleanup -> Mono.empty()),
++                active -> active.finish().onErrorResume(cleanup -> Mono.empty()));
++        });
++    }
++
++    private static PropagatedContext minimalContext() {
++        var context = PropagatedContext.empty();
++        var origin = AuthorizationInvocationContext.current().orElse(null);
++        return origin == null ? context : context.plus(origin);
++    }
++
++    static Owner current(ContextView context) {
++        var reference = ReactorPropagation.findContextElement(context, AuthorizationEvaluationContext.class)
++            .or(AuthorizationEvaluationContext::current).orElse(null);
++        return reference != null && reference.reference() instanceof Owner owner ? owner : null;
++    }
++
++    static Owner current() {
++        var reference = AuthorizationEvaluationContext.current().orElse(null);
++        return reference != null && reference.reference() instanceof Owner owner ? owner : null;
++    }
++
++    static IllegalStateException denied() { return new IllegalStateException("Authorization evaluation is unavailable."); }
++
++    static final class Owner {
++        final RbacAuthorizer.Principal principal;
++        final String tenant;
++        final ConcurrentHashMap<String, TypedAuthorization.QueryDomain> domains = new ConcurrentHashMap<>();
++        private final CompletableFuture<AuthorizationEvaluationV1> ready = new CompletableFuture<>();
++        private final CompletableFuture<Void> released = new CompletableFuture<>();
++        private AuthorizationEvaluationV1 evaluation;
++        private boolean ended;
++        private boolean closing;
++        private int pending;
++
++        Owner(RbacAuthorizer.Principal principal, String tenant) {
++            this.principal = principal;
++            this.tenant = tenant;
++        }
++
++        Mono<AuthorizationEvaluationV1> acquire(AuthorizationEvaluationProviderV1 provider) {
++            try { Objects.requireNonNull(provider.begin(principal, tenant)).whenComplete(this::arrived); }
++            catch (Throwable failure) { ready.completeExceptionally(failure); }
++            return Mono.fromFuture(ready, true).timeout(TIMEOUT);
++        }
++
++        private synchronized void arrived(AuthorizationEvaluationV1 handle, Throwable failure) {
++            if (failure != null || handle == null) {
++                ready.completeExceptionally(failure == null ? denied() : failure);
++                released.complete(null);
++                return;
++            }
++            evaluation = handle;
++            if (ended) closeOnce();
++            else ready.complete(handle);
++        }
++
++        synchronized boolean matches(RbacAuthorizer.Principal caller, String callerTenant) {
++            return !ended && evaluation != null && principal.equals(caller) && tenant.equals(callerTenant);
++        }
++
++        synchronized CompletionStage<TypedAuthorization.Decision> authorize(RbacAuthorizer.Principal caller,
++            TypedAuthorization.Operation operation) {
++            if (!matches(caller, operation.tenant())) return CompletableFuture.failedFuture(denied());
++            var result = new CompletableFuture<TypedAuthorization.Decision>();
++            pending++;
++            try {
++                Objects.requireNonNull(evaluation.authorize(operation)).whenComplete((decision, failure) -> {
++                    synchronized (this) {
++                        pending--;
++                        if (ended && pending == 0) closeOnce();
++                    }
++                    if (failure == null) result.complete(decision);
++                    else result.completeExceptionally(failure);
++                });
++            } catch (Throwable failure) {
++                pending--;
++                result.completeExceptionally(failure);
++            }
++            return result;
++        }
++
++        synchronized Mono<Void> finish() {
++            ended = true;
++            domains.clear();
++            if (evaluation == null) return Mono.empty();
++            if (pending == 0) closeOnce();
++            return Mono.fromFuture(released, true).timeout(TIMEOUT)
++                .doOnError(failure -> LOGGER.error("Authorization evaluation cleanup failed or timed out.", failure));
++        }
++
++        private void closeOnce() {
++            if (closing) return;
++            closing = true;
++            try {
++                Objects.requireNonNull(evaluation.close()).whenComplete((ignored, failure) -> {
++                    if (failure == null) released.complete(null);
++                    else failedClose(failure);
++                });
++            } catch (Throwable failure) { failedClose(failure); }
++        }
++
++        private void failedClose(Throwable failure) {
++            LOGGER.error("Authorization evaluation cleanup failed.", failure);
++            released.completeExceptionally(failure);
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
+index 9488059..ca33508 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
+@@ -22,6 +22,11 @@ public class RbacGate {
+         RbacAuthorizer.Action action) {
+         return authorize(principal, resource, action, false);
+     }
++    public <Result> reactor.core.publisher.Flux<Result> boundary(RbacAuthorizer.Principal principal, String tenant,
++        java.util.function.Supplier<? extends org.reactivestreams.Publisher<Result>> action) {
++        return typedEnabled ? typedGate.boundary(principal, tenant, action) : reactor.core.publisher.Flux.defer(action);
++    }
++    public Mono<Void> finishCurrent() { return typedEnabled ? typedGate.finishCurrent() : Mono.empty(); }
+     public Mono<Boolean> authorize(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
+         RbacAuthorizer.Action action, boolean completeQuery) {
+         return Mono.defer(() -> {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+index 201c734..9e098fe 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+@@ -10,16 +10,42 @@ import static io.kestra.webserver.rbac.TypedAuthorization.*;
+ @Singleton
+ public final class TypedAuthorizationGate {
+     private final BeanProvider<TypedAuthorizationResolver> policies;
++    private AuthorizationEvaluations evaluations;
+
+     public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies) {
+         this.policies = policies;
+     }
+
++    @jakarta.inject.Inject
++    public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies, AuthorizationEvaluations evaluations) {
++        this(policies);
++        this.evaluations = evaluations;
++    }
++
++    public boolean evaluationEnabled() { return evaluations != null && evaluations.enabled(); }
++
++    public Mono<Void> finishCurrent() {
++        return Mono.deferContextual(context -> {
++            var owner = AuthorizationEvaluations.current(context);
++            return !evaluationEnabled() || owner == null ? Mono.empty() : owner.finish();
++        });
++    }
++
++    public <Result> reactor.core.publisher.Flux<Result> boundary(RbacAuthorizer.Principal principal, String tenant,
++        java.util.function.Supplier<? extends org.reactivestreams.Publisher<Result>> action) {
++        return evaluations == null ? reactor.core.publisher.Flux.defer(action) : evaluations.boundary(principal, tenant, action);
++    }
++
+     public Mono<Decision> authorize(RbacAuthorizer.Principal principal, Operation operation) {
+-        return Mono.defer(() -> {
++        return Mono.deferContextual(context -> {
+             if (principal == null || principal.subject() == null || principal.subject().isBlank()
+-                || operation == null || !policies.isUnique()) return Mono.just(Decision.deny("Invalid authorization context"));
+-            return Mono.fromCompletionStage(policies.get().authorize(principal, operation))
++                || operation == null) return Mono.just(Decision.deny("Invalid authorization context"));
++            var owner = AuthorizationEvaluations.current(context);
++            if (evaluationEnabled() && owner == null || !evaluationEnabled() && !policies.isUnique())
++                return Mono.just(Decision.deny("Missing authorization evaluation or policy"));
++            var stage = evaluationEnabled() ? owner.authorize(principal, operation) : policies.get().authorize(principal, operation);
++            return Mono.from(io.micronaut.core.async.propagation.ReactivePropagation.propagate(
++                io.kestra.core.repositories.AuthorizationEvaluationContext.capture(context), Mono.fromFuture(stage.toCompletableFuture(), true)))
+                 .map(decision -> {
+                     if (!decision.allowed()) return Decision.deny(decision.reason());
+                     QueryDomain effective = operation.queryDomain().intersect(decision.scope());
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+index 06722d6..0fef9e6 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+@@ -45,10 +45,20 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+         if (!configuration.enabled() || RestRbacFilter.protocol(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+         if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
++        var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++        var route = RouteAttributes.getRouteMatch(request).orElse(null);
++        String tenant = route == null ? "main" : (String) route.getVariableValues().getOrDefault("tenant", "main");
++        return gate.boundary(principal, tenant, () -> authorize(request, principal)
++            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).timeout(Duration.ofSeconds(10))
++            .defaultIfEmpty(false).onErrorReturn(false)
++            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN))))
++            .onErrorResume(failure -> Mono.just(error(request, HttpStatus.FORBIDDEN)));
++    }
++
++    private Mono<Boolean> authorize(HttpRequest<?> request, RbacAuthorizer.Principal principal) {
+         return Mono.defer(() -> {
+             var route = RouteAttributes.getRouteMatch(request).orElse(null);
+             if (!(route instanceof MethodBasedRouteMatch<?, ?> methodRoute)) return Mono.just(false);
+-            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+             Map<String, List<String>> query = new LinkedHashMap<>();
+             request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
+             return body(request).flatMap(bytes -> {
+@@ -66,9 +76,7 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+                             operation.coverage(), operation.aggregate(), operation.sideEffect()) : operation))
+                     .all(TypedAuthorization.Decision::allowed);
+             });
+-        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).timeout(Duration.ofSeconds(10))
+-            .defaultIfEmpty(false).onErrorReturn(false)
+-            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
++        });
+     }
+
+     private Mono<byte[]> body(HttpRequest<?> request) {
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
+new file mode 100644
+index 0000000..d19e4ab
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
+@@ -0,0 +1,148 @@
++package io.kestra.mcp;
++
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.BiFunction;
++import io.kestra.core.events.CrudEvent;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.models.flows.State;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.runners.FlowInputOutput;
++import io.kestra.core.runners.FlowMetaStoreInterface;
++import io.kestra.core.services.ExecutionOutputService;
++import io.kestra.core.services.ExecutionStreamingService;
++import io.kestra.plugin.core.trigger.McpToolTrigger;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.kestra.webserver.rbac.*;
++import io.micronaut.context.ApplicationContext;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.context.event.ApplicationEventPublisher;
++import io.micronaut.http.sse.Event;
++import io.modelcontextprotocol.server.McpAsyncServerExchange;
++import io.modelcontextprotocol.spec.McpSchema;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.FluxSink;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.*;
++
++class McpEvaluationLifecycleTest {
++
++    static <Bean> BeanProvider<Bean> bean(Bean value) {
++        return new BeanProvider<>() {
++            public Bean get() { return value; }
++            public boolean isPresent() { return value != null; }
++            public boolean isUnique() { return value != null; }
++        };
++    }
++
++    @Test
++    void shouldDenyMixedPolicyVersionsBeforeQueueEmissionInCompleteHandler() throws Exception {
++        runCompleteHandler(true, false);
++    }
++
++    @Test
++    void shouldDenyRevokedOutputsAfterExecutionWithoutReadingOutputStorage() throws Exception {
++        runCompleteHandler(false, true);
++    }
++
++    @Test
++    void shouldCloseSubmissionAndRuntimeBeforeWaitAndReadOutputsWithNewEvaluation() throws Exception {
++        runCompleteHandler(false, false);
++    }
++
++    @SuppressWarnings("unchecked")
++    void runCompleteHandler(boolean denyComposite, boolean revokeOutput) throws Exception {
++        var begins = new AtomicInteger();
++        var closes = new AtomicInteger();
++        var identities = new java.util.concurrent.CopyOnWriteArrayList<RbacAuthorizer.Principal>();
++        var revision = new AtomicInteger();
++        AuthorizationEvaluationProviderV1 provider = (principal, tenant) -> {
++            int boundary = begins.incrementAndGet();
++            int snapshot = revision.get();
++            identities.add(principal);
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    assertThat(operation.tenant()).isEqualTo("main");
++                    if (boundary == 3) assertThat(operation.action()).isEqualTo(Action.ACCESS_OUTPUTS);
++                    revision.set(1);
++                    if (denyComposite && (snapshot == 0 ? operation.action() != Action.READ : operation.action() == Action.READ)
++                        || revokeOutput && boundary == 3) return CompletableFuture.completedFuture(Decision.deny("snapshot denied"));
++                    return CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted()));
++                }
++                public CompletionStage<Void> close() { closes.incrementAndGet(); return CompletableFuture.completedFuture(null); }
++            });
++        };
++        var configuration = new RbacConfiguration(true, false);
++        var typed = new TypedAuthorizationGate(bean(null), new AuthorizationEvaluations(true, configuration, true, bean(provider)));
++        var gate = new McpCapabilityGate(true, true, false, bean(null), configuration, new RbacGate(bean(null), typed, true));
++        var resolver = McpCapabilityGate.class.getDeclaredField("mcpResolvers");
++        resolver.setAccessible(true);
++        McpAuthorizationResolver dependencies = (principal, invocation) -> CompletableFuture.completedFuture(List.of());
++        resolver.set(gate, bean(dependencies));
++        var queue = mock(DispatchQueueInterface.class);
++        var inputs = mock(FlowInputOutput.class);
++        when(inputs.resolveInputs(any(), any(), any(), any())).thenAnswer(invocation -> {
++            assertThat(begins.get()).isEqualTo(2);
++            assertThat(closes.get()).isZero();
++            return List.of();
++        });
++        var outputs = mock(ExecutionOutputService.class);
++        when(outputs.getOutputs(any())).thenAnswer(invocation -> {
++            assertThat(begins.get()).isEqualTo(3);
++            assertThat(closes.get()).isEqualTo(2);
++            return Map.of("value", "verified");
++        });
++        var meta = mock(FlowMetaStoreInterface.class);
++        when(meta.findByIdForRuntime(any(), any(), any(), any())).thenReturn(Optional.empty());
++        var streaming = mock(ExecutionStreamingService.class);
++        var emitted = new java.util.concurrent.atomic.AtomicReference<Execution>();
++        ApplicationEventPublisher<CrudEvent<Execution>> publisher = event -> emitted.set(event.getModel());
++        doAnswer(invocation -> {
++            assertThat(closes.get()).isEqualTo(2);
++            FluxSink<Event<Execution>> sink = invocation.getArgument(2);
++            sink.next(Event.of(emitted.get().withState(State.Type.SUCCESS)));
++            sink.complete();
++            return null;
++        }).when(streaming).registerSubscriber(anyString(), anyString(), any(), any());
++        var service = new McpToolService(queue, mock(FlowRepositoryInterface.class), mock(FlowToolSchemaMapper.class), streaming,
++            publisher, new McpConfig(new McpConfig.ToolCacheConfig(10L, java.time.Duration.ofMinutes(5)), null, java.time.Duration.ofSeconds(5)),
++            inputs, meta, outputs, new DefaultMcpToolAccessControl(), gate);
++        var flow = Flow.builder().tenantId("main").id("flow").namespace("team").tasks(List.of()).build();
++        var trigger = McpToolTrigger.builder().id("tool").type(McpToolTrigger.class.getName()).toolName("tool").build();
++        var method = McpToolService.class.getDeclaredMethod("buildCallHandler", Flow.class, McpToolTrigger.class);
++        method.setAccessible(true);
++        var handler = (BiFunction<McpAsyncServerExchange, McpSchema.CallToolRequest, Mono<McpSchema.CallToolResult>>) method.invoke(service, flow, trigger);
++        var exchange = mock(McpAsyncServerExchange.class);
++        when(exchange.transportContext()).thenReturn(KestraMcpTransportContext.builder().tenantId("main").serverId("default")
++            .sessionId("session").userId("alice").roles(List.of("reader")).clientId("client").resource("resource")
++            .scopes(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE)).build());
++        var result = handler.apply(exchange, new McpSchema.CallToolRequest("tool", Map.of())).block();
++        assertThat(result.isError()).isEqualTo(denyComposite || revokeOutput);
++        if (!denyComposite && !revokeOutput) assertThat(result.structuredContent()).isEqualTo(Map.of("value", "verified"));
++        assertThat(begins.get()).isEqualTo(denyComposite ? 1 : 3);
++        assertThat(closes.get()).isEqualTo(begins.get());
++        assertThat(identities).allSatisfy(principal -> {
++            assertThat(principal.subject()).isEqualTo("alice");
++            assertThat(principal.clientId()).isEqualTo("client");
++            assertThat(principal.audience()).isEqualTo("resource");
++            assertThat(principal.roles()).containsExactly("reader");
++        });
++        if (denyComposite) verifyNoInteractions(queue, inputs, outputs, streaming);
++        else {
++            verify(queue).emit(any(io.kestra.core.executor.command.ExecutionCommand.class));
++            verify(streaming).unregisterSubscriber(anyString(), anyString());
++            if (revokeOutput) verifyNoInteractions(outputs);
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
+new file mode 100644
+index 0000000..5983ab1
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
+@@ -0,0 +1,106 @@
++package io.kestra.webserver.rbac;
++
++import java.net.http.HttpClient;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.models.flows.GenericFlow;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "kestra.rbac.evaluation.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "evaluation.http.probe", value = "true")
++class AuthorizationEvaluationHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject FlowRepositoryInterface flows;
++    @Inject SnapshotPolicy policy;
++
++    @Test
++    void shouldUseOneSnapshotThroughRealHttpControllerAndSqlPaginationThenRevokeNextRequest() throws Exception {
++        for (String namespace : List.of("evaluation.a", "evaluation.b")) {
++            flows.create(GenericFlow.fromYaml("main", "namespace: " + namespace + "\nid: snapshot\ntasks: []"));
++        }
++        policy.namespace.set("evaluation.a");
++        policy.begins.set(0);
++        policy.closes.set(0);
++        var client = HttpClient.newHttpClient();
++        var first = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
++            .header("X-Evaluation-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(first.statusCode()).isEqualTo(200);
++        var firstJson = io.kestra.core.serializers.JacksonMapper.ofJson().readTree(first.body());
++        assertThat(firstJson.path("total").asLong()).isEqualTo(1);
++        assertThat(first.body()).contains("evaluation.a").doesNotContain("evaluation.b");
++        assertThat(policy.begins.get()).isEqualTo(1);
++        assertThat(policy.closes.get()).isEqualTo(1);
++        var second = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
++            .header("X-Evaluation-Probe", "reader").GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(second.statusCode()).isEqualTo(200);
++        assertThat(second.body()).contains("evaluation.b").doesNotContain("evaluation.a");
++        var denied = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows"))
++            .header("X-Evaluation-Probe", "reader").header("Content-Type", "application/x-yaml")
++            .POST(java.net.http.HttpRequest.BodyPublishers.ofString("namespace: evaluation.a\nid: denied\ntasks: []")).build(),
++            java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(denied.statusCode()).isEqualTo(403);
++        assertThat(flows.findByIdWithoutAcl("main", "evaluation.a", "denied", Optional.empty())).isEmpty();
++        assertThat(flows.findDistinctNamespace("main")).isEmpty();
++    }
++
++    @Singleton
++    @Requires(property = "evaluation.http.probe", value = "true")
++    static class ProbeIdentity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            return "reader".equals(request.getHeaders().get("X-Evaluation-Probe"))
++                ? Mono.just(Authentication.build("reader", List.of("reader"))) : Mono.empty();
++        }
++    }
++
++    @Singleton
++    @Requires(property = "evaluation.http.probe", value = "true")
++    static class SnapshotPolicy implements AuthorizationEvaluationProviderV1 {
++        final AtomicReference<String> namespace = new AtomicReference<>("evaluation.a");
++        final AtomicInteger begins = new AtomicInteger();
++        final AtomicInteger closes = new AtomicInteger();
++
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
++            begins.incrementAndGet();
++            String snapshot = namespace.get();
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    namespace.set("evaluation.b");
++                    return CompletableFuture.completedFuture(operation.action() == Action.LIST || operation.resource() == Resource.METADATA
++                        ? Decision.allow(new QueryDomain(List.of(snapshot), List.of(), List.of(), true, false))
++                        : Decision.deny("Read-only snapshot"));
++                }
++                public CompletionStage<Void> close() {
++                    closes.incrementAndGet();
++                    return CompletableFuture.completedFuture(null);
++                }
++            });
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java
+new file mode 100644
+index 0000000..dd4b3d7
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java
+@@ -0,0 +1,84 @@
++package io.kestra.webserver.rbac;
++
++import java.lang.reflect.Proxy;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.webserver.controllers.api.ExecutionController;
++import io.kestra.webserver.errors.ProblemFactory;
++import io.kestra.webserver.errors.ProblemMapperRegistry;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MediaType;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.MethodBasedRouteMatch;
++import io.micronaut.web.router.RouteAttributes;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import reactor.core.scheduler.Schedulers;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++class AuthorizationEvaluationRestTest {
++
++    static io.micronaut.http.MutableHttpRequest<?> request() {
++        var request = HttpRequest.POST("/api/v1/main/executions/latest",
++            "[{\"namespace\":\"team.a\",\"id\":\"a\"},{\"namespace\":\"team.b\",\"id\":\"b\"}]".getBytes())
++            .contentType(MediaType.APPLICATION_JSON_TYPE);
++        request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("alice", List.of("reader")));
++        var route = (MethodBasedRouteMatch<?, ?>) Proxy.newProxyInstance(AuthorizationEvaluationRestTest.class.getClassLoader(),
++            new Class<?>[]{MethodBasedRouteMatch.class}, (proxy, method, arguments) -> switch (method.getName()) {
++                case "getDeclaringType" -> ExecutionController.class;
++                case "getMethodName" -> "getLatestExecutions";
++                case "getArgumentTypes" -> new Class<?>[0];
++                case "getVariableValues" -> Map.of("tenant", "main");
++                default -> throw new UnsupportedOperationException(method.getName());
++            });
++        RouteAttributes.setRouteMatch(request, route);
++        return request;
++    }
++
++    static TypedRestRbacFilter filter(TypedAuthorizationGate gate) {
++        return new TypedRestRbacFilter(new RbacConfiguration(true, false), new OssRestOperationAdapter(null), gate,
++            new ProblemFactory(new ProblemMapperRegistry(List.of()), new io.kestra.core.utils.EditionProvider()));
++    }
++
++    @Test
++    void shouldDenySwitchingCompositePlanBeforeBusinessContinuation() {
++        var provider = new AuthorizationEvaluationTest.Policy();
++        var gate = AuthorizationEvaluationTest.gate(provider);
++        provider.afterDecision = () -> provider.grants.set(Set.of("team.b"));
++        var effects = new AtomicInteger();
++        var response = Mono.from(filter(gate).doFilter(request(), ignored -> {
++            effects.incrementAndGet();
++            return Mono.just(HttpResponse.ok());
++        })).block();
++        assertThat(response.code()).isEqualTo(403);
++        assertThat(effects.get()).isZero();
++        assertThat(provider.begins.get()).isEqualTo(1);
++        assertThat(provider.closes.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldKeepSnapshotAliveThroughAsyncBusinessQueryAndCloseAfterCompletion() {
++        var provider = new AuthorizationEvaluationTest.Policy();
++        provider.grants.set(Set.of("team.a", "team.b"));
++        var gate = AuthorizationEvaluationTest.gate(provider);
++        var namespaces = new TypedNamespaceAccessControl(gate);
++        var response = Mono.from(filter(gate).doFilter(request(), ignored -> io.kestra.core.repositories.AuthorizationEvaluationContext.<io.micronaut.http.MutableHttpResponse<?>>call(() -> {
++            assertThat(provider.closes.get()).isZero();
++            provider.grants.set(Set.of("other"));
++            assertThat(namespaces.domain(QueryFilter.Resource.FLOW).exactNamespaces()).containsExactlyInAnyOrder("team.a", "team.b");
++            assertThat(namespaces.domain(QueryFilter.Resource.EXECUTION).exactNamespaces()).containsExactlyInAnyOrder("team.a", "team.b");
++            return HttpResponse.ok();
++        }).subscribeOn(Schedulers.boundedElastic()))).block();
++        assertThat(response.code()).isEqualTo(200);
++        assertThat(provider.begins.get()).isEqualTo(1);
++        assertThat(provider.closes.get()).isEqualTo(1);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+new file mode 100644
+index 0000000..af85f2f
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+@@ -0,0 +1,328 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.context.ApplicationContext;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.security.authentication.Authentication;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import reactor.core.scheduler.Schedulers;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++
++class AuthorizationEvaluationTest {
++    static final RbacAuthorizer.Principal PRINCIPAL = new RbacAuthorizer.Principal("alice", List.of("reader"), null, null, List.of());
++
++    static <Bean> BeanProvider<Bean> bean(Bean value) {
++        return new BeanProvider<>() {
++            public Bean get() { return value; }
++            public boolean isPresent() { return value != null; }
++            public boolean isUnique() { return value != null; }
++        };
++    }
++
++    static Operation operation(Resource resource, String namespace) {
++        return new Operation(CONTRACT_VERSION, Source.REST, resource, Action.LIST, "main", namespace, null,
++            QueryDomain.unrestricted(), namespace == null ? Coverage.COMPLETE_QUERY : Coverage.SINGLE,
++            Aggregate.NONE, SideEffect.READ_ONLY);
++    }
++
++    static final class Policy implements AuthorizationEvaluationProviderV1 {
++        final AtomicReference<Set<String>> grants = new AtomicReference<>(Set.of("team.a"));
++        final AtomicInteger begins = new AtomicInteger();
++        final AtomicInteger closes = new AtomicInteger();
++        final AtomicInteger calls = new AtomicInteger();
++        Runnable afterDecision = () -> {};
++
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
++            begins.incrementAndGet();
++            Set<String> snapshot = grants.get();
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    calls.incrementAndGet();
++                    afterDecision.run();
++                    var domain = new QueryDomain(List.copyOf(snapshot), List.of(), List.of(), true, false);
++                    return CompletableFuture.completedFuture(operation.namespace() == null || snapshot.contains(operation.namespace())
++                        ? Decision.allow(domain) : Decision.deny("snapshot denied"));
++                }
++                public CompletionStage<Void> close() {
++                    closes.incrementAndGet();
++                    return CompletableFuture.completedFuture(null);
++                }
++            });
++        }
++    }
++
++    static AuthorizationEvaluations evaluations(AuthorizationEvaluationProviderV1 provider) {
++        return new AuthorizationEvaluations(true, new RbacConfiguration(true, false), true, bean(provider));
++    }
++
++    static TypedAuthorizationGate gate(AuthorizationEvaluationProviderV1 provider) {
++        return new TypedAuthorizationGate(bean(null), evaluations(provider));
++    }
++
++    @Test
++    void shouldDenyMixedVersionsAndReadNewSnapshotAtNextBoundary() {
++        var provider = new Policy();
++        var gate = gate(provider);
++        provider.afterDecision = () -> provider.grants.set(Set.of("team.b"));
++        boolean allowed = gate.boundary(PRINCIPAL, "main", () -> gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.a"))
++            .flatMap(first -> gate.authorize(PRINCIPAL, operation(Resource.EXECUTION, "team.b")))
++            .map(Decision::allowed)).single().block();
++        assertThat(allowed).isFalse();
++        assertThat(gate.boundary(PRINCIPAL, "main", () -> gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.b")))
++            .single().block().allowed()).isTrue();
++        assertThat(provider.begins.get()).isEqualTo(2);
++        assertThat(provider.closes.get()).isEqualTo(2);
++    }
++
++    @Test
++    void shouldIsolateNestedQueryCachesAndRestoreOuterReferenceAcrossThreads() {
++        var provider = new Policy();
++        var gate = gate(provider);
++        var namespaces = new TypedNamespaceAccessControl(gate);
++        gate.boundary(PRINCIPAL, "main", () -> AuthorizationEvaluationContext.call(() -> {
++            assertThat(namespaces.domain(QueryFilter.Resource.FLOW).contains("team.a")).isTrue();
++            provider.grants.set(Set.of("team.b"));
++            assertThat(namespaces.domain(QueryFilter.Resource.EXECUTION).contains("team.a")).isTrue();
++            var outer = AuthorizationEvaluations.current();
++            gate.boundary(PRINCIPAL, "main", () -> AuthorizationEvaluationContext.call(() -> {
++                assertThat(AuthorizationEvaluations.current()).isNotSameAs(outer);
++                assertThat(namespaces.domain(QueryFilter.Resource.FLOW).contains("team.b")).isTrue();
++                return true;
++            }).subscribeOn(Schedulers.boundedElastic())).single().block();
++            assertThat(AuthorizationEvaluations.current()).isSameAs(outer);
++            assertThat(namespaces.domain(QueryFilter.Resource.FLOW).contains("team.a")).isTrue();
++            return true;
++        }).subscribeOn(Schedulers.boundedElastic())).single().block();
++        assertThat(provider.begins.get()).isEqualTo(2);
++        assertThat(provider.closes.get()).isEqualTo(2);
++        assertThat(namespaces.domain(QueryFilter.Resource.FLOW)).isEqualTo(QueryDomain.empty());
++    }
++
++    @Test
++    void shouldRejectMissingContextAndChangedFullIdentityOrTenant() {
++        var provider = new Policy();
++        var gate = gate(provider);
++        assertThat(gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.a")).block().allowed()).isFalse();
++        gate.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(() -> {
++            for (var identity : List.of(
++                new RbacAuthorizer.Principal("bob", PRINCIPAL.roles(), null, null, List.of()),
++                new RbacAuthorizer.Principal("alice", List.of("admin"), null, null, List.of()),
++                new RbacAuthorizer.Principal("alice", PRINCIPAL.roles(), "client", null, List.of()),
++                new RbacAuthorizer.Principal("alice", PRINCIPAL.roles(), null, "audience", List.of()),
++                new RbacAuthorizer.Principal("alice", PRINCIPAL.roles(), null, null, List.of("scope")))) {
++                assertThat(gate.authorize(identity, operation(Resource.FLOW, "team.a")).block().allowed()).isFalse();
++            }
++            var operation = operation(Resource.FLOW, "team.a");
++            var other = new Operation(operation.contractVersion(), operation.source(), operation.resource(), operation.action(),
++                "other", operation.namespace(), null, operation.queryDomain(), operation.coverage(), operation.aggregate(), operation.sideEffect());
++            assertThat(gate.authorize(PRINCIPAL, other).block().allowed()).isFalse();
++            return true;
++        })).single().block();
++        assertThat(provider.calls.get()).isZero();
++    }
++
++    @Test
++    void shouldFailClosedForMissingProvidersAndInvalidConfiguration() {
++        assertThatThrownBy(() -> evaluations(null).boundary(PRINCIPAL, "main", () -> Mono.just(true)).blockLast())
++            .isInstanceOf(IllegalStateException.class);
++        assertThatThrownBy(() -> new AuthorizationEvaluations(true, new RbacConfiguration(false, false), true, bean(null)))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> new AuthorizationEvaluations(true, new RbacConfiguration(true, false), false, bean(null)))
++            .isInstanceOf(IllegalArgumentException.class);
++    }
++
++    @Test
++    void shouldReleaseLateBeginAfterCancellationWithoutRunningBusinessAction() {
++        var pending = new CompletableFuture<AuthorizationEvaluationV1>();
++        var closed = new AtomicInteger();
++        var effects = new AtomicInteger();
++        var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet)).subscribe();
++        subscription.dispose();
++        assertThat(pending.isCancelled()).isFalse();
++        pending.complete(handle(closed, CompletableFuture.completedFuture(null)));
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed.get()).isEqualTo(1));
++        assertThat(effects.get()).isZero();
++    }
++
++    static AuthorizationEvaluationV1 handle(AtomicInteger closed, CompletionStage<Void> cleanup) {
++        return new AuthorizationEvaluationV1() {
++            public CompletionStage<Decision> authorize(Operation operation) {
++                return CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted()));
++            }
++            public CompletionStage<Void> close() { closed.incrementAndGet(); return cleanup; }
++        };
++    }
++
++    @Test
++    void shouldRetainCloseFailureAndNeverRetryCleanup() {
++        var closed = new AtomicInteger();
++        var service = evaluations((principal, tenant) -> CompletableFuture.completedFuture(handle(closed,
++            CompletableFuture.failedFuture(new IllegalStateException("close failed")))));
++        assertThatThrownBy(() -> service.boundary(PRINCIPAL, "main", () -> Mono.just(true)).blockLast())
++            .hasRootCauseMessage("close failed");
++        assertThat(closed.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldPreserveBusinessFailureWhenCleanupAlsoFails() {
++        var closed = new AtomicInteger();
++        var service = evaluations((principal, tenant) -> CompletableFuture.completedFuture(handle(closed,
++            CompletableFuture.failedFuture(new IllegalStateException("close failed")))));
++        assertThatThrownBy(() -> service.boundary(PRINCIPAL, "main", () -> Mono.error(new IllegalArgumentException("business failed"))).blockLast())
++            .isInstanceOf(IllegalArgumentException.class).hasMessage("business failed");
++        assertThat(closed.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldRejectNullAndFailedBeginWithoutInvokingBusiness() {
++        var effects = new AtomicInteger();
++        for (AuthorizationEvaluationProviderV1 provider : List.<AuthorizationEvaluationProviderV1>of(
++            (principal, tenant) -> null,
++            (principal, tenant) -> CompletableFuture.completedFuture(null),
++            (principal, tenant) -> CompletableFuture.failedFuture(new IllegalStateException("begin failed")),
++            (principal, tenant) -> { throw new IllegalStateException("begin threw"); })) {
++            assertThatThrownBy(() -> evaluations(provider).boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet)).blockLast())
++                .isInstanceOf(RuntimeException.class);
++        }
++        assertThat(effects.get()).isZero();
++    }
++
++    @Test
++    void shouldObserveCloseTimeoutWithoutCancellingOrRetryingOriginalCleanup() {
++        var closed = new AtomicInteger();
++        var cleanup = new CompletableFuture<Void>();
++        var service = evaluations((principal, tenant) -> CompletableFuture.completedFuture(handle(closed, cleanup)));
++        assertThatThrownBy(() -> service.boundary(PRINCIPAL, "main", () -> Mono.just(true)).blockLast())
++            .hasRootCauseInstanceOf(java.util.concurrent.TimeoutException.class);
++        assertThat(cleanup.isCancelled()).isFalse();
++        cleanup.complete(null);
++        assertThat(closed.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldCloseExactlyOnceDuringConcurrentCancelAndLateBegin() throws Exception {
++        for (int iteration = 0; iteration < 100; iteration++) {
++            var pending = new CompletableFuture<AuthorizationEvaluationV1>();
++            var closed = new AtomicInteger();
++            var start = new CompletableFuture<Void>();
++            var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", Mono::never).subscribe();
++            var cancellation = CompletableFuture.runAsync(() -> { start.join(); subscription.dispose(); });
++            var acquisition = CompletableFuture.runAsync(() -> { start.join(); pending.complete(handle(closed, CompletableFuture.completedFuture(null))); });
++            start.complete(null);
++            CompletableFuture.allOf(cancellation, acquisition).get(2, TimeUnit.SECONDS);
++            assertThat(closed.get()).isEqualTo(1);
++        }
++    }
++
++    @Test
++    void shouldReleaseOnErrorAndBodyTimeoutAndCancel() throws Exception {
++        var provider = new Policy();
++        var service = evaluations(provider);
++        assertThatThrownBy(() -> service.boundary(PRINCIPAL, "main", () -> Mono.error(new IllegalStateException("body"))).blockLast())
++            .hasMessage("body");
++        assertThatThrownBy(() -> service.boundary(PRINCIPAL, "main", () -> Mono.never()).timeout(Duration.ofMillis(20)).blockLast())
++            .hasCauseInstanceOf(java.util.concurrent.TimeoutException.class);
++        var acquired = new CountDownLatch(1);
++        var subscription = service.boundary(PRINCIPAL, "main", () -> { acquired.countDown(); return Mono.never(); }).subscribe();
++        assertThat(acquired.await(1, TimeUnit.SECONDS)).isTrue();
++        subscription.dispose();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(provider.closes.get()).isEqualTo(3));
++    }
++
++    @Test
++    void shouldRetainLateBeginOwnershipAfterAcquireTimeout() {
++        var pending = new CompletableFuture<AuthorizationEvaluationV1>();
++        var closed = new AtomicInteger();
++        assertThatThrownBy(() -> evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", () -> Mono.just(true)).blockLast())
++            .hasCauseInstanceOf(java.util.concurrent.TimeoutException.class);
++        pending.complete(handle(closed, CompletableFuture.completedFuture(null)));
++        assertThat(closed.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldKeepInflightDecisionOwnedUntilItsLateCompletion() {
++        var decision = new CompletableFuture<Decision>();
++        var closed = new AtomicInteger();
++        var gate = gate((principal, tenant) -> CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++            public CompletionStage<Decision> authorize(Operation operation) { return decision; }
++            public CompletionStage<Void> close() { closed.incrementAndGet(); return CompletableFuture.completedFuture(null); }
++        }));
++        var subscription = gate.boundary(PRINCIPAL, "main", () -> gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.a"))).subscribe();
++        subscription.dispose();
++        assertThat(closed.get()).isZero();
++        assertThat(decision.isCancelled()).isFalse();
++        decision.complete(Decision.allow(QueryDomain.unrestricted()));
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed.get()).isEqualTo(1));
++    }
++
++    @Test
++    void shouldKeepStaticProviderAndDisabledModeCompatible() {
++        var calls = new AtomicInteger();
++        TypedAuthorizationResolver legacy = (principal, operation) -> {
++            calls.incrementAndGet();
++            return CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted()));
++        };
++        var gate = new TypedAuthorizationGate(bean(legacy), new AuthorizationEvaluations(false, new RbacConfiguration(false, false), false, bean(null)));
++        assertThat(gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.a")).block().allowed()).isTrue();
++        assertThat(calls.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldStartIndependentActualFlowEvaluationAndCoverAsyncInputReads() {
++        var provider = new Policy();
++        var typed = gate(provider);
++        var gate = new RbacGate(bean(null), typed, true);
++        McpAuthorizationResolver dependencies = (principal, invocation) -> CompletableFuture.completedFuture(List.of());
++        var runtime = new RbacExecutionGate(new RbacConfiguration(true, false), gate, bean(dependencies));
++        var flow = Flow.builder().tenantId("main").namespace("team.a").id("flow").tasks(List.of()).build();
++        typed.boundary(PRINCIPAL, "main", () -> {
++            var outer = AuthorizationEvaluations.current();
++            return runtime.checked(Authentication.build("alice", PRINCIPAL.roles()), "main", flow, "execution", false,
++                () -> AuthorizationEvaluationContext.call(() -> {
++                    assertThat(AuthorizationEvaluations.current()).isNotSameAs(outer).isNotNull();
++                    return true;
++                }).subscribeOn(Schedulers.boundedElastic()));
++        }).single().block();
++        assertThat(provider.begins.get()).isEqualTo(2);
++        assertThat(provider.closes.get()).isEqualTo(2);
++    }
++
++    @Test
++    void shouldPropagateOnlyAuthorizationReferencesToJoinedHostTasks() throws Exception {
++        var provider = new Policy();
++        var gate = gate(provider);
++        gate.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(() -> {
++            var request = io.micronaut.http.HttpRequest.GET("/probe");
++            try (var scope = PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request, false)).propagate()) {
++                var captured = AuthorizationInvocationContext.captureHostTask();
++                assertThat(captured.find(AuthorizationEvaluationContext.class)).isPresent();
++                assertThat(AuthorizationInvocationContext.internalTask().find(AuthorizationEvaluationContext.class)).isEmpty();
++                return CompletableFuture.supplyAsync(() -> {
++                    try (var taskScope = captured.propagate()) {
++                        return gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.a")).block().allowed();
++                    }
++                }).get(2, TimeUnit.SECONDS);
++            }
++        })).single().block();
++        assertThat(provider.closes.get()).isEqualTo(1);
++    }
++}

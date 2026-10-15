@@ -1,0 +1,1183 @@
+# 需求: REQ-0340，独立管理页面通用注册、资源、菜单根、模块生命周期与公开SDK。
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；本地独立验证中，正式CI与发布待验收。
+# 来源: 新写；依据发布宿主页面装载失败与公开组件消费及ShadowRoot隔离探针。
+# 触达上游文件: 通用Java描述与controller、UI挂载和菜单路由、公开类型语言校验资源、独立测试，共21文件。
+# 移除条件: 上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约。
+diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
+new file mode 100644
+index 0000000..3dfe8d3
+--- /dev/null
++++ b/ui/src/components/extensions/ExtensionPage.vue
+@@ -0,0 +1,83 @@
++<template>
++    <TopNavBar :title="title" />
++    <KsSkeleton v-if="loading" data-test="extension-loading" />
++    <KsAlert v-if="failed" type="error" :closable="false" :title="$t('errors.500.title')" data-test="extension-error" />
++    <div ref="container" data-test="extension-container" />
++</template>
++
++<script setup lang="ts">
++    import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
++    import {useRoute, useRouter} from "vue-router";
++    import {useI18n} from "vue-i18n";
++    import {useMiscStore} from "override/stores/misc";
++    import {SUPPORT_LOCALES} from "../../translations/languages";
++    import {createExtensionRequest, extensionPath, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
++    import type {UiExtensionContextV1, UiExtensionDescriptorV1, UiExtensionModuleV1} from "../../extensions/protocol";
++    import TopNavBar from "../layout/TopNavBar.vue";
++
++    const route = useRoute();
++    const router = useRouter();
++    const misc = useMiscStore();
++    const {locale} = useI18n({useScope: "global"});
++    const container = ref<HTMLElement>();
++    const descriptor = ref<UiExtensionDescriptorV1>();
++    const loading = ref(true);
++    const failed = ref(false);
++    const title = computed(() => descriptor.value?.titles[locale.value] ?? descriptor.value?.titles.en ?? String(route.params.extensionId));
++    let lifecycle: ExtensionLifecycle | undefined;
++    let generation = 0;
++    let observer: MutationObserver | undefined;
++
++    function context(): UiExtensionContextV1 {
++        const tenant = String(route.params.tenant ?? "main");
++        const id = String(route.params.extensionId);
++        const assetBase = hostExtensionPath(`/ui-extensions/${encodeURIComponent(tenant)}/${encodeURIComponent(id)}/`);
++        const path = Array.isArray(route.params.pathMatch) ? route.params.pathMatch.join("/") : String(route.params.pathMatch ?? "");
++        const signal = lifecycle!.signal;
++        return Object.freeze({
++            contractVersion: 1, tenant, path, locale: locale.value, supportedLocales: Object.freeze([...SUPPORT_LOCALES]), fallbackLocale: "en",
++            theme: document.documentElement.classList.contains("dark-2") ? "dark-2" : document.documentElement.classList.contains("dark") ? "dark" : "light",
++            themePreference: misc.theme === "syncWithSystem" ? "system" : misc.theme,
++            apiBase: hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`), assetBase,
++            styles: Object.freeze(descriptor.value!.styles.map(style => assetBase + style)), signal,
++            navigate: async (next: string, options?: {replace?: boolean}) => {
++                const safe = extensionPath(next);
++                await router[options?.replace ? "replace" : "push"]({name: "extensions/page", params: {tenant, extensionId: id, pathMatch: safe.split("/")}});
++            },
++            request: createExtensionRequest(signal, hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`)),
++        });
++    }
++
++    async function load() {
++        const current = ++generation;
++        await lifecycle?.dispose();
++        loading.value = true;
++        failed.value = false;
++        descriptor.value = undefined;
++        if (!container.value) return;
++        lifecycle = new ExtensionLifecycle(container.value, error => {console.error("[UiExtension]", error); failed.value = true; loading.value = false;});
++        const active = lifecycle;
++        try {
++            const response = await fetch(hostExtensionPath(`/ui-extensions/${encodeURIComponent(String(route.params.tenant ?? "main"))}/manifest`), {signal: active.signal, credentials: "same-origin", redirect: "error"});
++            if (!response.ok) throw new Error("Extension manifest unavailable");
++            const manifest = await response.json();
++            if (current !== generation) return;
++            descriptor.value = manifest.extensions.find((value: UiExtensionDescriptorV1) => value.id === route.params.extensionId);
++            if (manifest.contractVersion !== 1 || !descriptor.value) throw new Error("Extension not registered");
++            const initial = context();
++            await active.start(() => import(/* @vite-ignore */ initial.assetBase + descriptor.value!.entry) as Promise<UiExtensionModuleV1>, initial);
++            if (current === generation) {loading.value = false; await active.update(context());}
++        } catch (error) {
++            if (!active.signal.aborted) {console.error("[UiExtension]", error); failed.value = true; loading.value = false;}
++        }
++    }
++
++    watch(() => `${route.params.tenant}/${route.params.extensionId}`, () => {void load();});
++    watch(() => `${route.fullPath}/${locale.value}/${misc.theme}`, () => {if (descriptor.value && lifecycle) void lifecycle.update(context());});
++    onMounted(() => {
++        observer = new MutationObserver(() => {if (descriptor.value && lifecycle) void lifecycle.update(context());});
++        observer.observe(document.documentElement, {attributes: true, attributeFilter: ["class"]});
++        void load();
++    });
++    onBeforeUnmount(() => {generation++; observer?.disconnect(); void lifecycle?.dispose();});
++</script>
+diff --git a/ui/src/extensions/protocol.ts b/ui/src/extensions/protocol.ts
+new file mode 100644
+index 0000000..30ca573
+--- /dev/null
++++ b/ui/src/extensions/protocol.ts
+@@ -0,0 +1,35 @@
++export interface UiExtensionDescriptorV1 {
++    contractVersion: 1;
++    id: string;
++    entry: string;
++    styles: readonly string[];
++    titles: Readonly<Record<string, string>>;
++    capabilityPath: string | null;
++}
++
++export interface UiExtensionContextV1 {
++    readonly contractVersion: 1;
++    readonly tenant: string;
++    readonly path: string;
++    readonly locale: string;
++    readonly supportedLocales: readonly string[];
++    readonly fallbackLocale: "en";
++    readonly theme: "light" | "dark" | "dark-2";
++    readonly themePreference: "light" | "dark" | "dark-2" | "system";
++    readonly apiBase: string;
++    readonly assetBase: string;
++    readonly styles: readonly string[];
++    readonly signal: AbortSignal;
++    navigate(path: string, options?: {replace?: boolean}): Promise<void>;
++    request(path: string, options?: RequestInit): Promise<Response>;
++}
++
++export interface MountedUiExtensionV1 {
++    update(context: UiExtensionContextV1): Promise<void> | void;
++    unmount(): Promise<void> | void;
++}
++
++export interface UiExtensionModuleV1 {
++    contractVersion: 1;
++    mount(container: HTMLElement, context: UiExtensionContextV1): Promise<MountedUiExtensionV1> | MountedUiExtensionV1;
++}
+diff --git a/ui/src/extensions/registry.ts b/ui/src/extensions/registry.ts
+new file mode 100644
+index 0000000..0cec2e1
+--- /dev/null
++++ b/ui/src/extensions/registry.ts
+@@ -0,0 +1,32 @@
++import {ref, watch, onScopeDispose} from "vue";
++import {useRoute} from "vue-router";
++import type {UiExtensionDescriptorV1} from "./protocol";
++import {hostExtensionPath} from "./runtime";
++
++export function useUiExtensions() {
++    const route = useRoute();
++    const extensions = ref<UiExtensionDescriptorV1[]>([]);
++    let controller: AbortController | undefined;
++    watch(() => String(route.params.tenant ?? "main"), async tenant => {
++        controller?.abort();
++        const current = new AbortController();
++        controller = current;
++        extensions.value = [];
++        try {
++            const response = await fetch(hostExtensionPath(`/ui-extensions/${encodeURIComponent(tenant)}/manifest`), {signal: current.signal, credentials: "same-origin", redirect: "error"});
++            if (!response.ok) return;
++            const manifest = await response.json();
++            if (manifest.contractVersion !== 1 || !Array.isArray(manifest.extensions)) return;
++            const visible = await Promise.all(manifest.extensions.map(async (descriptor: UiExtensionDescriptorV1) => {
++                if (!descriptor.capabilityPath) return descriptor;
++                try {
++                    const capability = await fetch(hostExtensionPath(descriptor.capabilityPath), {signal: current.signal, credentials: "same-origin", redirect: "error"});
++                    return capability.ok && (await capability.json()).allowed === true ? descriptor : null;
++                } catch {return null;}
++            }));
++            if (!current.signal.aborted) extensions.value = visible.filter((value): value is UiExtensionDescriptorV1 => value !== null);
++        } catch {extensions.value = [];}
++    }, {immediate: true});
++    onScopeDispose(() => controller?.abort());
++    return extensions;
++}
+diff --git a/ui/src/extensions/runtime.spec.ts b/ui/src/extensions/runtime.spec.ts
+new file mode 100644
+index 0000000..14b3521
+--- /dev/null
++++ b/ui/src/extensions/runtime.spec.ts
+@@ -0,0 +1,133 @@
++import {afterEach, describe, expect, it, vi} from "vitest"
++import {createExtensionRequest, extensionPath, ExtensionLifecycle, hostExtensionPath} from "./runtime"
++import type {UiExtensionContextV1} from "./protocol"
++
++const context = (overrides: Partial<UiExtensionContextV1> = {}): UiExtensionContextV1 => ({
++    contractVersion: 1,
++    tenant: "main",
++    path: "roles",
++    locale: "en",
++    supportedLocales: ["en"],
++    fallbackLocale: "en",
++    theme: "light",
++    themePreference: "light",
++    apiBase: "/api/v1/main",
++    assetBase: "/ui-extensions/main/roles",
++    styles: [],
++    signal: new AbortController().signal,
++    navigate: vi.fn(),
++    request: vi.fn(),
++    ...overrides,
++})
++
++describe("extensionPath", () => {
++    it("keeps host context prefixes without granting another API root", async () => {
++        const original = window.KESTRA_BASE_PATH
++        window.KESTRA_BASE_PATH = "/kestra"
++        try {
++            expect(hostExtensionPath("/ui-extensions/main/manifest")).toBe("/kestra/ui-extensions/main/manifest")
++            const fetcher = vi.fn(async () => new Response("allowed"))
++            const request = createExtensionRequest(new AbortController().signal, "/kestra/api/v1/main", fetcher)
++            await request("/kestra/api/v1/main/roles?size=20")
++            expect(fetcher).toHaveBeenCalledOnce()
++            await expect(request("/api/v1/main/roles")).rejects.toThrow("Invalid extension request URL")
++        } finally { window.KESTRA_BASE_PATH = original }
++    })
++    it("accepts only relative extension paths", () => {
++        expect(extensionPath("details/one")).toBe("details/one")
++        for (const invalid of ["/details", "../details", "details/../one", "details%2Fone", "details?x=1", "details#x", "details\\one", "details//one"]) {
++            expect(() => extensionPath(invalid)).toThrow("Invalid extension path")
++        }
++    })
++})
++
++describe("createExtensionRequest", () => {
++    afterEach(() => document.head.replaceChildren())
++
++    it("keeps query parameters, credentials, abort signal and CSRF while preserving 401/403 responses", async () => {
++        const meta = document.createElement("meta")
++        meta.name = "csrf-token"
++        meta.content = "csrf-value"
++        document.head.append(meta)
++        const signal = new AbortController().signal
++        const fetcher = vi.fn(async () => new Response("denied", {status: 403}))
++        const response = await createExtensionRequest(signal, "/api/v1/main", fetcher)("/api/v1/main/roles?scope=team", {
++            method: "post",
++            headers: {Authorization: "Bearer forbidden"},
++        })
++        expect(response.status).toBe(403)
++        expect(fetcher).toHaveBeenCalledOnce()
++        const [url, options] = fetcher.mock.calls[0]
++        expect(url.toString()).toBe("http://localhost:3000/api/v1/main/roles?scope=team")
++        expect(options).toMatchObject({method: "POST", credentials: "same-origin", redirect: "error", signal})
++        expect((options as RequestInit).headers).toBeInstanceOf(Headers)
++        expect(((options as RequestInit).headers as Headers).get("X-CSRF-TOKEN")).toBe("csrf-value")
++        expect(((options as RequestInit).headers as Headers).get("Authorization")).toBeNull()
++    })
++
++    it("rejects paths outside the API base and accepts an unchanged 401 response", async () => {
++        const fetcher = vi.fn(async () => new Response(null, {status: 401}))
++        await expect(createExtensionRequest(new AbortController().signal, "/api/v1/main", fetcher)("/api/v1/other/roles")).rejects.toThrow("Invalid extension request URL")
++        await expect(createExtensionRequest(new AbortController().signal, "/api/v1/main", fetcher)("/api/v1/main/roles")).resolves.toMatchObject({status: 401})
++    })
++})
++
++describe("ExtensionLifecycle", () => {
++    afterEach(() => vi.useRealTimers())
++
++    it("unmounts a late mount result after disposal", async () => {
++        let resolveMount!: (value: {update: () => void; unmount: () => void}) => void
++        const late = {update: vi.fn(), unmount: vi.fn()}
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), vi.fn())
++        const started = lifecycle.start(async () => ({contractVersion: 1, mount: () => new Promise(resolve => {resolveMount = resolve})}), context())
++        await new Promise(resolve => setTimeout(resolve, 0))
++        await lifecycle.dispose()
++        resolveMount(late)
++        await started
++        await Promise.resolve()
++        expect(late.unmount).toHaveBeenCalledOnce()
++    })
++
++    it("retains the latest pending context and serializes updates", async () => {
++        const releases: (() => void)[] = []
++        const mounted = {update: vi.fn()
++            .mockImplementationOnce(() => undefined)
++            .mockImplementationOnce(() => new Promise<void>(resolve => {releases.push(resolve)}))
++            .mockImplementation(() => undefined), unmount: vi.fn()}
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), vi.fn())
++        await lifecycle.start(async () => ({contractVersion: 1, mount: () => mounted}), context())
++        const first = lifecycle.update(context({path: "one"}))
++        const second = lifecycle.update(context({path: "two"}))
++        await new Promise(resolve => setTimeout(resolve, 0))
++        await vi.waitFor(() => expect(releases).toHaveLength(1))
++        releases[0]()
++        await Promise.all([first, second])
++        expect(mounted.update).toHaveBeenCalledTimes(3)
++        expect(mounted.update.mock.calls.at(-1)?.[0].path).toBe("two")
++    })
++
++    it("reports mount, update and timeout errors and disposes", async () => {
++        vi.useFakeTimers()
++        const onError = vi.fn()
++        const mounted = {update: vi.fn()
++            .mockImplementationOnce(() => undefined)
++            .mockImplementation(() => new Promise<void>(() => {})), unmount: vi.fn()}
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), onError)
++        await lifecycle.start(async () => ({contractVersion: 1, mount: () => mounted}), context())
++        const update = lifecycle.update(context({path: "stuck"}))
++        await vi.advanceTimersByTimeAsync(5000)
++        await update
++        expect(onError).toHaveBeenCalledWith(expect.objectContaining({message: "Extension lifecycle timed out"}))
++        expect(mounted.unmount).toHaveBeenCalledOnce()
++    })
++
++    it("reports module and lifecycle errors", async () => {
++        const onError = vi.fn()
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), onError)
++        await lifecycle.start(async () => {throw new Error("load failed")}, context())
++        expect(onError).toHaveBeenCalledWith(expect.objectContaining({message: "load failed"}))
++        const invalid = new ExtensionLifecycle(document.createElement("div"), onError)
++        await invalid.start(async () => ({contractVersion: 1, mount: () => ({unmount: vi.fn()} as never)}), context())
++        expect(onError).toHaveBeenCalledWith(expect.objectContaining({message: "Invalid extension lifecycle"}))
++    })
++})
+diff --git a/ui/src/extensions/runtime.ts b/ui/src/extensions/runtime.ts
+new file mode 100644
+index 0000000..5b9f469
+--- /dev/null
++++ b/ui/src/extensions/runtime.ts
+@@ -0,0 +1,92 @@
++import type {MountedUiExtensionV1, UiExtensionContextV1, UiExtensionModuleV1} from "./protocol";
++import {getCsrfToken} from "../utils/csrf";
++
++export function hostExtensionPath(path: string): string {
++    return (window.KESTRA_BASE_PATH ?? "").replace(/\/$/, "") + path;
++}
++
++export function extensionPath(path: string): string {
++    if (path.startsWith("/") || path.includes("\\") || path.includes("%") || path.includes("?") || path.includes("#")
++        || path.split("/").some(segment => segment === "." || segment === "..") || path.includes("//")) {
++        throw new Error("Invalid extension path");
++    }
++    return path;
++}
++
++export function createExtensionRequest(signal: AbortSignal, apiBase: string, fetcher: typeof fetch = fetch) {
++    return async (path: string, options: RequestInit = {}): Promise<Response> => {
++        const url = new URL(path, window.location.origin);
++        const base = new URL(apiBase, window.location.origin);
++        const pathname = path.split("?")[0];
++        if (!path.startsWith("/") || path.startsWith("//") || url.origin !== window.location.origin || !url.pathname.startsWith(base.pathname + "/")
++            || pathname.includes("%") || pathname.includes("\\") || pathname.includes("//") || path.includes("#")
++            || pathname.split("/").some(segment => segment === "." || segment === "..")) {
++            throw new Error("Invalid extension request URL");
++        }
++        const headers = new Headers(options.headers);
++        headers.delete("Authorization");
++        const method = (options.method ?? "GET").toUpperCase();
++        if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
++            const token = getCsrfToken();
++            if (!token) throw new Error("CSRF token is unavailable");
++            headers.set("X-CSRF-TOKEN", token);
++        }
++        return fetcher(url, {...options, method, headers, credentials: "same-origin", redirect: "error", signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal});
++    };
++}
++
++export class ExtensionLifecycle {
++    private controller = new AbortController();
++    private mounted?: MountedUiExtensionV1;
++    private serial: Promise<void> = Promise.resolve();
++    private disposed = false;
++    private latest?: UiExtensionContextV1;
++
++    constructor(private container: HTMLElement, private onError: (error: unknown) => void) {}
++
++    get signal() {return this.controller.signal;}
++
++    async start(load: () => Promise<UiExtensionModuleV1>, context: UiExtensionContextV1) {
++        this.latest = context;
++        try {
++            const module = await this.bounded(load());
++            if (this.disposed) return;
++            if (module.contractVersion !== 1 || typeof module.mount !== "function") throw new Error("Unsupported extension module");
++            const pending = Promise.resolve(module.mount(this.container, context));
++            void pending.then(async mounted => {if (this.disposed) await mounted?.unmount?.();}).catch(error => this.onError(error));
++            const mounted = await this.bounded(pending);
++            if (!mounted || typeof mounted.update !== "function" || typeof mounted.unmount !== "function") throw new Error("Invalid extension lifecycle");
++            if (this.disposed) return;
++            this.mounted = mounted;
++            await this.update(this.latest);
++        } catch (error) {
++            if (!this.disposed) {this.onError(error); void this.dispose();}
++        }
++    }
++
++    update(context: UiExtensionContextV1) {
++        this.latest = context;
++        this.serial = this.serial.then(async () => {
++            if (!this.disposed && this.mounted) await this.bounded(Promise.resolve(this.mounted.update(this.latest!)));
++        }).catch(error => {if (!this.disposed) {this.onError(error); void this.dispose();}});
++        return this.serial;
++    }
++
++    async dispose() {
++        if (this.disposed) return;
++        this.disposed = true;
++        this.controller.abort();
++        try {await this.bounded(this.serial);}
++        catch (error) {this.onError(error);}
++        try {await this.bounded(Promise.resolve(this.mounted?.unmount()));}
++        catch (error) {this.onError(error);}
++        finally {this.container.replaceChildren(); this.container.shadowRoot?.replaceChildren();}
++    }
++
++    private bounded<Result>(promise: Promise<Result>): Promise<Result> {
++        return new Promise((resolve, reject) => {
++            const timer = setTimeout(() => reject(new Error("Extension lifecycle timed out")), 5000);
++            promise.then(resolve, reject).finally(() => clearTimeout(timer));
++        });
++    }
++}
+diff --git a/ui/src/override/components/useLeftMenu.ts b/ui/src/override/components/useLeftMenu.ts
+index 0afc065..d4818fb 100644
+--- a/ui/src/override/components/useLeftMenu.ts
++++ b/ui/src/override/components/useLeftMenu.ts
+@@ -1,4 +1,5 @@
+ import {computed} from "vue"
++import {useUiExtensions} from "../../extensions/registry"
+
+ import {useRoute, useRouter} from "vue-router"
+ import type {
+@@ -58,7 +59,8 @@ export function useLeftMenu() {
+     const $route = useRoute()
+     const $router = useRouter()
+
+-    const {t} = useI18n({useScope: "global"})
++    const {t, locale} = useI18n({useScope: "global"})
++    const extensions = useUiExtensions()
+
+     /**
+      * Returns the names of all registered routes whose name starts with the given prefix.
+@@ -91,7 +93,7 @@ export function useLeftMenu() {
+     }
+
+     const menu = computed<MenuItem[]>(() => {
+-        const generated = [
++        const generated: MenuItem[] = [
+             {
+                 id: "workspace",
+                 title: "Workspace",
+@@ -399,6 +401,18 @@ export function useLeftMenu() {
+             },
+         ]
+
++        if (extensions.value.length) generated.push({
++            id: "extensions",
++            title: t("plugins.names"),
++            child: extensions.value.map(extension => ({
++                id: `extension-${extension.id}`,
++                title: extension.titles[locale.value] ?? extension.titles.en,
++                routes: [],
++                href: {name: "extensions/page", params: {tenant: $route.params.tenant ?? "main", extensionId: extension.id, pathMatch: []}},
++                icon: {element: PuzzleOutline},
++            })),
++        })
++
+         flatten(generated).forEach((item: MenuItem) => {
+             if (!item.id) {
+                 item.id = item.title.toLowerCase().replaceAll(" ", "-")
+@@ -426,4 +440,4 @@ export function useLeftMenu() {
+     })
+
+     return {menu}
+-}
+\ No newline at end of file
++}
+diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
+index 6bd429e..a696a90 100644
+--- a/ui/src/routes/routes.ts
++++ b/ui/src/routes/routes.ts
+@@ -11,6 +11,7 @@ import {NAMESPACE_PARENT_ROUTE, createNamespaceTabRoutes} from "../utils/namespa
+ export type KestraRouteRecord = RouteRecordRaw & {ossOnly?: boolean}
+
+ const routes: KestraRouteRecord[] = [
++    {name: "extensions/page", path: "/:tenant/extensions/:extensionId/:pathMatch(.*)*", component: () => import("../components/extensions/ExtensionPage.vue")},
+     {name: "access-denied", path: "/access-denied", component: () => import("../components/errors/AccessDenied.vue"), meta: {anonymous: true, layout: FullScreenLayout}},
+     //Initial
+     {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
+new file mode 100644
+index 0000000..b5e1295
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
+@@ -0,0 +1,65 @@
++package io.kestra.webserver.controllers.api;
++
++import io.kestra.webserver.ui.UiExtensionDescriptorV1;
++import io.kestra.webserver.ui.UiExtensionRegistry;
++import io.kestra.webserver.rbac.RbacConfiguration;
++import io.kestra.webserver.rbac.RbacAuthorizer;
++import io.kestra.webserver.rbac.TypedAuthorization;
++import io.kestra.webserver.rbac.TypedAuthorizationGate;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import reactor.core.publisher.Mono;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MediaType;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++import io.swagger.v3.oas.annotations.Operation;
++import java.util.List;
++
++@Controller("/ui-extensions/{tenant}")
++@ExecuteOn(TaskExecutors.IO)
++public final class UiExtensionController {
++    private final UiExtensionRegistry registry;
++    private final RbacConfiguration configuration;
++    private final TypedAuthorizationGate gate;
++
++    public UiExtensionController(UiExtensionRegistry registry, RbacConfiguration configuration, TypedAuthorizationGate gate) {
++        this.registry = registry;
++        this.configuration = configuration;
++        this.gate = gate;
++    }
++
++    @Get("/manifest")
++    @Operation(summary = "List registered independent management pages")
++    public Mono<HttpResponse<Manifest>> manifest(String tenant, HttpRequest<?> request) {
++        if (!"main".equals(tenant)) return Mono.just(HttpResponse.notFound());
++        return managementAllowed(tenant, request).map(allowed -> HttpResponse.ok(new Manifest(1, allowed ? registry.descriptors() : List.of()))
++            .header("Cache-Control", "no-store"));
++    }
++
++    private Mono<Boolean> managementAllowed(String tenant, HttpRequest<?> request) {
++        if (!configuration.enabled()) return Mono.just(true);
++        Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication == null) return Mono.just(false);
++        var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++        var operation = new TypedAuthorization.Operation(1, TypedAuthorization.Source.REST, TypedAuthorization.Resource.SYSTEM,
++            TypedAuthorization.Action.EXECUTE, tenant, null, null, TypedAuthorization.QueryDomain.unrestricted(),
++            TypedAuthorization.Coverage.SINGLE, TypedAuthorization.Aggregate.NONE, TypedAuthorization.SideEffect.READ_ONLY);
++        return gate.authorize(principal, operation).map(TypedAuthorization.Decision::allowed).onErrorReturn(false);
++    }
++
++    @Get("/{id}/{path:.*}")
++    @Operation(summary = "Read a declared independent management page resource")
++    public HttpResponse<byte[]> asset(String tenant, String id, String path) {
++        if (!"main".equals(tenant)) return HttpResponse.notFound();
++        return registry.asset(id, path).map(asset -> HttpResponse.ok(asset.bytes())
++            .contentType(MediaType.of(asset.mime())).header("Cache-Control", "no-cache")
++            .header("X-Content-Type-Options", "nosniff").header("ETag", "\"" + asset.sha256() + "\""))
++            .orElseGet(HttpResponse::notFound);
++    }
++
++    public record Manifest(int contractVersion, List<UiExtensionDescriptorV1> extensions) { }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+index df43b5f..7e9749c 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+@@ -50,6 +50,8 @@ public final class OssRestOperationAdapter {
+         String handler = route.handler();
+         try {
+             return switch (route.controller()) {
++                case "io.kestra.webserver.controllers.api.UiExtensionController" -> Set.of("manifest", "sdk").contains(handler)
++                    ? metadata(tenant) : administrative(tenant);
+                 case "io.kestra.webserver.controllers.api.FlowController" -> flow(request, tenant, namespace, id);
+                 case "io.kestra.webserver.controllers.api.ExecutionController" -> execution(request, tenant, namespace, id);
+                 case "io.kestra.webserver.controllers.api.OutputController" -> switch (handler) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionDescriptorV1.java b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionDescriptorV1.java
+new file mode 100644
+index 0000000..27155d4
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionDescriptorV1.java
+@@ -0,0 +1,19 @@
++package io.kestra.webserver.ui;
++
++import io.micronaut.core.annotation.Introspected;
++import java.util.List;
++import java.util.Map;
++
++/** Versioned static page declaration; paths are relative to the isolated provider resource root. */
++@Introspected
++public record UiExtensionDescriptorV1(int contractVersion, String id, String resourceRoot, String entry,
++    List<String> styles, Map<String, Resource> files, Map<String, String> titles, String capabilityPath) {
++    public UiExtensionDescriptorV1 {
++        styles = List.copyOf(styles);
++        files = Map.copyOf(files);
++        titles = Map.copyOf(titles);
++    }
++
++    @Introspected
++    public record Resource(String sha256, String mime) { }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionProviderV1.java b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionProviderV1.java
+new file mode 100644
+index 0000000..0e3a6a0
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionProviderV1.java
+@@ -0,0 +1,8 @@
++package io.kestra.webserver.ui;
++
++import java.util.Collection;
++
++/** Supplies trusted deployment extensions; resource namespaces and digests identify assets in the shared classloader. */
++public interface UiExtensionProviderV1 {
++    Collection<UiExtensionDescriptorV1> extensions();
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionRegistry.java b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionRegistry.java
+new file mode 100644
+index 0000000..a67fdcb
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionRegistry.java
+@@ -0,0 +1,129 @@
++package io.kestra.webserver.ui;
++
++import jakarta.inject.Singleton;
++import java.io.IOException;
++import java.io.UncheckedIOException;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.HexFormat;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.Set;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++@Singleton
++public final class UiExtensionRegistry {
++    private static final Logger LOG = LoggerFactory.getLogger(UiExtensionRegistry.class);
++    private static final int MAX_RESOURCE_BYTES = 16 * 1024 * 1024;
++    private static final long MAX_EXTENSION_BYTES = 64L * 1024 * 1024;
++    private static final long MAX_REGISTRY_BYTES = 128L * 1024 * 1024;
++    private static final Map<String, String> MIME = Map.of("js", "application/javascript", "mjs", "application/javascript",
++        "css", "text/css", "json", "application/json", "png", "image/png", "svg", "image/svg+xml",
++        "woff2", "font/woff2", "jpg", "image/jpeg", "webp", "image/webp");
++    private final Map<String, Registered> registered;
++
++    public UiExtensionRegistry(Collection<UiExtensionProviderV1> providers) {
++        Map<String, Registered> accepted = new LinkedHashMap<>();
++        Set<String> duplicates = new java.util.HashSet<>();
++        long totalBytes = 0;
++        for (UiExtensionProviderV1 provider : providers) {
++            try {
++                for (UiExtensionDescriptorV1 descriptor : provider.extensions()) {
++                    try {
++                        if (accepted.containsKey(descriptor.id()) || duplicates.contains(descriptor.id())) {
++                            Registered removed = accepted.remove(descriptor.id());
++                            if (removed != null) totalBytes -= removed.size();
++                            duplicates.add(descriptor.id());
++                            throw new IllegalArgumentException("Duplicate UI extension identifier.");
++                        }
++                        Registered candidate = validate(descriptor, provider.getClass().getClassLoader(), MAX_REGISTRY_BYTES - totalBytes);
++                        accepted.put(descriptor.id(), candidate);
++                        totalBytes += candidate.size();
++                    } catch (RuntimeException invalid) {
++                        LOG.error("UI extension registration was rejected.", invalid);
++                    }
++                }
++            } catch (RuntimeException invalid) {
++                LOG.error("UI extension provider failed.", invalid);
++            }
++        }
++        registered = Map.copyOf(accepted);
++    }
++
++    public List<UiExtensionDescriptorV1> descriptors() {
++        return registered.values().stream().map(Registered::descriptor).sorted(java.util.Comparator.comparing(UiExtensionDescriptorV1::id)).toList();
++    }
++
++    public Optional<Asset> asset(String id, String path) {
++        if (!safePath(path)) return Optional.empty();
++        Registered extension = registered.get(id);
++        return extension == null ? Optional.empty() : Optional.ofNullable(extension.assets().get(path));
++    }
++
++    static Registered validate(UiExtensionDescriptorV1 descriptor, ClassLoader loader, long availableBytes) {
++        if (descriptor == null || descriptor.contractVersion() != 1 || descriptor.id() == null
++            || !descriptor.id().matches("[a-z][a-z0-9-]{0,63}") || !safePath(descriptor.resourceRoot())
++            || !descriptor.resourceRoot().equals("ui-extensions/" + descriptor.id()) || descriptor.files().isEmpty()
++            || descriptor.files().size() > 2048 || !descriptor.titles().containsKey("en")
++            || descriptor.titles().values().stream().anyMatch(title -> title == null || title.isBlank() || title.length() > 120)) {
++            throw new IllegalArgumentException("Invalid UI extension declaration.");
++        }
++        if (!safePath(descriptor.entry()) || !descriptor.entry().endsWith(".js") || !descriptor.files().containsKey(descriptor.entry())
++            || descriptor.styles().stream().anyMatch(path -> !safePath(path) || !path.endsWith(".css") || !descriptor.files().containsKey(path))) {
++            throw new IllegalArgumentException("UI extension entry or stylesheet is not declared.");
++        }
++        if (descriptor.capabilityPath() != null && (!descriptor.capabilityPath().startsWith("/api/v1/")
++            || !safePath(descriptor.capabilityPath().substring(1)))) {
++            throw new IllegalArgumentException("Invalid UI extension capability path.");
++        }
++        Map<String, Asset> assets = new LinkedHashMap<>();
++        long[] total = {0};
++        descriptor.files().forEach((path, resource) -> {
++            if (!safePath(path) || resource == null || resource.sha256() == null || !resource.sha256().matches("[a-f0-9]{64}")
++                || !java.util.Objects.equals(resource.mime(), MIME.get(path.substring(path.lastIndexOf('.') + 1))) || resource.mime() == null) {
++                throw new IllegalArgumentException("Invalid UI extension resource metadata.");
++            }
++            try (var stream = loader.getResourceAsStream(descriptor.resourceRoot() + "/" + path)) {
++                if (stream == null) throw new IllegalArgumentException("UI extension resource is missing.");
++                long budget = Math.min(MAX_RESOURCE_BYTES, Math.min(MAX_EXTENSION_BYTES - total[0], availableBytes - total[0]));
++                if (budget < 0) throw new IllegalArgumentException("UI extension resource budget is exhausted.");
++                byte[] bytes = stream.readNBytes((int) budget + 1);
++                if (bytes.length > budget) {
++                    throw new IllegalArgumentException("UI extension resource budget is exceeded.");
++                }
++                if (!hash(bytes).equals(resource.sha256())) {
++                    throw new IllegalArgumentException("UI extension resource digest or size is invalid.");
++                }
++                total[0] += bytes.length;
++                assets.put(path, new Asset(bytes, resource.mime(), resource.sha256()));
++            } catch (IOException failure) {
++                throw new UncheckedIOException(failure);
++            }
++        });
++        return new Registered(descriptor, Map.copyOf(assets), total[0]);
++    }
++
++    static boolean safePath(String path) {
++        return path != null && path.matches("[A-Za-z0-9_./-]+") && !path.startsWith("/") && !path.endsWith("/")
++            && java.util.Arrays.stream(path.split("/", -1)).noneMatch(segment -> segment.isEmpty() || segment.equals(".") || segment.equals(".."));
++    }
++
++    static String hash(byte[] bytes) {
++        try {
++            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
++        } catch (NoSuchAlgorithmException failure) {
++            throw new IllegalStateException(failure);
++        }
++    }
++
++    record Registered(UiExtensionDescriptorV1 descriptor, Map<String, Asset> assets, long size) { }
++    public record Asset(byte[] bytes, String mime, String sha256) {
++        public Asset {bytes = bytes.clone();}
++        @Override public byte[] bytes() {return bytes.clone();}
++    }
++}
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
+new file mode 100644
+index 0000000..17f7be9
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
+@@ -0,0 +1,39 @@
++# Independent management page protocol V1
++
++Extract this directory from the published executable. Compile Java providers against the same
++published executable. The SDK and npm package are the only host inputs for independent extensions.
++`contract.json` pins the supported component package and integrity, language IDs and fallback.
++`index.d.ts` is the ESM protocol; `locales.mjs` resolves public locale aliases.
++
++Provide one `UiExtensionProviderV1` bean with Micronaut annotation processor indexes. Declare
++`UiExtensionDescriptorV1(1,id,"ui-extensions/"+id,entry,styles,files,titles,capabilityPath)`.
++Each file has a lowercase SHA-256 and MIME. Resources must exist under that exact classpath root.
++The classloader is shared: namespace and hash validate content, not classloader source isolation.
++Duplicate IDs, invalid metadata and missing or mismatched files reject registrations. Limits are
++16 MiB per file, 64 MiB per extension, 128 MiB per registry. Restart the JVM after changing jars.
++
++The host route is `/ui/{tenant}/extensions/{id}/...`. The host owns navigation and lifetime;
++the module owns its app and ShadowRoot. Never add extension styles to document. Load only
++context.styles inside the root, inherit host fonts and consume resolved theme data. The initial
++supported components are buttons, inputs and tables. Use routed details, inline confirmation,
++and extension-owned vue-i18n pagination. Dialogs, popovers and complex dropdowns are unsupported.
++
++Export `contractVersion=1` and `mount(container,context)` returning update/unmount. Mount and update
++can be asynchronous. Unmount must be idempotent. The host aborts on navigation, serializes updates,
++retains the latest pending context and cleans late mount results. Lifecycle timeout is 5 seconds;
++trusted extension code must stop effects on abort because JavaScript is not a security sandbox.
++
++`navigate` accepts only root-relative extension paths. `request` accepts same-origin
++`/api/v1/{tenant}/...` with query parameters, includes cookies and write CSRF, and returns standard
++Response including 401/403. It rejects redirects, fragments, encoded path ambiguity and external
++origins. The server continues to authorize every API request.
++
++Discovery returns metadata with 200 and hides management entries unless explicit SYSTEM permission
++allows them; no-RBAC deployments use their existing instance authentication boundary. Capability
++is an optional same-origin GET returning `{allowed:true}` and affects menu visibility only.
++It never authorizes API operations. Direct route access still encounters API authorization.
++
++Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fallback `en`.
++Run `node check-translations.mjs path/to/translations`; failure includes missing, extra, empty
++messages and interpolation differences for all public locales. The checker does not translate
++messages or prove translation quality. No host-internal JSON import is supported.
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/check-translations.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/check-translations.mjs
+new file mode 100644
+index 0000000..0269c3b
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/check-translations.mjs
+@@ -0,0 +1,51 @@
++import {readFile} from "node:fs/promises";
++import {resolve} from "node:path";
++import {pathToFileURL} from "node:url";
++import {supportedLocales} from "./locales.mjs";
++
++function flatten(value, path = "", result = {}) {
++    if (typeof value === "string") {result[path] = value; return result;}
++    if (!value || typeof value !== "object") throw new Error(`Non-message value at ${path}`);
++    for (const [key, child] of Object.entries(value)) flatten(child, path ? `${path}.${key}` : key, result);
++    return result;
++}
++
++function placeholders(message) {
++    const literalFree = message.replace(/\\[{}]/g, "").replace(/\{'[^']*'\}/g, "");
++    if (/\{\{/.test(literalFree)) throw new Error("Nested interpolation braces");
++    const names = [...literalFree.matchAll(/\{([^{}]*)\}/g)].map(match => match[1].trim());
++    if (names.some(name => !/^(?:[A-Za-z_$][\w$]*|\d+)$/.test(name))) throw new Error("Invalid interpolation name");
++    return [...new Set(names)].sort().join(",");
++}
++
++export async function checkTranslations(directory) {
++    const reports = [];
++    const source = JSON.parse(await readFile(resolve(directory, "en.json"), "utf8"));
++    if (!source.en) throw new Error("English messages must be wrapped under en");
++    const english = flatten(source.en);
++    for (const locale of supportedLocales) {
++        const errors = [];
++        try {
++            const content = JSON.parse(await readFile(resolve(directory, `${locale}.json`), "utf8"));
++            if (!content[locale]) throw new Error(`Messages must be wrapped under ${locale}`);
++            const messages = flatten(content[locale]);
++            for (const key of Object.keys(english)) {
++                if (!(key in messages)) errors.push(`Missing: ${key}`);
++                else if (!messages[key].trim()) errors.push(`Empty: ${key}`);
++                else if (placeholders(messages[key]) !== placeholders(english[key])) errors.push(`Placeholders differ: ${key}`);
++            }
++            for (const key of Object.keys(messages)) if (!(key in english)) errors.push(`Extra: ${key}`);
++        } catch (error) {errors.push(String(error));}
++        reports.push({locale, errors});
++    }
++    return {contractVersion: 1, passed: reports.every(report => report.errors.length === 0), reports};
++}
++
++if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
++    try {
++        if (!process.argv[2]) throw new Error("Usage: node check-translations.mjs <locale-directory>");
++        const report = await checkTranslations(process.argv[2]);
++        console.log(JSON.stringify(report, null, 2));
++        process.exitCode = report.passed ? 0 : 1;
++    } catch (error) {console.error(String(error)); process.exitCode = 1;}
++}
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
+new file mode 100644
+index 0000000..f582719
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
+@@ -0,0 +1,19 @@
++{
++  "contractVersion": 1,
++  "fallbackLocale": "en",
++  "supportedLocales": ["en", "de", "es", "fr", "hi", "it", "ja", "ko", "pl", "pt", "pt_BR", "ru", "zh_CN"],
++  "localeAliases": {"pt-BR": "pt_BR", "zh-CN": "zh_CN"},
++  "designSystem": {"package": "@kestra-io/design-system", "version": "0.5.0", "integrity": "sha512-5KJ229xVkJs8tMSWDDxJbv1eB70oKlMP1GQ9KkeZhjyWyJKnPuxyRROwSuD4nxK1dvQFGIabjJldsgXdicl0mQ=="},
++  "components": {
++    "button": "@kestra-io/design-system/components/Basic/KsButton/KsButton",
++    "input": "@kestra-io/design-system/components/Form/KsInput",
++    "table": "@kestra-io/design-system/components/Data/KsTable/KsTable",
++    "column": "@kestra-io/design-system/components/Data/KsTable/KsTableColumn"
++  },
++  "messageFormat": "One JSON file per locale; wrap its messages under the exact locale key",
++  "themes": ["light", "dark", "dark-2"],
++  "request": "Same-origin /api/v1/{tenant}/ path; query parameters allowed; encoded path separators and fragments forbidden; 401/403 returned unchanged",
++  "styles": "Load context.styles inside an extension-owned ShadowRoot; inherit host font; document stylesheet injection is unsupported",
++  "unsupportedComponents": ["dialog", "popover", "complex dropdown", "KsPagination"],
++  "lifecycleTimeoutMs": 5000
++}
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
+new file mode 100644
+index 0000000..30ca573
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
+@@ -0,0 +1,35 @@
++export interface UiExtensionDescriptorV1 {
++    contractVersion: 1;
++    id: string;
++    entry: string;
++    styles: readonly string[];
++    titles: Readonly<Record<string, string>>;
++    capabilityPath: string | null;
++}
++
++export interface UiExtensionContextV1 {
++    readonly contractVersion: 1;
++    readonly tenant: string;
++    readonly path: string;
++    readonly locale: string;
++    readonly supportedLocales: readonly string[];
++    readonly fallbackLocale: "en";
++    readonly theme: "light" | "dark" | "dark-2";
++    readonly themePreference: "light" | "dark" | "dark-2" | "system";
++    readonly apiBase: string;
++    readonly assetBase: string;
++    readonly styles: readonly string[];
++    readonly signal: AbortSignal;
++    navigate(path: string, options?: {replace?: boolean}): Promise<void>;
++    request(path: string, options?: RequestInit): Promise<Response>;
++}
++
++export interface MountedUiExtensionV1 {
++    update(context: UiExtensionContextV1): Promise<void> | void;
++    unmount(): Promise<void> | void;
++}
++
++export interface UiExtensionModuleV1 {
++    contractVersion: 1;
++    mount(container: HTMLElement, context: UiExtensionContextV1): Promise<MountedUiExtensionV1> | MountedUiExtensionV1;
++}
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/locales.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/locales.mjs
+new file mode 100644
+index 0000000..db23815
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/locales.mjs
+@@ -0,0 +1,7 @@
++import contract from "./contract.json" with {type: "json"};
++export const supportedLocales = Object.freeze([...contract.supportedLocales]);
++export const fallbackLocale = contract.fallbackLocale;
++export function resolveLocale(value) {
++    const normalized = contract.localeAliases[value] ?? value;
++    return supportedLocales.includes(normalized) ? normalized : fallbackLocale;
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java
+new file mode 100644
+index 0000000..c4a2094
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java
+@@ -0,0 +1,68 @@
++package io.kestra.webserver.ui;
++
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import io.kestra.webserver.controllers.api.UiExtensionController;
++import io.kestra.webserver.rbac.RbacConfiguration;
++import io.kestra.webserver.rbac.TypedAuthorization;
++import io.kestra.webserver.rbac.TypedAuthorizationGate;
++import io.kestra.webserver.rbac.TypedAuthorizationResolver;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class UiExtensionControllerTest {
++    private static final UiExtensionDescriptorV1 DESCRIPTOR = new UiExtensionDescriptorV1(1, "probe", "ui-extensions/probe",
++        "page.js", List.of(), Map.of(), Map.of("en", "Probe"), null);
++    private BeanProvider<TypedAuthorizationResolver> provider() {
++        return new BeanProvider<>() {
++            @Override public TypedAuthorizationResolver get() {
++                return (principal, operation) -> CompletableFuture.completedFuture(
++                    principal.subject().equals("owner") && operation.resource() == TypedAuthorization.Resource.SYSTEM
++                        ? TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted())
++                        : TypedAuthorization.Decision.deny("Not a management identity"));
++            }
++            @Override public boolean isUnique() { return true; }
++            @Override public boolean isPresent() { return true; }
++        };
++    }
++    private UiExtensionController controller(boolean enabled) {
++        var registry = mock(UiExtensionRegistry.class);
++        when(registry.descriptors()).thenReturn(List.of(DESCRIPTOR));
++        return new UiExtensionController(registry, new RbacConfiguration(enabled, false), new TypedAuthorizationGate(provider()));
++    }
++    private HttpRequest<?> request(String subject) {
++        var request = HttpRequest.GET("/ui-extensions/main/manifest");
++        if (subject != null) request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build(subject, List.of()));
++        return request;
++    }
++    @Test void shouldReturnEmptyMetadataForReaderAndNoIdentity() {
++        var controller = controller(true);
++        for (String subject : new String[]{"reader", null}) {
++            var response = controller.manifest("main", request(subject)).block();
++            assertEquals(200, response.code());
++            assertTrue(response.body().extensions().isEmpty());
++        }
++    }
++    @Test void shouldReturnOnlyExplicitManagementEntries() {
++        var response = controller(true).manifest("main", request("owner")).block();
++        assertEquals(200, response.code());
++        assertEquals(List.of(DESCRIPTOR), response.body().extensions());
++        assertEquals("no-store", response.getHeaders().get("Cache-Control"));
++    }
++    @Test void shouldRejectUnknownTenantAndNeverReturnSpaForMissingAssets() {
++        var controller = controller(true);
++        assertEquals(404, controller.manifest("other", request("owner")).block().code());
++        assertEquals(404, controller.asset("main", "probe", "missing.js").code());
++        assertEquals(404, controller.asset("main", "probe", "../page.js").code());
++        assertEquals(404, controller.asset("other", "probe", "page.js").code());
++    }
++    @Test void shouldPreserveExistingAuthenticatedNoRbacVisibility() {
++        assertEquals(1, controller(false).manifest("main", request("ordinary")).block().body().extensions().size());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionHttpTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionHttpTest.java
+new file mode 100644
+index 0000000..d1ff7f7
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionHttpTest.java
+@@ -0,0 +1,88 @@
++package io.kestra.webserver.ui;
++
++import java.net.http.HttpClient;
++import java.net.http.HttpResponse;
++import java.util.List;
++import java.util.Map;
++import java.util.HexFormat;
++import java.security.MessageDigest;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.webserver.rbac.RbacAuthorizer;
++import io.kestra.webserver.rbac.TypedAuthorization;
++import io.kestra.webserver.rbac.TypedAuthorizationResolver;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "ui.extension.http.probe", value = "true")
++class UiExtensionHttpTest {
++    @Inject EmbeddedServer server;
++    private HttpResponse<String> get(String path, String subject) throws Exception {
++        var request = java.net.http.HttpRequest.newBuilder(server.getURI().resolve(path)).GET();
++        if (subject != null) request.header("X-Ui-Probe", subject);
++        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
++    }
++    @Test void shouldDiscoverMetadataWithoutGrantingManagementOrServingSpaAssets() throws Exception {
++        var reader = get("/ui-extensions/main/manifest", "reader");
++        assertEquals(200, reader.statusCode());
++        assertTrue(reader.body().contains("\"extensions\":[]"));
++        var owner = get("/ui-extensions/main/manifest", "owner");
++        assertEquals(200, owner.statusCode());
++        assertTrue(owner.body().contains("http-probe"));
++        assertEquals(401, get("/ui-extensions/main/manifest", null).statusCode());
++        assertEquals(403, get("/ui-extensions/main/http-probe/page.js", "reader").statusCode());
++        var asset = get("/ui-extensions/main/http-probe/page.js", "owner");
++        assertEquals(200, asset.statusCode());
++        assertTrue(asset.headers().firstValue("content-type").orElse("").contains("application/javascript"));
++        assertEquals("export const contractVersion = 1;\n", asset.body());
++        var missing = get("/ui-extensions/main/http-probe/missing.js", "owner");
++        assertEquals(404, missing.statusCode());
++        assertFalse(missing.body().contains("id=\"app\""));
++        assertEquals(200, get("/api/v1/configs", "reader").statusCode());
++    }
++    @Singleton
++    @Requires(property = "ui.extension.http.probe", value = "true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        @Override public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            String subject = request.getHeaders().get("X-Ui-Probe");
++            return subject == null ? Mono.empty() : Mono.just(Authentication.build(subject, List.of()));
++        }
++    }
++    @Singleton
++    @Requires(property = "ui.extension.http.probe", value = "true")
++    static class Policy implements TypedAuthorizationResolver {
++        @Override public CompletionStage<TypedAuthorization.Decision> authorize(RbacAuthorizer.Principal principal, TypedAuthorization.Operation operation) {
++            return CompletableFuture.completedFuture(principal.subject().equals("owner") || operation.resource() == TypedAuthorization.Resource.METADATA
++                ? TypedAuthorization.Decision.allow(operation.queryDomain()) : TypedAuthorization.Decision.deny("Read-only identity"));
++        }
++    }
++    @Singleton
++    @Requires(property = "ui.extension.http.probe", value = "true")
++    static class Pages implements UiExtensionProviderV1 {
++        @Override public List<UiExtensionDescriptorV1> extensions() {
++            try (var resource = getClass().getClassLoader().getResourceAsStream("ui-extensions/http-probe/page.js")) {
++                String hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(resource.readAllBytes()));
++                return List.of(new UiExtensionDescriptorV1(1, "http-probe", "ui-extensions/http-probe", "page.js", List.of(),
++                    Map.of("page.js", new UiExtensionDescriptorV1.Resource(hash, "application/javascript")), Map.of("en", "HTTP probe"), null));
++            } catch (Exception failure) { throw new IllegalStateException(failure); }
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionRegistryTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionRegistryTest.java
+new file mode 100644
+index 0000000..746c571
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionRegistryTest.java
+@@ -0,0 +1,85 @@
++package io.kestra.webserver.ui;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import java.net.URL;
++import java.net.URLClassLoader;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++
++class UiExtensionRegistryTest {
++    @Test
++    void shouldRejectResourceRootThatCanBeSharedByDifferentIds() throws Exception {
++        Path root = Files.createTempDirectory("ui-extension");
++        Files.createDirectories(root.resolve("ui-extensions/shared"));
++        byte[] body = "export const contractVersion=1".getBytes();
++        Files.write(root.resolve("ui-extensions/shared/page.js"), body);
++        String hash = UiExtensionRegistry.hash(body);
++        var descriptor = new UiExtensionDescriptorV1(1, "role", "ui-extensions/shared", "page.js", List.of(),
++            Map.of("page.js", new UiExtensionDescriptorV1.Resource(hash, "application/javascript")), Map.of("en", "Roles"), null);
++        assertThatThrownBy(() -> UiExtensionRegistry.validate(descriptor, new URLClassLoader(new URL[]{root.toUri().toURL()}), 128L * 1024 * 1024))
++            .isInstanceOf(IllegalArgumentException.class);
++    }
++
++    @Test
++    void shouldRejectExtensionWhenItsBudgetIsExceeded() throws Exception {
++        Path root = Files.createTempDirectory("ui-extension-budget");
++        Files.createDirectories(root.resolve("ui-extensions/roles"));
++        byte[] body = new byte[1024];
++        Files.write(root.resolve("ui-extensions/roles/page.js"), body);
++        var descriptor = new UiExtensionDescriptorV1(1, "roles", "ui-extensions/roles", "page.js", List.of(),
++            Map.of("page.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "application/javascript")), Map.of("en", "Roles"), null);
++        assertThatThrownBy(() -> UiExtensionRegistry.validate(descriptor, new URLClassLoader(new URL[]{root.toUri().toURL()}), 512))
++            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("budget");
++    }
++
++    @Test
++    void shouldCloneAssetBytesAtThePublicBoundary() {
++        byte[] body = {1, 2, 3};
++        var asset = new UiExtensionRegistry.Asset(body, "application/javascript", "a".repeat(64));
++        body[0] = 9;
++        byte[] returned = asset.bytes();
++        returned[1] = 9;
++        assertThat(asset.bytes()).containsExactly(1, 2, 3);
++    }
++
++    @Test
++    void shouldRejectMissingHashMismatchMimeAndUnsafePaths() throws Exception {
++        Path root = Files.createTempDirectory("ui-extension-validation");
++        Files.createDirectories(root.resolve("ui-extensions/roles"));
++        byte[] body = "export const contractVersion=1".getBytes();
++        Files.write(root.resolve("ui-extensions/roles/page.js"), body);
++        try (var loader = new URLClassLoader(new URL[]{root.toUri().toURL()})) {
++            for (var invalid : List.of(
++                new UiExtensionDescriptorV1(2, "roles", "ui-extensions/roles", "page.js", List.of(), Map.of("page.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "application/javascript")), Map.of("en", "Roles"), null),
++                new UiExtensionDescriptorV1(1, "roles", "ui-extensions/roles", "missing.js", List.of(), Map.of("missing.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "application/javascript")), Map.of("en", "Roles"), null),
++                new UiExtensionDescriptorV1(1, "roles", "ui-extensions/roles", "page.js", List.of(), Map.of("page.js", new UiExtensionDescriptorV1.Resource("0".repeat(64), "application/javascript")), Map.of("en", "Roles"), null),
++                new UiExtensionDescriptorV1(1, "roles", "ui-extensions/roles", "page.js", List.of(), Map.of("page.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "text/html")), Map.of("en", "Roles"), null),
++                new UiExtensionDescriptorV1(1, "roles", "ui-extensions/roles", "../page.js", List.of(), Map.of("../page.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "application/javascript")), Map.of("en", "Roles"), null))) {
++                assertThatThrownBy(() -> UiExtensionRegistry.validate(invalid, loader, 1024)).isInstanceOf(IllegalArgumentException.class);
++            }
++            var valid = new UiExtensionDescriptorV1(1, "roles", "ui-extensions/roles", "page.js", List.of(),
++                Map.of("page.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "application/javascript")), Map.of("en", "Roles"), null);
++            assertThat(UiExtensionRegistry.validate(valid, loader, 1024).size()).isEqualTo(body.length);
++        }
++        for (String invalid : List.of("../page.js", "a//page.js", "/page.js", "a%2fpage.js", "a\\page.js", "https://external/page.js")) {
++            assertThat(UiExtensionRegistry.safePath(invalid)).isFalse();
++        }
++    }
++
++    @Test
++    void shouldRejectDuplicateProviderIdsRatherThanPickOne() throws Exception {
++        byte[] body;
++        try (var resource = getClass().getClassLoader().getResourceAsStream("ui-extensions/http-probe/page.js")) { body = resource.readAllBytes(); }
++        var descriptor = new UiExtensionDescriptorV1(1, "http-probe", "ui-extensions/http-probe", "page.js", List.of(),
++            Map.of("page.js", new UiExtensionDescriptorV1.Resource(UiExtensionRegistry.hash(body), "application/javascript")), Map.of("en", "Probe"), null);
++        UiExtensionProviderV1 provider = () -> List.of(descriptor);
++        var registry = new UiExtensionRegistry(List.of(provider, provider));
++        assertThat(registry.descriptors()).isEmpty();
++        assertThat(registry.asset("http-probe", "page.js")).isEmpty();
++    }
++}
+diff --git a/webserver/src/test/resources/ui-extensions/http-probe/page.js b/webserver/src/test/resources/ui-extensions/http-probe/page.js
+new file mode 100644
+index 0000000..48314ae
+--- /dev/null
++++ b/webserver/src/test/resources/ui-extensions/http-probe/page.js
+@@ -0,0 +1 @@
++export const contractVersion = 1;

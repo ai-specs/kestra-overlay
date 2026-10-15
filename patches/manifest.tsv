@@ -39,3 +39,6 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0300	0300-rbac-ui-usage-and-mcp-reads.patch	core	ai-specs/kestra-plugin-rbac	规范tenant登录路径、零授权退出页面、usage与MCP工具列表实际查询域及宿主探针	7	新写;用户真实UI失败与typed查询契约	上游OSS提供等价登录路径、拒绝退出入口与usage/MCP查询授权
 0310	0310-access-denied-login-style.patch	core	ai-specs/kestra-plugin-rbac	认证页面兼容宿主主题与窄屏，拒绝页移除K字母标志	1	新写;用户认证页面风格要求	上游OSS提供与登录页一致的独立拒绝页面
 0320	0320-oidc-upstream-i18n-entry.patch	core	ai-specs/kestra-plugin-rbac	独立登录页复用上游vue-i18n语言目录与现有翻译键	4	新写;用户国际化要求	上游OSS提供同等独立认证页面国际化入口
+0330	0330-authorization-evaluation-lifecycle.patch	core	ai-specs/kestra-plugin-rbac	版本化授权评估生命周期接口与唯一所有者和查询缓存及定向探针	13	新写;正式宿主混合策略版本探针及REQ-0330接收;既有激活点演进归0170/0230/0270/0280	上游OSS提供等价完整评估生命周期与安全上下文传播
+0340	0340-independent-management-pages.patch	core	ai-specs/kestra-plugin-rbac	独立ESM管理页面描述和资源及菜单根与偏好生命周期桥接并发布UI消费SDK	21	新写;发布宿主装载失败与独立公开组件隔离探针	上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约
+0350	0350-oidc-public-user-directory.patch	core	ai-specs/kestra-plugin-rbac	公开账号目录SPI与原子生命周期及登录session和授权码及token认证版本失效	11	新写;目录反馈探针;协议发行与token验证激活点演进归0150/0160	上游OSS提供等价公开账号目录与完整认证生命周期失效机制

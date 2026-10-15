@@ -4,6 +4,7 @@
 # 来源: 可信roles从已验证claims贯穿Authentication/context/factory； 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 25 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
+# 演进理由: REQ-0350 沿用协议授权码发行与consent激活点，生产身份版本检查留目录能力。
 diff --git a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
 index 9903d69..d936d67 100644
 --- a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
@@ -16,7 +17,7 @@ index 9903d69..d936d67 100644
 +        if (verified.isPresent()) return verified.map(io.micronaut.security.authentication.Authentication::getName);
          return request.getUserPrincipal().map(Principal::getName);
      }
- 
+
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
 index e93c3ee..a044504 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
@@ -36,7 +37,7 @@ index e93c3ee..a044504 100644
 +    private final java.util.List<String> scopes;
 +    private final java.util.List<String> roles;
      private String sessionId;
- 
+
      @Override
 @@ -25,6 +29,10 @@ public class KestraMcpTransportContext implements McpTransportContext {
              case "serverId" -> serverId;
@@ -83,7 +84,7 @@ index d7e2233..40e0a1f 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 @@ -7,12 +7,21 @@ import jakarta.inject.Singleton;
- 
+
  @Singleton
  public class McpSessionFactory {
 -    public KestraMcpTransportContext build(String tenantId, String serverId, @Nullable String sessionId, @Nullable String callerId) {
@@ -112,7 +113,7 @@ index 5195153..d82b6cd 100644
 @@ -81,9 +81,12 @@ public class McpToolController {
              return Mono.just(HttpResponse.status(HttpStatus.SERVICE_UNAVAILABLE));
          }
- 
+
 -        var transportContext = sessionFactory.build(
 -            tenantId, id, request.getHeaders().get(HttpHeaders.MCP_SESSION_ID), accessControl.callerId(request).orElse(null)
 -        );
@@ -122,7 +123,7 @@ index 5195153..d82b6cd 100644
 +            (String) identity.get("client_id"), (String) identity.get("resource"),
 +            (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()),
 +            (java.util.List<String>) identity.getOrDefault("roles", java.util.List.of()));
- 
+
          return handlerRegistry.getServerHandler(transportContext).handleRequest(request, transportContext);
      }
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java
@@ -343,128 +344,6 @@ index 0000000..7cfecf7
 +        return value;
 +    }
 +}
-diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-index 9fb4a2c..67b17ea 100644
---- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-+++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-@@ -56,6 +56,7 @@ import io.kestra.webserver.oidc.services.OidcAuthorizationCodeService;
- import io.kestra.webserver.oidc.services.OidcClientService;
- import io.kestra.webserver.oidc.services.OidcJwkService;
- import io.kestra.webserver.oidc.services.OidcSessionService;
-+import io.kestra.webserver.mcp.McpResourceUrl;
- import io.kestra.webserver.oidc.services.OidcTokenService;
- import io.kestra.webserver.oidc.services.OidcUserService;
- 
-@@ -102,6 +103,7 @@ public class OidcProviderController {
-         final OidcConfiguration configuration,
-         final OidcClientService clientService,
-         final OidcAuthorizationCodeService authCodeService,
-+        final McpResourceUrl resources,
-         final OidcTokenService tokenService,
-         final io.kestra.webserver.oidc.services.OidcConsentPolicy consentPolicy,
-         final OidcJwkService jwkService,
-@@ -112,6 +114,7 @@ public class OidcProviderController {
-         this.configuration = configuration;
-         this.clientService = clientService;
-         this.authCodeService = authCodeService;
-+        this.resources = resources;
-         this.tokenService = tokenService;
-         this.consentPolicy = consentPolicy;
-         this.jwkService = jwkService;
-@@ -120,6 +123,16 @@ public class OidcProviderController {
-         this.ownership = ownership;
-     }
- 
-+    private final McpResourceUrl resources;
-+
-+    private String requestResource(final TokenRequest request) {
-+        final var values = request.getResources();
-+        if (values == null || values.isEmpty()) return null;
-+        if (values.size() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        try { return resources.parseExact(values.getFirst().toString()).toString(); }
-+        catch (IllegalArgumentException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
-+    }
-+
-     @Get("/jwks")
-     @Produces(MediaType.APPLICATION_JSON)
-     public HttpResponse<?> jwks() {
-@@ -129,6 +142,13 @@ public class OidcProviderController {
-     @Get("/authorize")
-     public HttpResponse<?> authorize(final HttpRequest<?> request) {
-         final var parameters = queryParams(request);
-+        if (parameters.containsKey("resource")) {
-+            final var requestedResources = parameters.get("resource");
-+            if (requestedResources.size() != 1) {
-+                return HttpResponse.badRequest(Map.of("error", "invalid_target"));
-+            }
-+            try { this.resources.parseExact(requestedResources.getFirst()); } catch (IllegalArgumentException exception) { return HttpResponse.badRequest(Map.of("error", "invalid_target")); }
-+        }
-         if (parameters.containsKey("code_challenge") && parameters.get("code_challenge").stream().anyMatch(String::isBlank)) {
-             return HttpResponse.badRequest(Map.of("error", "invalid_request"));
-         }
-@@ -153,6 +173,9 @@ public class OidcProviderController {
-         if (!client.active()) {
-             return HttpResponse.badRequest("Unknown client_id");
-         }
-+        if (parameters.containsKey("resource") && "system".equals(ownership.state(client.clientId()).kind())) {
-+            return HttpResponse.badRequest(Map.of("error", "invalid_client"));
-+        }
- 
-         if (redirectUri == null || !clientService.isRedirectUriRegistered(client, redirectUri.toString())) {
-             // E1: never redirect with an unregistered URI — 400, no redirect leakage.
-@@ -238,6 +261,7 @@ public class OidcProviderController {
-             final OidcClientService.OidcClient client = clientService.require(clientId.getValue());
- 
-             final AuthorizationGrant grant = tokenRequest.getAuthorizationGrant();
-+            requestResource(tokenRequest);
-             final String grantType = grant.getType().getValue();
-             if (!clientService.isGrantTypeAllowed(client, grantType)) {
-                 throw new OidcException(OAuth2Error.UNAUTHORIZED_CLIENT.appendDescription(": grant type not enabled for this client"));
-@@ -439,7 +463,7 @@ public class OidcProviderController {
-             grant.getAuthorizationCode().getValue(),
-             client.clientId(),
-             redirectUri != null ? redirectUri.toString() : null,
--            grant.getCodeVerifier()
-+            grant.getCodeVerifier(), requestResource(tokenRequest)
-         );
- 
-         List<String> scopes = stored.scopes();
-@@ -457,8 +481,8 @@ public class OidcProviderController {
-         final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
-             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
-         final BearerAccessToken accessToken = tokenService.issueAccessToken(
--            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
--        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
-+            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope, stored.resource());
-+        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope, stored.resource());
- 
-         if (scope.contains("openid")) {
-             final SignedJWT idToken = tokenService.issueIdToken(
-@@ -494,9 +518,8 @@ public class OidcProviderController {
-         final TokenRequest tokenRequest,
-         final RefreshTokenGrant grant
-     ) {
--        final OidcTokenService.StoredToken stored = tokenService.validateRefreshToken(
--            grant.getRefreshToken().getValue(), client.clientId());
--        tokenService.revoke(stored.value()); // rotation: the old refresh token dies on use
-+        final OidcTokenService.StoredToken stored = tokenService.validateResourceRefreshToken(
-+            grant.getRefreshToken().getValue(), client.clientId(), requestResource(tokenRequest));
- 
-         List<String> scopes = stored.scopes();
-         if (tokenRequest.getScope() != null) {
-@@ -511,11 +534,7 @@ public class OidcProviderController {
-         if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
-         final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
-             .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
--        final BearerAccessToken accessToken = tokenService.issueAccessToken(
--            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
--        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
--        final AccessTokenResponse response = new AccessTokenResponse(
--            new com.nimbusds.oauth2.sdk.token.Tokens(accessToken, refreshToken));
-+        final AccessTokenResponse response = new AccessTokenResponse(tokenService.rotateRefreshToken(stored, user, scope));
-         return tokenOk(response.toJSONObject());
-     }
- 
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java
 new file mode 100644
 index 0000000..6adf696
@@ -509,10 +388,10 @@ index 21d1173..c283ea3 100644
 -        String codeChallenge, String codeChallengeMethod, String nonce, Instant expiresAt, boolean used
 +        String codeChallenge, String codeChallengeMethod, String nonce, Instant expiresAt, boolean used, String resource
      ) {}
- 
+
      @Inject
 @@ -99,7 +99,7 @@ public class OidcAuthorizationCodeService {
- 
+
      public Optional<StoredCode> find(final String codeValue) {
          final String sql = """
 -            SELECT code, client_id, subject, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, expires_at, used
@@ -530,7 +409,7 @@ index 21d1173..c283ea3 100644
                  }
                  return Optional.empty();
 @@ -128,11 +128,16 @@ public class OidcAuthorizationCodeService {
- 
+
      /** Consumes a code: full validation (D1) then marks it used. */
      public StoredCode consume(final String codeValue, final String expectedClientId, final String redirectUri, final CodeVerifier codeVerifier) {
 +        return consume(codeValue, expectedClientId, redirectUri, codeVerifier, null);
@@ -548,7 +427,7 @@ index 21d1173..c283ea3 100644
          }
 @@ -175,11 +180,11 @@ public class OidcAuthorizationCodeService {
      }
- 
+
      private void markUsed(final String codeValue) {
 -        final String sql = "UPDATE oidc_authorization_code SET used = TRUE WHERE code = ?";
 +        final String sql = "UPDATE oidc_authorization_code SET used = TRUE WHERE code = ? AND NOT used AND expires_at>now()";
@@ -582,19 +461,49 @@ index cd3f6e2..deec90f 100644
                      }
                  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-index 9885dcd..0d62179 100644
+index 9885dcd..b380515 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-@@ -77,7 +77,7 @@ public class OidcTokenService {
+@@ -77,9 +77,37 @@ public class OidcTokenService {
      /** A stored token record (mirror of the table row). */
      public record StoredToken(
          long id, String clientId, String subject, String tokenType, String value,
 -        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked
 +        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked, String resource
      ) {}
- 
+
++    public com.nimbusds.openid.connect.sdk.token.OIDCTokens issueAuthorizationTokens(String clientId,
++        OidcUserService.OidcUser user, Scope scope, String resource, String nonce, String code) {
++        try (var connection = dataSource.getConnection()) {
++            connection.setAutoCommit(false);
++            try {
++                long version;
++                try (var statement = connection.prepareStatement("SELECT authentication_version FROM oidc_user WHERE username=? AND user_state='ACTIVE' FOR SHARE")) {
++                    statement.setString(1, user.sub());
++                    try (var rows = statement.executeQuery()) {
++                        if (!rows.next()) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                        version = rows.getLong(1);
++                    }
++                }
++                try (var statement = connection.prepareStatement("SELECT authentication_version FROM oidc_authorization_code WHERE code=? AND subject=? AND used")) {
++                    statement.setString(1, code); statement.setString(2, user.sub());
++                    try (var rows = statement.executeQuery()) {
++                        if (!rows.next() || rows.getLong(1) != version) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                    }
++                }
++                var access = issueAccessToken(connection, clientId, user.sub(), user.name(), user.email(), user.roles(), scope, resource);
++                var refresh = issueRefreshToken(connection, clientId, user.sub(), scope, resource);
++                var identity = scope.contains("openid") ? issueIdToken(clientId, user.sub(), user.name(), user.email(), user.roles(), nonce) : null;
++                connection.commit();
++                return new com.nimbusds.openid.connect.sdk.token.OIDCTokens(identity, access, refresh);
++            } catch (RuntimeException | SQLException failure) { connection.rollback(); throw failure; }
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot issue authorization tokens"); }
++    }
++
      /** Issues an access token (RS256 JWT), signs it with the newest active key and persists it. */
-@@ -89,12 +89,23 @@ public class OidcTokenService {
+     public BearerAccessToken issueAccessToken(
+         final String clientId,
+@@ -89,12 +117,23 @@ public class OidcTokenService {
          final List<String> roles,
          final Scope scope
      ) {
@@ -619,15 +528,25 @@ index 9885dcd..0d62179 100644
              .expirationTime(Date.from(exp))
              .issueTime(Date.from(now))
              .jwtID(java.util.UUID.randomUUID().toString())
-@@ -110,18 +121,88 @@ public class OidcTokenService {
+@@ -109,19 +148,98 @@ public class OidcTokenService {
+         if (roles != null && !roles.isEmpty()) {
              claims.claim("roles", roles);
          }
++        try {
++            if (connection != null) {
++                var version = OidcIdentityLifecycle.activeVersion(connection, subject);
++                if (version.isPresent()) claims.claim(OidcIdentityLifecycle.CLAIM, version.getAsLong());
++            } else {
++                var version = new OidcIdentityLifecycle(dataSource).activeVersion(subject);
++                if (version.isPresent()) claims.claim(OidcIdentityLifecycle.CLAIM, version.getAsLong());
++            }
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot issue identity version"); }
          final String jwt = sign(claims.build()).serialize();
 -        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
 +        persist(connection, "access", clientId, subject, scope.toStringList(), jwt, now, exp, resource);
          return new BearerAccessToken(jwt, configuration.getAccessTokenTtl().getSeconds(), scope);
      }
- 
+
      /** Issues a new opaque refresh token and persists it. */
      public RefreshToken issueRefreshToken(final String clientId, final String subject, final Scope scope) {
 +        return issueRefreshToken(clientId, subject, scope, null);
@@ -645,7 +564,7 @@ index 9885dcd..0d62179 100644
 +        persist(connection, "refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
          return refreshToken;
      }
- 
+
 +    public com.nimbusds.oauth2.sdk.token.Tokens rotateRefreshToken(final StoredToken stored,
 +        final OidcUserService.OidcUser user, final Scope scope) {
 +        try (Connection connection = dataSource.getConnection()) {
@@ -710,7 +629,15 @@ index 9885dcd..0d62179 100644
      /** Issues an OIDC ID token (RS256 JWT) for the given client (audience). */
      public SignedJWT issueIdToken(
          final String clientId,
-@@ -175,6 +256,9 @@ public class OidcTokenService {
+@@ -154,6 +272,7 @@ public class OidcTokenService {
+             final JWTClaimsSet base = idTokenClaims.toJWTClaimsSet();
+             final JWTClaimsSet jwtClaims = new JWTClaimsSet.Builder(base)
+                 .jwtID(java.util.UUID.randomUUID().toString())
++                .claim(OidcIdentityLifecycle.CLAIM, new OidcIdentityLifecycle(dataSource).activeVersion(subject).orElse(0))
+                 .build();
+             return sign(jwtClaims);
+         } catch (com.nimbusds.oauth2.sdk.ParseException e) {
+@@ -175,6 +294,9 @@ public class OidcTokenService {
          if (exp == null || exp.before(new Date())) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": token expired"));
          }
@@ -720,10 +647,20 @@ index 9885dcd..0d62179 100644
          final StoredToken stored = findByValue(value)
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown token")));
          if (stored.revoked()) {
-@@ -235,9 +319,15 @@ public class OidcTokenService {
+@@ -184,6 +306,9 @@ public class OidcTokenService {
+             throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
+         }
+         validateClientAndSubject(stored);
++        var lifecycle = new OidcIdentityLifecycle(dataSource);
++        if (!(stored.clientId().equals(stored.subject()) && lifecycle.machineSubject(stored.subject())) && !lifecycle.matches(
++            stored.subject(), claims.getClaim(OidcIdentityLifecycle.CLAIM))) throw new OidcException(OAuth2Error.INVALID_GRANT);
+         return claims;
+     }
+
+@@ -235,9 +360,15 @@ public class OidcTokenService {
          }
      }
- 
+
 +    public StoredToken validateResourceRefreshToken(final String value, final String clientId, final String resource) {
 +        final var stored = validateRefreshToken(value, clientId);
 +        if (!java.util.Objects.equals(stored.resource(), resource)) throw new OidcException(OAuth2Error.INVALID_GRANT);
@@ -737,8 +674,8 @@ index 9885dcd..0d62179 100644
              FROM oidc_token WHERE value = ?""";
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
-@@ -317,13 +407,25 @@ public class OidcTokenService {
- 
+@@ -317,13 +448,25 @@ public class OidcTokenService {
+
      private void persist(
          final String type, final String clientId, final String subject,
 -        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt
@@ -768,7 +705,7 @@ index 9885dcd..0d62179 100644
              ps.setString(1, clientId);
              ps.setString(2, subject);
              ps.setString(3, type);
-@@ -331,6 +433,7 @@ public class OidcTokenService {
+@@ -331,6 +474,7 @@ public class OidcTokenService {
              ps.setString(5, toJson(scopes));
              ps.setTimestamp(6, Timestamp.from(issuedAt));
              ps.setTimestamp(7, Timestamp.from(expiresAt));
@@ -776,7 +713,7 @@ index 9885dcd..0d62179 100644
              ps.executeUpdate();
          } catch (SQLException e) {
              throw new IllegalStateException("Failed to persist OIDC token", e);
-@@ -349,7 +452,7 @@ public class OidcTokenService {
+@@ -349,7 +493,7 @@ public class OidcTokenService {
              fromJson(rs.getString("scopes")),
              issuedAt == null ? null : issuedAt.toInstant(),
              expiresAt == null ? null : expiresAt.toInstant(),
@@ -784,7 +721,7 @@ index 9885dcd..0d62179 100644
 +            rs.getBoolean("revoked"), rs.getString("resource")
          );
      }
- 
+
 diff --git a/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql b/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql
 new file mode 100644
 index 0000000..295ed40
@@ -800,7 +737,7 @@ index 7d64c04..fd20578 100644
 @@ -49,6 +49,24 @@ class McpServerHandlerTransportTest {
          assertThat(mcpServerHandlerTransport.listToolsForServer(null, serverB).collectList().block()).isEmpty();
      }
- 
+
 +    @Test
 +    void shouldSeparateHandlersByVerifiedCallerAndCapabilities() {
 +        final String server = UUID.randomUUID().toString();

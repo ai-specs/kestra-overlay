@@ -31,11 +31,14 @@ GRADLE
 PROCESSORS="$(cat "$TASK_WORK/processor-path")"
 mkdir -p "$TASK_WORK/classes" "$TASK_WORK/libs"
 "$JAVA_HOME/bin/javac" -parameters -cp "$EXE:$PROCESSORS" -processorpath "$PROCESSORS" \
-    -d "$TASK_WORK/classes" "$REPO/scripts/tests/classpath-probe/RbacProbe.java"
+    -d "$TASK_WORK/classes" "$REPO/scripts/tests/classpath-probe/RbacProbe.java" \
+    "$REPO/scripts/tests/classpath-probe/UiPageProbe.java"
+cp -R "$REPO/scripts/tests/classpath-probe/ui-extensions" "$TASK_WORK/classes/"
 "$JAVA_HOME/bin/jar" --create --file "$TASK_WORK/libs/kestra-rbac-authorizer.jar" -C "$TASK_WORK/classes" .
 "$JAVA_HOME/bin/jar" tf "$TASK_WORK/libs/kestra-rbac-authorizer.jar" > "$TASK_WORK/entries"
 grep -q 'RbacProbe.*Definition' "$TASK_WORK/entries"
 grep -q 'META-INF/micronaut/' "$TASK_WORK/entries"
+if [ -n "${RBAC_PROBE_OUTPUT:-}" ]; then cp "$TASK_WORK/libs/kestra-rbac-authorizer.jar" "$RBAC_PROBE_OUTPUT"; fi
 if [ "$IMAGE" = --compile-only ]; then
     if [ -n "${RBAC_PROBE_OUTPUT:-}" ]; then cp "$TASK_WORK/libs/kestra-rbac-authorizer.jar" "$RBAC_PROBE_OUTPUT"; fi
     echo 'PASS: independent probe compiled against real overlay SPI with Micronaut bean index'

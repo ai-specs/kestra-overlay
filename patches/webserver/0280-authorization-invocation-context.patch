@@ -4,67 +4,7 @@
 # 来源: 新写；namespace ACL将上下文丢失解释为全域，违反HTTP缺失身份不可视为内部调用的契约
 # 触达上游文件: 15 个（来源上下文、宿主执行器传播、内部facade和queue激活与探针）
 # 移除条件: 上游OSS提供等价请求授权上下文传播和显式内部调用机制
-diff --git a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
-index a83210e..d5f829c 100644
---- a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
-+++ b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
-@@ -127,19 +127,19 @@ public class ExecutorsUtils {
-     }
- 
-     private ScheduledExecutorService wrapScheduled(String name, ScheduledExecutorService executorService) {
--        return ExecutorServiceMetrics.monitor(
-+        return AuthorizationContextExecutors.hostScheduled(ExecutorServiceMetrics.monitor(
-             meterRegistry,
-             executorService,
-             name
--        );
-+        ));
-     }
- 
-     private ExecutorService wrap(String name, ExecutorService executorService) {
--        return ExecutorServiceMetrics.monitor(
-+        return AuthorizationContextExecutors.host(ExecutorServiceMetrics.monitor(
-             meterRegistry,
-             executorService,
-             name
--        );
-+        ));
-     }
- 
-     /**
-diff --git a/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java b/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
-index d769f4b..73262a1 100644
---- a/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
-+++ b/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
-@@ -31,14 +31,14 @@ import static io.kestra.core.utils.Rethrow.throwConsumer;
- 
- public final class NamespaceFilesUtils {
-     private static final int maxThreads = Math.max(KestraContext.getContext().getAllocatedCpuCores() * 4, 32);
--    private static final ExecutorService EXECUTOR_SERVICE = new ThreadPoolExecutor(
-+    private static final ExecutorService EXECUTOR_SERVICE = AuthorizationContextExecutors.host(new ThreadPoolExecutor(
-         0,
-         maxThreads,
-         60L,
-         TimeUnit.SECONDS,
-         new LinkedBlockingQueue<>(),
-         new ThreadFactoryBuilder().setNameFormat("namespace-files").build()
--    );;
-+    ));
- 
-     private NamespaceFilesUtils() {
-         // utility class pattern
-diff --git a/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java b/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
-index a84a23a..8ec8b30 100644
---- a/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
-+++ b/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
-@@ -23,6 +23,7 @@ import jakarta.inject.Singleton;
-  */
- @Singleton
- @Requires(beans = KvMetadataRepositoryInterface.class)
-+@io.kestra.core.repositories.InternalInvocation
- public class DefaultKVMetadataStateStore implements KVMetadataStateStore {
- 
-     private final KvMetadataRepositoryInterface kvMetadataRepository;
+# 演进理由: REQ-0330 沿用本需求原授权激活点，加入完整评估边界或查询释放；避免后续补丁重复改写同一来源行。
 diff --git a/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java b/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java
 index 5bf8701..296e7cc 100644
 --- a/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java
@@ -75,89 +15,14 @@ index 5bf8701..296e7cc 100644
  @Requires(beans = NamespaceFileMetadataRepositoryInterface.class)
 +@io.kestra.core.repositories.InternalInvocation
  public class DefaultNamespaceFileMetadataStateStore implements NamespaceFileMetadataStateStore {
- 
+
      private final NamespaceFileMetadataRepositoryInterface repository;
-diff --git a/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java b/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
-index 9cbc0d4..edc6366 100644
---- a/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
-+++ b/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
-@@ -43,6 +43,7 @@ public class KVPurgeCleaner {
-     private KVPurgeConfiguration kvPurgeConfiguration;
- 
-     @Scheduled(initialDelay = "${kestra.kv.purge-expired.initial-delay:PT1H}", fixedDelay = "${kestra.kv.purge-expired.fixed-delay:PT1H}")
-+    @io.kestra.core.repositories.InternalInvocation
-     public void purgeExpired() {
-         log.info("Start cleaning expired KV store entries");
-         List<String> tenants = findTenants();
-diff --git a/queue/src/main/java/io/kestra/queue/QueueService.java b/queue/src/main/java/io/kestra/queue/QueueService.java
-index 0aa05ba..d68b52d 100644
---- a/queue/src/main/java/io/kestra/queue/QueueService.java
-+++ b/queue/src/main/java/io/kestra/queue/QueueService.java
-@@ -74,3 +74,3 @@ public class QueueService {
-     public void execute(Runnable runnable) {
--        this.subscriberExecutorService.execute(runnable);
-+        this.subscriberExecutorService.execute(io.kestra.core.repositories.AuthorizationInvocationContext.internalTask().wrap(runnable));
-     }
-diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
-index ad213a0..9091c65 100644
---- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
-+++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
-@@ -27,8 +27,10 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
-     }
- 
-     public QueryDomain domain(QueryFilter.Resource resource) {
--        var request = ServerRequestContext.currentRequest().orElse(null);
--        if (request == null) return QueryDomain.unrestricted();
-+        if (resource == null) return QueryDomain.empty();
-+        var request = io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest().orElse(null);
-+        if (request == null) return io.kestra.core.repositories.AuthorizationInvocationContext.isInternal()
-+            ? QueryDomain.unrestricted() : QueryDomain.empty();
-         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
-         if (authentication == null || resource == null) return QueryDomain.empty();
-         String cacheKey = TypedNamespaceAccessControl.class.getName() + "." + resource.name();
-diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-index da945ec..3e236af 100644
---- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-+++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-@@ -41,7 +41,7 @@ public final class TypedDashboardGate implements io.kestra.core.services.Dashboa
- 
-     private void authorize(String tenant, Object datasource, boolean numerator) {
-         if (!configuration.enabled() || !typedEnabled) return;
--        var request = ServerRequestContext.currentRequest().orElseThrow(() -> denied());
-+        var request = io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest().orElseThrow(() -> denied());
-         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow(() -> denied());
-         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
-         Resource resource;
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
-index ea4a75d..550da4e 100644
---- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
-@@ -46,7 +46,7 @@ class TypedRbacHttpProbeTest {
-             .build(), java.net.http.HttpResponse.BodyHandlers.ofString());
-         assertThat(denied.statusCode()).isEqualTo(403);
-         assertThat(denied.headers().firstValue("content-type").orElse("")).contains("application/problem+json");
--        assertThat(flows.findById("main", "team", "denied")).isEmpty();
-+        assertThat(flows.findByIdWithoutAcl("main", "team", "denied", java.util.Optional.empty())).isEmpty();
-         for (String namespace : List.of("team", "team.child", "team2", "other")) {
-             flows.create(io.kestra.core.models.flows.GenericFlow.fromYaml("main", "namespace: " + namespace + "\nid: probe\ntasks: []"));
-         }
-@@ -58,6 +58,10 @@ class TypedRbacHttpProbeTest {
-         var anonymous = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
-             .GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
-         assertThat(anonymous.statusCode()).isEqualTo(401);
-+        assertThat(flows.findDistinctNamespace("main")).isEmpty();
-+        try (var scope = io.kestra.core.repositories.AuthorizationInvocationContext.captureHostInvocation().propagate()) {
-+            assertThat(flows.findDistinctNamespace("main")).contains("team", "team.child", "team2", "other");
-+        }
-     }
- 
-     @Singleton
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java
 new file mode 100644
-index 0000000..e695977
+index 0000000..a6a23b3
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,48 @@
 +package io.kestra.core.repositories;
 +
 +import java.util.Optional;
@@ -194,7 +59,12 @@ index 0000000..e695977
 +
 +    public static PropagatedContext captureHostTask() {
 +        var origin = captureHostInvocation().find(AuthorizationInvocationContext.class).orElseThrow();
-+        return PropagatedContext.empty().plus(origin);
++        var context = PropagatedContext.empty().plus(origin);
++        var evaluation = AuthorizationEvaluationContext.current().orElse(null);
++        if (evaluation == null || origin.internal()) return context;
++        context = context.plus(evaluation);
++        var query = PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class).orElse(null);
++        return query == null ? context : context.plus(query);
 +    }
 +
 +    public static PropagatedContext internalTask() {
@@ -242,6 +112,30 @@ index 0000000..35dc2e5
 +        }
 +    }
 +}
+diff --git a/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java b/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
+index a84a23a..8ec8b30 100644
+--- a/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
++++ b/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
+@@ -23,6 +23,7 @@ import jakarta.inject.Singleton;
+  */
+ @Singleton
+ @Requires(beans = KvMetadataRepositoryInterface.class)
++@io.kestra.core.repositories.InternalInvocation
+ public class DefaultKVMetadataStateStore implements KVMetadataStateStore {
+
+     private final KvMetadataRepositoryInterface kvMetadataRepository;
+diff --git a/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java b/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
+index 9cbc0d4..edc6366 100644
+--- a/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
++++ b/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
+@@ -43,6 +43,7 @@ public class KVPurgeCleaner {
+     private KVPurgeConfiguration kvPurgeConfiguration;
+
+     @Scheduled(initialDelay = "${kestra.kv.purge-expired.initial-delay:PT1H}", fixedDelay = "${kestra.kv.purge-expired.fixed-delay:PT1H}")
++    @io.kestra.core.repositories.InternalInvocation
+     public void purgeExpired() {
+         log.info("Start cleaning expired KV store entries");
+         List<String> tenants = findTenants();
 diff --git a/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java b/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java
 new file mode 100644
 index 0000000..6b7c062
@@ -298,6 +192,68 @@ index 0000000..6b7c062
 +        }
 +    }
 +}
+diff --git a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
+index a83210e..d5f829c 100644
+--- a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
++++ b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
+@@ -127,19 +127,19 @@ public class ExecutorsUtils {
+     }
+
+     private ScheduledExecutorService wrapScheduled(String name, ScheduledExecutorService executorService) {
+-        return ExecutorServiceMetrics.monitor(
++        return AuthorizationContextExecutors.hostScheduled(ExecutorServiceMetrics.monitor(
+             meterRegistry,
+             executorService,
+             name
+-        );
++        ));
+     }
+
+     private ExecutorService wrap(String name, ExecutorService executorService) {
+-        return ExecutorServiceMetrics.monitor(
++        return AuthorizationContextExecutors.host(ExecutorServiceMetrics.monitor(
+             meterRegistry,
+             executorService,
+             name
+-        );
++        ));
+     }
+
+     /**
+diff --git a/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java b/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
+index d769f4b..73262a1 100644
+--- a/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
++++ b/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
+@@ -31,14 +31,14 @@ import static io.kestra.core.utils.Rethrow.throwConsumer;
+
+ public final class NamespaceFilesUtils {
+     private static final int maxThreads = Math.max(KestraContext.getContext().getAllocatedCpuCores() * 4, 32);
+-    private static final ExecutorService EXECUTOR_SERVICE = new ThreadPoolExecutor(
++    private static final ExecutorService EXECUTOR_SERVICE = AuthorizationContextExecutors.host(new ThreadPoolExecutor(
+         0,
+         maxThreads,
+         60L,
+         TimeUnit.SECONDS,
+         new LinkedBlockingQueue<>(),
+         new ThreadFactoryBuilder().setNameFormat("namespace-files").build()
+-    );;
++    ));
+
+     private NamespaceFilesUtils() {
+         // utility class pattern
+diff --git a/queue/src/main/java/io/kestra/queue/QueueService.java b/queue/src/main/java/io/kestra/queue/QueueService.java
+index 0aa05ba..d68b52d 100644
+--- a/queue/src/main/java/io/kestra/queue/QueueService.java
++++ b/queue/src/main/java/io/kestra/queue/QueueService.java
+@@ -72,7 +72,7 @@ public class QueueService {
+     }
+
+     public void execute(Runnable runnable) {
+-        this.subscriberExecutorService.execute(runnable);
++        this.subscriberExecutorService.execute(io.kestra.core.repositories.AuthorizationInvocationContext.internalTask().wrap(runnable));
+     }
+
+     public int computeVNode(String key) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationInvocationFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationInvocationFilter.java
 new file mode 100644
 index 0000000..3e38fa6
@@ -327,6 +283,75 @@ index 0000000..3e38fa6
 +        context.add(new AuthorizationInvocationContext(request, false));
 +    }
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+index 2f16bcc..22a372d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
+@@ -52,7 +52,7 @@ public final class TypedDashboardGate implements io.kestra.core.services.Dashboa
+
+     private DatasourceDomain authorize(String tenant, Object datasource, boolean numerator) {
+         if (!configuration.enabled() || !typedEnabled) return null;
+-        var request = ServerRequestContext.currentRequest().orElseThrow(() -> denied());
++        var request = io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest().orElseThrow(() -> denied());
+         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow(() -> denied());
+         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+         Resource resource;
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+index ad213a0..1ab3a71 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+@@ -27,8 +27,23 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
+     }
+
+     public QueryDomain domain(QueryFilter.Resource resource) {
+-        var request = ServerRequestContext.currentRequest().orElse(null);
+-        if (request == null) return QueryDomain.unrestricted();
++        if (resource == null) return QueryDomain.empty();
++        if (gate.evaluationEnabled()) {
++            var owner = AuthorizationEvaluations.current();
++            if (owner != null) {
++                if (!owner.matches(owner.principal, owner.tenant)) return QueryDomain.empty();
++                var query = io.micronaut.core.propagation.PropagatedContext.getOrEmpty()
++                    .find(io.kestra.core.repositories.AuthorizationQueryContext.class).orElse(null);
++                if (query != null && query.reference() instanceof TypedDashboardGate.DatasourceDomain domain
++                    && domain.owner() == owner && domain.resource().name().equals(resource.name())) return domain.domain();
++                return owner.domains.computeIfAbsent(resource.name(), ignored -> evaluationDomain(owner, resource));
++            }
++            return io.kestra.core.repositories.AuthorizationInvocationContext.isInternal()
++                ? QueryDomain.unrestricted() : QueryDomain.empty();
++        }
++        var request = io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest().orElse(null);
++        if (request == null) return io.kestra.core.repositories.AuthorizationInvocationContext.isInternal()
++            ? QueryDomain.unrestricted() : QueryDomain.empty();
+         var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+         if (authentication == null || resource == null) return QueryDomain.empty();
+         String cacheKey = TypedNamespaceAccessControl.class.getName() + "." + resource.name();
+@@ -60,6 +75,25 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
+         }
+     }
+
++    private QueryDomain evaluationDomain(AuthorizationEvaluations.Owner owner, QueryFilter.Resource resource) {
++        Resource kind = switch (resource) {
++            case FLOW, TEMPLATE -> Resource.FLOW;
++            case EXECUTION, TASK -> Resource.EXECUTION;
++            case NAMESPACE -> Resource.NAMESPACE;
++            case LOG -> Resource.LOG;
++            case TRIGGER -> Resource.TRIGGER;
++            case KV_METADATA -> Resource.KVSTORE;
++            case NAMESPACE_FILE_METADATA -> Resource.NAMESPACE_FILE;
++            default -> null;
++        };
++        if (kind == null) return QueryDomain.empty();
++        var operation = new Operation(CONTRACT_VERSION, owner.principal.scopes().isEmpty() ? Source.REST : Source.MCP,
++            kind, Action.LIST, owner.tenant, null, null, QueryDomain.unrestricted(), Coverage.COMPLETE_QUERY,
++            Aggregate.NONE, SideEffect.READ_ONLY);
++        var decision = gate.authorize(owner.principal, operation).block();
++        return decision != null && decision.allowed() ? decision.scope() : QueryDomain.empty();
++    }
++
+     @Override
+     public AccessScope namespaceScope(QueryFilter.Resource resource) {
+         QueryDomain scope = domain(resource);
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java
 new file mode 100644
 index 0000000..79b62e4
@@ -403,3 +428,27 @@ index 0000000..79b62e4
 +        assertThatThrownBy(() -> new AuthorizationInvocationContext(null, false)).isInstanceOf(IllegalArgumentException.class);
 +    }
 +}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
+index ea4a75d..550da4e 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
+@@ -46,7 +46,7 @@ class TypedRbacHttpProbeTest {
+             .build(), java.net.http.HttpResponse.BodyHandlers.ofString());
+         assertThat(denied.statusCode()).isEqualTo(403);
+         assertThat(denied.headers().firstValue("content-type").orElse("")).contains("application/problem+json");
+-        assertThat(flows.findById("main", "team", "denied")).isEmpty();
++        assertThat(flows.findByIdWithoutAcl("main", "team", "denied", java.util.Optional.empty())).isEmpty();
+         for (String namespace : List.of("team", "team.child", "team2", "other")) {
+             flows.create(io.kestra.core.models.flows.GenericFlow.fromYaml("main", "namespace: " + namespace + "\nid: probe\ntasks: []"));
+         }
+@@ -58,6 +58,10 @@ class TypedRbacHttpProbeTest {
+         var anonymous = client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/flows/search"))
+             .GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString());
+         assertThat(anonymous.statusCode()).isEqualTo(401);
++        assertThat(flows.findDistinctNamespace("main")).isEmpty();
++        try (var scope = io.kestra.core.repositories.AuthorizationInvocationContext.captureHostInvocation().propagate()) {
++            assertThat(flows.findDistinctNamespace("main")).contains("team", "team.child", "team2", "other");
++        }
+     }
+
+     @Singleton

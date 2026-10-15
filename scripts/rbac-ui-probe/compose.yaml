@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: probe
+      POSTGRES_USER: probe
+      POSTGRES_PASSWORD: probe-local-only
+    tmpfs: [/var/lib/postgresql]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U probe -d probe]
+      interval: 2s
+      retries: 30
+  host:
+    image: ghcr.io/ai-specs/kestra-overlay@sha256:878be36bcb1a2d15266f6c7c05921f77d836136604bd956a5318671c2f34186c
+    command: server standalone
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["127.0.0.1:18097:8080"]
+    volumes:
+      - ../../.work/rbac-ui-probe/static-probe.jar:/app/libs/kestra-rbac-authorizer.jar:ro
+    environment:
+      KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: jdbc:postgresql://postgres:5432/probe
+            driverClassName: org.postgresql.Driver
+            username: probe
+            password: probe-local-only
+        kestra:
+          server:
+            basic-auth:
+              username: probe@example.org
+              password: ProbeOnly2026!
+          repository:
+            type: postgres
+          queue:
+            type: postgres
+          storage:
+            type: local
+            local:
+              base-path: /app/storage
+          url: http://localhost:18097/
+          plugins:
+            auto-install:
+              enabled: false
+          oidc:
+            enabled: false
+        micronaut:
+          security:
+            enabled: false

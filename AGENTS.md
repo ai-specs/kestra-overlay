@@ -212,6 +212,10 @@ OSS 已有机制和已发布契约，区分宿主机制缺失、扩展业务实�
 - ❌ patch 携带业务逻辑（应出仓为扩展仓 jar）；A 类新增文件进 patch 仅限「M 面激活点的编译锚」（manifest 标 `transition` + 移除条件）。**例外（2026-10-07）**：协议标准基础设施层（R-OIDC-SERVER 类）走 patch 路线——条件见 §3-7；
 - ❌ build 面 patch：settings.gradle **模块 include**、docker-entrypoint 等——CI 实证必挂（`Configuring project ':x' without an existing directory`）。**唯一例外（2026-10-07 R-OIDC-SERVER 裁定）**：`webserver/build.gradle` 增**依赖行**允许（nimbus oauth2-oidc-sdk / jbcrypt / micronaut-security 系，fork 归因实证清单）；模块 include 永远禁止；
 - ❌ ui 面 patch：一般 UI 定制不接收；**2026-10-09 维护者例外**：R-OIDC-SERVER 的完整认证替换允许最小 UI patch（路由守卫、401 跳转、退出、登录外观）。OIDC 模式完全关闭 Basic Auth 链，不伪造 Basic Auth cookie/登录标志，不复用其凭据端点。镜像必须构建 UI 并保留上游其他功能；详细契约与验收见 docs/r-oidc-server.md §0；
+  **独立扩展页面激活例外**：允许按入口 B 接收通用描述发现、隔离资源、菜单根入口、
+  页面挂载／卸载和主题／语言数据桥接；不得加入扩展业务页面、角色模型或路径特例。
+  必须先有独立页面实际装载失败证据、公开组件消费与样式隔离探针，冻结最小版本化
+  边界并提供宿主独立测试。仅复用内部组件或复制插件页面不满足此例外。
 - ❌ migration 面 patch：**扩展仓需求**的 migration 归扩展仓（`MigrationRunner` 注入 `Collection<MigrationScript>` 收集上下文全部 bean，classpath jar 的也收（`core/migration/MigrationRunner.java:47-56`）——扩展仓 jar 自带 bean+SQL 即生效；SQL-only patch 缺 bean 注册，从未生效，§8-2）。**例外（2026-10-07）**：**overlay 自有 schema**（R-OIDC-SERVER 的用户/client/JWKS 表）的 migration 进 patch——源码级 MigrationScript bean + SQL 成对（F2 机制自动执行，前置裁定③）；
 - ❌ 复刻 EE 产品功能（审计日志、Kafka 队列等）——本仓只补**架构扩展能力**（见差异表 §0 定位）。
 

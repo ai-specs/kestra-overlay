@@ -1,0 +1,3 @@
+.probe-page {padding: 24px; max-width: 900px; margin: auto; color: var(--ks-text-primary); background: var(--ks-bg-base);}
+.probe-page label {display: block; margin-bottom: 16px;}
+.probe-page .kel-select {width: 180px; margin: 16px;}

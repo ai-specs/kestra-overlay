@@ -4,8 +4,9 @@
 # 来源: 新写；R-EE-RBAC架构激活面 + Micronaut 4.10.26/security 4.15.2契约；不包含角色模型或路由权限策略
 # 触达上游文件: 11 个（详见diff）
 # 移除条件: 上游OSS提供等价统一授权SPI、可信主体传递与失败关闭执行门
+# 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
-index 741ed00..6e3c3d7 100644
+index 741ed00..96c6bd8 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 @@ -159,6 +159,8 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
@@ -15,21 +16,58 @@ index 741ed00..6e3c3d7 100644
 +    @Inject private io.kestra.webserver.rbac.RbacExecutionGate rbacExecutionGate;
 +
      private static final Duration AVERAGE_DURATION_LOOKBACK = Duration.ofDays(30);
- 
+
      @Nullable
-@@ -1033,7 +1035,11 @@ public class ExecutionController {
+@@ -1033,10 +1035,17 @@ public class ExecutionController {
          // Same reason for the Micronaut propagated context: it carries the server request and its
          // authentication, which the CREATE event listeners need to attribute the execution to its author.
          final PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
 -        return flowInputOutput.readExecutionInputs(resolvedFlow, executionId, contributed, inputs)
-+        return rbacExecutionGate.authorize(io.micronaut.http.context.ServerRequestContext.currentRequest()
+-            .flatMap(executionInputs ->
++        var authentication = io.micronaut.http.context.ServerRequestContext.currentRequest()
 +                .flatMap(request -> request.getAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION,
-+                    io.micronaut.security.authentication.Authentication.class)).orElse(null), tenantId, resolvedFlow, executionId, Boolean.TRUE.equals(wait))
-+            .flatMap(allowed -> allowed ? Mono.defer(() -> flowInputOutput.readExecutionInputs(resolvedFlow, executionId, contributed, inputs))
-+                : Mono.error(new HttpStatusException(HttpStatus.FORBIDDEN, "Execution authorization denied")))
-             .flatMap(executionInputs ->
++                    io.micronaut.security.authentication.Authentication.class)).orElse(null);
++        return rbacExecutionGate.checked(authentication, tenantId, resolvedFlow, executionId, Boolean.TRUE.equals(wait),
++                () -> flowInputOutput.readExecutionInputs(resolvedFlow, executionId, contributed, inputs)
++                    .flatMap(executionInputs -> io.kestra.core.repositories.AuthorizationEvaluationContext.call(() ->
++                        Map.entry(executionInputs, flowService.getFailedChecks(resolvedFlow, executionInputs)))))
++            .flatMap(checked ->
              {
-                 List<Check> failed = flowService.getFailedChecks(resolvedFlow, executionInputs);
+-                List<Check> failed = flowService.getFailedChecks(resolvedFlow, executionInputs);
++                var executionInputs = checked.getKey();
++                List<Check> failed = checked.getValue();
+                 Check.Behavior behavior = Check.resolveBehavior(failed);
+                 if (Check.Behavior.BLOCK_EXECUTION.equals(behavior)) {
+                     return Mono.error(
+@@ -1095,7 +1104,7 @@ public class ExecutionController {
+                     // SSE subscribe
+                     String subscriberId = UUID.randomUUID().toString();
+                     // Use Flux to wait for completion using the streaming service
+-                    return Flux.<Event<Execution>> create(emitter ->
++                    return rbacExecutionGate.finishRequest().thenMany(Flux.<Event<Execution>> create(emitter ->
+                     {
+                         streamingService.registerSubscriber(
+                             executionId,
+@@ -1103,14 +1112,15 @@ public class ExecutionController {
+                             emitter,
+                             flow
+                         );
+-                    })
++                    }))
+                         .last()
+                         .map(Event::getData)
+-                        .map(
+-                            execution -> ExecutionResponse.fromExecution(
++                        .flatMap(
++                            execution -> rbacExecutionGate.readResult(authentication, tenantId, execution.getNamespace(), executionId,
++                                () -> Mono.just(ExecutionResponse.fromExecution(
+                                 execution,
+                                 executionUrl
+-                            )
++                            )))
+                         )
+                         .timeout(Duration.ofHours(1)) // avoid idle SSE sockets by setting a between-item timeout
+                         .doFinally(signalType -> streamingService.unregisterSubscriber(executionId, subscriberId));
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java
 new file mode 100644
 index 0000000..dd45e13
@@ -102,10 +140,10 @@ index 0000000..753d032
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacExecutionGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacExecutionGate.java
 new file mode 100644
-index 0000000..7a43e81
+index 0000000..5360be8
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacExecutionGate.java
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,72 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -128,6 +166,21 @@ index 0000000..7a43e81
 +        this.configuration=configuration; this.gate=gate; this.resolvers=resolvers;
 +    }
 +    public Mono<Boolean> authorize(Authentication authentication, String tenant, Flow flow, String executionId, boolean outputs) {
++        return checked(authentication, tenant, flow, executionId, outputs, () -> Mono.just(true)).onErrorReturn(false);
++    }
++
++    public <Result> Mono<Result> checked(Authentication authentication, String tenant, Flow flow, String executionId,
++        boolean outputs, java.util.function.Supplier<Mono<Result>> action) {
++        if (!configuration.enabled()) return Mono.defer(action);
++        var principal = authentication == null ? null : new RbacAuthorizer.Principal(authentication.getName(),
++            List.copyOf(authentication.getRoles()), null, null, List.of());
++        return gate.boundary(principal, tenant, () -> authorizeCurrent(authentication, tenant, flow, executionId, outputs)
++            .flatMap(allowed -> allowed ? Mono.defer(action) : Mono.error(new io.micronaut.http.exceptions.HttpStatusException(
++                io.micronaut.http.HttpStatus.FORBIDDEN, "Execution authorization denied"))))
++            .singleOrEmpty();
++    }
++
++    private Mono<Boolean> authorizeCurrent(Authentication authentication, String tenant, Flow flow, String executionId, boolean outputs) {
 +        if (!configuration.enabled()) return Mono.just(true);
 +        return Mono.defer(() -> {
 +            if (authentication == null) return Mono.just(false);
@@ -140,6 +193,19 @@ index 0000000..7a43e81
 +                .flatMap(allowed -> allowed && outputs ? gate.authorize(principal,execution,RbacAuthorizer.Action.ACCESS_OUTPUTS) : Mono.just(allowed))
 +                .flatMap(allowed -> allowed ? dependencies(principal,tenant,flow,executionId) : Mono.just(false));
 +        }).timeout(Duration.ofSeconds(10)).defaultIfEmpty(false).onErrorReturn(false);
++    }
++    public Mono<Void> finishRequest() { return gate.finishCurrent(); }
++
++    public <Result> Mono<Result> readResult(Authentication authentication, String tenant, String namespace, String executionId,
++        java.util.function.Supplier<Mono<Result>> action) {
++        if (!configuration.enabled()) return Mono.defer(action);
++        var principal = authentication == null ? null : new RbacAuthorizer.Principal(authentication.getName(),
++            List.copyOf(authentication.getRoles()), null, null, List.of());
++        var resource = new RbacAuthorizer.Resource(RbacAuthorizer.Kind.EXECUTION, RbacAuthorizer.Scope.NAMESPACE,
++            tenant, namespace, executionId);
++        return gate.boundary(principal, tenant, () -> gate.authorize(principal, resource, RbacAuthorizer.Action.ACCESS_OUTPUTS)
++            .flatMap(allowed -> allowed ? Mono.defer(action) : Mono.error(new io.micronaut.http.exceptions.HttpStatusException(
++                io.micronaut.http.HttpStatus.FORBIDDEN, "Execution output authorization denied")))).singleOrEmpty();
 +    }
 +    public Mono<Boolean> dependencies(RbacAuthorizer.Principal principal,String tenant,Flow flow,String executionId) {
 +        return Mono.defer(() -> {
@@ -462,7 +528,7 @@ index 0000000..fbe4079
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacExecutionActivationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacExecutionActivationTest.java
 new file mode 100644
-index 0000000..59525e3
+index 0000000..783c5c0
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacExecutionActivationTest.java
 @@ -0,0 +1,42 @@
@@ -497,7 +563,7 @@ index 0000000..59525e3
 +        var gate=mock(RbacExecutionGate.class);var flow=Flow.builder().namespace("private.ns").id("flow").tasks(List.of()).build();
 +        when(tenant.resolveTenant()).thenReturn("main");when(flowService.getFlowIfExecutableOrThrow(any(),any(),any(),any())).thenReturn(flow);
 +        when(meta.findByIdForRuntime(any(),any(),any(),any())).thenReturn(Optional.empty());
-+        when(gate.authorize(any(),any(),any(),any(),anyBoolean())).thenReturn(Mono.just(false));
++        when(gate.checked(any(),any(),any(),any(),anyBoolean(),any())).thenReturn(Mono.error(new HttpStatusException(HttpStatus.FORBIDDEN,"Execution authorization denied")));
 +        set(controller,"modelValidator",mock(io.kestra.core.models.validations.ModelValidator.class));set(controller,"flowService",flowService);set(controller,"flowInputOutput",inputs);set(controller,"executionCommandQueue",queue);
 +        set(controller,"flowMetaStore",meta);set(controller,"tenantService",tenant);set(controller,"rbacExecutionGate",gate);
 +        var request=HttpRequest.POST("/api/v1/main/executions/private.ns/flow","");
@@ -505,7 +571,7 @@ index 0000000..59525e3
 +        java.util.function.Supplier<org.reactivestreams.Publisher<?>> invocation=() -> controller.createExecution("private.ns","flow",null,null,true,Optional.empty(),Optional.empty(),Optional.empty(),Optional.empty());
 +        var publisher=ServerRequestContext.with(request,invocation);
 +        var exception=assertThrows(HttpStatusException.class,() -> Mono.from(publisher).block());assertEquals(HttpStatus.FORBIDDEN,exception.getStatus());
-+        verify(gate).authorize(eq(identity),eq("main"),argThat(actual -> actual.getNamespace().equals("private.ns") && actual.getId().equals("flow")),anyString(),eq(true));verifyNoInteractions(inputs,queue);
++        verify(gate).checked(eq(identity),eq("main"),argThat(actual -> actual.getNamespace().equals("private.ns") && actual.getId().equals("flow")),anyString(),eq(true),any());verifyNoInteractions(inputs,queue);
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java

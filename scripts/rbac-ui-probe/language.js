@@ -1,0 +1,14 @@
+import {createApp, h, ref} from "vue";
+import {createI18n} from "vue-i18n";
+import {registerDesignSystemI18n, setDesignSystemLocale, KsEmpty, KsPagination} from "@kestra-io/design-system";
+import {ElConfigProvider} from "element-plus";
+import fr from "element-plus/es/locale/lang/fr";
+import "@kestra-io/design-system/styleBase";
+const i18n = createI18n({legacy: false, locale: "fr", fallbackLocale: "en", messages: {}});
+await registerDesignSystemI18n(i18n);
+setDesignSystemLocale("fr");
+window.languageProbe = {locales: i18n.global.availableLocales, translations: Object.fromEntries(i18n.global.availableLocales.map(locale => [locale, i18n.global.t("no_data", {}, {locale})]))};
+const locale = ref("fr");
+window.languageProbe.setLocale = next => {locale.value = next; i18n.global.locale.value = next; setDesignSystemLocale(next);};
+createApp({setup() {return () => h(ElConfigProvider, {namespace: "kel", locale: fr}, {default: () => [h(KsEmpty), h(KsPagination, {total: 42, pageSize: 10, currentPage: 1, layout: "total, sizes, prev, pager, next"})]});}}).use(i18n).mount("#app");
+window.languageProbe.ready = true;

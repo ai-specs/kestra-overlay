@@ -1,0 +1,7 @@
+{
+  "name": "rbac-ui-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "vite build", "serve": "vite --host 127.0.0.1 --port 5197 --strictPort"},
+  "dependencies": {"@kestra-io/design-system": "0.5.0", "vue": "3.5.39", "vue-i18n": "11.4.4", "vue-router": "5.0.6", "vite": "7.1.9", "sass": "1.100.0", "@vitejs/plugin-vue": "6.0.7", "postcss": "8.5.30"}
+}

@@ -4,22 +4,32 @@
 # 来源: 新写；RFC7591/7636/6749 + PostgreSQL 事务；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 16 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
+# 演进理由: REQ-0350 沿用协议授权码发行与consent激活点，生产身份版本检查留目录能力。
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-index 8402a3f..9fb4a2c 100644
+index 8402a3f..9f65757 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-@@ -94,6 +94,8 @@ public class OidcProviderController {
+@@ -56,6 +56,7 @@ import io.kestra.webserver.oidc.services.OidcAuthorizationCodeService;
+ import io.kestra.webserver.oidc.services.OidcClientService;
+ import io.kestra.webserver.oidc.services.OidcJwkService;
+ import io.kestra.webserver.oidc.services.OidcSessionService;
++import io.kestra.webserver.mcp.McpResourceUrl;
+ import io.kestra.webserver.oidc.services.OidcTokenService;
+ import io.kestra.webserver.oidc.services.OidcUserService;
+
+@@ -94,24 +95,42 @@ public class OidcProviderController {
      private final OidcJwkService jwkService;
      private final OidcUserService userService;
      private final OidcSessionService sessionService;
 +    private final io.kestra.webserver.oidc.services.OidcOwnershipService ownership;
 +    private final io.kestra.webserver.oidc.services.OidcConsentPolicy consentPolicy;
- 
+
      @Inject
      public OidcProviderController(
-@@ -101,17 +103,21 @@ public class OidcProviderController {
+         final OidcConfiguration configuration,
          final OidcClientService clientService,
          final OidcAuthorizationCodeService authCodeService,
++        final McpResourceUrl resources,
          final OidcTokenService tokenService,
 +        final io.kestra.webserver.oidc.services.OidcConsentPolicy consentPolicy,
          final OidcJwkService jwkService,
@@ -31,19 +41,55 @@ index 8402a3f..9fb4a2c 100644
          this.configuration = configuration;
          this.clientService = clientService;
          this.authCodeService = authCodeService;
++        this.resources = resources;
          this.tokenService = tokenService;
 +        this.consentPolicy = consentPolicy;
          this.jwkService = jwkService;
          this.userService = userService;
          this.sessionService = sessionService;
 +        this.ownership = ownership;
++    }
++
++    private final McpResourceUrl resources;
++
++    private String requestResource(final TokenRequest request) {
++        final var values = request.getResources();
++        if (values == null || values.isEmpty()) return null;
++        if (values.size() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        try { return resources.parseExact(values.getFirst().toString()).toString(); }
++        catch (IllegalArgumentException exception) { throw new OidcException(OAuth2Error.INVALID_GRANT); }
      }
- 
+
      @Get("/jwks")
-@@ -181,6 +187,24 @@ public class OidcProviderController {
+@@ -123,6 +142,13 @@ public class OidcProviderController {
+     @Get("/authorize")
+     public HttpResponse<?> authorize(final HttpRequest<?> request) {
+         final var parameters = queryParams(request);
++        if (parameters.containsKey("resource")) {
++            final var requestedResources = parameters.get("resource");
++            if (requestedResources.size() != 1) {
++                return HttpResponse.badRequest(Map.of("error", "invalid_target"));
++            }
++            try { this.resources.parseExact(requestedResources.getFirst()); } catch (IllegalArgumentException exception) { return HttpResponse.badRequest(Map.of("error", "invalid_target")); }
++        }
+         if (parameters.containsKey("code_challenge") && parameters.get("code_challenge").stream().anyMatch(String::isBlank)) {
+             return HttpResponse.badRequest(Map.of("error", "invalid_request"));
+         }
+@@ -147,6 +173,9 @@ public class OidcProviderController {
+         if (!client.active()) {
+             return HttpResponse.badRequest("Unknown client_id");
+         }
++        if (parameters.containsKey("resource") && "system".equals(ownership.state(client.clientId()).kind())) {
++            return HttpResponse.badRequest(Map.of("error", "invalid_client"));
++        }
+
+         if (redirectUri == null || !clientService.isRedirectUriRegistered(client, redirectUri.toString())) {
+             // E1: never redirect with an unregistered URI — 400, no redirect leakage.
+@@ -181,7 +210,26 @@ public class OidcProviderController {
              return HttpResponse.temporaryRedirect(URI.create("/oidc/login?from=" + returnTo));
          }
- 
+
+-        final AuthorizationCode code = authCodeService.create(
 +        if (ownership != null && !"system".equals(ownership.state(client.clientId()).kind())) {
 +            try {
 +                final String interaction = ownership.begin(client.clientId(), subject.get(),
@@ -62,13 +108,23 @@ index 8402a3f..9fb4a2c 100644
 +                return HttpResponse.badRequest(Map.of("error", "invalid_client"));
 +            }
 +        }
-         final AuthorizationCode code = authCodeService.create(
++        final AuthorizationCode code = authCodeService.createForSession(
++            sessionService.authenticationVersion(sessionService.sessionIdFrom(request).orElseThrow()),
              client.clientId(),
              subject.get(),
-@@ -241,6 +265,34 @@ public class OidcProviderController {
+             redirectUri.toString(),
+@@ -214,6 +262,7 @@ public class OidcProviderController {
+             final OidcClientService.OidcClient client = clientService.require(clientId.getValue());
+
+             final AuthorizationGrant grant = tokenRequest.getAuthorizationGrant();
++            requestResource(tokenRequest);
+             final String grantType = grant.getType().getValue();
+             if (!clientService.isGrantTypeAllowed(client, grantType)) {
+                 throw new OidcException(OAuth2Error.UNAUTHORIZED_CLIENT.appendDescription(": grant type not enabled for this client"));
+@@ -241,6 +290,34 @@ public class OidcProviderController {
          }
      }
- 
+
 +    @Post("/consent")
 +    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
 +    public HttpResponse<?> consent(final HttpRequest<?> request, @Body final Map<String, String> form) {
@@ -82,7 +138,7 @@ index 8402a3f..9fb4a2c 100644
 +            final boolean approve = "approve".equals(form.get("decision"));
 +            final var selected = form.entrySet().stream().filter(entry -> entry.getKey().startsWith("scope-") && "yes".equals(entry.getValue()))
 +                .map(entry -> entry.getKey().substring(6)).toList();
-+            final var result = ownership.complete(form.get("interaction"), subject, session, approve, selected);
++            final var result = ownership.completeForSession(sessionService.authenticationVersion(session), form.get("interaction"), subject, session, approve, selected);
 +            final var authorization = AuthenticationRequest.parse(result.parameters());
 +            if (!approve) return authorizeError(authorization.getRedirectionURI(), authorization.getState(), OAuth2Error.ACCESS_DENIED);
 +            final AuthorizationCode code = new AuthorizationCode(result.code());
@@ -100,8 +156,8 @@ index 8402a3f..9fb4a2c 100644
      @Get("/userinfo")
      @Produces(MediaType.APPLICATION_JSON)
      public HttpResponse<?> userInfoGet(final HttpRequest<?> request) {
-@@ -297,9 +349,15 @@ public class OidcProviderController {
- 
+@@ -297,9 +374,15 @@ public class OidcProviderController {
+
          final String value = introspectionRequest.getToken().getValue();
          final Optional<OidcTokenService.StoredToken> stored = tokenService.findByValue(value);
 -        final boolean active = stored.isPresent()
@@ -114,10 +170,17 @@ index 8402a3f..9fb4a2c 100644
 +                else tokenService.validateRefreshToken(value, stored.get().clientId());
 +            } catch (RuntimeException exception) { active = false; }
 +        }
- 
+
          final TokenIntrospectionSuccessResponse.Builder builder = new TokenIntrospectionSuccessResponse.Builder(active);
          if (active) {
-@@ -387,13 +445,15 @@ public class OidcProviderController {
+@@ -381,33 +464,27 @@ public class OidcProviderController {
+             grant.getAuthorizationCode().getValue(),
+             client.clientId(),
+             redirectUri != null ? redirectUri.toString() : null,
+-            grant.getCodeVerifier()
++            grant.getCodeVerifier(), requestResource(tokenRequest)
+         );
+
          List<String> scopes = stored.scopes();
          if (tokenRequest.getScope() != null) {
              final List<String> requested = tokenRequest.getScope().toStringList();
@@ -128,13 +191,39 @@ index 8402a3f..9fb4a2c 100644
              scopes = requested;
          }
          final Scope scope = new Scope(scopes.toArray(new String[0]));
- 
+
 +        if (ownership != null && !"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
 +
          final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
-         final BearerAccessToken accessToken = tokenService.issueAccessToken(
-@@ -441,13 +501,14 @@ public class OidcProviderController {
+-        final BearerAccessToken accessToken = tokenService.issueAccessToken(
+-            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
+-        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
+-
+-        if (scope.contains("openid")) {
+-            final SignedJWT idToken = tokenService.issueIdToken(
+-                client.clientId(), user.sub(), user.name(), user.email(), user.roles(), stored.nonce());
+-            final OIDCTokenResponse response = new OIDCTokenResponse(new OIDCTokens(idToken, accessToken, refreshToken));
+-            return tokenOk(response.toJSONObject());
+-        }
++        final var issued = tokenService.issueAuthorizationTokens(client.clientId(), user, scope, stored.resource(), stored.nonce(), stored.code());
++        if (scope.contains("openid")) return tokenOk(new OIDCTokenResponse(issued).toJSONObject());
+         final AccessTokenResponse response = new AccessTokenResponse(
+-            new com.nimbusds.oauth2.sdk.token.Tokens(accessToken, refreshToken));
++            new com.nimbusds.oauth2.sdk.token.Tokens(issued.getAccessToken(), issued.getRefreshToken()));
+         return tokenOk(response.toJSONObject());
+     }
+
+@@ -434,27 +511,23 @@ public class OidcProviderController {
+         final TokenRequest tokenRequest,
+         final RefreshTokenGrant grant
+     ) {
+-        final OidcTokenService.StoredToken stored = tokenService.validateRefreshToken(
+-            grant.getRefreshToken().getValue(), client.clientId());
+-        tokenService.revoke(stored.value()); // rotation: the old refresh token dies on use
++        final OidcTokenService.StoredToken stored = tokenService.validateResourceRefreshToken(
++            grant.getRefreshToken().getValue(), client.clientId(), requestResource(tokenRequest));
+
          List<String> scopes = stored.scopes();
          if (tokenRequest.getScope() != null) {
              final List<String> requested = tokenRequest.getScope().toStringList();
@@ -145,11 +234,19 @@ index 8402a3f..9fb4a2c 100644
              scopes = requested;
          }
          final Scope scope = new Scope(scopes.toArray(new String[0]));
- 
+
 +        if (!"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
          final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
-         final BearerAccessToken accessToken = tokenService.issueAccessToken(
+-        final BearerAccessToken accessToken = tokenService.issueAccessToken(
+-            client.clientId(), user.sub(), user.name(), user.email(), user.roles(), scope);
+-        final RefreshToken refreshToken = tokenService.issueRefreshToken(client.clientId(), user.sub(), scope);
+-        final AccessTokenResponse response = new AccessTokenResponse(
+-            new com.nimbusds.oauth2.sdk.token.Tokens(accessToken, refreshToken));
++        final AccessTokenResponse response = new AccessTokenResponse(tokenService.rotateRefreshToken(stored, user, scope));
+         return tokenOk(response.toJSONObject());
+     }
+
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_95OidcServerOwnerMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_95OidcServerOwnerMigration.java
 new file mode 100644
 index 0000000..aa92bd7
@@ -217,11 +314,11 @@ index a9cfbed..d1714f5 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcClientService.java
 @@ -40,11 +40,18 @@ public class OidcClientService {
- 
+
      private final DataSource dataSource;
      private final ObjectMapper objectMapper;
 +    private final OidcClientSecretCodec secretCodec;
- 
+
 -    @Inject
      public OidcClientService(final DataSource dataSource, final ObjectMapper objectMapper) {
 +        this(dataSource, objectMapper, OidcClientSecretCodec.plaintext());
@@ -234,7 +331,7 @@ index a9cfbed..d1714f5 100644
          this.objectMapper = objectMapper;
 +        this.secretCodec = secretCodec;
      }
- 
+
      /** A registered client. {@code clientSecret == ""} marks a public (PKCE-only) client. */
 @@ -115,7 +122,7 @@ public class OidcClientService {
          return find(clientId)
@@ -244,7 +341,7 @@ index a9cfbed..d1714f5 100644
 +            .map(c -> secretCodec.matches(clientSecret, c.clientSecret()))
              .orElse(false);
      }
- 
+
 @@ -150,7 +157,7 @@ public class OidcClientService {
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -517,7 +614,7 @@ index ae918e2..d7b4499 100644
      private final int maximum;
 +    private final int pendingMaximum;
 +    private final int pendingMinutes;
- 
+
 +    public OidcRegistrationService(final DataSource source, final ObjectMapper mapper, final int maximum) {
 +        this(source, mapper, maximum, maximum, 30);
 +    }
@@ -540,7 +637,7 @@ index ae918e2..d7b4499 100644
 +        this.pendingMaximum = pendingMaximum;
 +        this.pendingMinutes = pendingMinutes;
      }
- 
+
      public Map<String, Object> register(final Map<String, Object> request) {
 @@ -67,9 +81,19 @@ public class OidcRegistrationService {
          try (var connection = source.getConnection()) {
@@ -587,7 +684,7 @@ index 8fa17d0..f7372d3 100644
      private final Environment environment;
      private final OidcInstallationReceipt receipt;
 +    private final OidcClientSecretCodec secretCodec;
- 
+
      public OidcSetupService(final DataSource dataSource, final OidcConfiguration configuration,
          final Environment environment) {
 +        this(dataSource, configuration, environment, OidcClientSecretCodec.plaintext());
@@ -626,7 +723,7 @@ index 8fa17d0..f7372d3 100644
              statement.executeUpdate();
          }
      }
- 
+
 +    private void identifySystemClient(final Connection connection) throws SQLException {
 +        final String configuredName = property("kestra.oidc.bootstrap.client-name");
 +        final String name = configuredName.isEmpty() ? "kestra" : configuredName;
@@ -682,7 +779,7 @@ index 1b9c05c..9885dcd 100644
 +        validateClientAndSubject(stored);
          return claims;
      }
- 
+
 @@ -202,9 +203,38 @@ public class OidcTokenService {
          if (!stored.clientId().equals(expectedClientId)) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": refresh token issued to a different client"));
@@ -690,7 +787,7 @@ index 1b9c05c..9885dcd 100644
 +        validateClientAndSubject(stored);
          return stored;
      }
- 
+
 +    private void validateClientAndSubject(final StoredToken token) {
 +        try (var connection = dataSource.getConnection()) {
 +            validateClientAndSubject(connection, token);
@@ -728,12 +825,12 @@ index 8889c3e..72108dd 100644
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserService.java
 @@ -74,7 +74,7 @@ public class OidcUserService {
      }
- 
+
      public Optional<OidcUser> bySubject(final String subject) {
 -        return findUser(subject).map(u -> new OidcUser(u.username(), u.name(), u.email(), u.emailVerified(), fromJson(u.rolesJson())));
 +        return findUser(subject).filter(user -> "ACTIVE".equals(user.userState())).map(u -> new OidcUser(u.username(), u.name(), u.email(), u.emailVerified(), fromJson(u.rolesJson())));
      }
- 
+
      public List<UserRow> list() {
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/PlaintextOidcClientSecretCodec.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/PlaintextOidcClientSecretCodec.java
 new file mode 100644
@@ -942,7 +1039,7 @@ index c633b4f..7fa99d3 100644
 @@ -73,6 +73,38 @@ class OidcSetupServiceTest extends OidcPostgresTestBase {
          assertFalse(service().setup(account("second")));
      }
- 
+
 +    @Test
 +    void upgradeIdentifiesOnlyExactlyConfiguredSystemClient() throws Exception {
 +        assertTrue(service().setup(account("first")));
@@ -984,7 +1081,7 @@ index dff7ea2..ead0d6b 100644
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
 @@ -36,7 +36,7 @@ class OidcTokenServiceTest extends OidcPostgresTestBase {
      private OidcClientService clients;
- 
+
      @BeforeEach
 -    void setUp() {
 +    void setUp() throws Exception {
@@ -1022,5 +1119,5 @@ index dff7ea2..ead0d6b 100644
 +        final var machine = service.issueAccessToken("machine-client", "machine-client", "Machine", null, List.of(), new Scope("openid"));
 +        assertThrows(OidcException.class, () -> service.validateAccessToken(machine.getValue()));
      }
- 
+
      @Test

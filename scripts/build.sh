@@ -58,12 +58,13 @@ echo "== scoped OIDC acceptance tests =="
 python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
-  --tests io.kestra.mcp.McpServerHandlerTransportTest --console=plain)
+  --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest \
+  --tests 'io.kestra.webserver.ui.*' --console=plain)
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions/runtime.spec.ts)
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 
 echo "== compile webserver executable jar (thin-patched upstream) =="

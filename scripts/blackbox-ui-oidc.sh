@@ -72,6 +72,9 @@ kestra:
       enabled: true
       max-clients: 10
       max-pending-clients: 10
+  ui-extension:
+    probe:
+      enabled: ${BB_UI_EXTENSION_PROBE:-false}
 micronaut:
   security:
     enabled: true
@@ -120,7 +123,11 @@ if [ "$SETUP_MODE" = env ]; then
 elif [ "$SETUP_MODE" != form ]; then
   echo 'FAIL: BB_SETUP_MODE must be form or env'; exit 1
 fi
-docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" \
+EXTENSION_MOUNT=()
+if [ -n "${BB_UI_EXTENSION_JAR:-}" ]; then
+  EXTENSION_MOUNT=(-v "$BB_UI_EXTENSION_JAR:/app/libs/kestra-rbac-authorizer.jar:ro")
+fi
+docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" \
   -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
@@ -155,6 +162,8 @@ assert_status "completed setup rejects bodyless POST before binding" 404 "$(curl
 assert_status "completed setup rejects malformed POST before binding" 404 "$(curl -s -X POST -H 'Content-Type: application/json' -d '{' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 assert_status "completed setup POST cannot reactivate" 404 "$(curl -s -X POST -H "Origin: $BASE" \
   -d 'username=attacker&password=AttackerPass123!' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
+python3 "$(dirname "$0")/directory-probe/http-check.py" "$BASE" "$SERVER" "$PG" \
+  "$(dirname "$0")/../.work/directory-http-$SETUP_MODE.json"
 HASH_BEFORE=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 [[ "$HASH_BEFORE" == '$2a$'* ]] || { echo 'FAIL: password must be bcrypt'; exit 1; }
 
@@ -229,6 +238,23 @@ assert_status "registration rejects remote HTTP callback" 400 "$(curl -s -H 'Con
   -d '{"redirect_uris":["http://attacker.example/cb"],"token_endpoint_auth_method":"none"}' -o /dev/null -w '%{http_code}' "$BASE/oidc/register")"
 assert_status "authenticated dashboard refresh" 200 "$(request "$BASE/ui/dashboards")"
 assert_status "authenticated navigation" 200 "$(request "$BASE/ui/main/flows")"
+if [ -n "${BB_UI_EXTENSION_EGO_SPACE:-}" ]; then
+  python3 - "$(dirname "$0")/ui-extension-ego.mjs" "$(dirname "$0")/ui-extension-cases.mjs" "$BASE" \
+    "$(dirname "$0")/../.work/ui-extension-ego.json" "$BB_UI_EXTENSION_EGO_SPACE" <<'PYEGO' | ego-browser nodejs
+import json,pathlib,sys
+entry,cases,base,report,space=sys.argv[1:]
+print('const UI_EXTENSION_SPACE='+json.dumps(int(space))+';')
+print('const UI_EXTENSION_BASE='+json.dumps(base)+';')
+print('const UI_EXTENSION_REPORT='+json.dumps(str(pathlib.Path(report).resolve()))+';')
+print('const UI_EXTENSION_CASES='+json.dumps(pathlib.Path(cases).resolve().as_uri())+';')
+scripts=pathlib.Path(entry).resolve().parent
+print('const UI_THEME_CASES='+json.dumps((scripts/'auth-theme-cases.mjs').as_uri())+';')
+print('const UI_I18N_CASES='+json.dumps((scripts/'auth-i18n-cases.mjs').as_uri())+';')
+print('const UI_THEME_REPORT='+json.dumps(str(pathlib.Path(report).resolve().with_name('auth-theme-local-management.json')))+';')
+print('const UI_I18N_REPORT='+json.dumps(str(pathlib.Path(report).resolve().with_name('auth-i18n-local-management.json')))+';')
+print(pathlib.Path(entry).read_text())
+PYEGO
+fi
 CSRF=$(awk '$6=="csrfToken" {print $7}' "$TEMP_DIR/cookies")
 for path in login logout basicAuth; do
   LEGACY_STATUS=$(curl -s -b "$TEMP_DIR/cookies" -X POST \
@@ -256,7 +282,7 @@ assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{htt
 HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
 docker rm -f "$SERVER" >/dev/null
-docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" -v "$STORAGE:/app/storage" \
+docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_OIDC_BOOTSTRAP_USERNAME=attacker -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=InjectedPass123!' \
   -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 for attempt in $(seq 1 60); do

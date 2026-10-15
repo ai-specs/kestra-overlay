@@ -4,6 +4,7 @@
 # 来源: 新写；MCP SDK 1.1.3 + 维护者能力契约；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 15 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
+# 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
 diff --git a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
 index f1f7f73..4e74ab2 100644
 --- a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
@@ -26,12 +27,12 @@ index f1f7f73..4e74ab2 100644
 +    public McpSession(String tenantId, String serverId, String sessionId, String sseNode, String userId, boolean deleted, String clientId, String resource) {
 +        this(tenantId, serverId, sessionId, sseNode, userId, deleted, clientId, resource, java.util.List.of());
 +    }
- 
+
      /** {@inheritDoc} */
      @Override
 @@ -31,6 +43,6 @@ public record McpSession(
      }
- 
+
      public McpSession toDeleted() {
 -        return new McpSession(tenantId, serverId, sessionId, sseNode, userId, true);
 +        return new McpSession(tenantId, serverId, sessionId, sseNode, userId, true, clientId, resource, roles);
@@ -46,7 +47,7 @@ index c8d3137..7774bac 100644
      private final McpSessionService mcpSessionService;
      private final McpToolAccessControl accessControl;
 +    private final io.kestra.webserver.mcp.McpCapabilityGate capabilities;
- 
+
      @Inject
      public McpServerHandlerTransport(
 @@ -46,12 +47,13 @@ public class McpServerHandlerTransport {
@@ -62,7 +63,7 @@ index c8d3137..7774bac 100644
          this.accessControl = accessControl;
 +        this.capabilities = capabilities;
      }
- 
+
      /**
 @@ -78,7 +80,7 @@ public class McpServerHandlerTransport {
              servers.put(
@@ -75,7 +76,7 @@ index c8d3137..7774bac 100644
              return transportProvider;
 @@ -104,7 +106,8 @@ public class McpServerHandlerTransport {
      }
- 
+
      public Mono<Void> refreshTools(String tenantId, String serverId) {
 -        return Flux.fromIterable(keysFor(tenantId, serverId))
 +        return Flux.defer(() -> Flux.fromIterable(keysFor(tenantId, serverId)))
@@ -95,7 +96,7 @@ index c8d3137..7774bac 100644
 @@ -192,12 +195,15 @@ public class McpServerHandlerTransport {
              }
          });
- 
+
 -        return mcpServerSpec.tools(
 +        final var identity = KestraMcpTransportContext.builder().tenantId(handlerKey.tenantId()).serverId(handlerKey.serverId())
 +            .userId(handlerKey.userId()).clientId(handlerKey.clientId()).resource(handlerKey.resource()).scopes(handlerKey.capabilities()).roles(handlerKey.roles()).build();
@@ -110,7 +111,7 @@ index c8d3137..7774bac 100644
 +            ) : List.of()
          ).build();
      }
- 
+
 @@ -233,6 +239,6 @@ public class McpServerHandlerTransport {
          McpAsyncServer server,
          AccessScope scope,
@@ -154,7 +155,7 @@ index 1e6fd7d..d0b340d 100644
 -        ).isPresent();
 +        ).filter(session -> sameIdentity(session, context)).isPresent();
      }
- 
+
      Optional<McpStreamableServerSession> findMcpStreamableServerSession(KestraMcpTransportContext context) {
 @@ -107,7 +110,7 @@ public class McpSessionService {
          }
@@ -195,7 +196,7 @@ index 1e6fd7d..d0b340d 100644
 +    }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolService.java b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
-index 8c1d54b..1a9770d 100644
+index 8c1d54b..89d8f73 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 @@ -57,6 +57,7 @@ public class McpToolService {
@@ -204,7 +205,7 @@ index 8c1d54b..1a9770d 100644
      private final McpToolAccessControl accessControl;
 +    private final io.kestra.webserver.mcp.McpCapabilityGate capabilities;
      private final Cache<ToolHandlerCacheKey, McpServerFeatures.AsyncToolSpecification> asyncToolSpecificationCache;
- 
+
      private static final McpSchema.CallToolResult FLOW_ERROR_CALL_TOOL_RESULT = McpSchema.CallToolResult.builder()
 @@ -78,7 +79,7 @@ public class McpToolService {
          FlowInputOutput flowInputOutput,
@@ -226,7 +227,7 @@ index 8c1d54b..1a9770d 100644
 @@ -110,6 +112,18 @@ public class McpToolService {
              ).toList();
      }
- 
+
 +    public List<McpServerFeatures.AsyncToolSpecification> listToolSpecsForServer(String tenantId, String serverId,
 +        AccessScope scope, KestraMcpTransportContext context) {
 +        return fetchFlowWithMcpToolTrigger(tenantId, serverId).stream()
@@ -242,19 +243,31 @@ index 8c1d54b..1a9770d 100644
      private McpServerFeatures.AsyncToolSpecification getAsyncToolSpecification(Flow flow, McpToolTrigger toolTrigger) {
          ToolHandlerCacheKey toolHandlerCacheKey = new ToolHandlerCacheKey(flow, toolTrigger);
          return asyncToolSpecificationCache.get(
-@@ -155,42 +169,56 @@ public class McpToolService {
-                 return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
+@@ -144,6 +158,8 @@ public class McpToolService {
+
+             KestraMcpTransportContext context = (KestraMcpTransportContext) exchange.transportContext();
+
++            final String tenant = flow.getTenantId() == null ? context.getTenantId() : flow.getTenantId();
++            return capabilities.evaluation(context, tenant, () -> Mono.defer(() -> {
+             AccessScope callerScope = accessControl.executableScope(
+                 context.getUserId(), context.getTenantId(), context.getServerId()
+             );
+@@ -152,55 +168,79 @@ public class McpToolService {
+                     "Rejecting MCP tool '{}' call for flow {}/{}/{}: caller '{}' cannot execute in that namespace",
+                     toolTrigger.getToolName(), flow.getTenantId(), flow.getNamespace(), flow.getId(), context.getUserId()
+                 );
+-                return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
++                return Mono.just(new PreparedCall(null, FORBIDDEN_CALL_TOOL_RESULT));
              }
- 
+
 -            Execution execution = toolTrigger.evaluate(
 -                flow, input, additionalInputs, Label.from(
 -                    Map.of(
 -                        Label.FROM, Label.FromLabel.MCP.value,
 -                        Label.MCP_SERVER_ID, context.getServerId(),
 -                        Label.MCP_SESSION_ID, context.getSessionId()
-+            final String tenant = flow.getTenantId() == null ? context.getTenantId() : flow.getTenantId();
 +            return capabilities.execute(context, tenant, flow.getNamespace(), flow.getId()).flatMap(allowed -> {
-+                if (!allowed) return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
++                if (!allowed) return Mono.just(new PreparedCall(null, FORBIDDEN_CALL_TOOL_RESULT));
 +                Execution execution = toolTrigger.evaluate(
 +                    flow, input, additionalInputs, Label.from(
 +                        Map.of(
@@ -275,7 +288,7 @@ index 8c1d54b..1a9770d 100644
                  );
 -                return Mono.just(invalidInputResult(validationErrors));
 -            }
- 
+
 -            return runFlowForMcpTask(flow, execution)
 -                .flatMap(executionResult ->
 -                {
@@ -293,46 +306,56 @@ index 8c1d54b..1a9770d 100644
 -                })
 -                .onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
 +                return capabilities.outputs(context, tenant, flow.getNamespace(), execution.getId()).flatMap(outputsAllowed -> {
-+                if (!outputsAllowed) return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
-+                return Mono.fromCallable(() -> FlowMetaStores.findForRuntimeOrRaw(flowMetaStore, flow))
++                if (!outputsAllowed) return Mono.just(new PreparedCall(null, FORBIDDEN_CALL_TOOL_RESULT));
++                return io.kestra.core.repositories.AuthorizationEvaluationContext.call(() -> FlowMetaStores.findForRuntimeOrRaw(flowMetaStore, flow))
 +                    .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).flatMap(processedFlow -> {
 +                Flow resolved = processedFlow.flow() instanceof FlowWithException ? flow : processedFlow.flow();
-+                return capabilities.preflight(context, tenant, execution.getId(), resolved).flatMap(preflightAllowed -> {
-+                if (!preflightAllowed) return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
-+                List<String> validationErrors = collectInputValidationErrors(flow, execution, input, processedFlow);
++                return capabilities.evaluation(context, tenant, () -> capabilities.execute(context, tenant, resolved.getNamespace(), resolved.getId())
++                    .flatMap(actualAllowed -> actualAllowed ? capabilities.outputs(context, tenant, resolved.getNamespace(), execution.getId()) : Mono.just(false))
++                    .flatMap(actualAllowed -> actualAllowed ? capabilities.preflight(context, tenant, execution.getId(), resolved) : Mono.just(false))
++                    .flatMap(actualAllowed -> {
++                        if (!actualAllowed) return Mono.just(List.of("Execution authorization denied"));
++                        return io.kestra.core.repositories.AuthorizationEvaluationContext.call(() -> collectInputValidationErrors(flow, execution, input, processedFlow));
++                    })).flatMap(validationErrors -> {
 +                if (!validationErrors.isEmpty()) {
 +                    log.debug(
 +                        "Rejecting MCP tool '{}' call for flow {}/{}/{} (execution {}): {} invalid input(s): {}",
 +                        toolTrigger.getToolName(), flow.getTenantId(), flow.getNamespace(), flow.getId(),
 +                        execution.getId(), validationErrors.size(), validationErrors
 +                    );
-+                    return Mono.just(invalidInputResult(validationErrors));
++                    return Mono.just(new PreparedCall(null, invalidInputResult(validationErrors)));
 +                }
 +
-+                return runFlowForMcpTask(flow, execution)
-+                    .flatMap(executionResult ->
-+                    {
-+                        try {
-+                            Map<String, Object> outputs = executionResult.getState().isSuccess() ? executionOutputService.getOutputs(executionResult) : null;
-+                            return Mono.just(
-+                                McpSchema.CallToolResult.builder()
-+                                    .structuredContent(outputs != null ? outputs : Map.of())
-+                                    .isError(!executionResult.getState().isSuccess())
-+                                    .build()
-+                            );
-+                        } catch (InternalException e) {
-+                            return Mono.error(e);
-+                        }
-+                    })
-+                    .onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
++                return io.kestra.core.repositories.AuthorizationEvaluationContext.call(() -> {
++                    emitFlowForMcpTask(execution);
++                    return new PreparedCall(execution, null);
++                });
 +                });
 +                });
 +                });
 +            });
++            })).flatMap(prepared -> {
++                if (prepared.rejection() != null) return Mono.just(prepared.rejection());
++                return waitForMcpTask(flow, prepared.execution()).flatMap(executionResult ->
++                    capabilities.evaluation(context, tenant, () -> capabilities.readOutputs(context, tenant,
++                        executionResult.getNamespace(), executionResult.getId()).flatMap(allowed -> {
++                            if (!allowed) return Mono.just(FORBIDDEN_CALL_TOOL_RESULT);
++                            return io.kestra.core.repositories.AuthorizationEvaluationContext.call(() -> {
++                                Map<String, Object> outputs = executionResult.getState().isSuccess()
++                                    ? executionOutputService.getOutputs(executionResult) : null;
++                                return McpSchema.CallToolResult.builder().structuredContent(outputs != null ? outputs : Map.of())
++                                    .isError(!executionResult.getState().isSuccess()).build();
++                            });
++                        })));
++            }).onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
          };
      }
- 
-@@ -200,7 +228,10 @@ public class McpToolService {
+
++    private record PreparedCall(Execution execution, McpSchema.CallToolResult rejection) {}
++
+     List<String> collectInputValidationErrors(Flow flow, Execution execution, Map<String, Object> input) {
+         // An input renders against the execution's labels, which the trigger deliberately limits to what it
+         // contributes, so validate against the merge the executor will build, on the flow it will build it
          // from. Otherwise an input defaulting to {{ labels.something }} is rejected here and accepted there.
          // a flow governance blocks resolves to a FlowWithException, which carries no input: the authored ones
          // are validated instead, and the block itself fails the execution once it is created
@@ -344,6 +367,40 @@ index 8c1d54b..1a9770d 100644
          Flow resolvedFlow = processedFlow.flow() instanceof FlowWithException ? flow : processedFlow.flow();
          Execution forValidation = execution.withLabels(
              LabelService.forExecution(
+@@ -227,10 +267,7 @@ public class McpToolService {
+             .build();
+     }
+
+-    private Mono<Execution> runFlowForMcpTask(
+-        Flow flow,
+-        Execution execution) {
+-        try {
++    private void emitFlowForMcpTask(Execution execution) throws QueueException {
+             executionCommandQueue.emit(
+                 Create.of(new ExecutionId(execution.getTenantId(), execution.getNamespace(), execution.getFlowId(), execution.getId(), execution.getFlowRevision()))
+                     .withKind(execution.getKind())
+@@ -239,7 +276,10 @@ public class McpToolService {
+                     .withInputs(execution.getInputs())
+             );
+             eventPublisher.publishEvent(CrudEvent.create(execution));
++    }
+
++    private Mono<Execution> waitForMcpTask(Flow flow, Execution execution) {
++        return Mono.defer(() -> {
+             String subscriberId = UUID.randomUUID().toString();
+             return Flux.<Event<Execution>> create(
+                 emitter -> streamingService.registerSubscriber(
+@@ -253,9 +293,7 @@ public class McpToolService {
+                 .last()
+                 .map(Event::getData)
+                 .doFinally(signalType -> streamingService.unregisterSubscriber(execution.getId(), subscriberId));
+-        } catch (QueueException e) {
+-            return Mono.error(e);
+-        }
++        });
+     }
+
+     /**
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 index d82b6cd..91a9d44 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
@@ -351,7 +408,7 @@ index d82b6cd..91a9d44 100644
 @@ -88,6 +88,8 @@ public class McpToolController {
              (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()),
              (java.util.List<String>) identity.getOrDefault("roles", java.util.List.of()));
- 
+
 -        return handlerRegistry.getServerHandler(transportContext).handleRequest(request, transportContext);
 +        return Mono.fromCallable(() -> handlerRegistry.getServerHandler(transportContext))
 +            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
@@ -377,10 +434,10 @@ index 0000000..7473723
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
 new file mode 100644
-index 0000000..f3546dd
+index 0000000..6f6d041
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,136 @@
 +package io.kestra.webserver.mcp;
 +
 +import io.kestra.mcp.KestraMcpTransportContext;
@@ -422,6 +479,23 @@ index 0000000..f3546dd
 +    }
 +
 +    private boolean unifiedEnabled() { return unified != null && unified.enabled(); }
++
++    public <Result> Mono<Result> evaluation(KestraMcpTransportContext context, String tenant,
++        java.util.function.Supplier<Mono<Result>> action) {
++        if (!unifiedEnabled()) return Mono.defer(action);
++        if (!valid(context) || !java.util.Objects.equals(tenant, context.getTenantId()))
++            return Mono.error(new IllegalStateException("Invalid MCP authorization context."));
++        return gate.boundary(principal(context), tenant, action).singleOrEmpty();
++    }
++
++    public Mono<Boolean> readOutputs(KestraMcpTransportContext context, String tenant, String namespace, String executionId) {
++        if (!unifiedEnabled()) return Mono.just(true);
++        if (!valid(context)) return Mono.just(false);
++        var resource = new io.kestra.webserver.rbac.RbacAuthorizer.Resource(
++            io.kestra.webserver.rbac.RbacAuthorizer.Kind.EXECUTION,
++            io.kestra.webserver.rbac.RbacAuthorizer.Scope.NAMESPACE, tenant, namespace, executionId);
++        return gate.authorize(principal(context), resource, io.kestra.webserver.rbac.RbacAuthorizer.Action.ACCESS_OUTPUTS);
++    }
 +
 +    private io.kestra.webserver.rbac.RbacAuthorizer.Principal principal(KestraMcpTransportContext context) {
 +        return new io.kestra.webserver.rbac.RbacAuthorizer.Principal(context.getUserId(),
@@ -506,7 +580,7 @@ index 62fdba7..f059c5b 100644
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 @@ -25,6 +25,16 @@ public class OidcConfiguration {
      private Duration authorizationCodeTtl = Duration.ofMinutes(5);
- 
+
      private Duration sessionTtl = Duration.ofHours(8);
 +    private List<String> mcpScopes = List.of("mcp:flows:read", "mcp:executions:write");
 +
@@ -518,7 +592,7 @@ index 62fdba7..f059c5b 100644
 +        }
 +        this.mcpScopes = List.copyOf(scopes);
 +    }
- 
+
      /** Accounts seeded into an empty user directory at startup (bcrypt-hashed at runtime, never stored in config as hashes). */
      private List<UserSeed> users = List.of();
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java
