@@ -21,7 +21,7 @@ async function main() {
         await page.locator('input[name=username]').fill('tester');
         await page.locator('input[name=password]').fill('wrong-password');
         await page.locator('button[type=submit]').click();
-        await page.getByText('Invalid username or password.').waitFor();
+        await page.getByText('Invalid username or password. Make sure your credentials are correct.', {exact: true}).waitFor();
         await page.locator('input[name=username]').fill('tester');
         await page.locator('input[name=password]').fill('Passw0rd!');
         await page.locator('button[type=submit]').click();
@@ -82,6 +82,11 @@ async function main() {
         const themeRows = await runAuthThemeChecks(page, (method, params) => themeSession.send(method, params), base,
             report => fs.writeFileSync(themeReport, JSON.stringify(report, null, 2)));
         console.log(`AUTHENTICATION THEME MATRIX GREEN: ${themeRows.length} checks`);
+        const {runAuthI18nChecks} = await import('./auth-i18n-cases.mjs');
+        const i18nReport = `.work/auth-i18n-${process.env.BB_BROWSER_SETUP === '1' ? 'setup' : 'env'}.json`;
+        const i18nRows = await runAuthI18nChecks(page, (method, params) => themeSession.send(method, params), base,
+            report => fs.writeFileSync(i18nReport, JSON.stringify(report, null, 2)));
+        console.log(`AUTHENTICATION I18N MATRIX GREEN: ${i18nRows.length} checks`);
         // The logout endpoint intentionally redirects while clearing the OIDC session. Chromium
         // reports that redirect as ERR_ABORTED when the navigation is superseded; wait for the
         // redirect target and keep the authentication assertions below.

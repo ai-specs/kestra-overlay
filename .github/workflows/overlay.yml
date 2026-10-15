@@ -100,7 +100,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: authentication-theme-browser
-          path: .work/auth-theme-*.json
+          path: |
+            .work/auth-theme-*.json
+            .work/auth-i18n-*.json
           include-hidden-files: true
           if-no-files-found: error
   promote:

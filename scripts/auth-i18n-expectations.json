@@ -1,0 +1,119 @@
+{
+  "zh_CN": {
+    "setup.login_title": "登录 Kestra",
+    "setup.form.username": "用户名",
+    "setup.form.password": "密码",
+    "setup.login": "登录",
+    "setup.validation.incorrect_creds": "用户名或密码无效。请确保您的凭据正确。",
+    "errors.403.title": "访问被拒绝",
+    "errors.403.content": "你没有访问此页面所需的权限。"
+  },
+  "ja": {
+    "setup.login_title": "Kestraにサインイン",
+    "setup.form.username": "ユーザー名",
+    "setup.form.password": "パスワード",
+    "setup.login": "ログイン",
+    "setup.validation.incorrect_creds": "ユーザー名またはパスワードが無効です。資格情報が正しいことを確認してください。",
+    "errors.403.title": "アクセス拒否",
+    "errors.403.content": "このページにアクセスするための権限がありません。"
+  },
+  "de": {
+    "setup.login_title": "Bei Kestra anmelden",
+    "setup.form.username": "Benutzername",
+    "setup.form.password": "Passwort",
+    "setup.login": "Anmelden",
+    "setup.validation.incorrect_creds": "Ungültiger Benutzername oder ungültiges Passwort. Prüfe, ob deine Anmeldedaten korrekt sind.",
+    "errors.403.title": "Zugriff verweigert",
+    "errors.403.content": "Du hast nicht die erforderlichen Berechtigungen für diese Seite."
+  },
+  "ru": {
+    "setup.login_title": "Войти в Kestra",
+    "setup.form.username": "Имя пользователя",
+    "setup.form.password": "Пароль",
+    "setup.login": "Войти",
+    "setup.validation.incorrect_creds": "Неверное имя пользователя или пароль. Убедитесь, что ваши учетные данные верны.",
+    "errors.403.title": "Доступ запрещен",
+    "errors.403.content": "У вас нет необходимых прав для доступа к этой странице."
+  },
+  "pl": {
+    "setup.login_title": "Zaloguj się do Kestra",
+    "setup.form.username": "Nazwa użytkownika",
+    "setup.form.password": "Hasło",
+    "setup.login": "Zaloguj się",
+    "setup.validation.incorrect_creds": "Nieprawidłowa nazwa użytkownika lub hasło. Upewnij się, że Twoje poświadczenia są poprawne.",
+    "errors.403.title": "Dostęp zabroniony",
+    "errors.403.content": "Nie masz wymaganych uprawnień, aby uzyskać dostęp do tej strony."
+  },
+  "pt": {
+    "setup.login_title": "Entrar no Kestra",
+    "setup.form.username": "Nome de Usuário",
+    "setup.form.password": "Senha",
+    "setup.login": "Login",
+    "setup.validation.incorrect_creds": "Nome de usuário ou senha inválidos. Certifique-se de que suas credenciais estão corretas.",
+    "errors.403.title": "Acesso negado",
+    "errors.403.content": "Você não tem as permissões necessárias para acessar esta página."
+  },
+  "en": {
+    "setup.login_title": "Sign in to Kestra",
+    "setup.form.username": "Username",
+    "setup.form.password": "Password",
+    "setup.login": "Login",
+    "setup.validation.incorrect_creds": "Invalid username or password. Make sure your credentials are correct.",
+    "errors.403.title": "Access denied",
+    "errors.403.content": "You don't have the required permissions to access this page."
+  },
+  "it": {
+    "setup.login_title": "Accedi a Kestra",
+    "setup.form.username": "Nome utente",
+    "setup.form.password": "Password",
+    "setup.login": "Accedi",
+    "setup.validation.incorrect_creds": "Nome utente o password non validi. Assicurati che le tue credenziali siano corrette.",
+    "errors.403.title": "Accesso negato",
+    "errors.403.content": "Non hai i permessi necessari per accedere a questa pagina."
+  },
+  "fr": {
+    "setup.login_title": "Connectez-vous à Kestra",
+    "setup.form.username": "Nom d'utilisateur",
+    "setup.form.password": "Mot de passe",
+    "setup.login": "Connexion",
+    "setup.validation.incorrect_creds": "Nom d'utilisateur ou mot de passe invalide. Assurez-vous que vos identifiants sont corrects.",
+    "errors.403.title": "Accès refusé",
+    "errors.403.content": "Vous n'avez pas les permissions suffisantes pour accéder à cette page."
+  },
+  "hi": {
+    "setup.login_title": "Kestra में साइन इन करें",
+    "setup.form.username": "उपयोगकर्ता नाम",
+    "setup.form.password": "पासवर्ड",
+    "setup.login": "लॉगिन",
+    "setup.validation.incorrect_creds": "अमान्य उपयोगकर्ता नाम या पासवर्ड। सुनिश्चित करें कि आपके प्रमाण-पत्र सही हैं।",
+    "errors.403.title": "पहुँच अस्वीकृत",
+    "errors.403.content": "इस पृष्ठ तक पहुँचने के लिए आपके पास आवश्यक अनुमतियाँ नहीं हैं।"
+  },
+  "ko": {
+    "setup.login_title": "Kestra에 로그인",
+    "setup.form.username": "사용자 이름",
+    "setup.form.password": "비밀번호",
+    "setup.login": "로그인",
+    "setup.validation.incorrect_creds": "잘못된 사용자 이름 또는 비밀번호입니다. 자격 증명이 올바른지 확인하세요.",
+    "errors.403.title": "접근 거부됨",
+    "errors.403.content": "이 페이지에 접근할 권한이 없습니다."
+  },
+  "pt_BR": {
+    "setup.login_title": "Entrar no Kestra",
+    "setup.form.username": "Nome de Usuário",
+    "setup.form.password": "Senha",
+    "setup.login": "Login",
+    "setup.validation.incorrect_creds": "Nome de usuário ou senha inválidos. Certifique-se de que suas credenciais estão corretas.",
+    "errors.403.title": "Acesso negado",
+    "errors.403.content": "Você não tem as permissões necessárias para acessar esta página."
+  },
+  "es": {
+    "setup.login_title": "Iniciar sesión en Kestra",
+    "setup.form.username": "Nombre de usuario",
+    "setup.form.password": "Contraseña",
+    "setup.login": "Iniciar sesión",
+    "setup.validation.incorrect_creds": "Nombre de usuario o contraseña inválidos. Asegúrate de que tus credenciales sean correctas.",
+    "errors.403.title": "Acceso denegado",
+    "errors.403.content": "No tienes los permisos necesarios para acceder a esta página."
+  }
+}

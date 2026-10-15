@@ -1,0 +1,57 @@
+# 需求: REQ-0320 独立OIDC登录页复用上游vue-i18n与语言目录
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；用户要求定制页面沿用上游国际化机制，复用现有翻译键
+# 触达上游文件: 2 个（Vite入口、独立登录翻译入口）
+# 移除条件: 上游OSS提供同等独立认证页面国际化入口
+diff --git a/ui/src/oidc-login-i18n.ts b/ui/src/oidc-login-i18n.ts
+new file mode 100644
+index 0000000..dccef6b
+--- /dev/null
++++ b/ui/src/oidc-login-i18n.ts
+@@ -0,0 +1,28 @@
++import en from "./translations/en.json"
++import {loadLocaleMessages, setI18nLanguage, setupI18n} from "./translations/i18n"
++import {SUPPORT_LOCALES} from "./translations/languages"
++
++// The standalone OIDC form shares the host's catalogue and vue-i18n loader.
++// It does not boot the application, fetch business configuration, or alter form submission.
++const i18n = setupI18n({
++    locale: "en", messages: en, legacy: false, warnHtmlMessage: false,
++} as any)
++
++async function translate() {
++    let locale = "en"
++    try { locale = localStorage.getItem("lang") || "en" } catch (_) { /* Keep English without storage. */ }
++    if (!SUPPORT_LOCALES.includes(locale)) locale = "en"
++    if (locale !== "en") await loadLocaleMessages(i18n, locale, {})
++    setI18nLanguage(i18n, locale)
++    // i18n-keys: setup.login_title, setup.form.username, setup.form.password, setup.login, setup.validation.incorrect_creds
++    for (const element of document.querySelectorAll<HTMLElement>("[data-i18n]")) {
++        element.textContent = i18n.global.t(element.dataset.i18n!)
++    }
++    document.title = i18n.global.t("setup.login_title")
++    document.documentElement.dataset.i18nReady = locale
++}
++
++void translate().catch(error => console.error("OIDC translation loading failed", error))
++window.addEventListener("storage", event => {
++    if (event.key === "lang" || event.key === null) void translate()
++})
+diff --git a/ui/vite.config.js b/ui/vite.config.js
+index ce67332..a499750 100644
+--- a/ui/vite.config.js
++++ b/ui/vite.config.js
+@@ -54,6 +54,12 @@ export default defineConfig(({mode}) => {
+         base: "",
+         build: {
+             outDir: "../webserver/src/main/resources/ui",
++            rollupOptions: {
++                input: {main: path.resolve(__dirname, "index.html"), "oidc-login-i18n": path.resolve(__dirname, "src/oidc-login-i18n.ts")},
++                output: {
++                    entryFileNames: chunk => chunk.name === "oidc-login-i18n" ? "oidc-login-i18n.js" : "assets/[name]-[hash].js",
++                },
++            },
+         },
+         server: {
+             watch: {

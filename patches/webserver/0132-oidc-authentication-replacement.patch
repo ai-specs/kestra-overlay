@@ -305,7 +305,7 @@ index 0000000..d0d82dc
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
-index 0a32216..7af7c83 100644
+index 0a32216..8f6a09f 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 @@ -83,6 +83,8 @@ public class OidcLoginController {
@@ -317,19 +317,19 @@ index 0a32216..7af7c83 100644
              .cookie(io.micronaut.http.cookie.Cookie.of(OidcSessionService.SESSION_COOKIE_NAME, "")
                  .path("/")
                  .maxAge(java.time.Duration.ZERO));
-@@ -103,15 +105,29 @@ public class OidcLoginController {
+@@ -103,27 +105,43 @@ public class OidcLoginController {
          return trimmed;
      }
  
 -    /** The login form — self-contained HTML (no external assets), CSP-friendly. */
-+    /** The login form uses no external assets and follows the browser UI theme preference. */
++    /** The login form follows host theme/language preferences without booting the business UI. */
      private String loginPageHtml(final String from, final boolean failed) {
          final String safeFrom = from == null ? DEFAULT_LANDING : from;
          return """
              <!DOCTYPE html>
              <html lang="en">
 -            <head><meta charset="utf-8"><title>Sign in</title></head>
-+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in | Kestra</title>
++            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to Kestra</title>
 +            %s
 +            <style>
 +            body{margin:0;background:var(--ks-bg-base);color:var(--ks-text-primary);font-family:system-ui,sans-serif}
@@ -346,17 +346,25 @@ index 0a32216..7af7c83 100644
 +            </style></head>
              <body>
 -            <main style="font-family:system-ui,sans-serif;max-width:22rem;margin:12vh auto;">
-+            <main><div class="logo" aria-label="Kestra">K</div><h1>Welcome to Kestra</h1>
++            <main><div class="logo" aria-label="Kestra">K</div><h1 data-i18n="setup.login_title">Sign in to Kestra</h1>
              %s
              <form method="post" action="/oidc/login">
              <input type="hidden" name="from" value="%s">
-@@ -123,7 +139,8 @@ public class OidcLoginController {
+-            <p><label>Username<br><input name="username" autocomplete="username" required></label></p>
+-            <p><label>Password<br><input type="password" name="password" autocomplete="current-password" required></label></p>
+-            <p><button type="submit">Sign in</button></p>
++            <p><label><span data-i18n="setup.form.username">Username</span><br><input name="username" autocomplete="username" required></label></p>
++            <p><label><span data-i18n="setup.form.password">Password</span><br><input type="password" name="password" autocomplete="current-password" required></label></p>
++            <p><button type="submit" data-i18n="setup.login">Login</button></p>
+             </form>
+             </main>
++            <script type="module" src="/ui/oidc-login-i18n.js"></script>
              </body>
              </html>
              """.formatted(
 -            failed ? "<p style=\"color:#b00;\">Invalid username or password.</p>" : "",
 +            io.kestra.webserver.oidc.services.OidcPageTheme.head(),
-+            failed ? "<p class=\"error\" role=\"alert\">Invalid username or password.</p>" : "",
++            failed ? "<p class=\"error\" role=\"alert\" data-i18n=\"setup.validation.incorrect_creds\">Invalid username or password. Make sure your credentials are correct.</p>" : "",
              htmlEscape(safeFrom)
          );
      }

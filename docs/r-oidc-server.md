@@ -148,6 +148,25 @@ BASE 设计系统的必要颜色，不装载业务配置、身份或权限数据
 登录页另检查偏好缺失、未知值和存储不可用的回退。CI 保留 JSON 报告，既有错误密码、
 生产登录、刷新、导航和退出测试继续执行。零授权账号退出换号由部署仓组合验收。
 
+### 认证页面国际化（REQ-0320）
+
+本次修订复用固定 BASE 的 `vue-i18n`、`translations/i18n.ts`、`languages.ts` 和
+现有 JSON 翻译目录。拒绝页使用 `errors.403.title`、`errors.403.content` 和 `setup.login`。
+独立登录页通过 Vite 入口 `/ui/oidc-login-i18n.js` 装载同一翻译机制，读取宿主保存的
+`localStorage.lang`；缺失、不支持或不可读取时使用英文。页面标题、标签、按钮、错误
+提示和 HTML 的 BCP 47 语言标记同步更新。表单字段名、提交路径、回跳校验和认证逻辑不变。
+入口只翻译页面，不启动业务 UI，不读取业务配置。无脚本时保留可提交的英文表单。
+
+现有 `setup.login_title`、`setup.form.username`、`setup.form.password`、`setup.login`
+及 `setup.validation.incorrect_creds` 覆盖登录文案，无需新增翻译键。不得在 Java 中
+维护平行翻译表；今后确需新增文案时进入上游同类翻译源、生成和检查流程。
+`scripts/auth-i18n-cases.mjs` 由本地与 CI 复用，核对全部 13 种语言在桌面和窄屏的
+实际文案、页面标题、语言标记和溢出。测试预期来自固定 BASE 的既有翻译，不作为产品资源。
+
+全量上游翻译检查另发现既有 MCP 定制键 `mcp.built_in_oidc_hint` 缺少非英文翻译，
+且它与 `mcp.no_oauth_providers` 的生成指纹未同步。本次页面复用不新增此缺口；
+完整检查未通过不得表述为全量国际化检查通过。处理新增翻译需按上游生成机制执行。
+
 ## 1. 裁定记录（全部 2026-10-07，维护者）
 
 | # | 裁定 | 依据 |

@@ -5,7 +5,7 @@
 # 触达上游文件: 1 个（AccessDenied.vue）
 # 移除条件: 上游OSS提供与登录页一致的独立授权拒绝页面
 diff --git a/ui/src/components/errors/AccessDenied.vue b/ui/src/components/errors/AccessDenied.vue
-index 67160a9..c6f9d06 100644
+index 67160a9..9727e10 100644
 --- a/ui/src/components/errors/AccessDenied.vue
 +++ b/ui/src/components/errors/AccessDenied.vue
 @@ -1,9 +1,12 @@
@@ -17,10 +17,10 @@ index 67160a9..c6f9d06 100644
 -    </main>
 +    <div class="access-denied-page">
 +        <main role="main" aria-labelledby="access-denied-title">
-+            <h1 id="access-denied-title">Access denied</h1>
++            <h1 id="access-denied-title">{{ $t("errors.403.title") }}</h1>
 +            <p class="status">403</p>
-+            <p class="description">This account does not have permission to access this page. Sign in with another account to continue.</p>
-+            <button type="button" data-testid="return-to-login" @click="returnToLogin">返回登录 / Return to login</button>
++            <p class="description">{{ $t("errors.403.content") }}</p>
++            <button type="button" data-testid="return-to-login" @click="returnToLogin">{{ $t("setup.login") }}</button>
 +        </main>
 +    </div>
  </template>

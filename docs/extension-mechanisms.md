@@ -315,3 +315,11 @@ usage HTTP 入口必须使用 tenant 报告方法，不能调用面向后台采�
 工具列表实际读取的是 Flow，typed adapter 必须把它分类为完整 Flow 查询。服务配置的
 READ/LIST 与 CREATE/UPDATE/DELETE 是不同授权，不因工具列表允许而授予配置写权限。
 REQ-0300 提案、发布与组合验收状态见 `r-ee-rbac.md`；本节只说明机制，不作为通过证据。
+
+
+### 独立认证页的语言装载
+
+REQ-0320 的 Vite 独立入口与业务 UI 使用同一 `vue-i18n` 初始化、语言目录和 JSON。
+宿主在自己的构建中产出 `/ui/oidc-login-i18n.js`，独立 OIDC 登录表单引用该入口；
+该机制不向插件暴露宿主内部源码，不作为外部管理页面共享组件契约。
+主题和国际化的实现、回退及验收要求见 `r-oidc-server.md`。发布状态以对应 CI 为准。

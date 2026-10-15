@@ -126,6 +126,7 @@ monorepo 验收确定；这里不跟踪独立扩展仓的业务实现进度。
 | R-EE-RBAC | 端点/资源级授权：消费仓 `ai-specs/kestra-plugin-rbac` 已指名，统一授权 SPI 与激活门实施中 | 缺 jar 时 REST 未受控与 MCP 主体角色丢失证据见 r-ee-rbac §11；承载为 R-CLASSPATH-MERGE | 外部 classpath jar（S6）承载业务模型和操作解析；overlay 只补 typed SPI、可信主体传递与失败关闭门。独立插件构建后由 monorepo Compose 组合验收。展开文档：[docs/r-ee-rbac.md](r-ee-rbac.md) |
 | REQ-0240 | R-EE-RBAC 查询 scope 最小表达，消费仓 `kestra-plugin-rbac`；入口 B 用户生产要求 | Exact 错授子 namespace；Namespace 父级/system 合成候选进入分页与 total | 三参 AccessScope 保留二参兼容；统一 JDBC/log Exact 翻译；Namespace predicate 分页前过滤；MCP 匹配与缓存兼容。角色与后台策略归插件。上游 OSS 提供等价 Exact scope 和候选过滤时移除 |
 | REQ-0300 | R-EE-RBAC 宿主 UI 与查询适配修复，消费仓 `kestra-plugin-rbac` | 登录路径缺 tenant、零授权账号无法换号、usage 使用全局报告、MCP 工具列表未分类；详见 r-ee-rbac 提案 | 复用现有 typed SPI 与 namespace ACL；规范 UI 路径和独立拒绝退出入口；usage 使用 tenant 报告，工具列表按 Flow 查询域；业务 grants 归插件，组合验收归部署仓 |
+| REQ-0320 | 定制认证页国际化，消费仓 `kestra-plugin-rbac` | 独立登录页和拒绝页硬编码英文或中英混排，未消费宿主 `lang` | 复用既有 vue-i18n、语言目录、JSON 与文案键；独立登录入口只翻译表单，不启动业务应用；实际发布与组合状态见能力文档和部署仓 |
 
 ## 5. 复现命令（BASE 树内执行）
 
