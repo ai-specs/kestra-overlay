@@ -512,7 +512,8 @@ REQ-0340 的源码和本地测试已存在，正式使用必须选择包含该�
 tenant时按宿主SYSTEM管理门处理，插件仍须检查自身管理权限；不能靠资源可读或菜单
 可见授权保存。关闭统一RBAC时沿用宿主现有认证边界，插件管理接口必须自行保持关闭。
 
-宿主提供 `/ui/{tenant}/extensions/{id}/...` 根路由与菜单组。ESM导出contractVersion=1和
+宿主提供 `/ui/{tenant}/extensions/{id}/...` 根路由与独立 Extensions（扩展）菜单组，
+与 Resources 下的 Plugins 插件目录入口区分。ESM导出contractVersion=1和
 mount(container,context)，返回update／unmount。context提供tenant、根内路径、语言、
 解析后主题、styles、assetBase、AbortSignal及导航／同源request函数，不提供Vue、router、
 store、i18n实例或token。扩展自有ShadowRoot，只在根内装载styles，不向document注入

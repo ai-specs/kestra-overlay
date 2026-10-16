@@ -8,7 +8,8 @@ export async function runUiExtensionChecks(page, base, record = async () => {}) 
     try {
         await page.waitForSelector('a[href="/ui/main/extensions/host-probe"]', {state: 'attached'});
         const collapsed = await page.evaluate(() => Boolean(document.querySelector('a[href="/ui/main/extensions/host-probe"]')?.closest('[inert]')));
-        if (collapsed) await page.click('button.ks-sidebar-section__title:has-text("Plugins")');
+        await check('extension section is distinct from Plugins catalog', await page.evaluate(() => [...document.querySelectorAll('button.ks-sidebar-section__title')].some(button => button.textContent.trim() === 'Extensions') && ![...document.querySelectorAll('button.ks-sidebar-section__title')].some(button => button.textContent.trim() === 'Plugins')));
+        if (collapsed) await page.click('button.ks-sidebar-section__title:has-text("Extensions")');
         await page.waitForFunction(() => !document.querySelector('a[href="/ui/main/extensions/host-probe"]')?.closest('[inert]'));
         await page.hover('a[href="/ui/main/extensions/host-probe"]');
         await page.waitForFunction(() => {
