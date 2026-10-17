@@ -1078,8 +1078,9 @@ index 0fa89f5..e5059f1 100644
 +            final String toolName = System.getenv("MCP_CALL_TOOL");
 +            if (toolName != null && !toolName.isBlank()) {
 +                if ("true".equals(System.getenv("MCP_EXPECT_HIDDEN_CALL"))) {
-+                    assertThrows(io.modelcontextprotocol.spec.McpError.class, () -> client.callTool(
-+                        new io.modelcontextprotocol.spec.McpSchema.CallToolRequest(toolName, java.util.Map.of())));
++                    final var hiddenResult = client.callTool(
++                        new io.modelcontextprotocol.spec.McpSchema.CallToolRequest(toolName, java.util.Map.of()));
++                    assertTrue(Boolean.TRUE.equals(hiddenResult.isError()), "Hidden tool call must return an MCP error result");
 +                    return;
 +                }
 +                assertTrue(tools.stream().anyMatch(tool -> toolName.equals(tool.name())), "Fixture tool must exist before call");
