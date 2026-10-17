@@ -1064,10 +1064,10 @@ index 0000000..476b8e0
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
-index 0fa89f5..e5059f1 100644
+index 0fa89f5..37b39a4 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
-@@ -32,7 +32,20 @@ class McpSdkInstanceTest {
+@@ -32,7 +32,21 @@ class McpSdkInstanceTest {
          final var client = McpClient.sync(transport).requestTimeout(Duration.ofSeconds(15)).build();
          try {
              assertNotNull(client.initialize().protocolVersion());
