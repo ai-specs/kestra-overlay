@@ -38,8 +38,61 @@ index f1f7f73..4e74ab2 100644
 +        return new McpSession(tenantId, serverId, sessionId, sseNode, userId, true, clientId, resource, roles);
      }
  }
+diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
+index 1e70462..9cc2d6a 100644
+--- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
++++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
+@@ -35,6 +35,12 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+
+     private McpStreamableServerSession.Factory sessionFactory;
+
++    private java.util.function.Function<KestraMcpTransportContext, Mono<List<McpSchema.Tool>>> toolListProvider;
++
++    public void setToolListProvider(java.util.function.Function<KestraMcpTransportContext, Mono<List<McpSchema.Tool>>> provider) {
++        this.toolListProvider = java.util.Objects.requireNonNull(provider);
++    }
++
+     private final McpSessionService mcpSessionService;
+
+     private final AtomicBoolean isClosing = new AtomicBoolean(false);
+@@ -257,6 +263,9 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+             if (message instanceof McpSchema.JSONRPCNotification) {
+                 return Mono.just(HttpResponse.accepted());
+             }
++            if (message instanceof McpSchema.JSONRPCRequest listRequest && McpSchema.METHOD_TOOLS_LIST.equals(listRequest.method())) {
++                return listToolsResponse(listRequest, transportContext);
++            }
+             // Tool handlers are identical on every node — create a lightweight ephemeral session
+             // to process the request and stream the result back in this POST response body.
+             if (message instanceof McpSchema.JSONRPCRequest jsonrpcRequest) {
+@@ -290,6 +299,10 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+             );
+         }
+
++        if (message instanceof McpSchema.JSONRPCRequest listRequest && McpSchema.METHOD_TOOLS_LIST.equals(listRequest.method())) {
++            return listToolsResponse(listRequest, transportContext);
++        }
++
+         Mono<HttpResponse<?>> response = switch (message) {
+             case McpSchema.JSONRPCResponse jsonrpcResponse ->
+                 session.get().accept(jsonrpcResponse).then(Mono.just(HttpResponse.accepted()));
+@@ -310,6 +323,14 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+             .onErrorResume(Throwable.class, e -> mcpErrorResponseMapper.exceptionResponse(e, message));
+     }
+
++    private Mono<? extends HttpResponse<?>> listToolsResponse(McpSchema.JSONRPCRequest request, KestraMcpTransportContext context) {
++        return Mono.defer(() -> toolListProvider == null ? Mono.error(new IllegalStateException("Tool visibility provider is unavailable."))
++            : toolListProvider.apply(context))
++            .<HttpResponse<?>>map(tools -> HttpResponse.ok().contentType(MediaType.APPLICATION_JSON)
++                .body(new McpSchema.JSONRPCResponse(McpSchema.JSONRPC_VERSION, request.id(), new McpSchema.ListToolsResult(tools, null), null)))
++            .onErrorResume(failure -> mcpErrorResponseMapper.exceptionResponse(failure, request));
++    }
++
+     private Flux<Event<?>> buildSeeBody(McpStreamableServerSession session, McpSchema.JSONRPCRequest jsonrpcRequest) {
+         return Flux.create(sink ->
+         {
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-index c8d3137..7774bac 100644
+index c8d3137..e0091f6 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 @@ -39,6 +39,7 @@ public class McpServerHandlerTransport {
@@ -65,7 +118,14 @@ index c8d3137..7774bac 100644
      }
 
      /**
-@@ -78,7 +80,7 @@ public class McpServerHandlerTransport {
+@@ -75,10 +77,14 @@ public class McpServerHandlerTransport {
+                 mcpErrorResponseMapper,
+                 mcpSessionService
+             );
++            transportProvider.setToolListProvider(identity -> mcpToolService.visibleToolSpecs(
++                identity.getTenantId(), identity.getServerId(), accessControl.executableScope(
++                    identity.getUserId(), identity.getTenantId(), identity.getServerId()), identity)
++                .map(specs -> specs.stream().map(McpServerFeatures.AsyncToolSpecification::tool).toList()));
              servers.put(
                  handlerKey,
                  new ScopedServer(
@@ -74,7 +134,7 @@ index c8d3137..7774bac 100644
                  )
              );
              return transportProvider;
-@@ -104,7 +106,8 @@ public class McpServerHandlerTransport {
+@@ -104,7 +110,8 @@ public class McpServerHandlerTransport {
      }
 
      public Mono<Void> refreshTools(String tenantId, String serverId) {
@@ -84,35 +144,26 @@ index c8d3137..7774bac 100644
              .concatMap(key -> Optional.ofNullable(servers.get(key)).map(this::refreshTools).orElseGet(Mono::empty))
              .then();
      }
-@@ -147,7 +150,7 @@ public class McpServerHandlerTransport {
-     private Mono<Void> refreshTools(ScopedServer scopedServer) {
-         McpAsyncServer server = scopedServer.server();
-         List<McpServerFeatures.AsyncToolSpecification> newSpecs = mcpToolService.listToolSpecsForServer(
--            scopedServer.tenantId(), scopedServer.serverId(), scopedServer.scope()
-+            scopedServer.tenantId(), scopedServer.serverId(), scopedServer.scope(), scopedServer.identity()
-         );
-         Set<String> newToolNames = newSpecs.stream()
-             .map(spec -> spec.tool().name())
-@@ -192,12 +195,15 @@ public class McpServerHandlerTransport {
+@@ -192,13 +199,15 @@ public class McpServerHandlerTransport {
              }
          });
 
 -        return mcpServerSpec.tools(
 +        final var identity = KestraMcpTransportContext.builder().tenantId(handlerKey.tenantId()).serverId(handlerKey.serverId())
 +            .userId(handlerKey.userId()).clientId(handlerKey.clientId()).resource(handlerKey.resource()).scopes(handlerKey.capabilities()).roles(handlerKey.roles()).build();
-+        return mcpServerSpec.tools(capabilities.visible(identity) ?
++        List<McpServerFeatures.AsyncToolSpecification> list = capabilities.visible(identity) ?
              this.mcpToolService.listToolSpecsForServer(
                  handlerKey.tenantId(),
                  handlerKey.serverId(),
--                scope
+                 scope
 -            )
-+                scope,
-+                identity
-+            ) : List.of()
-         ).build();
+-        ).build();
++            ) : List.of();
++        return mcpServerSpec.tools(list).build();
      }
 
-@@ -233,6 +239,6 @@ public class McpServerHandlerTransport {
+     private record HandlerKey(
+@@ -233,6 +242,6 @@ public class McpServerHandlerTransport {
          McpAsyncServer server,
          AccessScope scope,
          String tenantId,
@@ -196,7 +247,7 @@ index 1e6fd7d..d0b340d 100644
 +    }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolService.java b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
-index 8c1d54b..89d8f73 100644
+index 8c1d54b..d7f296c 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 @@ -57,6 +57,7 @@ public class McpToolService {
@@ -224,26 +275,33 @@ index 8c1d54b..89d8f73 100644
          asyncToolSpecificationCache = Caffeine.newBuilder()
              .maximumSize(mcpConfig.toolCacheConfig().maximumSize())
              .expireAfterAccess(mcpConfig.toolCacheConfig().expireAfterAccess())
-@@ -110,6 +112,18 @@ public class McpToolService {
+@@ -110,6 +112,25 @@ public class McpToolService {
              ).toList();
      }
 
 +    public List<McpServerFeatures.AsyncToolSpecification> listToolSpecsForServer(String tenantId, String serverId,
 +        AccessScope scope, KestraMcpTransportContext context) {
-+        return fetchFlowWithMcpToolTrigger(tenantId, serverId).stream()
++        return visibleToolSpecs(tenantId, serverId, scope, context).blockOptional().orElse(List.of());
++    }
++
++    public Mono<List<McpServerFeatures.AsyncToolSpecification>> visibleToolSpecs(String tenantId, String serverId,
++        AccessScope scope, KestraMcpTransportContext context) {
++        if (!capabilities.visible(context)) return Mono.just(List.of());
++        return capabilities.evaluation(context, tenantId, () -> Mono.fromSupplier(() -> fetchFlowWithMcpToolTrigger(tenantId, serverId))
++            .flatMapMany(reactor.core.publisher.Flux::fromIterable)
 +            .filter(flow -> McpToolScope.allows(scope, flow.getNamespace()))
-+            .filter(flow -> capabilities.readable(context, tenantId, flow.getNamespace(), flow.getId()).blockOptional().orElse(false))
-+            .flatMap(flow -> flow.getTriggers().stream()
++            .filterWhen(flow -> capabilities.readable(context, tenantId, flow.getNamespace(), flow.getId()))
++            .flatMapIterable(flow -> flow.getTriggers().stream()
 +                .filter(isMcpTriggerTypeAndEnabledPredicate())
 +                .filter(trigger -> serverId.equals(Objects.requireNonNullElse(((McpToolTrigger) trigger).getMcpServer(), McpToolTrigger.DEFAULT_SERVER_ID)))
-+                .map(trigger -> getAsyncToolSpecification(flow, (McpToolTrigger) trigger)))
-+            .toList();
++                .map(trigger -> getAsyncToolSpecification(flow, (McpToolTrigger) trigger)).toList())
++            .collectList()).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
 +    }
 +
      private McpServerFeatures.AsyncToolSpecification getAsyncToolSpecification(Flow flow, McpToolTrigger toolTrigger) {
          ToolHandlerCacheKey toolHandlerCacheKey = new ToolHandlerCacheKey(flow, toolTrigger);
          return asyncToolSpecificationCache.get(
-@@ -144,6 +158,8 @@ public class McpToolService {
+@@ -144,6 +165,8 @@ public class McpToolService {
 
              KestraMcpTransportContext context = (KestraMcpTransportContext) exchange.transportContext();
 
@@ -252,7 +310,7 @@ index 8c1d54b..89d8f73 100644
              AccessScope callerScope = accessControl.executableScope(
                  context.getUserId(), context.getTenantId(), context.getServerId()
              );
-@@ -152,55 +168,79 @@ public class McpToolService {
+@@ -152,55 +175,79 @@ public class McpToolService {
                      "Rejecting MCP tool '{}' call for flow {}/{}/{}: caller '{}' cannot execute in that namespace",
                      toolTrigger.getToolName(), flow.getTenantId(), flow.getNamespace(), flow.getId(), context.getUserId()
                  );
@@ -367,7 +425,7 @@ index 8c1d54b..89d8f73 100644
          Flow resolvedFlow = processedFlow.flow() instanceof FlowWithException ? flow : processedFlow.flow();
          Execution forValidation = execution.withLabels(
              LabelService.forExecution(
-@@ -227,10 +267,7 @@ public class McpToolService {
+@@ -227,10 +274,7 @@ public class McpToolService {
              .build();
      }
 
@@ -379,7 +437,7 @@ index 8c1d54b..89d8f73 100644
              executionCommandQueue.emit(
                  Create.of(new ExecutionId(execution.getTenantId(), execution.getNamespace(), execution.getFlowId(), execution.getId(), execution.getFlowRevision()))
                      .withKind(execution.getKind())
-@@ -239,7 +276,10 @@ public class McpToolService {
+@@ -239,7 +283,10 @@ public class McpToolService {
                      .withInputs(execution.getInputs())
              );
              eventPublisher.publishEvent(CrudEvent.create(execution));
@@ -390,7 +448,7 @@ index 8c1d54b..89d8f73 100644
              String subscriberId = UUID.randomUUID().toString();
              return Flux.<Event<Execution>> create(
                  emitter -> streamingService.registerSubscriber(
-@@ -253,9 +293,7 @@ public class McpToolService {
+@@ -253,9 +300,7 @@ public class McpToolService {
                  .last()
                  .map(Event::getData)
                  .doFinally(signalType -> streamingService.unregisterSubscriber(execution.getId(), subscriberId));
@@ -648,6 +706,144 @@ index d7b4499..2c2d632 100644
              throw new IllegalArgumentException("invalid_client_metadata");
          }
          if (request.containsKey("client_name")
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
+new file mode 100644
+index 0000000..3e30eb9
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
+@@ -0,0 +1,132 @@
++package io.kestra.mcp;
++
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.repositories.ArrayListTotal;
++import io.kestra.core.services.ExecutionOutputService;
++import io.kestra.core.services.ExecutionStreamingService;
++import io.kestra.core.runners.FlowInputOutput;
++import io.kestra.core.runners.FlowMetaStoreInterface;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.kestra.plugin.core.trigger.McpToolTrigger;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.kestra.webserver.rbac.*;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.data.model.Page;
++import io.micronaut.http.*;
++import io.modelcontextprotocol.spec.McpSchema;
++import io.modelcontextprotocol.spec.McpStreamableServerSession;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++class McpDynamicToolListTest {
++    static <Bean> BeanProvider<Bean> bean(Bean value) {
++        return new BeanProvider<>() {
++            public Bean get() { return value; }
++            public boolean isPresent() { return value != null; }
++            public boolean isUnique() { return value != null; }
++        };
++    }
++
++    @Test
++    void shouldUseOneFreshSnapshotForEveryListAndKeepIdentitiesSeparate() {
++        var begins = new AtomicInteger();
++        var closes = new AtomicInteger();
++        var visibleNamespace = new AtomicReference<>("team.a");
++        AuthorizationEvaluationProviderV1 provider = (principal, tenant) -> {
++            begins.incrementAndGet();
++            String snapshot = principal.subject().equals("alice") ? visibleNamespace.get() : "team.b";
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public java.util.concurrent.CompletionStage<Decision> authorize(Operation operation) {
++                    visibleNamespace.set("team.b");
++                    return CompletableFuture.completedFuture(snapshot.equals(operation.namespace())
++                        ? Decision.allow(QueryDomain.unrestricted()) : Decision.deny("outside snapshot"));
++                }
++                public java.util.concurrent.CompletionStage<Void> close() {
++                    closes.incrementAndGet();
++                    return CompletableFuture.completedFuture(null);
++                }
++            });
++        };
++        var configuration = new RbacConfiguration(true, false);
++        var typed = new TypedAuthorizationGate(bean(null), new AuthorizationEvaluations(true, configuration, true, bean(provider)));
++        var capabilities = new McpCapabilityGate(true, true, false, bean(null), configuration, new RbacGate(bean(null), typed, true));
++        var repository = mock(FlowRepositoryInterface.class);
++        var flows = List.of(flow("team.a", "first"), flow("team.b", "second"));
++        when(repository.findWithNoAcl(any(), eq("main"), eq(McpToolTrigger.class))).thenReturn(new ArrayListTotal<>(flows, flows.size()));
++        var mapper = mock(FlowToolSchemaMapper.class);
++        when(mapper.buildTool(any(), any())).thenAnswer(call -> McpSchema.Tool.builder().name(((Flow) call.getArgument(0)).getId()).build());
++        var service = new McpToolService(mock(DispatchQueueInterface.class), repository, mapper,
++            mock(ExecutionStreamingService.class), event -> {}, new McpConfig(new McpConfig.ToolCacheConfig(10L, Duration.ofMinutes(5)), null, Duration.ofSeconds(5)),
++            mock(FlowInputOutput.class), mock(FlowMetaStoreInterface.class), mock(ExecutionOutputService.class), new DefaultMcpToolAccessControl(), capabilities);
++        assertThat(service.visibleToolSpecs("main", "default", io.kestra.core.models.AccessScope.global(), identity("alice")).block())
++            .extracting(spec -> spec.tool().name()).containsExactly("first");
++        assertThat(service.visibleToolSpecs("main", "default", io.kestra.core.models.AccessScope.global(), identity("alice")).block())
++            .extracting(spec -> spec.tool().name()).containsExactly("second");
++        assertThat(service.visibleToolSpecs("main", "default", io.kestra.core.models.AccessScope.global(), identity("bob")).block())
++            .extracting(spec -> spec.tool().name()).containsExactly("second");
++        assertThat(begins.get()).isEqualTo(3);
++        assertThat(closes.get()).isEqualTo(3);
++    }
++
++    @Test
++    void shouldReturnDynamicListForLocalAndRemoteSessionsAndKeepRequestId() {
++        for (boolean remote : List.of(false, true)) {
++            var sessions = mock(McpSessionService.class);
++            when(sessions.findMcpStreamableServerSession(any())).thenReturn(remote ? Optional.empty() : Optional.of(mock(McpStreamableServerSession.class)));
++            when(sessions.sessionExists(any())).thenReturn(remote);
++            var transport = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(), sessions);
++            var count = new AtomicInteger();
++            transport.setToolListProvider(context -> Mono.just(count.getAndIncrement() == 0 ? List.of(McpSchema.Tool.builder().name("first").build()) : List.of()));
++            try {
++                var first = transport.handleRequest(request("tools/list", "request-1"), identity("alice")).block();
++                org.assertj.core.api.Assertions.assertThat(first.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
++                var result = (McpSchema.JSONRPCResponse) first.body();
++                assertThat(result.id()).isEqualTo("request-1");
++                assertThat(((McpSchema.ListToolsResult) result.result()).tools()).extracting(McpSchema.Tool::name).containsExactly("first");
++                var second = (McpSchema.JSONRPCResponse) transport.handleRequest(request("tools/list", "request-2"), identity("alice")).block().body();
++                assertThat(((McpSchema.ListToolsResult) second.result()).tools()).isEmpty();
++            } finally { transport.closeGracefully().block(); }
++        }
++    }
++
++    @Test
++    void shouldRejectMissingSessionAndMissingVisibilityProvider() {
++        var sessions = mock(McpSessionService.class);
++        when(sessions.findMcpStreamableServerSession(any())).thenReturn(Optional.empty());
++        var transport = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(), sessions);
++        try {
++            org.assertj.core.api.Assertions.assertThat(transport.handleRequest(request("tools/list", "request"), identity("alice")).block().getStatus().getCode()).isEqualTo(HttpStatus.NOT_FOUND.getCode());
++            when(sessions.sessionExists(any())).thenReturn(true);
++            var response = transport.handleRequest(request("tools/list", "request"), identity("alice")).block();
++            org.assertj.core.api.Assertions.assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.getCode());
++            assertThat(((McpSchema.JSONRPCResponse) response.body()).id()).isEqualTo("request");
++        } finally { transport.closeGracefully().block(); }
++    }
++
++    private static MutableHttpRequest<String> request(String method, String id) {
++        return HttpRequest.POST("/mcp", "{\"jsonrpc\":\"2.0\",\"method\":\"" + method + "\",\"id\":\"" + id + "\",\"params\":{}}")
++            .accept(MediaType.APPLICATION_JSON_TYPE, MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id", "session");
++    }
++
++    private static KestraMcpTransportContext identity(String subject) {
++        return KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId("session").userId(subject)
++            .clientId("client").resource("resource").roles(List.of()).scopes(List.of(McpCapabilityGate.FLOW_READ)).build();
++    }
++
++    private static Flow flow(String namespace, String name) {
++        return Flow.builder().tenantId("main").namespace(namespace).id(name).tasks(List.of())
++            .triggers(List.of(McpToolTrigger.builder().id("tool").type(McpToolTrigger.class.getName()).toolName(name).build())).build();
++    }
++}
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
 new file mode 100644
 index 0000000..b3caed8
