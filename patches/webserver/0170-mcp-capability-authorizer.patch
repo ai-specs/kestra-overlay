@@ -39,7 +39,7 @@ index f1f7f73..4e74ab2 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-index 1e70462..9cc2d6a 100644
+index 1e70462..bdf3d4c 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
 +++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
 @@ -35,6 +35,12 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
@@ -76,11 +76,16 @@ index 1e70462..9cc2d6a 100644
          Mono<HttpResponse<?>> response = switch (message) {
              case McpSchema.JSONRPCResponse jsonrpcResponse ->
                  session.get().accept(jsonrpcResponse).then(Mono.just(HttpResponse.accepted()));
-@@ -310,6 +323,14 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+@@ -310,6 +323,19 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
              .onErrorResume(Throwable.class, e -> mcpErrorResponseMapper.exceptionResponse(e, message));
      }
 
 +    private Mono<? extends HttpResponse<?>> listToolsResponse(McpSchema.JSONRPCRequest request, KestraMcpTransportContext context) {
++        if (request.params() != null && (!(request.params() instanceof java.util.Map<?, ?> parameters)
++            || parameters.get("cursor") != null)) {
++            return mcpErrorResponseMapper.exceptionResponse(McpError.builder(McpSchema.ErrorCodes.INVALID_PARAMS)
++                .message("Tool lists are returned without pagination; cursor must be absent.").build(), request);
++        }
 +        return Mono.defer(() -> toolListProvider == null ? Mono.error(new IllegalStateException("Tool visibility provider is unavailable."))
 +            : toolListProvider.apply(context))
 +            .<HttpResponse<?>>map(tools -> HttpResponse.ok().contentType(MediaType.APPLICATION_JSON)

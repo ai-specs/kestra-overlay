@@ -312,6 +312,10 @@ fixture/SDK 实例测试按预期跳过，零失败；UI 构建与认证单测�
 
 usage HTTP 入口必须使用 tenant 报告方法，不能调用面向后台采集的全实例报告。tenant
 报告的 Flow 查询和 Execution statistics 查询分别消费现有 namespace ACL。MCP server
+2026-10-17 组合反馈发现评估模式的 MCP 工具注册遗漏评估边界，列表全空。0170 修复
+候选对每次已验证 session 的列表建立短期评估，直接输出本次快照的可见 schema，不从
+SDK 注册表复用可见性；调用处理器仍由独立 tools/call 授权。发布及组合复验尚未通过。
+
 工具列表实际读取的是 Flow，typed adapter 必须把它分类为完整 Flow 查询。服务配置的
 READ/LIST 与 CREATE/UPDATE/DELETE 是不同授权，不因工具列表允许而授予配置写权限。
 REQ-0300 提案、发布与组合验收状态见 `r-ee-rbac.md`；本节只说明机制，不作为通过证据。

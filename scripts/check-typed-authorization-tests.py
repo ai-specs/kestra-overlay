@@ -39,6 +39,13 @@ if int(mcp_evaluation.attrib["tests"]) != 3 or any(
     raise SystemExit("FAIL: McpEvaluationLifecycleTest must execute 3 tests without failures or skips")
 print("PASS: McpEvaluationLifecycleTest: 3 tests executed, no failures or skips")
 
+dynamic_tools = ET.parse(results / "TEST-io.kestra.mcp.McpDynamicToolListTest.xml").getroot()
+if int(dynamic_tools.attrib["tests"]) != 3 or any(
+    int(dynamic_tools.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
+):
+    raise SystemExit("FAIL: McpDynamicToolListTest must execute 3 tests without failures or skips")
+print("PASS: McpDynamicToolListTest: 3 tests executed, no failures or skips")
+
 for suite, expected in {"UiExtensionRegistryTest": 5, "UiExtensionControllerTest": 4, "UiExtensionHttpTest": 1}.items():
     report = ET.parse(results / f"TEST-io.kestra.webserver.ui.{suite}.xml").getroot()
     if int(report.attrib["tests"]) != expected or any(int(report.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")):

@@ -58,7 +58,7 @@ echo "== scoped OIDC acceptance tests =="
 python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
-  --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest \
+  --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest --tests io.kestra.mcp.McpDynamicToolListTest \
   --tests 'io.kestra.webserver.ui.*' --console=plain)
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 
