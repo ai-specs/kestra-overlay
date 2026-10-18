@@ -398,3 +398,12 @@ predicate 保持(namespace,id)关联。无 ID 列的 JDBC 资源只对 RESTRICTE
 
 目录可信身份先读后写，写事务持锁复核当前状态；token 内部目录、账号版本和 JWK
 读取复用事务连接。公开目录/身份接口不接收 JDBC Connection，不把连接带出短事务。
+
+### 应用项目宿主发布状态（2026-10-18）
+
+上述应用项目机制及目录迁移数据源修正已在 `4b017f6` 的正式 CI
+[39087229293](https://github.com/ai-specs/kestra-overlay/actions/runs/39087229293) 通过，
+镜像已推广为 `sha256:ba19764bf232306e6501c5226af015d3e18d006da75a4e96a55c6baecee457af`。
+先前段落中的“候选／未发布”描述提案与实施时状态；本条只确认指定提交的宿主公开机制、
+镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
+使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。

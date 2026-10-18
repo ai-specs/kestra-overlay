@@ -214,3 +214,12 @@ PostgreSQL 与最多一个活动连接的受限 DataSource，不将连接暴露�
 签发和 refresh 在同一连接核对 active client 注册范围，项目项继续按 member 上界
 解释。目录 namespace 与 opaque resource ID 在公开构造边界严格校验，非法共享
 意图不得保存后再交由插件拒绝。上述均为未发布候选的必要拒绝语义。
+
+### 应用项目宿主发布状态（2026-10-18）
+
+上述应用项目机制及目录迁移数据源修正已在 `4b017f6` 的正式 CI
+[39087229293](https://github.com/ai-specs/kestra-overlay/actions/runs/39087229293) 通过，
+镜像已推广为 `sha256:ba19764bf232306e6501c5226af015d3e18d006da75a4e96a55c6baecee457af`。
+先前段落中的“候选／未发布”描述提案与实施时状态；本条只确认指定提交的宿主公开机制、
+镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
+使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。

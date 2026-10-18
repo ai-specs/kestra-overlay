@@ -580,11 +580,13 @@ Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
 - [OIDC 服务与首次安装契约](docs/r-oidc-server.md)
 - [R-EE-RBAC 扩展边界](docs/r-ee-rbac.md)
 
-## 应用项目公开契约候选（未发布）
+## 应用项目公开契约
 
-本节对应隔离候选源码，不属于上文已发布镜像的能力承诺。必须先由宿主完成 CI、镜像级
-OIDC/MCP 黑盒与镜像发布，消费扩展再从该正式镜像取得编译输入。不得从相邻开发树或
-候选 executable 编译正式插件 jar。实际部署还须执行 Compose 与真实浏览器验收。
+本节宿主机制已随 `4b017f6` 通过正式 CI [39087229293](https://github.com/ai-specs/kestra-overlay/actions/runs/39087229293)，
+包含 MCP、OIDC 和浏览器镜像黑盒，且已推广发布。镜像摘要为
+`sha256:ba19764bf232306e6501c5226af015d3e18d006da75a4e96a55c6baecee457af`。
+这是指定提交的宿主发布证据；独立插件与部署组合仍须分别通过验收。消费扩展必须从
+兼容正式镜像取得编译输入，不得从相邻开发树或候选 executable 编译正式插件 jar。
 
 宿主只维护共享身份目录与 scope 的语义上界，不保存插件本地 grants。公开 classpath
 接口为 `io.kestra.webserver.oidc.ApplicationDirectoryV1`、`TrustedIdentityV1` 和
@@ -653,7 +655,7 @@ client 批准、subject 授予和登录，不得给旧名称增加权限后复�
 项目目录会推进 epoch，每次后续写入前可能都需要重新登录。旧 refresh token 不能
 恢复旧授权。宿主不替插件执行本地策略恢复，也不承诺跨数据库原子事务。
 
-### 本地 CLI 首次激活计划（候选）
+### 本地 CLI 首次激活计划
 
 `io.kestra.webserver.oidc.projects.ApplicationDirectoryCommand` 只用于宿主本地的受信
 维护过程，不提供 HTTP 引导入口。需要已经完成 OIDC 首装的数据库、原安装凭据文件、
@@ -720,7 +722,7 @@ java -cp /app/kestra io.kestra.webserver.oidc.projects.ApplicationDirectoryComma
 必须重新登录。失败回滚不能开放匿名引导。此命令不创建永久 subject 管理员豁免。
 CLI 入口与目录组件已有本地探针；容器内完整 CLI、浏览器引导及最终组合仍须发布验收。
 
-### ID 查询域的首版适配范围（候选）
+### ID 查询域的首版适配范围
 
 | 消费入口 | 受限 resource ID |
 |---|---|
