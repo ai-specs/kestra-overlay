@@ -1,0 +1,111 @@
+# 需求: REQ-0365 MCP调用异常安全诊断helper与独立测试
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；本地候选，未发布
+# 来源: 新写；BASE 172dd0f3760fb1255d3b22bd1fd07ce31b173fa3 + overlay d63518ca39b4093dbbbd0c8dca3b84aba6a4c5bc按需求顺序提交；0170原fallback最小激活；本轮wrong-project允许调用失败证据
+# 触达上游文件: 新增McpCallDiagnostic与独立McpCallDiagnosticTest，共2文件
+# 移除条件: 上游提供等价MCP调用安全异常诊断
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpCallDiagnostic.java b/webserver/src/main/java/io/kestra/mcp/McpCallDiagnostic.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..48407e42a3bd8c5c557cfe0706f84e16696f3620
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/mcp/McpCallDiagnostic.java
+@@ -0,0 +1,24 @@
++package io.kestra.mcp;
++
++import java.util.Arrays;
++import java.util.stream.Collectors;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++final class McpCallDiagnostic {
++    private static final Logger LOGGER = LoggerFactory.getLogger(McpCallDiagnostic.class);
++
++    private McpCallDiagnostic() {
++    }
++
++    static void record(Throwable failure) {
++        String frames = Arrays.stream(failure.getStackTrace()).limit(12)
++            .map(frame -> symbol(frame.getClassName()) + "." + symbol(frame.getMethodName()) + ":" + frame.getLineNumber())
++            .collect(Collectors.joining(","));
++        LOGGER.warn("MCP_TOOL_CALL_FAILED exception={} frames={}", symbol(failure.getClass().getName()), frames);
++    }
++
++    private static String symbol(String value) {
++        return value.length() <= 200 && value.matches("[A-Za-z0-9_.$<>]+") ? value : "redacted";
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpCallDiagnosticTest.java b/webserver/src/test/java/io/kestra/mcp/McpCallDiagnosticTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb9d1af8ac8ee141a1a1e89c89b4d7c640a12e9b
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpCallDiagnosticTest.java
+@@ -0,0 +1,69 @@
++package io.kestra.mcp;
++
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.function.BiFunction;
++import ch.qos.logback.classic.Logger;
++import ch.qos.logback.classic.LoggerContext;
++import ch.qos.logback.classic.PatternLayout;
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.core.read.ListAppender;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.plugin.core.trigger.McpToolTrigger;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.modelcontextprotocol.server.McpAsyncServerExchange;
++import io.modelcontextprotocol.spec.McpSchema;
++import org.junit.jupiter.api.Test;
++import org.slf4j.LoggerFactory;
++import reactor.core.publisher.Mono;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++class McpCallDiagnosticTest {
++    @Test
++    @SuppressWarnings("unchecked")
++    void shouldRenderSafeDiagnosticAndKeepGenericFallbackWhenCallFails() throws Exception {
++        String secret = "malicious-secret\nFORGED_LOG";
++        var failure = new IllegalStateException(secret, new RuntimeException(secret));
++        failure.addSuppressed(new RuntimeException(secret));
++        failure.setStackTrace(new StackTraceElement[]{new StackTraceElement("io.kestra.Safe", "invoke", secret, 42)});
++        var gate = mock(McpCapabilityGate.class);
++        when(gate.evaluation(any(), anyString(), any())).thenReturn(Mono.error(failure));
++        var service = new McpToolService(null, null, null, null, null,
++            new McpConfig(new McpConfig.ToolCacheConfig(10L, Duration.ofMinutes(1)), null, Duration.ofSeconds(5)),
++            null, null, null, null, gate);
++        var flow = Flow.builder().tenantId("main").namespace("test").id("controlled").tasks(List.of()).build();
++        var trigger = McpToolTrigger.builder().id("tool").toolName("tool").build();
++        var method = McpToolService.class.getDeclaredMethod("buildCallHandler", Flow.class, McpToolTrigger.class);
++        method.setAccessible(true);
++        var handler = (BiFunction<McpAsyncServerExchange, McpSchema.CallToolRequest, Mono<McpSchema.CallToolResult>>) method.invoke(service, flow, trigger);
++        var exchange = mock(McpAsyncServerExchange.class);
++        when(exchange.transportContext()).thenReturn(KestraMcpTransportContext.builder().tenantId("main").build());
++        Logger logger = (Logger) LoggerFactory.getLogger(McpCallDiagnostic.class);
++        var appender = new ListAppender<ILoggingEvent>();
++        appender.setContext(logger.getLoggerContext());
++        appender.start();
++        logger.addAppender(appender);
++        try {
++            var result = handler.apply(exchange, new McpSchema.CallToolRequest("tool", Map.of("secret", secret))).block();
++            assertThat(result.isError()).isTrue();
++            assertThat(result.content()).containsExactly(new McpSchema.TextContent("Failed to execute flow"));
++            assertThat(appender.list).hasSize(1);
++            var event = appender.list.getFirst();
++            assertThat(event.getThrowableProxy()).isNull();
++            var layout = new PatternLayout();
++            layout.setContext((LoggerContext) LoggerFactory.getILoggerFactory());
++            layout.setPattern("%level %msg%n%ex");
++            layout.start();
++            String rendered = layout.doLayout(event);
++            layout.stop();
++            assertThat(rendered).contains("MCP_TOOL_CALL_FAILED", "exception=java.lang.IllegalStateException", "io.kestra.Safe.invoke:42")
++                .doesNotContain("malicious-secret", "FORGED_LOG", "Caused by", "Suppressed");
++        } finally {
++            logger.detachAppender(appender);
++            appender.stop();
++        }
++    }
++}

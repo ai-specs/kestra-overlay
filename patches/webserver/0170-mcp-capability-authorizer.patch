@@ -5,6 +5,8 @@
 # 触达上游文件: 15 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 # 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
+# 诊断维护: 最终fallback前调用0365独立安全诊断helper；保持原响应和权限；以真实需求提交重新生成
+# 输入: BASE 172dd0f3760fb1255d3b22bd1fd07ce31b173fa3；overlay d63518ca39b4093dbbbd0c8dca3b84aba6a4c5bc原0170加最小诊断钩子
 diff --git a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
 index f1f7f730c5fa5f5b647f760ac4e2031ba2041f97..4e74ab21e566f08c33b5da06cfda036b69c393cb 100644
 --- a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
@@ -268,7 +270,7 @@ index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e
 +    }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolService.java b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
-index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b696381db2c58 100644
+index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..8d53adabfd316ae579598ce60c0c36906f56afb8 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 @@ -57,6 +57,7 @@ public class McpToolService {
@@ -331,7 +333,7 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b6963
              AccessScope callerScope = accessControl.executableScope(
                  context.getUserId(), context.getTenantId(), context.getServerId()
              );
-@@ -152,55 +175,79 @@ public class McpToolService {
+@@ -152,55 +175,80 @@ public class McpToolService {
                      "Rejecting MCP tool '{}' call for flow {}/{}/{}: caller '{}' cannot execute in that namespace",
                      toolTrigger.getToolName(), flow.getTenantId(), flow.getNamespace(), flow.getId(), context.getUserId()
                  );
@@ -383,7 +385,6 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b6963
 -                        return Mono.error(e);
 -                    }
 -                })
--                .onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
 +                return capabilities.outputs(context, tenant, flow.getNamespace(), execution.getId()).flatMap(outputsAllowed -> {
 +                if (!outputsAllowed) return Mono.just(new PreparedCall(null, FORBIDDEN_CALL_TOOL_RESULT));
 +                return io.kestra.core.repositories.AuthorizationEvaluationContext.call(() -> FlowMetaStores.findForRuntimeOrRaw(flowMetaStore, flow))
@@ -426,7 +427,8 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b6963
 +                                    .isError(!executionResult.getState().isSuccess()).build();
 +                            });
 +                        })));
-+            }).onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
++            }).doOnError(Exception.class, McpCallDiagnostic::record)
+                 .onErrorReturn(Exception.class, FLOW_ERROR_CALL_TOOL_RESULT);
          };
      }
 
@@ -446,7 +448,7 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b6963
          Flow resolvedFlow = processedFlow.flow() instanceof FlowWithException ? flow : processedFlow.flow();
          Execution forValidation = execution.withLabels(
              LabelService.forExecution(
-@@ -227,10 +274,7 @@ public class McpToolService {
+@@ -227,10 +275,7 @@ public class McpToolService {
              .build();
      }
 
@@ -458,7 +460,7 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b6963
              executionCommandQueue.emit(
                  Create.of(new ExecutionId(execution.getTenantId(), execution.getNamespace(), execution.getFlowId(), execution.getId(), execution.getFlowRevision()))
                      .withKind(execution.getKind())
-@@ -239,7 +283,10 @@ public class McpToolService {
+@@ -239,7 +284,10 @@ public class McpToolService {
                      .withInputs(execution.getInputs())
              );
              eventPublisher.publishEvent(CrudEvent.create(execution));
@@ -469,7 +471,7 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b6963
              String subscriberId = UUID.randomUUID().toString();
              return Flux.<Event<Execution>> create(
                  emitter -> streamingService.registerSubscriber(
-@@ -253,9 +300,7 @@ public class McpToolService {
+@@ -253,9 +301,7 @@ public class McpToolService {
                  .last()
                  .map(Event::getData)
                  .doFinally(signalType -> streamingService.unregisterSubscriber(execution.getId(), subscriberId));

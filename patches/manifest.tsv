@@ -22,7 +22,7 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0134	0134-oidc-public-registration.patch	core	—（R-OIDC-SERVER 协议能力）	RFC7591 public client 动态注册;无secret+S256,开关/安全回调/元数据/并发注册总量限制	4	新写;RFC7591+OIDC Registration 1.0+RFC7636	上游 OSS 提供等价动态注册或 R-OIDC-SERVER 弃用
 0150	0150-oidc-owned-consent.patch	core	—（R-OIDC-SERVER patch 路线）	用户归属 pending→consent 原子绑定、scope收窄与旧client生命周期	16	公开机制在4b017f6通过CI39087229293并发布	上游 OSS 提供等价 owner/consent 生命周期或 R-OIDC-SERVER 弃用
 0160	0160-mcp-resource-bearer.patch	core	—（R-OIDC-SERVER/MCP认证面）	canonical MCP resource/audience、resource-bound code/token/refresh、Bearer、metadata、可信身份与缓存隔离；可信roles经认证/context传递	24	公开机制在4b017f6通过CI39087229293并发布	上游 OSS 提供等价 MCP OAuth2 资源认证或 R-OIDC-SERVER 弃用
-0170	0170-mcp-capability-authorizer.patch	core	ai-specs/kestra-plugin-rbac / MCP协议层	复合 flows:read+executions:write scope、typed READ/EXECUTE gate、fail-closed Authorizer、session主体隔离；统一RBAC SPI衔接、实际runtime声明依赖计划与roles隔离、动态工具列表评估	18	公开机制在4b017f6通过CI39087229293并发布	上游提供等价 MCP scope/执行授权或 R-EE-RBAC 衔接面弃用
+0170	0170-mcp-capability-authorizer.patch	core	ai-specs/kestra-plugin-rbac / MCP协议层	复合 flows:read+executions:write scope、typed READ/EXECUTE gate、fail-closed Authorizer、session主体隔离；统一RBAC SPI衔接、实际runtime声明依赖计划与roles隔离、动态工具列表评估、原异常fallback安全诊断钩子	18	原机制在4b017f6通过CI39087229293并发布;诊断钩子本地候选未发布	上游提供等价 MCP scope/执行授权或 R-EE-RBAC 衔接面弃用
 0180	0180-mcp-oauth-only.patch	core	—（MCP认证面）	MCP OAuth-only API/UI与非OIDC模式失败关闭	8	新写;维护者OAuth-only裁决	上游提供等价OAuth-only MCP或本需求弃用
 0190	0190-oidc-owner-management-rate.patch	core	—（R-OIDC-SERVER）	owner分页管理/单次交互撤销/有界清理/共享DB注册限速	9	新写;RFC6749/7591+OWASP CSRF;维护者批准重编号0190;本轮稳定需求边界重建	上游提供等价生命周期或R-OIDC-SERVER弃用
 0200	0200-client-secret-hash.patch	core	—（R-OIDC-SERVER）	confidential client版本化PBKDF2哈希/启动历史secret迁移/真实DI与PG验证	7	新写;RFC6749+PBKDF2-HMAC-SHA256	上游提供等价secret安全存储或R-OIDC-SERVER弃用
@@ -47,3 +47,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0362	0362-application-project.patch	core	ai-specs/kestra-plugin-rbac	可信身份、通用关联查询与独立安全探针	12	公开机制在4b017f6通过CI39087229293并发布	上游提供等价公开项目身份与授权机制
 0363	0363-application-project.patch	core	ai-specs/kestra-plugin-rbac	共享身份目录、显式引导与迁移；不含本地grants	9	公开机制在4b017f6通过CI39087229293并发布	上游提供等价公开项目身份与授权机制
 0364	0364-directory-migration-datasource.patch	core	ai-specs/kestra-plugin-rbac	解包contextual数据源并实际执行无请求上下文目录迁移	2	目录迁移在4b017f6通过CI39087229293镜像验收并发布	上游提供等价目录迁移数据源处理
+0365	0365-mcp-call-safe-diagnostic.patch	core	ai-specs/kestra-plugin-rbac	新增MCP安全异常诊断helper与真实Logback格式化探针	2	主控接收;本地候选未发布	上游提供等价MCP调用安全异常诊断

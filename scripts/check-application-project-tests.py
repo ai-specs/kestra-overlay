@@ -4,6 +4,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 REQUIRED = {
+    "io.kestra.mcp.McpCallDiagnosticTest": 1,
     "io.kestra.webserver.oidc.ApplicationDirectoryV1Test": 7,
     "io.kestra.webserver.oidc.TrustedIdentityV1Test": 1,
     "io.kestra.webserver.oidc.ProjectScopeIssuanceTest": 4,

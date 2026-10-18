@@ -655,3 +655,40 @@ UI audience 和无请求上下文必须拒绝。MCP 当前请求优先消费 Bea
 先前段落中的“候选／未发布”描述提案与实施时状态；本条只确认指定提交的宿主公开机制、
 镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
 使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。
+
+### REQ-0365 MCP 调用异常安全诊断（主控接收，本地候选，未发布）
+
+消费项目为 `ai-specs/kestra-plugin-rbac`。2026-10-18 部署仓使用宿主 `d63518c`
+及插件 `9715def` 执行真实组合验收：56 项 REST 检查通过，但 security 的
+`wrong-project` 允许基线在 `main-tool-call-response` 返回 HTTP 200，JSON-RPC
+result 为 `isError:true`、`Failed to execute flow`。这只能证明工具调用链进入异常
+fallback，不能证明插件拒绝，也不能据此修改授权。原始证据入口为部署仓本轮
+`ego-progress.json` 指向报告中的该 check/step；报告不得包含凭据。
+
+现有 `McpToolService` 最终 `onErrorReturn` 静默替换异常；输入拒绝的 DEBUG 日志和
+协议错误映射均不能说明该异常的来源。Logback formatter 会渲染传入的 Throwable，
+直接记录异常可能泄露 message、cause 或 suppressed 中的秘密。按既有 R-EE-RBAC
+的 MCP 执行激活点缺陷接收最小诊断，不增加 SPI、配置或响应字段。
+
+0170 在原最终异常 fallback 前调用独立安全诊断 helper；0365 只新增 helper 和测试，
+发送 WARN 事件 `MCP_TOOL_CALL_FAILED`，记录异常类名及最多 12 个 class/method/line
+栈位置。符号限定字符集和长度，不记录
+异常 message、Throwable、cause、suppressed、文件名、请求参数、token、输入输出、
+Flow 全文或身份。不插入阶段状态，不包装或重构调用链；诊断保持现有授权、队列和通用响应。
+宿主负责事件生成与脱敏；插件负责业务策略，部署仓负责真实调用和最终根因裁决。
+
+兼容性不改变公开 Java 契约、MCP schema 或开关。升级时只适配最终异常 fallback 激活点；
+上游提供等价安全诊断后移除补丁。异常继续失败关闭，拒绝不增加权限。
+宿主独立测试通过完整 handler 注入带恶意 message/cause/suppressed/文件名的异常，
+使用真实 Logback formatter 检查事件可定位且秘密不输出，并核对原响应不变。
+本地检查不代表 CI 或镜像已发布。正式宿主发布后，部署仓必须重跑允许调用、拒绝分类
+和无副作用检查，用实际诊断定位异常；不得把新增诊断本身计为业务修复。
+
+主控已拒绝插入阶段状态的旧候选，收窄为维护 0170 原激活点并新增独立 helper。
+旧候选只作为失败检查证据保留，不作为当前实现或发布输入。当前两个补丁必须由各自
+真实需求提交生成，并在干净 BASE 上顺序重放及通过结构门；不得豁免重叠规则。
+
+2026-10-18 收窄候选本地检查：诊断、MCP 评估生命周期和执行门共 5 项定向测试通过，
+无失败或跳过；结构门无跨补丁重叠，37 个补丁从固定 BASE 顺序应用成功。
+相对 `d63518c` 的实际宿主源码只改变最终 fallback 的诊断调用并新增 helper/测试。
+这些结果不代表正式 CI、镜像发布或真实 MCP 执行通过。
