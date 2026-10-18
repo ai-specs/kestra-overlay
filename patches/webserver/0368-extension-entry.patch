@@ -4,6 +4,7 @@
 # 来源：新写；独立逐需求提交 540815166f51fb7a2422ef5d6e3371b283c66c45
 # 触达上游文件：16 个
 # 移除条件：上游提供等价认证发现和条件安全壳层
+# CI修正来源：da41e28；App测试清理自身uid，不放宽共享状态泄漏门。
 diff --git a/ui/src/components/extensions/ExtensionFallbackLayout.vue b/ui/src/components/extensions/ExtensionFallbackLayout.vue
 new file mode 100644
 index 0000000..6383012
@@ -230,7 +231,7 @@ index 0000000..6989fb1
 +}
 diff --git a/ui/src/extensions/app-entry.spec.ts b/ui/src/extensions/app-entry.spec.ts
 new file mode 100644
-index 0000000..7cf7fbd
+index 0000000..e0f8a8a
 --- /dev/null
 +++ b/ui/src/extensions/app-entry.spec.ts
 @@ -0,0 +1,85 @@
@@ -274,7 +275,7 @@ index 0000000..7cf7fbd
 +
 +let wrapper: ReturnType<typeof mount>;
 +beforeEach(() => {setExtensionFallback(); localStorage.clear();});
-+afterEach(() => wrapper?.unmount());
++afterEach(() => {wrapper?.unmount(); localStorage.clear();});
 +
 +async function render(reduced: boolean) {
 +    const pinia = createPinia();
