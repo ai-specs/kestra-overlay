@@ -46,3 +46,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0361	0361-application-project.patch	core	ai-specs/kestra-plugin-rbac	显式UI selector签发交集；不授本地grants	2	独立本地定向检查通过；CI与镜像发布待验证	上游提供等价项目 scope selector
 0362	0362-application-project.patch	core	ai-specs/kestra-plugin-rbac	可信身份、通用关联查询与独立安全探针	12	独立本地定向检查通过；CI与镜像发布待验证	上游提供等价公开项目身份与授权机制
 0363	0363-application-project.patch	core	ai-specs/kestra-plugin-rbac	共享身份目录、显式引导与迁移；不含本地grants	9	独立本地定向检查通过；CI与镜像发布待验证	上游提供等价公开项目身份与授权机制
+0364	0364-directory-migration-datasource.patch	core	ai-specs/kestra-plugin-rbac	解包contextual数据源并实际执行无请求上下文目录迁移	2	目录定向测试通过；镜像CI待验证	上游提供等价目录迁移数据源处理

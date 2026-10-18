@@ -431,3 +431,11 @@ active client 的真实注册协议 scopes 求交；未注册协议项返回 inv
 当作项目项继续处理。项目 scope 仍使用获批成员上界，不要求写入旧 client.scopes。
 selector 必须显式注册且匹配安装凭据中的第一方 UI client。独立回归通过生产 DCR
 注册、owner 同意和目录 membership 复现限制，不以手工 principal 代替签发证据。
+
+### 目录迁移数据源修正（REQ-0364，待镜像验证）
+
+提交 24a2b48 的 CI 39086467333 在 MCP 镜像启动时复现 NoConnectionException。
+目录组件接收 Micronaut contextual DataSource，却在无请求连接上下文的迁移中自行开启
+事务。组件必须先用宿主已有 DelegatingDataSource.unwrapDataSource 取得实际数据源，
+再按自身短事务管理连接。独立测试须调用实际注入的迁移 bean，不能只验证 bean 存在。
+此修正不改变目录模型、本地 grants 或启动认证边界；镜像启动仍须再次验证。
