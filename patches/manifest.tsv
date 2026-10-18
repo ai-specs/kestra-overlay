@@ -51,3 +51,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0366	0366-mcp-async-identity-context.patch	core	ai-specs/kestra-plugin-rbac	独立V2和OidcTrustedIdentity跨线程输出允许、epoch及账号撤权、缺来源与主体错配探针	1	本地5项通过;与V1及身份回归共12项通过;未发布	上游提供等价MCP异步授权来源与撤权探针
 0367	0367-oauth-error-callback.patch	core	内置OIDC认证链及独立消费扩展	OAuth错误回调校验state与callback并清除临时cookie;固定同源失败重定向	2	主控接收;独立HTTP测试6项;最终重放和正式发布待验证	上游提供等价OAuth错误回调state校验和安全重定向
 0368	0368-extension-entry.patch	core	ai-specs/kestra-plugin-rbac及独立管理页面	认证descriptor和capability准入;业务配置403时通用扩展安全壳层;拒绝页发现入口;精确manifest逐项授权委派	16	主控接收;候选测试通过;未发布	上游提供等价已认证扩展独立初始化及条件安全壳层
+0369	0369-system-theme-lifecycle.patch	core	ai-specs/kestra-plugin-rbac及宿主页面	通用主题生命周期跟随系统配色变化并卸载监听;显式主题不受影响	2	主控接收;前端64项通过;未发布	上游全局主题生命周期提供等价系统配色监听及清理

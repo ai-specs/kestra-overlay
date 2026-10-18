@@ -1,0 +1,66 @@
+# 需求: REQ-0369 宿主页面持续跟随系统主题
+# 消费扩展仓: kestra-plugin-rbac 管理页面与通用认证页面
+# 状态: core；本地64项前端检查通过，未发布
+# 来源: 新写；实际浏览器system主题失败，固定BASE既有useThemeCycle生命周期扩展
+# 触达上游文件: 2 个（通用主题监听与四项回归测试）
+# 移除条件: 上游在全局主题生命周期提供等价系统配色监听与清理
+diff --git a/ui/src/composables/useThemeCycle.ts b/ui/src/composables/useThemeCycle.ts
+index 964c8f3..703d720 100644
+--- a/ui/src/composables/useThemeCycle.ts
++++ b/ui/src/composables/useThemeCycle.ts
+@@ -12,6 +12,10 @@ import type {useMiscStore} from "override/stores/misc"
+ const THEMES: SelectedTheme[] = ["dark-2", "dark", "light"]
+ 
+ export function useThemeCycle(miscStore: ReturnType<typeof useMiscStore>) {
++    let media: MediaQueryList | undefined
++    function systemThemeChanged() {
++        if (miscStore.theme === "syncWithSystem") switchTheme(miscStore, "syncWithSystem")
++    }
+     function cycleTheme(e: KeyboardEvent) {
+         if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "l") {
+             const current = miscStore.theme ?? "light"
+@@ -20,6 +24,13 @@ export function useThemeCycle(miscStore: ReturnType<typeof useMiscStore>) {
+         }
+     }
+ 
+-    onMounted(() => window.addEventListener("keydown", cycleTheme))
+-    onUnmounted(() => window.removeEventListener("keydown", cycleTheme))
++    onMounted(() => {
++        window.addEventListener("keydown", cycleTheme)
++        media = window.matchMedia("(prefers-color-scheme: dark)")
++        media.addEventListener("change", systemThemeChanged)
++    })
++    onUnmounted(() => {
++        window.removeEventListener("keydown", cycleTheme)
++        media?.removeEventListener("change", systemThemeChanged)
++    })
+ }
+diff --git a/ui/src/extensions/system-theme.spec.ts b/ui/src/extensions/system-theme.spec.ts
+new file mode 100644
+index 0000000..507b083
+--- /dev/null
++++ b/ui/src/extensions/system-theme.spec.ts
+@@ -0,0 +1,23 @@
++import {afterEach, expect, it, vi} from "vitest";
++import {mount} from "@vue/test-utils";
++import {useThemeCycle} from "../composables/useThemeCycle";
++import {switchTheme} from "../utils/utils";
++
++vi.mock("../utils/utils", () => ({switchTheme: vi.fn()}));
++afterEach(() => {vi.unstubAllGlobals(); vi.clearAllMocks();});
++
++it.each(["syncWithSystem", "light", "dark", "dark-2"])("tracks system preference only when selected: %s", theme => {
++    const events = new EventTarget();
++    const remove = vi.spyOn(events, "removeEventListener");
++    vi.stubGlobal("matchMedia", vi.fn(() => events));
++    const store = {theme} as Parameters<typeof useThemeCycle>[0];
++    const wrapper = mount({setup() {useThemeCycle(store); return () => null;}});
++    events.dispatchEvent(new Event("change"));
++    if (theme === "syncWithSystem") expect(switchTheme).toHaveBeenCalledWith(store, "syncWithSystem");
++    else expect(switchTheme).not.toHaveBeenCalled();
++    wrapper.unmount();
++    expect(remove).toHaveBeenCalledWith("change", expect.any(Function));
++    vi.mocked(switchTheme).mockClear();
++    events.dispatchEvent(new Event("change"));
++    expect(switchTheme).not.toHaveBeenCalled();
++});

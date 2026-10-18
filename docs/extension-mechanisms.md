@@ -1,5 +1,9 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+> **系统主题监听（REQ-0369，已接收、未发布）**：全局主题生命周期监听系统媒体变化，
+> 只在 syncWithSystem 偏好下调用既有 switchTheme，并在卸载时清理。扩展继续消费
+> 宿主解析主题，不维护第二套偏好。真实失败与验证见 [R-EE-RBAC](r-ee-rbac.md)。
+
 > **条件扩展壳层（REQ-0368，已接收、未发布）**：认证 manifest 由控制器逐 descriptor
 > 检查 EXTENSION.READ，不以前置 METADATA 检查阻断发现。路由和模块装载重新核对描述与
 > capability；只有目标获准且业务 configs 返回 403 时使用独立壳层。获准 configs 的页面
