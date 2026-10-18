@@ -128,6 +128,10 @@ services:
                 access: [isAnonymous()]
               - pattern: /ui/assets/**
                 access: [isAnonymous()]
+              - pattern: /ui/manifest.webmanifest
+                access: [isAnonymous()]
+              - pattern: /favicon.ico
+                access: [isAnonymous()]
               - pattern: /api/v1/configs/login
                 access: [isAnonymous()]
               - pattern: /**

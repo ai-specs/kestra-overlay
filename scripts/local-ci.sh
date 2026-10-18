@@ -65,7 +65,7 @@ echo "== scoped tests (filter: $TESTS) =="
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest --tests io.kestra.mcp.McpDynamicToolListTest \
-  --tests io.kestra.mcp.McpCallDiagnosticTest --tests 'io.kestra.webserver.ui.*' --console=plain)
+  --tests io.kestra.mcp.McpCallDiagnosticTest --tests io.kestra.mcp.McpAsyncIdentityContextTest --tests 'io.kestra.webserver.ui.*' --console=plain)
 python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 

@@ -1,5 +1,39 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+## MCP 异步可信来源修复（2026-10-18，已接收、未发布）
+
+消费项目为 `kestra-plugin-rbac`。基线 overlay 为
+`8279e82e2ad9b4bbaaca2d181f2eab8e19930cf2`，BASE 为
+`172dd0f3760fb1255d3b22bd1fd07ce31b173fa3`。部署验收的安全诊断显示允许工具调用
+在等待执行完成后的新输出评估失败：`OidcTrustedIdentity.current:36` 缺少 HTTP 来源，
+调用链包含 `AuthorizationEvaluations.lambda$boundary$0:80` 和 `MonoTakeLastOne`。
+REST 56 项和 MCP 9 项拒绝／撤权通过是消费方提供的归因证据，本次宿主测试不代替其复测。
+
+现有 `AuthorizationInvocationContext` 已支持短期 HTTP 来源；无需新增身份 SPI 或插件
+模型。0170 的同次工具 publisher 仅保留 `PropagatedContext.empty().plus(origin)`，
+不复制 JDBC 事务、旧评估或查询上下文。`ReactivePropagation.propagate` 恢复订阅与
+回调线程的来源；runtime flow 和执行事件等待流分别在异步边界包裹它。
+`ReactorPropagation.addPropagatedContext` 经 `contextWrite` 提供同一最小 Reactor 上下文。
+仅写 Reactor context 不能保证 `OidcTrustedIdentity.current()` 的线程读取取得来源。
+
+来源只限当前已认证 HTTP 请求的同次 publisher 生命周期，不写入队列或 MCP session。
+transport `userId` 仅用于主体一致性检查，不能建立认证。无来源或不同主体失败关闭。
+提交和 runtime 评估结束后仍关闭原句柄；等待期间不持有评估句柄。输出读取新建评估，
+重新调用 `OidcTrustedIdentity` 在线核对账号认证版本及项目 epoch。晚到撤权拒绝且不读输出存储。
+关闭新模式保留 V1 行为；新增传播不扩大任何 scope、角色或目录授权。
+
+宿主独立探针 `McpAsyncIdentityContextTest` 使用宿主最小 V2 provider、真实
+`OidcTrustedIdentity` 和独立执行事件线程，覆盖输出允许、等待期间 epoch／账号撤权、
+无来源及主体错配、每个句柄恰好关闭一次、测试 JDBC marker 和旧评估不传播。
+新增五项、既有 V1 生命周期三项和可信身份四项均通过，无失败或跳过。
+主控最终定向矩阵共 278 项，276 项通过，两个既有外部环境探针跳过；必需应用项目
+及类型化授权报告数量门全部通过，无失败或跳过。外部环境探针由镜像验收另行覆盖，
+不得将这两个跳过项计为本地通过。
+源码需求提交与 format-patch 已核对；0170 来源为 `7618b5b`，0366 来源为 `c23b2df`。
+新测试已加入定向 CI 与报告数量检查，要求五项全部执行且无失败或跳过。
+主控负责正式 CI、镜像发布、插件重新固定正式产物及允许／拒绝／撤权组合验收。
+差异表 R-EE-RBAC 与机制文档的既有授权来源职责不变；需要同步的发布状态由主控处理。
+
 > **状态**：实施中（2026-10-13）。消费仓已指定为 `ai-specs/kestra-plugin-rbac`。
 > 独立 jar 承载业务角色模型与 REST 操作解析；overlay 提供统一授权 SPI、REST
 > 失败关闭门、REST 执行前 gate、MCP 可信主体传递及逐操作激活点，构建期只注入 classpath 元数据。

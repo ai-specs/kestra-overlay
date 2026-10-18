@@ -20,6 +20,10 @@
 > 1. kestra-oidc-provider，含后续重新接收的 MCP 认证/能力契约面；
 > 2. R-EE-RBAC（docs/r-ee-rbac.md）。
 >
+> 2026-10-18 已接收、未发布：0367 修复框架 OAuth 授权错误被通用控制器处理为 500。
+> 内部专用处理器复用 state 校验并使用固定同源失败页；不新增插件 SPI。
+> 消费失败与独立检查要求见 `docs/r-oidc-server.md`。
+>
 > **基本原则**：扩展点/占位的充分性由上游架构与机制推导，不依赖外部实现时序
 > （AGENTS.md §0·基本原则）。
 > 裁定全文与重启规则见 `AGENTS.md` §0。其余域的历史调查存 git 历史。
@@ -80,7 +84,7 @@
 | 能力 | OSS 行为 | EE 行为 | 补足方式 | 状态 |
 |---|---|---|---|---|
 | 端点级认证门 | 无过滤器链（见 A）。OSS 主源码零授权钩子（无 SecurityRule/intercept-url-map 类，2026-10-07 复扫） | 规则链 `[docs]` | 部署面：micronaut-security `intercept-url-map`（`/**→isAuthenticated()`）。生效前提 = 认证链 jar 进镜像（R-CLASSPATH-MERGE 前置） | 部署面（kestra-oidc-provider 侧） |
-| RBAC | OSS 零授权钩子。EE IAM API 面（users/roles/permissions/groups/service-accounts/me）在 vanilla 实例全部 404 `[live]` ⇒ 判定面整体在 EE jar，无可解禁开关 | 资源×动作×namespace 绑定；五内置角色；三类主体（详见 r-ee-rbac.md §2） | 扩展仓 jar 提供角色模型与策略 bean（S6）；overlay 复用 namespace/log 查询 ACL，提供 typed SPI、宿主操作适配与失败关闭激活门。需求文档：[docs/r-ee-rbac.md](r-ee-rbac.md) | **实施中** R-EE-RBAC |
+| RBAC | OSS 零授权钩子。EE IAM API 面（users/roles/permissions/groups/service-accounts/me）在 vanilla 实例全部 404 `[live]` ⇒ 判定面整体在 EE jar，无可解禁开关 | 资源×动作×namespace 绑定；五内置角色；三类主体（详见 r-ee-rbac.md §2） | 扩展仓 jar 提供角色模型与策略 bean（S6）；overlay 复用 namespace/log 查询 ACL，提供 typed SPI、宿主操作适配与失败关闭激活门。0170/0366 异步来源修复已接收、未发布；不新增 SPI。需求文档：[docs/r-ee-rbac.md](r-ee-rbac.md) | **实施中** R-EE-RBAC |
 
 ## 3. 当前闭环视图
 

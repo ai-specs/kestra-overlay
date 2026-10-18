@@ -1,0 +1,384 @@
+# 需求: REQ-0367 OAuth 错误 callback 安全失败处理
+# 消费扩展仓: kestra-overlay 内置 OIDC 认证链；不新增插件公开 SPI
+# 状态: core；实现与定向 HTTP 测试通过，未发布
+# 来源: 新写；依据 Micronaut Security OAuth2 4.15.2 已发布 StateValidator、CookieStatePersistence、RedirectService、HttpHostResolver 公开 API
+# 触达上游文件: 2 个（新增内部 OAuth 错误 @Controller 与真实 HTTP 路由测试）
+# 移除条件: 上游提供等价 OAuth 错误 callback 专用路由，且保留 state 校验、cookie 消费和同源失败重定向语义
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OauthAuthorizationErrorController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OauthAuthorizationErrorController.java
+new file mode 100644
+index 0000000..61e9840
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OauthAuthorizationErrorController.java
+@@ -0,0 +1,127 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import java.time.Duration;
++import java.util.Set;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Error;
++import io.micronaut.http.cookie.Cookie;
++import io.micronaut.security.config.RedirectService;
++import io.micronaut.http.server.util.HttpHostResolver;
++import io.micronaut.security.oauth2.endpoint.authorization.response.AuthorizationErrorCode;
++import io.micronaut.security.oauth2.endpoint.authorization.response.AuthorizationErrorResponseException;
++import io.micronaut.security.oauth2.endpoint.authorization.state.State;
++import io.micronaut.security.oauth2.endpoint.authorization.state.persistence.StatePersistence;
++import io.micronaut.security.oauth2.endpoint.authorization.state.persistence.cookie.CookieStatePersistence;
++import io.micronaut.security.oauth2.endpoint.authorization.state.persistence.cookie.CookieStatePersistenceConfiguration;
++import io.micronaut.security.oauth2.endpoint.authorization.state.validation.StateValidator;
++import jakarta.inject.Singleton;
++
++@Controller
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++public final class OauthAuthorizationErrorController {
++    private static final Set<String> RFC_ERROR_CODES = Set.of(
++        AuthorizationErrorCode.INVALID_REQUEST.getErrorCode(),
++        AuthorizationErrorCode.UNAUTHORIZED_CLIENT.getErrorCode(),
++        AuthorizationErrorCode.ACCESS_DENIED.getErrorCode(),
++        AuthorizationErrorCode.UNSUPPORTED_RESPONSE_TYPE.getErrorCode(),
++        AuthorizationErrorCode.INVALID_SCOPE.getErrorCode(),
++        AuthorizationErrorCode.SERVER_ERROR.getErrorCode(),
++        AuthorizationErrorCode.TEMPORARILY_UNAVAILABLE.getErrorCode()
++    );
++
++    private final RedirectService redirectService;
++    private final StateValidator stateValidator;
++    private final StatePersistence statePersistence;
++    private final CookieStatePersistenceConfiguration cookieConfiguration;
++    private final HttpHostResolver hostResolver;
++
++    public OauthAuthorizationErrorController(
++        RedirectService redirectService,
++        StateValidator stateValidator,
++        StatePersistence statePersistence,
++        CookieStatePersistenceConfiguration cookieConfiguration,
++        HttpHostResolver hostResolver
++    ) {
++        this.redirectService = redirectService;
++        this.stateValidator = stateValidator;
++        this.statePersistence = statePersistence;
++        this.cookieConfiguration = cookieConfiguration;
++        this.hostResolver = hostResolver;
++    }
++
++    @Error(global = true)
++    public HttpResponse<?> handle(HttpRequest<?> request, AuthorizationErrorResponseException exception) {
++        var error = exception.getAuthorizationErrorResponse();
++        if (!RFC_ERROR_CODES.contains(error.getError().getErrorCode())) {
++            return HttpResponse.badRequest();
++        }
++        if (!(statePersistence instanceof CookieStatePersistence)) {
++            return HttpResponse.badRequest();
++        }
++        State state = error.getState();
++        if (state == null || state.getRedirectUri() == null || !callbackUriMatches(state.getRedirectUri(), request)) {
++            return HttpResponse.badRequest();
++        }
++        try {
++            var stored = statePersistence.retrieveState(request);
++            if (stored.isEmpty() || !stored.get().equals(state)) {
++                return HttpResponse.badRequest();
++            }
++            stateValidator.validate(request, state);
++        } catch (RuntimeException invalidState) {
++            return HttpResponse.badRequest();
++        }
++
++        String failureUrl = redirectService.loginFailureUrl();
++        if (failureUrl == null || !isSameOriginPath(failureUrl)) {
++            return HttpResponse.badRequest();
++        }
++        MutableHttpResponse<?> response = HttpResponse.seeOther(URI.create(failureUrl));
++        response.cookie(Cookie.of(cookieConfiguration.getCookieName(), "")
++            .configure(cookieConfiguration, request.isSecure())
++            .maxAge(Duration.ZERO));
++        return response;
++    }
++
++    private boolean callbackUriMatches(URI configured, HttpRequest<?> request) {
++        URI callback = request.getUri();
++        if (callback.getRawQuery() == null || configured.getRawPath() == null
++            || !configured.getRawPath().equals(callback.getRawPath())) {
++            return false;
++        }
++        if (configured.getScheme() == null || configured.getRawAuthority() == null) {
++            return configured.getScheme() == null && configured.getRawAuthority() == null;
++        }
++        URI trustedOrigin = trustedOrigin(request);
++        String requestScheme = callback.getScheme() == null ? trustedOrigin.getScheme() : callback.getScheme();
++        String requestAuthority = callback.getRawAuthority() == null ? trustedOrigin.getRawAuthority() : callback.getRawAuthority();
++        return configured.getScheme().equals(requestScheme)
++            && configured.getRawAuthority().equals(requestAuthority);
++    }
++
++    private URI trustedOrigin(HttpRequest<?> request) {
++        URI resolved = URI.create(hostResolver.resolve(request));
++        if (resolved.getScheme() != null && resolved.getRawAuthority() != null) {
++            return resolved;
++        }
++        return URI.create((request.isSecure() ? "https://" : "http://") + resolved);
++    }
++
++    private static boolean isSameOriginPath(String value) {
++        try {
++            URI uri = URI.create(value);
++            return uri.getScheme() == null && uri.getRawAuthority() == null && uri.getPath() != null
++                && uri.getPath().startsWith("/") && !uri.getPath().startsWith("//")
++                && uri.getFragment() == null && !value.contains("\\");
++        } catch (IllegalArgumentException invalidUri) {
++            return false;
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OauthAuthorizationErrorRoutingTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OauthAuthorizationErrorRoutingTest.java
+new file mode 100644
+index 0000000..8b1b1ec
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OauthAuthorizationErrorRoutingTest.java
+@@ -0,0 +1,239 @@
++package io.kestra.webserver.oidc;
++
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.core.annotation.Nullable;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.http.annotation.QueryValue;
++import io.micronaut.http.filter.HttpClientFilter;
++import io.micronaut.http.filter.ClientFilterChain;
++import io.micronaut.http.MutableHttpRequest;
++import io.micronaut.http.filter.ServerFilterPhase;
++import org.reactivestreams.Publisher;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.errors.ErrorCode;
++import io.micronaut.security.errors.ErrorResponse;
++import io.micronaut.security.oauth2.endpoint.authorization.response.AuthorizationErrorCode;
++import io.micronaut.security.oauth2.endpoint.authorization.response.AuthorizationErrorResponse;
++import io.micronaut.security.oauth2.endpoint.authorization.response.AuthorizationErrorResponseException;
++import io.micronaut.security.oauth2.endpoint.authorization.state.DefaultState;
++import io.micronaut.security.oauth2.endpoint.authorization.state.State;
++import io.micronaut.security.oauth2.endpoint.authorization.state.persistence.StatePersistence;
++import io.micronaut.security.oauth2.endpoint.authorization.state.StateSerDes;
++import io.micronaut.security.oauth2.endpoint.authorization.state.persistence.cookie.CookieStatePersistence;
++import io.micronaut.security.oauth2.endpoint.authorization.state.persistence.cookie.CookieStatePersistenceConfiguration;
++import io.micronaut.security.oauth2.endpoint.authorization.state.validation.StateValidator;
++import io.micronaut.security.config.RedirectService;
++import io.kestra.webserver.oidc.controllers.OauthAuthorizationErrorController;
++import io.micronaut.http.server.util.HttpHostResolver;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.oidc.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "oauth.error.test", value = "true")
++@Property(name = "micronaut.security.redirect.login-failure", value = "/oidc/login?error=1")
++class OauthAuthorizationErrorRoutingTest {
++    @Inject EmbeddedServer server;
++
++    @Test
++    void validCookieStateUsesSpecificErrorRouteAndClearsOnlyStateCookie() throws Exception {
++        HttpClient client = HttpClient.newHttpClient();
++        var start = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/start")).GET().build(), HttpResponse.BodyHandlers.ofString());
++        String stateCookie = start.headers().firstValue("set-cookie").orElseThrow();
++        var callback = HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback?error=access_denied&error_description=evil-description&state=" + URLEncoder.encode(start.body(), StandardCharsets.UTF_8)))
++            .header("Cookie", stateCookie.substring(0, stateCookie.indexOf(';')) + "; JWT=keep; oidc_session=keep").GET().build();
++        var result = client.send(callback, HttpResponse.BodyHandlers.ofString());
++        assertEquals(303, result.statusCode());
++        assertEquals("/oidc/login?error=1", result.headers().firstValue("location").orElseThrow());
++        assertFalse(result.headers().firstValue("location").orElse("").contains("evil-description"));
++        assertFalse(result.body().contains("evil-description"));
++        assertTrue(result.headers().allValues("set-cookie").stream().anyMatch(value -> value.contains("Max-Age=0")));
++        assertTrue(result.headers().allValues("set-cookie").stream().noneMatch(value -> value.startsWith("JWT=") || value.startsWith("oidc_session=")));
++        var replay = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback?error=invalid_scope&state=" + URLEncoder.encode(start.body(), StandardCharsets.UTF_8))).GET().build(), HttpResponse.BodyHandlers.ofString());
++        assertEquals(400, replay.statusCode());
++    }
++
++    @Test
++    void absoluteConfiguredCallbackStateMatchesTrustedResolvedOrigin() throws Exception {
++        HttpClient client = HttpClient.newHttpClient();
++        var start = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/start?absolute=1")).GET().build(), HttpResponse.BodyHandlers.ofString());
++        String stateCookie = start.headers().firstValue("set-cookie").orElseThrow();
++        var result = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback?error=invalid_scope&state=" + URLEncoder.encode(start.body(), StandardCharsets.UTF_8)))
++            .header("Cookie", stateCookie.substring(0, stateCookie.indexOf(';'))).GET().build(), HttpResponse.BodyHandlers.ofString());
++        assertEquals(303, result.statusCode());
++        assertEquals("/oidc/login?error=1", result.headers().firstValue("location").orElseThrow());
++    }
++
++    @Test
++    void missingCookieReturns400WithoutRedirect() throws Exception {
++        var result = HttpClient.newHttpClient().send(
++            HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback-missing?error=invalid_scope")).GET().build(),
++            HttpResponse.BodyHandlers.ofString());
++        assertEquals(400, result.statusCode());
++        assertTrue(result.headers().firstValue("location").isEmpty());
++    }
++
++    @Test
++    void wrongStateReturns400AndDoesNotClearStateCookie() throws Exception {
++        HttpClient client = HttpClient.newHttpClient();
++        var start = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/start")).GET().build(), HttpResponse.BodyHandlers.ofString());
++        String stateCookie = start.headers().firstValue("set-cookie").orElseThrow();
++        var other = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/start-other")).GET().build(), HttpResponse.BodyHandlers.ofString());
++        var result = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback?error=invalid_scope&state=" + URLEncoder.encode(other.body(), StandardCharsets.UTF_8)))
++            .header("Cookie", stateCookie.substring(0, stateCookie.indexOf(';'))).GET().build(), HttpResponse.BodyHandlers.ofString());
++        assertEquals(400, result.statusCode());
++        assertTrue(result.headers().allValues("set-cookie").isEmpty());
++    }
++
++    @Test
++    void malformedStateIsSafeClientErrorAndUnknownErrorIsRejected() throws Exception {
++        HttpClient client = HttpClient.newHttpClient();
++        var malformed = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback?error=invalid_scope&state=not-a-state")).GET().build(), HttpResponse.BodyHandlers.ofString());
++        assertTrue(malformed.statusCode() == 400 || malformed.statusCode() == 422);
++        assertTrue(malformed.headers().firstValue("location").isEmpty());
++        var unknown = client.send(HttpRequest.newBuilder(server.getURI().resolve("/test/oauth-error/callback-unknown?error=invalid_scope&state=x")).GET().build(), HttpResponse.BodyHandlers.ofString());
++        assertEquals(400, unknown.statusCode());
++        assertTrue(unknown.headers().firstValue("location").isEmpty());
++    }
++
++    @Test
++    void rejectsExternalFailureUrlsAndAllowsOnlySameOriginRelativeFailurePath() {
++        var state = new DefaultState();
++        state.setNonce("url-test");
++        state.setRedirectUri(URI.create("/test/oauth-error/callback"));
++        var persistence = mock(CookieStatePersistence.class);
++        when(persistence.retrieveState(any())).thenReturn(java.util.Optional.of(state));
++        var validator = mock(StateValidator.class);
++        var cookies = mock(CookieStatePersistenceConfiguration.class);
++        when(cookies.getCookieName()).thenReturn("oauth2State");
++        var redirect = mock(RedirectService.class);
++        var hostResolver = mock(HttpHostResolver.class);
++        when(hostResolver.resolve(any())).thenReturn("localhost");
++        var request = io.micronaut.http.HttpRequest.GET(URI.create("http://localhost/test/oauth-error/callback?error=invalid_scope&state=state"));
++        var exception = new AuthorizationErrorResponseException(new ErrorResponseFixture(AuthorizationErrorCode.INVALID_SCOPE, state, "evil-description"));
++        var controller = new OauthAuthorizationErrorController(redirect, validator, persistence, cookies, hostResolver);
++        for (String url : java.util.List.of("https://evil.example/login", "//evil.example/login", "/oidc/login#fragment", "/oidc\\login")) {
++            when(redirect.loginFailureUrl()).thenReturn(url);
++            assertEquals(400, controller.handle(request, exception).getStatus().getCode());
++        }
++        when(redirect.loginFailureUrl()).thenReturn("/oidc/login?error=1");
++        var sameOriginState = new DefaultState();
++        sameOriginState.setNonce("same-origin");
++        sameOriginState.setRedirectUri(URI.create("http://localhost/test/oauth-error/callback"));
++        when(persistence.retrieveState(any())).thenReturn(java.util.Optional.of(sameOriginState));
++        assertEquals(303, controller.handle(request, new AuthorizationErrorResponseException(
++            new ErrorResponseFixture(AuthorizationErrorCode.INVALID_SCOPE, sameOriginState, "evil-description"))).getStatus().getCode());
++        reset(validator);
++        for (URI callback : java.util.List.of(
++            URI.create("https://localhost/test/oauth-error/callback"),
++            URI.create("http://evil.example/test/oauth-error/callback"),
++            URI.create("http://localhost/test/oauth-error/other"))) {
++            var wrongOriginState = new DefaultState();
++            wrongOriginState.setNonce("wrong-origin");
++            wrongOriginState.setRedirectUri(callback);
++            when(persistence.retrieveState(any())).thenReturn(java.util.Optional.of(wrongOriginState));
++            var wrongException = new AuthorizationErrorResponseException(new ErrorResponseFixture(AuthorizationErrorCode.INVALID_SCOPE, wrongOriginState, "evil-description"));
++            var response = controller.handle(request, wrongException);
++            assertEquals(400, response.getStatus().getCode());
++            assertTrue(response.getCookies().isEmpty());
++        }
++        when(hostResolver.resolve(any())).thenReturn("https://public.example");
++        var httpsState = new DefaultState();
++        httpsState.setNonce("trusted-https");
++        httpsState.setRedirectUri(URI.create("https://public.example/test/oauth-error/callback"));
++        when(persistence.retrieveState(any())).thenReturn(java.util.Optional.of(httpsState));
++        var httpsController = new OauthAuthorizationErrorController(redirect, validator, persistence, cookies, hostResolver);
++        var originFormRequest = io.micronaut.http.HttpRequest.GET(URI.create("/test/oauth-error/callback?error=invalid_scope&state=state"));
++        when(redirect.loginFailureUrl()).thenReturn("/oidc/login?error=1");
++        assertEquals(303, httpsController.handle(originFormRequest,
++            new AuthorizationErrorResponseException(new ErrorResponseFixture(AuthorizationErrorCode.INVALID_SCOPE, httpsState, "evil-description"))).getStatus().getCode());
++    }
++
++    @Controller
++    @Singleton
++    @Requires(property = "oauth.error.test", value = "true")
++    static class Fixture {
++        private final StatePersistence persistence;
++        private final StateSerDes serDes;
++        @Inject EmbeddedServer embeddedServer;
++        Fixture(StatePersistence persistence, StateSerDes serDes) { this.persistence = persistence; this.serDes = serDes; }
++
++        @Get("/test/oauth-error/start")
++        io.micronaut.http.HttpResponse<?> start(io.micronaut.http.HttpRequest<?> request, @Nullable @QueryValue("absolute") String absolute) {
++            var state = new DefaultState();
++            state.setNonce("test-nonce");
++            var callbackPath = "/test/oauth-error/callback";
++            state.setRedirectUri("1".equals(absolute)
++                ? embeddedServer.getURI().resolve(callbackPath)
++                : URI.create(request.getUri().resolve(callbackPath).toString()));
++            var response = io.micronaut.http.HttpResponse.ok(serDes.serialize(state));
++            persistence.persistState(request, response, state);
++            return response;
++        }
++
++        @Get("/test/oauth-error/callback{?error,state}")
++        io.micronaut.http.HttpResponse<?> callback(@Nullable @QueryValue("state") String encodedState, @QueryValue(value = "error", defaultValue = "invalid_scope") String error, @QueryValue(value = "error_description", defaultValue = "do-not-echo") String description) {
++            if (encodedState == null || encodedState.isBlank()) {
++                throw new AuthorizationErrorResponseException(new ErrorResponseFixture(errorCode(error), null, description));
++            }
++            throw new AuthorizationErrorResponseException(new ErrorResponseFixture(errorCode(error), serDes.deserialize(encodedState), description));
++        }
++
++        private static ErrorCode errorCode(String value) {
++            try { return AuthorizationErrorCode.valueOf(value.toUpperCase(java.util.Locale.ROOT)); }
++            catch (IllegalArgumentException ignored) { return new UnknownErrorCode(); }
++        }
++
++        @Get("/test/oauth-error/start-other")
++        io.micronaut.http.HttpResponse<?> startOther(io.micronaut.http.HttpRequest<?> request) {
++            var state = new DefaultState();
++            state.setNonce("other-nonce");
++            state.setRedirectUri(URI.create(request.getUri().resolve("/test/oauth-error/callback").toString()));
++            return io.micronaut.http.HttpResponse.ok(serDes.serialize(state));
++        }
++
++        @Get("/test/oauth-error/callback-missing{?error}")
++        io.micronaut.http.HttpResponse<?> callbackMissing() {
++            throw new AuthorizationErrorResponseException(new ErrorResponseFixture(AuthorizationErrorCode.INVALID_SCOPE, null, "do-not-echo"));
++        }
++
++        @Get("/test/oauth-error/callback-unknown{?error,state}")
++        io.micronaut.http.HttpResponse<?> callbackUnknown() {
++            throw new AuthorizationErrorResponseException(new ErrorResponseFixture(new UnknownErrorCode(), null, "evil-description"));
++        }
++    }
++
++    record ErrorResponseFixture(ErrorCode getError, State getState, String getErrorDescription) implements AuthorizationErrorResponse {
++        @Override public String getErrorUri() { return null; }
++    }
++
++    record UnknownErrorCode() implements ErrorCode {
++        @Override public String getErrorCode() { return "unknown"; }
++        @Override public String getErrorCodeDescription() { return "unknown"; }
++    }
++
++    @Replaces(io.kestra.webserver.filter.TestAuthFilter.class)
++    @io.micronaut.http.annotation.Filter("/**")
++    @Requires(env = "test")
++    static class PassThroughTestAuthFilter implements HttpClientFilter {
++        @Override public Publisher<? extends io.micronaut.http.HttpResponse<?>> doFilter(MutableHttpRequest<?> request, ClientFilterChain chain) { return chain.proceed(request); }
++        @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() - 1; }
++    }
++}

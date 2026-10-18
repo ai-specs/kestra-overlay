@@ -4,7 +4,9 @@ import sys
 import xml.etree.ElementTree as ET
 
 REQUIRED = {
+    "io.kestra.webserver.oidc.OauthAuthorizationErrorRoutingTest": 6,
     "io.kestra.mcp.McpCallDiagnosticTest": 1,
+    "io.kestra.mcp.McpAsyncIdentityContextTest": 5,
     "io.kestra.webserver.oidc.ApplicationDirectoryV1Test": 7,
     "io.kestra.webserver.oidc.TrustedIdentityV1Test": 1,
     "io.kestra.webserver.oidc.ProjectScopeIssuanceTest": 4,

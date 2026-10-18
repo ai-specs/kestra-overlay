@@ -1,0 +1,201 @@
+# 需求: REQ-0366 MCP异步可信HTTP授权来源传播探针
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；本地定向测试通过，未发布
+# 来源: 宿主独立V2 provider与OidcTrustedIdentity；固定BASE上真实需求提交
+# 触达上游文件: 1 个（仅新增独立测试）
+# 移除条件: 上游提供等价MCP异步授权来源与撤权探针
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java b/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java
+new file mode 100644
+index 0000000..6c20dea
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java
+@@ -0,0 +1,189 @@
++package io.kestra.mcp;
++
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.BiFunction;
++import io.kestra.core.events.CrudEvent;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.models.flows.State;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.runners.FlowInputOutput;
++import io.kestra.core.runners.FlowMetaStoreInterface;
++import io.kestra.core.services.ExecutionOutputService;
++import io.kestra.core.services.ExecutionStreamingService;
++import io.kestra.plugin.core.trigger.McpToolTrigger;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.kestra.webserver.rbac.*;
++import io.micronaut.context.ApplicationContext;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.context.event.ApplicationEventPublisher;
++import io.micronaut.http.sse.Event;
++import io.modelcontextprotocol.server.McpAsyncServerExchange;
++import io.modelcontextprotocol.spec.McpSchema;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.FluxSink;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.*;
++
++class McpAsyncIdentityContextTest {
++    record JdbcMarker() implements io.micronaut.core.propagation.PropagatedContextElement {}
++
++    static <Bean> BeanProvider<Bean> bean(Bean value) {
++        return new BeanProvider<>() {
++            public Bean get() { return value; }
++            public boolean isPresent() { return value != null; }
++            public boolean isUnique() { return value != null; }
++        };
++    }
++
++    @Test void allowedOutput() throws Exception { runCompleteHandler(false, false); }
++    @Test void epochRevokedWhileWaiting() throws Exception { runCompleteHandler(false, true); }
++    @Test void accountRevokedWhileWaiting() throws Exception { runCompleteHandler(true, true); }
++    @Test void missingHttpOrigin() throws Exception { runCompleteHandler(false, false, null); }
++    @Test void mismatchedSubject() throws Exception { runCompleteHandler(false, false, "bob"); }
++
++    void runCompleteHandler(boolean denyComposite, boolean revokeOutput) throws Exception {
++        runCompleteHandler(denyComposite, revokeOutput, "alice");
++    }
++    @SuppressWarnings("unchecked")
++    void runCompleteHandler(boolean denyComposite, boolean revokeOutput, String originSubject) throws Exception {
++        var begins = new AtomicInteger();
++        var closes = new AtomicInteger();
++        var identities = new java.util.concurrent.CopyOnWriteArrayList<RbacAuthorizer.Principal>();
++        var epoch = new AtomicInteger(7);
++        var active = new java.util.concurrent.atomic.AtomicBoolean(true);
++        var revision = new AtomicInteger();
++        AuthorizationEvaluationProviderV2 provider = (trusted, tenant) -> {
++            var principal = new RbacAuthorizer.Principal(trusted.subject(), List.of("reader"), "client", "resource", List.of());
++            assertThat(io.micronaut.core.propagation.PropagatedContext.getOrEmpty().find(JdbcMarker.class)).isEmpty();
++            int boundary = begins.incrementAndGet();
++            if (boundary != 2) assertThat(io.kestra.core.repositories.AuthorizationEvaluationContext.current()).isEmpty();
++            int snapshot = revision.get();
++            identities.add(principal);
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    assertThat(operation.tenant()).isEqualTo("main");
++                    if (boundary == 3) assertThat(operation.action()).isEqualTo(Action.ACCESS_OUTPUTS);
++                    revision.set(1);
++
++                    return CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted()));
++                }
++                private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
++                public CompletionStage<Void> close() { assertThat(closed.compareAndSet(false, true)).isTrue(); closes.incrementAndGet(); return CompletableFuture.completedFuture(null); }
++            });
++        };
++        var configuration = new RbacConfiguration(true, false);
++        var directory = mock(io.kestra.webserver.oidc.projects.ProjectDirectoryState.class);
++        var lifecycle = mock(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.class);
++        when(lifecycle.matches("alice", 3L)).thenAnswer(call -> active.get());
++        when(directory.snapshot("project")).thenAnswer(call -> {
++            var project = new io.kestra.webserver.oidc.ApplicationDirectoryV1.Project("project", "main", "https://issuer.invalid", "Project", true, 19, epoch.get());
++            var definition = new io.kestra.webserver.oidc.ApplicationDirectoryV1.ScopeDefinition("project", "read", "", true, List.of(), List.of(), 1);
++            var member = new io.kestra.webserver.oidc.ApplicationDirectoryV1.ClientMembership("project", "client", true, java.util.Set.of("resource"), java.util.Set.of("read"), false, 1);
++            var assignment = new io.kestra.webserver.oidc.ApplicationDirectoryV1.SubjectAssignment("project", "https://issuer.invalid", "alice", java.util.Set.of("read"), 1, 1);
++            return new io.kestra.webserver.oidc.projects.ProjectDirectoryState.Snapshot(project, List.of(definition), List.of(member), List.of(assignment), 19);
++        });
++        when(directory.protocolScopes()).thenReturn(List.of());
++        var oidc = new io.kestra.webserver.oidc.OidcConfiguration();
++        oidc.setIssuer("https://issuer.invalid");
++        var identity = new io.kestra.webserver.oidc.services.OidcTrustedIdentity(bean(directory), oidc, lifecycle);
++        var typed = new TypedAuthorizationGate(bean(null), new AuthorizationEvaluations(true, configuration, true, bean(null), bean(provider), bean(identity), true));
++        var gate = new McpCapabilityGate(true, true, false, bean(null), configuration, new RbacGate(bean(null), typed, true));
++        var resolver = McpCapabilityGate.class.getDeclaredField("mcpResolvers");
++        resolver.setAccessible(true);
++        McpAuthorizationResolver dependencies = (principal, invocation) -> CompletableFuture.completedFuture(List.of());
++        resolver.set(gate, bean(dependencies));
++        var queue = mock(DispatchQueueInterface.class);
++        var inputs = mock(FlowInputOutput.class);
++        when(inputs.resolveInputs(any(), any(), any(), any())).thenAnswer(invocation -> {
++            assertThat(begins.get()).isEqualTo(2);
++            assertThat(closes.get()).isZero();
++            return List.of();
++        });
++        var outputs = mock(ExecutionOutputService.class);
++        when(outputs.getOutputs(any())).thenAnswer(invocation -> {
++            assertThat(begins.get()).isEqualTo(3);
++            assertThat(closes.get()).isEqualTo(2);
++            return Map.of("value", "verified");
++        });
++        var meta = mock(FlowMetaStoreInterface.class);
++        when(meta.findByIdForRuntime(any(), any(), any(), any())).thenReturn(Optional.empty());
++        var streaming = mock(ExecutionStreamingService.class);
++        var emitted = new java.util.concurrent.atomic.AtomicReference<Execution>();
++        ApplicationEventPublisher<CrudEvent<Execution>> publisher = event -> emitted.set(event.getModel());
++        doAnswer(invocation -> {
++            assertThat(closes.get()).isEqualTo(2);
++            FluxSink<Event<Execution>> sink = invocation.getArgument(2);
++            Thread.ofPlatform().name("mcp-independent-execution-event").start(() -> {
++                assertThat(io.kestra.core.repositories.AuthorizationEvaluationContext.current()).isEmpty();
++                if (revokeOutput) {
++                    if (denyComposite) active.set(false);
++                    else epoch.incrementAndGet();
++                }
++                sink.next(Event.of(emitted.get().withState(State.Type.SUCCESS)));
++                sink.complete();
++            });
++            return null;
++        }).when(streaming).registerSubscriber(anyString(), anyString(), any(), any());
++        var service = new McpToolService(queue, mock(FlowRepositoryInterface.class), mock(FlowToolSchemaMapper.class), streaming,
++            publisher, new McpConfig(new McpConfig.ToolCacheConfig(10L, java.time.Duration.ofMinutes(5)), null, java.time.Duration.ofSeconds(5)),
++            inputs, meta, outputs, new DefaultMcpToolAccessControl(), gate);
++        var flow = Flow.builder().tenantId("main").id("flow").namespace("team").tasks(List.of()).build();
++        var trigger = McpToolTrigger.builder().id("tool").type(McpToolTrigger.class.getName()).toolName("tool").build();
++        var method = McpToolService.class.getDeclaredMethod("buildCallHandler", Flow.class, McpToolTrigger.class);
++        method.setAccessible(true);
++        var handler = (BiFunction<McpAsyncServerExchange, McpSchema.CallToolRequest, Mono<McpSchema.CallToolResult>>) method.invoke(service, flow, trigger);
++        var exchange = mock(McpAsyncServerExchange.class);
++        when(exchange.transportContext()).thenReturn(KestraMcpTransportContext.builder().tenantId("main").serverId("default")
++            .sessionId("session").userId("alice").roles(List.of("reader")).clientId("client").resource("resource")
++            .scopes(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE)).build());
++        var request = io.micronaut.http.HttpRequest.POST("/mcp", "");
++        var claim = Map.of("project_id", "project", "client_id", "client", "authorization_version", 7L,
++            "project_scopes", java.util.Set.of("read"), "protocol_scopes", java.util.Set.of("openid"));
++        request.setAttribute("io.kestra.mcp.authentication", io.micronaut.security.authentication.Authentication.build(originSubject == null ? "alice" : originSubject, List.of(),
++            Map.of("iss", "https://issuer.invalid", "aud", List.of("resource"), "resource", "resource",
++                io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, claim,
++                io.kestra.webserver.oidc.services.OidcIdentityLifecycle.CLAIM, 3L)));
++        Mono<McpSchema.CallToolResult> operation;
++        var invocation = io.micronaut.core.propagation.PropagatedContext.empty();
++        if (originSubject != null) invocation = invocation.plus(new io.kestra.core.repositories.AuthorizationInvocationContext(request, false));
++        try (var ignored = invocation
++            .plus(new JdbcMarker()).plus(new io.kestra.core.repositories.AuthorizationEvaluationContext(new Object())).propagate()) {
++            operation = handler.apply(exchange, new McpSchema.CallToolRequest("tool", Map.of()));
++        }
++        var result = operation.block(java.time.Duration.ofSeconds(10));
++        if (originSubject == null || !originSubject.equals("alice")) {
++            assertThat(result.isError()).isTrue();
++            assertThat(begins.get()).isZero();
++            assertThat(closes.get()).isZero();
++            verifyNoInteractions(queue, inputs, outputs, streaming);
++            return;
++        }
++        assertThat(result.isError()).isEqualTo(denyComposite || revokeOutput);
++        if (!denyComposite && !revokeOutput) assertThat(result.structuredContent()).isEqualTo(Map.of("value", "verified"));
++        assertThat(begins.get()).isEqualTo(revokeOutput ? 2 : 3);
++        assertThat(closes.get()).isEqualTo(begins.get());
++        assertThat(identities).allSatisfy(principal -> {
++            assertThat(principal.subject()).isEqualTo("alice");
++            assertThat(principal.clientId()).isEqualTo("client");
++            assertThat(principal.audience()).isEqualTo("resource");
++            assertThat(principal.roles()).containsExactly("reader");
++        });
++        {
++            verify(queue).emit(any(io.kestra.core.executor.command.ExecutionCommand.class));
++            verify(streaming, timeout(5000)).unregisterSubscriber(anyString(), anyString());
++            if (revokeOutput) verifyNoInteractions(outputs);
++        }
++    }
++}

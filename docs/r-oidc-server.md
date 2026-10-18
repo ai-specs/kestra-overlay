@@ -2,6 +2,32 @@
 
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
+### OAuth 错误回调安全处理（REQ-0367，已接收、未发布）
+
+消费方在正式镜像的应用项目迁移中遇到真实 `invalid_scope` 回调返回 500。
+Micronaut Security OAuth2 4.15.2 在错误分支先抛出
+`AuthorizationErrorResponseException`，既有通用错误控制器将它处理为服务器异常。
+0367 新增宿主内部专用错误控制器，不新增公开 SPI，不读取插件策略。
+
+处理器仅接受 RFC 6749 授权错误，要求返回 state 与当前 cookie 中的完整 state 相等，
+并调用框架 `StateValidator`。state 绑定的 redirect URI 必须匹配当前 callback；绝对 URI
+精确比较 scheme、authority、path，相对 URI 精确比较 path。origin-form 请求使用
+`HttpHostResolver` 的完整 origin，遵循部署的 Host/Forwarded 信任配置，不声称默认
+resolver 能抵抗任意代理头。注册 redirect URI 的检查保留在发起授权链；处理器不查询
+client 目录。UI 注册地址来自 issuer 加 `/oauth/callback/<client-name>`。
+
+只支持已确认的 `CookieStatePersistence`，其他存储返回 400。有效错误返回固定同源
+`micronaut.security.redirect.login-failure` 的 303，允许配置 `/oidc/login?error=1`。
+只清除临时 state cookie，保留 JWT 和 IdP 会话，不回显 provider 描述或 state。
+缺失、错配、未知错误或不安全失败 URL 均拒绝，错配不消耗当前合法 state。
+cookie 清除证明正常浏览器重放被拒绝；不提供持有原 cookie 的服务端一次性保证。
+成功回调的 PKCE、nonce 和 token 校验路径保持原契约。
+
+源需求提交为 `4b99df01c211dab20af8a961ae2086aec012c72e`，实现关键提交为 `6affe5f`。
+宿主独立 HTTP/边界六项已通过且无失败或跳过，最终 BASE 全部 39 个补丁顺序重放通过，
+测试源码与重放源码逐字节一致。宿主 CI 和发布尚待通过；部署仓还必须验证真实登录、
+错误回调、现有合法会话保留及安全拒绝。
+
 **生产审计修复契约（2026-10-11）**：invalid_scope/resource/owner 等拒绝不能消耗
 原 refresh，轮换并发仅一次成功；pending quota 饱和返回 429，数据库故障仍 503。
 confidential client 服务端仅保存版本化哈希，UI client 配置仍持原 secret；迁移旧
