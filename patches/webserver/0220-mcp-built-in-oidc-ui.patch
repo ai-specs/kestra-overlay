@@ -4,20 +4,22 @@
 # 来源: 手工适配；沿用上游 MCP 编辑与 PWA 组件，剥离外部 OIDC provider 列表对内置 IdP 的错误依赖
 # 触达上游文件: 3 个（MCP 编辑页、应用壳、英文翻译）
 # 移除条件: 上游 MCP UI 原生支持内置 OIDC provider 语义且不再显示外部 provider 空态
+# 演进：REQ-0368 通用入口激活按原需求归属；未引入业务逻辑。
+# 来源增量提交：e235220c93bc91aac1cb44045634ad6de19c8ff1
 diff --git a/ui/src/App.vue b/ui/src/App.vue
-index 3218c96..a60804b 100644
+index 63a4a25..5a8fc13 100644
 --- a/ui/src/App.vue
 +++ b/ui/src/App.vue
 @@ -14,7 +14,7 @@
-     <TourOverlay v-if="loaded && route?.name && !route.meta?.anonymous" />
+     <TourOverlay v-if="loaded && route?.name && !route.meta?.anonymous && !extensionFallback" />
      <UnsavedChangesDialog />
-     <DrillDownDrawer />
+     <DrillDownDrawer v-if="!extensionFallback" />
 -    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous" />
-+    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous && !isAdminRoute" />
++    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous && !isAdminRoute && !extensionFallback" />
  </template>
  
  <script lang="ts" setup>
-@@ -55,6 +55,7 @@
+@@ -57,6 +57,7 @@
          : null
  
      const loaded = ref(false)

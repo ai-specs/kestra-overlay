@@ -4,9 +4,11 @@
 # 来源: 新写；用户报告空白dashboard、全局usage泄露、受限MCP页面拒绝和零授权账号无法退出
 # 触达上游文件: 7 个（UI认证与拒绝页面、统计查询入口、typed资源适配和独立探针）
 # 移除条件: 上游OSS提供等价规范登录路径、独立拒绝退出入口和usage/MCP工具查询授权
+# 演进：REQ-0368 通用入口激活按原需求归属；未引入业务逻辑。
+# 来源增量提交：fa9c40e156fdc23705da38dc0f3b51c24ad948fc
 diff --git a/ui/src/components/errors/AccessDenied.vue b/ui/src/components/errors/AccessDenied.vue
 new file mode 100644
-index 0000000000000000000000000000000000000000..67160a9ec82f8212bde26c2d1df7c8acefec481b
+index 0000000..67160a9
 --- /dev/null
 +++ b/ui/src/components/errors/AccessDenied.vue
 @@ -0,0 +1,16 @@
@@ -27,11 +29,11 @@ index 0000000000000000000000000000000000000000..67160a9ec82f8212bde26c2d1df7c8ac
 +    }
 +</script>
 diff --git a/ui/src/main.ts b/ui/src/main.ts
-index 86046b23ed775814efa990e0f08eaaa55bc95e04..bcddd74390b018c78578c630825fce4d0c14927f 100644
+index e5460f1..a610b69 100644
 --- a/ui/src/main.ts
 +++ b/ui/src/main.ts
-@@ -35,6 +35,9 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
-
+@@ -37,6 +37,9 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
+ 
  // Fail closed: an error probing the pre-auth endpoints is no evidence that setup is needed.
  const handleAuthError = (to: {fullPath: string}, error: unknown) => {
 +    if ((error as {response?: {status?: number}} | null)?.response?.status === 403) {
@@ -40,10 +42,10 @@ index 86046b23ed775814efa990e0f08eaaa55bc95e04..bcddd74390b018c78578c630825fce4d
      if ((error as {response?: {status?: number}} | null)?.response?.status === 401) {
          if (Authentication.isOidc()) {
              Authentication.login()
-@@ -89,6 +92,15 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+@@ -97,6 +100,15 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
          return // Prevent navigation if the path and query are the same
      }
-
+ 
 +    if (to.name === "access-denied") {
 +        const response = await fetch("/api/v1/configs/login")
 +        if (response.ok) Authentication.configureOidc((await response.json()).oidcAuthEnabled === true)
@@ -55,21 +57,21 @@ index 86046b23ed775814efa990e0f08eaaa55bc95e04..bcddd74390b018c78578c630825fce4d
 +
      try {
          const miscStore = useMiscStore()
-         if(!httpClient) {
+         async function loadRouteConfigs() {
 diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
-index e243b3442b58d53ffe057da402a8eb47d69e41a9..6bd429eafcbfe14c554566145955b013d7d24a57 100644
+index e243b34..6bd429e 100644
 --- a/ui/src/routes/routes.ts
 +++ b/ui/src/routes/routes.ts
 @@ -11,6 +11,7 @@ import {NAMESPACE_PARENT_ROUTE, createNamespaceTabRoutes} from "../utils/namespa
  export type KestraRouteRecord = RouteRecordRaw & {ossOnly?: boolean}
-
+ 
  const routes: KestraRouteRecord[] = [
 +    {name: "access-denied", path: "/access-denied", component: () => import("../components/errors/AccessDenied.vue"), meta: {anonymous: true, layout: FullScreenLayout}},
      //Initial
      {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
-
+ 
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-index 438f276ab0af8065899a9e304a4d6e7d39e64ad9..9516ceb59f7821c302d4b1f7173fdd55ac0e302f 100644
+index 438f276..9516ceb 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 @@ -214,7 +214,7 @@ public class MiscController {
@@ -82,7 +84,7 @@ index 438f276ab0af8065899a9e304a4d6e7d39e64ad9..9516ceb59f7821c302d4b1f7173fdd55
              .flows(event.getFlows())
              .executions(event.getExecutions())
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
-index 2afcd6bd05124830d7a63c5d1aeb089439c055dc..e9640a51c55e8846d56ca70ed75f892eb8aa65cb 100644
+index 2afcd6b..e9640a5 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 @@ -108,11 +108,14 @@ public final class OssRestOperationAdapter {
@@ -103,13 +105,13 @@ index 2afcd6bd05124830d7a63c5d1aeb089439c055dc..e9640a51c55e8846d56ca70ed75f892e
                      case "getMcp" -> single(Resource.MCP_SERVER, Action.READ, tenant, null, id);
                      case "createMcp" -> single(Resource.MCP_SERVER, Action.CREATE, tenant, null, null);
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
-index f5a35ea78b32ad493ded2692196fb60deac7427d..85ebe0979a2d33a9741ee81e1ddeb42bf74cc43b 100644
+index f5a35ea..85ebe09 100644
 --- a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
 @@ -72,6 +72,22 @@ class OssRestOperationAdapterTest {
              "[]", Map.of()))).isEmpty();
      }
-
+ 
 +    @Test
 +    void usageRequiresBothResourceDomainsAndToolListingUsesFlowDomain() {
 +        var usage = adapter.resolve(request("MiscController", "getUsages", "GET", Map.of("tenant", "main"), "", Map.of()));
@@ -130,7 +132,7 @@ index f5a35ea78b32ad493ded2692196fb60deac7427d..85ebe0979a2d33a9741ee81e1ddeb42b
          Map<String, Object> variables, String body, Map<String, List<String>> query) {
          return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, "/api/v1/main/fixture", query,
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
-index 550da4e1b4244917be9af41c5e431e87bd6f1af9..705334af54bf9a2ff747ab01f8e8a31edeb46fc2 100644
+index 550da4e..705334a 100644
 --- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
 @@ -40,6 +40,9 @@ class TypedRbacHttpProbeTest {

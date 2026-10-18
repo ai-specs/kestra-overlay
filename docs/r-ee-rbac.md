@@ -1,5 +1,136 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+
+## REQ-0368 通用扩展入口独立于业务配置（2026-10-18，已接收、未发布）
+
+消费项目：`kestra-plugin-rbac`。本提案基于 overlay
+`5cac500003433edd95d842bf0d3ece67001722bc` 的 39 个 patch，BASE 为
+`172dd0f3760fb1255d3b22bd1fd07ce31b173fa3`。主控报告该提交 CI
+`39110903137` 全部 success（含 promote），主控已下载后端和浏览器报告并核对正式
+digest `1ffea645d37525ca4b789233f61d4c30fee810467983caffed7404cab806bb3c`。
+不修改或重新生成 0366/0367，不改变 Java SPI、descriptor 或 UI SDK 的 V1 版本。
+
+### 失败行为及归因
+
+主控提供的真实组合输入：正式宿主 digest `df41b913711f32beedffa35617914be80b877ef81271059af58a071fe782580c`
+与插件 `4bfcb29de2c38fcd6e5fa0f31c30d349f6859cd9`。通过真实 UI 编辑 client 后目录
+推进 epoch，重新登录后 capability 返回 needsReconciliation=true、allowed=true、
+reconciliationAllowed=true，业务 configs 返回 403。真实浏览器证据同时确认 manifest
+被外层 METADATA 门拒绝；恢复 API 本身返回 200，恢复编辑器未挂载。
+
+源码确认：`ui/src/main.ts` 的 OIDC beforeResolve 无条件 loadConfigs，把 403 转到
+access-denied；它在 ExtensionPage 的 manifest 装载之前执行。App.vue 的
+loadGeneralResources 又调用 loadConfigs；只修改守卫不足。DefaultLayout 以 configs
+决定是否显示 LeftMenu、RouteTabsSidebar 与 ContextDrawer；App 顶栏还装载 GlobalSearch
+及完整业务菜单。不能伪造空 configs 让这些组件误认为完整初始化成功。
+
+已发布机制足以做扩展独立授权：UiExtensionController.manifest 逐 descriptor 执行
+EXTENSION.READ；注册资源仍经宿主真实安全过滤。registry.ts 已支持可选 capabilityPath
+且要求 allowed===true；ExtensionPage 当前只查 manifest，未复用 capability 检查。
+插件 ProjectTypedPolicy 已明确允许获准恢复者的 EXTENSION.READ/UPDATE，而普通
+METADATA 拒绝符合其契约。故缺口属于宿主 UI 初始化耦合，不是业务 configs 权限缺失。
+OSS task 模块联邦不是管理入口，也不能修复此守卫链。
+
+实际 docs 中不存在独立 ui-extension*.md。现有能力入口为本节所属的管理页面公开扩展
+契约、extension-mechanisms.md 的管理页面机制和 oss-ee-gap.md 的 REQ-0340/0362。
+本提案复用这些机制，不新增与现有能力重复的文档或服务端通行例外。
+
+### 最小接收范围
+
+主控接收并收窄：先认证 manifest 与目标 capability，再正常尝试 configs。只有 configs
+明确返回 403 且目标扩展明确获准时，才启用该扩展的 fallback 安全壳层；configs 获准
+的正常扩展继续完整宿主布局和菜单。其他错误不得作为 fallback，普通路由维持原门。
+
+实现使用明确的 fallback
+状态控制 App general resources；普通路由重新经过 configs，不伪造 configs。拒绝页
+认证发现的通用获准扩展链接和其他安全、竞态、主题、语言矩阵保持接收。
+
+补充真实证据：round18 的独立 manifest 请求也返回 403；同一身份 capability 与目标
+恢复 API 均 200，configs 403。证据入口为部署仓本轮 `round-18-recovery-defect.json`。
+源码确认 OssRestOperationAdapter 将 UiExtensionController.manifest 先分类为 METADATA，
+TypedRestRbacFilter 因而在 Controller 的逐 descriptor EXTENSION.READ 前拒绝发现。
+按主控增补接收最小发现激活：仅实际 UiExtensionController.manifest、main tenant、
+精确 manifest 路径、GET/HEAD 请求可在已认证且既有评估边界内交给 Controller 逐项
+EXTENSION.READ 过滤。不是 protocol/匿名豁免，不放行任何业务 METADATA、asset 或未知路径。
+空发现可返回 200 空列表，但不授予目标访问。普通配置与资源/API 门保持独立。
+
+1. 路由只按既有命名路由 extensions/page 及对应匹配记录识别扩展，不能按任意字符串
+   包含 extensions 识别。先规范 tenant，再校验 ID，取得同源、禁重定向、携带当前 cookie
+   的认证 manifest。仅目标 descriptor 存在、版本正确且声明的 capability（若有）明确
+   allowed===true 时准入。空列表的 200 不证明目标有权访问。每次 direct、refresh、SPA
+   进入均重新验证，不以先前成功或 configs 缓存替代。装载前继续使用同一通用校验流程。
+2. 扩展路线验证 descriptor/capability 后正常请求业务 configs；仅该请求的 403 启用 fallback。
+   configs 获准时保留完整宿主布局，其他错误不作为 fallback；普通路线仍执行原 configs 门。登录配置只用于选择认证
+   流程，不证明身份。401 走既有登录；403、无目标或能力拒绝不装载模块；网络错误、非法
+   JSON、未知版本、异常与超时不作为允许。无身份、恶意 ID 和错误 tenant 均失败关闭。
+3. 仅为 configs 拒绝且扩展获准的路线使用专用安全壳层，明确这是扩展视图，不能声称完整宿主 UI。壳层提供获准
+   扩展列表、根内导航、宿主导航链接、主题、语言及宿主真实退出动作。返回宿主链接进入
+   原守卫，仍受 configs 门。扩展列表来自认证 manifest 和 capability，不硬编码业务 ID。
+4. App 的 general resources watcher 必须同时观察路线类别、fallback 与 anonymous 状态，fallback 路线
+   不调用 loadGeneralResources；离开扩展到普通路线须重新经过 configs 门并恢复普通
+   初始化，不能仅观察 anonymous（两类路线都为 false）。专用壳层不挂载完整 AppTopNavBar、
+   DefaultLayout 的业务侧栏/上下文抽屉、版本通知、tour 或 PWA 业务提示等配置消费者。
+   保留通用错误处理和必需的卸载/未保存处理，不吞全局错误。禁止对整个应用 suppress 403。
+5. 主题继续使用 misc.theme、switchTheme 和既有系统主题监听；语言继续使用 init.ts 的
+   偏好、动态语言分块和 design-system locale。壳层只复用无业务请求的宿主偏好控件或最小
+   通用控件，不复制翻译表。保持 ExtensionPage context 的主题/语言更新和 ShadowRoot 隔离。
+6. 拒绝页保留突出拒绝原因及真实退出换号入口；增加可选的通用获准扩展链接列表，以使
+   登录默认落到普通页面而 configs 拒绝时仍可点击进入恢复入口。列表按 main 认证 manifest
+   和 capability 过滤，不解析 needsReconciliation 或任何插件模型，不要求用户先手改 URL。
+   零授权列表为空；发现失败不得阻断原拒绝页和退出，不显示不可获准的业务入口。
+
+宿主不解析 rbac、project、scope、reconciliation 等业务路径或字段，不放宽 configs、
+METADATA、扩展业务 API、匿名规则或 CSRF；不按恢复状态改变服务器授权。模块和 API
+每次请求仍经真实过滤器；capability 只是 UI 装载条件，不授予 API 操作权限。
+
+### 实施与验证边界
+
+独立 overlay clone 新增 `patches/webserver/0368-*.patch` 并更新所属现有机制文档。
+主控追加授权按既有来源归属重新生成 0132/0220/0300/0310/0340，仅演进原通用激活点。
+0368 承载独立 helper、壳层与宿主最小 probe；使用本任务独占源码/验证树，沿 BASE
+逐项需求提交生成全部 patch，禁止手写 hunk。测试不得读取真实
+插件源码作为构建输入。不得修改正式 overlay、root tracked 文件、plugin、CI 或 manifest。
+未登记 manifest 的结构门预期不通过，必须如实报告；正式集成登记由主控另行处理。
+
+| 检查 | 必需断言 |
+|---|---|
+| 宿主独立最小 provider/probe | EXTENSION READ/UPDATE 可允许且 METADATA/configs 拒绝；资源授权、认证、CSRF 不变 |
+| 壳层实际挂载 | direct/refresh/SPA 都挂载目标；准入的一次 configs 尝试后无 feeds、业务搜索等壳层附带请求；App watcher 不补发 configs；route teleport 目标必须先挂载 |
+| 普通导航回归 | 扩展到普通页面仍请求 configs，403 仍拒绝；有 METADATA 时普通页面仍完整初始化；拒绝页可返回获准扩展 |
+| 拒绝矩阵 | 零授权、未认证、缺 provider、未知 extension、恶意/编码 ID、错误 tenant、manifest/capability 403/401/500/超时/错误版本均不 mount |
+| 生命周期 | navigation 竞态取消、撤权后再次进入、模块/资源缺失错误；离开卸载，不复用旧允许 |
+| 偏好和界面 | light/dark/dark-2/system、语言切换/刷新/页面切换、窄屏、键盘焦点与错误可读；实际动态语言资源成功 |
+| 安全与副作用 | 真实安全过滤下允许 probe 写入、未授权/CSRF 写拒绝且 probe 存储不变；业务 configs/API 仍拒绝 |
+| 来源与重放 | 39+0368 完整顺序重放，git apply --numstat 可解析，重放源码与需求提交树一致，定向前端与宿主测试记录失败/跳过 |
+
+浏览器只使用宿主自有最小 probe；真实插件恢复、完整候选审核及保存由主控在正式宿主
+发布后的组合环境复验。2026-10-18 候选源码本地前端 58 项、真实 EmbeddedServer/filter
+宿主定向测试 8 项通过，无跳过。40 patch 使用未改 provenance 算法通过，干净 BASE 顺序
+重放通过；实际检查与来源记录在本任务独占树。浏览器已发现并修复 fallback teleport
+挂载顺序缺口；Vite 自有 HTTP 响应程序检查与真实宿主过滤测试分别记录，不能合称正式镜像验收。
+结构脚本因未登记 0368 manifest 行仍失败一项；正式登记、CI、发布与真实组合验收均未完成。
+复用已有依赖缓存，不复制 node_modules/fatjar，不删除旧 .work，不修改或 reset 主控编译树。
+
+### 主控本地复验
+
+最终 40 个补丁通过原版结构门和干净 BASE 顺序重放；重放 tree 与需求 tree 均为
+`9377f8326dfebfefe99b06752ec37c058fd47bde`。宿主定向 283 项中 281 项通过，
+两项既有外部环境探针跳过，必需报告门无失败或跳过。前端 58 项、生产 UI 构建与
+executableJar 通过。主控 ego-browser 的宿主自有 UI 探针验证 light、dark、dark-2、
+system 主题及 KsSelect wrapper 的可见键盘焦点；该探针后端为自有响应程序，真实
+HTTP 安全过滤由独立宿主测试验证。正式镜像和真实插件组合仍须后续 CI 与部署验收。
+
+### 兼容与升级影响
+
+不新增公开服务端端点、不修改 V1 DTO 或 Java 二进制签名。已获准扩展仍消费同一 ESM
+context；没有扩展的普通页面保持原门。仅 configs 拒绝但扩展获准的视图使用专用壳层，属于有意的布局变化，
+不能把隐藏完整业务菜单表述为完整宿主 UI 兼容。恢复完毕后用户通过明确宿主导航回到
+完整界面，configs 仍需其实际授权。无 capabilityPath 的既有描述继续由 manifest 授权。
+
+上游升级必须重新核对 main.ts 守卫、App watcher、route/layout、偏好控件和 init 依赖图；
+以探针证明壳层不隐含 configs 请求。上游提供等价的已认证扩展独立初始化和壳层后可移除
+0368。正式发布仍由主控执行；本任务不提交、推送、发布正式仓或取消既有 CI。
+
 ## MCP 异步可信来源修复（2026-10-18，已接收、未发布）
 
 消费项目为 `kestra-plugin-rbac`。基线 overlay 为

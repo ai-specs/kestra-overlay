@@ -1,0 +1,889 @@
+# 需求：REQ-0368 已认证扩展条件安全壳层
+# 消费扩展仓：kestra-plugin-rbac
+# 状态：core
+# 来源：新写；独立逐需求提交 540815166f51fb7a2422ef5d6e3371b283c66c45
+# 触达上游文件：16 个
+# 移除条件：上游提供等价认证发现和条件安全壳层
+diff --git a/ui/src/components/extensions/ExtensionFallbackLayout.vue b/ui/src/components/extensions/ExtensionFallbackLayout.vue
+new file mode 100644
+index 0000000..6383012
+--- /dev/null
++++ b/ui/src/components/extensions/ExtensionFallbackLayout.vue
+@@ -0,0 +1,85 @@
++<template>
++    <section class="extension-fallback" data-testid="extension-fallback-shell">
++        <header>
++            <strong>{{ $t('uiExtensions') }}</strong>
++            <RouterLink :to="{name: 'home', params: {tenant: route.params.tenant}}">{{ $t('kestra') }}</RouterLink>
++            <label>
++                {{ $t('settings.blocks.theme.label') }}
++                <KsSelect :modelValue="misc.theme" :aria-label="$t('settings.blocks.theme.label')" @update:model-value="changeTheme">
++                    <KsOption v-for="theme in themes" :key="theme.value" :value="theme.value" :label="$t(theme.label)" />
++                </KsSelect>
++            </label>
++            <label>
++                {{ $t('settings.blocks.configuration.fields.language') }}
++                <KsSelect :modelValue="locale" :aria-label="$t('settings.blocks.configuration.fields.language')" @update:model-value="changeLanguage">
++                    <KsOption v-for="language in languages" :key="language[0]" :value="language[0]" :label="language[1]" />
++                </KsSelect>
++            </label>
++            <KsButton nativeType="button" @click="logout">{{ $t('setup.logout') }}</KsButton>
++        </header>
++        <ExtensionLinks />
++        <div id="topnav-title-slot" />
++        <div id="topnav-description-slot" />
++        <div id="topnav-actions-slot" />
++        <main v-if="ready"><slot /></main>
++    </section>
++</template>
++
++<script setup lang="ts">
++    import {onMounted, onBeforeUnmount, ref} from "vue";
++    import {useRoute, useRouter} from "vue-router";
++    import {useI18n} from "vue-i18n";
++    import {KsButton, KsSelect, KsOption} from "@kestra-io/design-system";
++    import {useMiscStore} from "override/stores/misc";
++    import {LANGUAGES} from "../../translations/languages";
++    import {switchTheme, type SelectedTheme} from "../../utils/utils";
++    import * as Authentication from "../../utils/authentication";
++    import ExtensionLinks from "./ExtensionLinks.vue";
++
++    const route = useRoute();
++    const ready = ref(false);
++    const router = useRouter();
++    const misc = useMiscStore();
++    const {locale} = useI18n({useScope: "global"});
++    const languages = [["en", "English"], ...LANGUAGES];
++    const themes = [
++        {value: "dark-2", label: "settings.blocks.theme.color_modes.dark_2"},
++        {value: "dark", label: "settings.blocks.theme.color_modes.dark_1"},
++        {value: "light", label: "settings.blocks.theme.color_modes.light"},
++        {value: "syncWithSystem", label: "settings.blocks.theme.color_modes.sync"},
++    ];
++    function changeTheme(value: string) {
++        if (themes.some(theme => theme.value === value)) switchTheme(misc, value as SelectedTheme);
++    }
++    function changeLanguage(value: string) {
++        if (languages.some(language => language[0] === value) && value !== locale.value) {
++            localStorage.setItem("lang", value);
++            window.location.assign(window.location.href);
++        }
++    }
++    async function logout() {
++        await Authentication.logout();
++        if (!Authentication.isOidc()) await router.push({name: "login"});
++    }
++    let media: MediaQueryList | undefined;
++    function systemTheme() {
++        if (misc.theme === "syncWithSystem") switchTheme(misc, "syncWithSystem");
++    }
++    onMounted(() => {
++        ready.value = true;
++        media = window.matchMedia("(prefers-color-scheme: dark)");
++        media.addEventListener("change", systemTheme);
++    });
++    onBeforeUnmount(() => media?.removeEventListener("change", systemTheme));
++</script>
++
++<style scoped>
++    .extension-fallback {width: 100%; min-height: 100vh; padding: var(--ks-spacing-4); background: var(--ks-bg-base); color: var(--ks-text-primary);}
++    header {display: flex; flex-wrap: wrap; align-items: center; gap: var(--ks-spacing-4);}
++    label {display: flex; align-items: center; gap: var(--ks-spacing-2);}
++    label {min-width: 0;}
++    label :deep(.kel-select) {width: 12rem; max-width: 100%;}
++    a {color: var(--ks-text-link);}
++    :is(select, button, a):focus-visible {outline: 2px solid var(--ks-border-focus); outline-offset: 3px;}
++    @media (max-width: 600px) {header, label {align-items: stretch; flex-direction: column;}}
++</style>
+diff --git a/ui/src/components/extensions/ExtensionLinks.vue b/ui/src/components/extensions/ExtensionLinks.vue
+new file mode 100644
+index 0000000..eb4992d
+--- /dev/null
++++ b/ui/src/components/extensions/ExtensionLinks.vue
+@@ -0,0 +1,26 @@
++<template>
++    <nav v-if="extensions.length" :aria-label="$t('uiExtensions')" data-testid="extension-links">
++        <RouterLink v-for="extension in extensions" :key="extension.id"
++            :to="{name: 'extensions/page', params: {tenant, extensionId: extension.id, pathMatch: []}}">
++            {{ extension.titles[locale] ?? extension.titles.en }}
++        </RouterLink>
++    </nav>
++</template>
++
++<script setup lang="ts">
++    import {computed} from "vue";
++    import {useRoute} from "vue-router";
++    import {useI18n} from "vue-i18n";
++    import {useUiExtensions} from "../../extensions/registry";
++
++    const route = useRoute();
++    const tenant = computed(() => String(route.params.tenant ?? "main"));
++    const {locale} = useI18n({useScope: "global"});
++    const extensions = useUiExtensions();
++</script>
++
++<style scoped>
++    nav {display: flex; flex-wrap: wrap; gap: var(--ks-spacing-4); margin-block: var(--ks-spacing-4);}
++    a {color: var(--ks-text-link);}
++    a:focus-visible {outline: 2px solid var(--ks-border-focus); outline-offset: 3px;}
++</style>
+diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
+index 724cc46..28025b9 100644
+--- a/ui/src/components/extensions/ExtensionPage.vue
++++ b/ui/src/components/extensions/ExtensionPage.vue
+@@ -11,6 +11,7 @@
+     import {useI18n} from "vue-i18n";
+     import {useMiscStore} from "override/stores/misc";
+     import {SUPPORT_LOCALES} from "../../translations/languages";
++    import {requireExtension} from "../../extensions/access";
+     import {createExtensionRequest, extensionPath, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
+     import type {UiExtensionContextV1, UiExtensionDescriptorV1, UiExtensionModuleV1} from "../../extensions/protocol";
+     import TopNavBar from "../layout/TopNavBar.vue";
+@@ -60,12 +61,9 @@
+         lifecycle = new ExtensionLifecycle(container.value, error => {console.error("[UiExtension]", error); failed.value = true; loading.value = false;});
+         const active = lifecycle;
+         try {
+-            const response = await fetch(hostExtensionPath(`/ui-extensions/${encodeURIComponent(String(route.params.tenant ?? "main"))}/manifest`), {signal: active.signal, credentials: "same-origin", redirect: "error"});
+-            if (!response.ok) throw new Error("Extension manifest unavailable");
+-            const manifest = await response.json();
++            const resolved = await requireExtension(String(route.params.tenant ?? "main"), String(route.params.extensionId), active.signal);
+             if (current !== generation) return;
+-            descriptor.value = manifest.extensions.find((value: UiExtensionDescriptorV1) => value.id === route.params.extensionId);
+-            if (manifest.contractVersion !== 1 || !descriptor.value) throw new Error("Extension not registered");
++            descriptor.value = resolved;
+             const initial = context();
+             await active.start(() => import(/* @vite-ignore */ initial.assetBase + descriptor.value!.entry) as Promise<UiExtensionModuleV1>, initial);
+             if (current === generation) {loading.value = false; await active.update(context());}
+diff --git a/ui/src/extensions/access.ts b/ui/src/extensions/access.ts
+new file mode 100644
+index 0000000..6989fb1
+--- /dev/null
++++ b/ui/src/extensions/access.ts
+@@ -0,0 +1,68 @@
++import type {UiExtensionDescriptorV1} from "./protocol";
++import {hostExtensionPath} from "./runtime";
++
++export class ExtensionAccessError extends Error {
++    constructor(public readonly status: number) {super("Extension access unavailable");}
++    get response() {return {status: this.status};}
++}
++
++export function validExtensionId(id: unknown): id is string {
++    return typeof id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(id);
++}
++
++function safePath(path: unknown): path is string {
++    return typeof path === "string" && /^[A-Za-z0-9_./-]+$/.test(path) && !path.startsWith("/")
++        && !path.endsWith("/") && !path.includes("//") && !path.split("/").some(part => part === "." || part === "..");
++}
++
++async function json(path: string, signal?: AbortSignal): Promise<any> {
++    const bounded = AbortSignal.timeout(10000);
++    const response = await fetch(hostExtensionPath(path), {
++        credentials: "same-origin", redirect: "error", signal: signal ? AbortSignal.any([signal, bounded]) : bounded,
++    });
++    if (!response.ok) throw new ExtensionAccessError(response.status);
++    return response.json();
++}
++
++export async function extensionManifest(tenant: string, signal?: AbortSignal): Promise<UiExtensionDescriptorV1[]> {
++    if (tenant !== "main") throw new ExtensionAccessError(403);
++    const manifest = await json(`/ui-extensions/${tenant}/manifest`, signal);
++    if (manifest?.contractVersion !== 1 || !Array.isArray(manifest.extensions)) throw new ExtensionAccessError(403);
++    const ids = new Set<string>();
++    for (const descriptor of manifest.extensions) {
++        if (!descriptor || descriptor.contractVersion !== 1 || !validExtensionId(descriptor.id) || ids.has(descriptor.id)
++            || !safePath(descriptor.entry) || !descriptor.entry.endsWith(".js") || !Array.isArray(descriptor.styles)
++            || !descriptor.styles.every((style: unknown) => safePath(style) && style.endsWith(".css"))
++            || !descriptor.titles || typeof descriptor.titles.en !== "string"
++            || (descriptor.capabilityPath != null && (typeof descriptor.capabilityPath !== "string"
++                || !descriptor.capabilityPath.startsWith("/api/v1/") || !safePath(descriptor.capabilityPath.slice(1))))) {
++            throw new ExtensionAccessError(403);
++        }
++        ids.add(descriptor.id);
++    }
++    return manifest.extensions;
++}
++
++export async function extensionCapability(descriptor: UiExtensionDescriptorV1, signal?: AbortSignal): Promise<void> {
++    if (descriptor.capabilityPath != null && (await json(descriptor.capabilityPath, signal))?.allowed !== true) {
++        throw new ExtensionAccessError(403);
++    }
++}
++
++export async function requireExtension(tenant: string, id: string, signal?: AbortSignal): Promise<UiExtensionDescriptorV1> {
++    if (!validExtensionId(id)) throw new ExtensionAccessError(403);
++    const descriptor = (await extensionManifest(tenant, signal)).find(value => value.id === id);
++    if (!descriptor) throw new ExtensionAccessError(403);
++    await extensionCapability(descriptor, signal);
++    signal?.throwIfAborted();
++    return descriptor;
++}
++
++export async function visibleExtensions(tenant: string, signal?: AbortSignal): Promise<UiExtensionDescriptorV1[]> {
++    const descriptors = await extensionManifest(tenant, signal);
++    const visible = await Promise.all(descriptors.map(async descriptor => {
++        try {await extensionCapability(descriptor, signal); return descriptor;} catch {return null;}
++    }));
++    signal?.throwIfAborted();
++    return visible.filter((value): value is UiExtensionDescriptorV1 => value !== null);
++}
+diff --git a/ui/src/extensions/app-entry.spec.ts b/ui/src/extensions/app-entry.spec.ts
+new file mode 100644
+index 0000000..7cf7fbd
+--- /dev/null
++++ b/ui/src/extensions/app-entry.spec.ts
+@@ -0,0 +1,85 @@
++import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
++import {mount, flushPromises} from "@vue/test-utils";
++import {createPinia, setActivePinia} from "pinia";
++import {createMemoryHistory, createRouter} from "vue-router";
++import App from "../App.vue";
++import {setExtensionFallback} from "./entry";
++import {useMiscStore} from "override/stores/misc";
++
++vi.mock("../styles/vendor.scss", () => ({}));
++vi.mock("../styles/app.scss", () => ({}));
++vi.mock("override/stores/misc", async () => {
++    const {defineStore} = await import("pinia");
++    return {useMiscStore: defineStore("misc", {state: () => ({theme: "light", configs: undefined}), actions: {
++        loadConfigs: vi.fn(async () => ({version: "2.0.5", uuid: "probe"})),
++    }})};
++});
++vi.mock("../stores/api", () => ({useApiStore: () => ({loadFeeds: vi.fn()})}));
++vi.mock("../stores/layout", () => ({useLayoutStore: () => ({envName: ""})}));
++vi.mock("../stores/core", () => ({useCoreStore: () => ({})}));
++vi.mock("../stores/doc", () => ({useDocStore: () => ({initResourceUrlTemplate: vi.fn()})}));
++vi.mock("../utils/utils", () => ({uid: () => "probe", switchTheme: vi.fn()}));
++vi.mock("../utils/authentication", () => ({isLoggedIn: () => true}));
++vi.mock("../utils/appFontSize", () => ({applyFontScale: vi.fn(), getAppFontSizeMode: vi.fn()}));
++vi.mock("../utils/posthog", () => ({initPosthogIfEnabled: vi.fn()}));
++vi.mock("../utils/savedFilterTracking", () => ({SAVED_FILTER_ANALYTICS_INJECTION_KEY: "tracking", trackSavedFilter: vi.fn()}));
++vi.mock("../composables/useThemeCycle", () => ({useThemeCycle: vi.fn()}));
++vi.mock("../utils/loaderReveal", () => ({revealApp: (ready: () => void) => ready()}));
++vi.mock("../components/ErrorToast.vue", () => ({default: {template: "<div />"}}));
++vi.mock("../components/onboarding/tour/TourOverlay.vue", () => ({default: {template: '<div data-test="tour" />'}}));
++vi.mock("override/components/layout/DefaultLayout.vue", () => ({default: {template: '<div data-test="full-layout"><slot /></div>'}}));
++vi.mock("../components/layout/AppTopNavBar.vue", () => ({default: {template: '<div data-test="full-topbar" />'}}));
++vi.mock("../components/DocIdDisplay.vue", () => ({default: {template: "<div />"}}));
++vi.mock("../components/UnsavedChangesDialog.vue", () => ({default: {template: "<div />"}}));
++vi.mock("../components/VersionUpgradeNotice.vue", () => ({default: {template: '<div data-test="version" />'}}));
++vi.mock("../components/dashboard/DrillDownDrawer.vue", () => ({default: {template: '<div data-test="drilldown" />'}}));
++vi.mock("../components/PwaInstallPrompt.vue", () => ({default: {template: '<div data-test="pwa" />'}}));
++vi.mock("../components/extensions/ExtensionFallbackLayout.vue", () => ({default: {template: '<div data-test="fallback-layout"><slot /></div>'}}));
++
++let wrapper: ReturnType<typeof mount>;
++beforeEach(() => {setExtensionFallback(); localStorage.clear();});
++afterEach(() => wrapper?.unmount());
++
++async function render(reduced: boolean) {
++    const pinia = createPinia();
++    setActivePinia(pinia);
++    const misc = useMiscStore();
++    vi.spyOn(misc, "loadConfigs");
++    const router = createRouter({history: createMemoryHistory(), routes: [
++        {name: "extensions/page", path: "/:tenant/extensions/:extensionId", component: {template: "<div>probe</div>"}},
++        {name: "home", path: "/:tenant/home", component: {template: "<div>home</div>"}},
++    ]});
++    if (reduced) setExtensionFallback({tenant: "main", id: "probe"});
++    await router.push("/main/extensions/probe");
++    wrapper = mount(App, {global: {plugins: [pinia, router]}});
++    await flushPromises();
++    return {router, misc};
++}
++
++describe("App extension shell initialization", () => {
++    it("mounts the fallback without any general resources or business shell components", async () => {
++        const {misc} = await render(true);
++        expect(misc.loadConfigs).not.toHaveBeenCalled();
++        expect(wrapper.find('[data-test="fallback-layout"]').exists()).toBe(true);
++        for (const component of ["full-topbar", "full-layout", "tour", "version", "drilldown", "pwa"]) {
++            expect(wrapper.find(`[data-test="${component}"]`).exists()).toBe(false);
++        }
++        expect(misc.configs).toBeUndefined();
++    });
++
++    it("preserves the full layout and normal general resources for an allowed extension", async () => {
++        const {misc} = await render(false);
++        expect(misc.loadConfigs).toHaveBeenCalledOnce();
++        expect(wrapper.find('[data-test="full-layout"]').exists()).toBe(true);
++        expect(wrapper.find('[data-test="full-topbar"]').exists()).toBe(true);
++        expect(wrapper.find('[data-test="fallback-layout"]').exists()).toBe(false);
++    });
++
++    it("resumes ordinary initialization when leaving fallback without an anonymous-state change", async () => {
++        const {router, misc} = await render(true);
++        await router.push("/main/home");
++        await flushPromises();
++        expect(misc.loadConfigs).toHaveBeenCalledOnce();
++        expect(wrapper.find('[data-test="full-layout"]').exists()).toBe(true);
++    });
++});
+diff --git a/ui/src/extensions/entry.spec.ts b/ui/src/extensions/entry.spec.ts
+new file mode 100644
+index 0000000..59756a1
+--- /dev/null
++++ b/ui/src/extensions/entry.spec.ts
+@@ -0,0 +1,153 @@
++import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
++import {reactive} from "vue";
++import {extensionManifest, requireExtension, visibleExtensions} from "./access";
++import {resolveExtensionEntry, setExtensionFallback, useExtensionFallback} from "./entry";
++
++const descriptor = (id = "probe", capabilityPath: string | null = "/api/v1/main/extensions/probe/capabilities") => ({
++    contractVersion: 1, id, entry: "page.js", styles: ["page.css"], titles: {en: "Probe"}, capabilityPath,
++});
++const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status, headers: {"Content-Type": "application/json"}});
++const configsError = (status: number) => ({response: {status}});
++let fetcher: ReturnType<typeof vi.fn>;
++
++beforeEach(() => {
++    setExtensionFallback();
++    window.KESTRA_BASE_PATH = "";
++    fetcher = vi.fn(async (path: string) => response(path.endsWith("/manifest") ? {contractVersion: 1, extensions: [descriptor()]} : {allowed: true}));
++    vi.stubGlobal("fetch", fetcher);
++});
++afterEach(() => {vi.unstubAllGlobals(); vi.useRealTimers();});
++
++describe("authenticated extension entry", () => {
++    it("checks manifest and capability before configs and falls back only on its 403", async () => {
++        const configs = vi.fn(async () => {expect(fetcher).toHaveBeenCalledTimes(2); throw configsError(403);});
++        await expect(resolveExtensionEntry("main", "probe", configs, new AbortController().signal)).resolves.toBe(true);
++        expect(configs).toHaveBeenCalledOnce();
++        expect(fetcher.mock.calls.map(([path]) => path)).toEqual(["/ui-extensions/main/manifest", "/api/v1/main/extensions/probe/capabilities"]);
++        for (const [, options] of fetcher.mock.calls) expect(options).toMatchObject({credentials: "same-origin", redirect: "error"});
++    });
++
++    it("keeps the full host layout when configs is allowed", async () => {
++        await expect(resolveExtensionEntry("main", "probe", async () => ({edition: "OSS"}), new AbortController().signal)).resolves.toBe(false);
++    });
++
++    it.each([401, 404, 500, 503])("does not swallow configs %i", async status => {
++        await expect(resolveExtensionEntry("main", "probe", async () => {throw configsError(status);}, new AbortController().signal)).rejects.toEqual(configsError(status));
++    });
++
++    it("does not swallow a configs network error", async () => {
++        const failure = new TypeError("Network unavailable");
++        await expect(resolveExtensionEntry("main", "probe", async () => {throw failure;}, new AbortController().signal)).rejects.toBe(failure);
++    });
++
++    it.each([401, 403, 500])("manifest %i cannot reach configs", async status => {
++        fetcher.mockResolvedValue(response({}, status));
++        const configs = vi.fn();
++        await expect(resolveExtensionEntry("main", "probe", configs, new AbortController().signal)).rejects.toMatchObject({status});
++        expect(configs).not.toHaveBeenCalled();
++    });
++
++    it.each([false, "true", null])("requires an explicit boolean capability allow: %s", async allowed => {
++        fetcher.mockImplementation(async (path: string) => response(path.endsWith("/manifest") ? {contractVersion: 1, extensions: [descriptor()]} : {allowed}));
++        const configs = vi.fn();
++        await expect(resolveExtensionEntry("main", "probe", configs, new AbortController().signal)).rejects.toMatchObject({status: 403});
++        expect(configs).not.toHaveBeenCalled();
++    });
++
++    it.each([401, 403, 500])("capability %i cannot select fallback", async status => {
++        fetcher.mockImplementation(async (path: string) => path.endsWith("/manifest") ? response({contractVersion: 1, extensions: [descriptor()]}) : response({}, status));
++        await expect(requireExtension("main", "probe")).rejects.toMatchObject({status});
++    });
++
++    it("does not grant a target from an empty manifest", async () => {
++        fetcher.mockImplementation(async () => response({contractVersion: 1, extensions: []}));
++        await expect(requireExtension("main", "probe")).rejects.toMatchObject({status: 403});
++        expect(await visibleExtensions("main")).toEqual([]);
++    });
++
++    it("supports existing descriptors with no capability", async () => {
++        fetcher.mockResolvedValue(response({contractVersion: 1, extensions: [descriptor("probe", null)]}));
++        expect((await requireExtension("main", "probe")).id).toBe("probe");
++        expect(fetcher).toHaveBeenCalledOnce();
++    });
++
++    it.each(["../probe", "probe%2fother", "probe/other", "Probe", "probe\\other", "", "a".repeat(65)])("rejects malicious or invalid target %s before requesting", async id => {
++        await expect(requireExtension("main", id)).rejects.toMatchObject({status: 403});
++        expect(fetcher).not.toHaveBeenCalled();
++    });
++
++    it("rejects another tenant before requesting", async () => {
++        await expect(requireExtension("other", "probe")).rejects.toMatchObject({status: 403});
++        expect(fetcher).not.toHaveBeenCalled();
++    });
++
++    it.each([
++        {contractVersion: 2, extensions: [descriptor()]},
++        {contractVersion: 1, extensions: [descriptor(), descriptor()]},
++        {contractVersion: 1, extensions: [{...descriptor(), entry: "../page.js"}]},
++        {contractVersion: 1, extensions: [{...descriptor(), capabilityPath: "https://evil.invalid"}]},
++        {contractVersion: 1, extensions: [{...descriptor(), capabilityPath: "/api/v1/../configs"}]},
++    ])("fails closed for malformed manifest %#", async manifest => {
++        fetcher.mockResolvedValue(response(manifest));
++        await expect(extensionManifest("main")).rejects.toMatchObject({status: 403});
++    });
++
++    it("hides a failed capability without hiding an unrelated allowed extension", async () => {
++        fetcher.mockImplementation(async (path: string) => path.endsWith("/manifest")
++            ? response({contractVersion: 1, extensions: [descriptor(), descriptor("other", "/api/v1/main/extensions/other/capabilities")]})
++            : response({allowed: !path.includes("/other/")}));
++        expect((await visibleExtensions("main")).map(value => value.id)).toEqual(["probe"]);
++    });
++
++    it("does not reuse a prior allow after revocation", async () => {
++        await requireExtension("main", "probe");
++        fetcher.mockResolvedValue(response({contractVersion: 1, extensions: []}));
++        await expect(requireExtension("main", "probe")).rejects.toMatchObject({status: 403});
++    });
++
++    it("does not commit a late configs 403 after navigation cancellation", async () => {
++        const controller = new AbortController();
++        let reject!: (error: unknown) => void;
++        const configs = vi.fn(() => new Promise((_, fail) => {reject = fail;}));
++        const result = resolveExtensionEntry("main", "probe", configs, controller.signal);
++        const denied = expect(result).rejects.toMatchObject({name: "AbortError"});
++        await vi.waitFor(() => expect(configs).toHaveBeenCalledOnce());
++        controller.abort();
++        reject(configsError(403));
++        await denied;
++    });
++
++    it("bounds manifest requests", async () => {
++        vi.useFakeTimers();
++        const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds => {
++            const controller = new AbortController();
++            setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), milliseconds);
++            return controller.signal;
++        });
++        fetcher.mockImplementation((_path: string, options: RequestInit) => new Promise((_, reject) => {
++            options.signal!.addEventListener("abort", () => reject(options.signal!.reason), {once: true});
++        }));
++        const denied = expect(requireExtension("main", "probe")).rejects.toMatchObject({name: "TimeoutError"});
++        await vi.advanceTimersByTimeAsync(10000);
++        await denied;
++        expect(timeout).toHaveBeenCalledWith(10000);
++        timeout.mockRestore();
++    });
++
++    it("selects fallback only for its actual extension route and preserves the current fallback during another entry", () => {
++        const route = reactive({name: "extensions/page", params: {tenant: "main", extensionId: "probe"}});
++        const reduced = useExtensionFallback(route);
++        setExtensionFallback({tenant: "main", id: "probe"});
++        expect(reduced.value).toBe(true);
++        setExtensionFallback({tenant: "main", id: "other"});
++        expect(reduced.value).toBe(true);
++        route.name = "flows/list";
++        expect(reduced.value).toBe(false);
++        route.name = "extensions/page";
++        route.params.extensionId = "unknown";
++        expect(reduced.value).toBe(false);
++        route.params.extensionId = "probe";
++        setExtensionFallback();
++        expect(reduced.value).toBe(false);
++    });
++});
+diff --git a/ui/src/extensions/entry.ts b/ui/src/extensions/entry.ts
+new file mode 100644
+index 0000000..07b629e
+--- /dev/null
++++ b/ui/src/extensions/entry.ts
+@@ -0,0 +1,26 @@
++import {computed, shallowRef} from "vue";
++import {requireExtension} from "./access";
++
++interface EntryRoute {name?: unknown; params: {tenant?: unknown; extensionId?: unknown}}
++interface Fallback {tenant: string; id: string}
++const fallback = shallowRef<ReadonlySet<string>>(new Set());
++
++export function isExtensionRoute(route: EntryRoute) {return route.name === "extensions/page";}
++
++export function useExtensionFallback(route: EntryRoute) {
++    return computed(() => isExtensionRoute(route) && fallback.value.has(`${route.params.tenant}/${route.params.extensionId}`));
++}
++
++export async function resolveExtensionEntry(tenant: string, id: string, loadConfigs: () => Promise<unknown>, signal: AbortSignal): Promise<boolean> {
++    await requireExtension(tenant, id, signal);
++    try {await loadConfigs(); signal.throwIfAborted(); return false;}
++    catch (error) {
++        signal.throwIfAborted();
++        if ((error as {response?: {status?: number}})?.response?.status === 403) return true;
++        throw error;
++    }
++}
++
++export function setExtensionFallback(value?: Fallback) {
++    fallback.value = value ? new Set([...fallback.value, `${value.tenant}/${value.id}`]) : new Set();
++}
+diff --git a/ui/src/extensions/fallback-layout.spec.ts b/ui/src/extensions/fallback-layout.spec.ts
+new file mode 100644
+index 0000000..eed1d78
+--- /dev/null
++++ b/ui/src/extensions/fallback-layout.spec.ts
+@@ -0,0 +1,35 @@
++import {afterEach, expect, it, vi} from "vitest";
++import {mount, flushPromises} from "@vue/test-utils";
++import {createPinia} from "pinia";
++import {createMemoryHistory, createRouter} from "vue-router";
++import {createI18n} from "vue-i18n";
++import ExtensionFallbackLayout from "../components/extensions/ExtensionFallbackLayout.vue";
++
++vi.mock("@kestra-io/design-system", () => ({
++    KsButton: {template: "<button><slot /></button>"},
++    KsSelect: {template: "<select><slot /></select>"},
++    KsOption: {template: "<option />"},
++}));
++vi.mock("override/stores/misc", () => ({useMiscStore: () => ({theme: "light"})}));
++vi.mock("../utils/utils", () => ({switchTheme: vi.fn()}));
++vi.mock("../components/extensions/ExtensionLinks.vue", () => ({default: {template: "<nav />"}}));
++vi.mock("../utils/authentication", () => ({logout: vi.fn(), isOidc: () => true}));
++afterEach(() => document.body.replaceChildren());
++
++it("mounts route teleports only after the safety shell targets exist in the document", async () => {
++    vi.stubGlobal("matchMedia", () => ({addEventListener: vi.fn(), removeEventListener: vi.fn()}));
++    const router = createRouter({history: createMemoryHistory(), routes: [{name: "home", path: "/:tenant/home", component: {template: "<div />"}}]});
++    await router.push("/main/home");
++    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
++    const wrapper = mount(ExtensionFallbackLayout, {
++        attachTo: document.body,
++        slots: {default: {template: '<Teleport to="#topnav-actions-slot"><button id="route-action">Route action</button></Teleport>'}},
++        global: {plugins: [createPinia(), router, createI18n({legacy: false, locale: "en", missingWarn: false, fallbackWarn: false, messages: {en: {}}})]},
++    });
++    await flushPromises();
++    expect(document.querySelector("#topnav-actions-slot #route-action")?.textContent).toBe("Route action");
++    expect(warn.mock.calls.flat().join(" ")).not.toContain("Teleport");
++    wrapper.unmount();
++    warn.mockRestore();
++    vi.unstubAllGlobals();
++});
+diff --git a/ui/src/extensions/main-entry.spec.ts b/ui/src/extensions/main-entry.spec.ts
+new file mode 100644
+index 0000000..4cc0def
+--- /dev/null
++++ b/ui/src/extensions/main-entry.spec.ts
+@@ -0,0 +1,84 @@
++import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
++import {useExtensionFallback, setExtensionFallback} from "./entry";
++
++const probe = vi.hoisted(() => ({
++    guard: undefined as ((router: unknown, to: any, from: any) => Promise<unknown>) | undefined,
++    configs: vi.fn(), login: vi.fn(), authenticated: vi.fn(),
++}));
++vi.mock("../App.vue", () => ({default: {template: "<div />"}}));
++vi.mock("../utils/monacoEnvironment", () => ({}));
++vi.mock("../utils/preloadErrorReload", () => ({setupPreloadErrorReloadHandler: vi.fn()}));
++vi.mock("../routes/routes", () => ({default: []}));
++vi.mock("../utils/init", () => ({default: (_app: unknown, _routes: unknown, _stores: unknown, _en: unknown, _extra: unknown, guards: any) => {
++    probe.guard = guards.beforeResolve;
++    return new Promise(() => {});
++}}));
++vi.mock("../utils/kestraHttp", () => ({setupKestraHttp: () => ({interceptors: {request: {use: vi.fn()}}})}));
++vi.mock("@kestra-io/kestra-sdk", () => ({useClient: () => ({})}));
++vi.mock("../utils/authentication", () => ({configureOidc: vi.fn(), isOidc: () => true, isLoggedIn: () => true, setAuthenticated: probe.authenticated, login: probe.login}));
++vi.mock("../stores/core", () => ({useCoreStore: () => ({})}));
++vi.mock("../stores/layout", () => ({useLayoutStore: () => ({})}));
++vi.mock("../stores/unsavedChanges", () => ({useUnsavedChangesStore: () => ({})}));
++vi.mock("override/stores/misc", () => ({useMiscStore: () => ({loadConfigs: probe.configs, loadLoginConfig: async () => ({oidcAuthEnabled: true})})}));
++vi.mock("@kestra-io/design-system", () => ({TASK_ICON_INJECTION_KEY: "icon"}));
++vi.mock("../components/plugins/TaskIcon.vue", () => ({default: {template: "<div />"}}));
++vi.mock("../utils/serviceWorker", () => ({registerServiceWorker: vi.fn()}));
++vi.mock("../utils/pwaInstallState", () => ({initPwaInstallCapture: vi.fn()}));
++import "../main";
++
++const route = (name = "extensions/page", id = "probe") => ({name, path: `/main/${name}/${id}`, fullPath: `/main/${name}/${id}`, query: {}, meta: {}, params: {tenant: "main", extensionId: id}});
++const navigate = (to = route()) => probe.guard!({}, to, {path: "/previous", query: {}});
++const manifest = {contractVersion: 1, extensions: [{contractVersion: 1, id: "probe", entry: "page.js", styles: [], titles: {en: "Probe"}, capabilityPath: null}]};
++beforeEach(() => {
++    vi.clearAllMocks();
++    setExtensionFallback();
++    probe.configs.mockResolvedValue({version: "2.0.5"});
++    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(manifest))));
++});
++afterEach(() => vi.unstubAllGlobals());
++
++describe("actual main navigation guard", () => {
++    it("enters the target fallback on configs 403 and marks the proven session authenticated", async () => {
++        probe.configs.mockRejectedValue({response: {status: 403}});
++        expect(await navigate()).toBeUndefined();
++        expect(probe.authenticated).toHaveBeenCalledWith(true);
++        expect(useExtensionFallback(route()).value).toBe(true);
++        expect(probe.configs).toHaveBeenCalledWith({showMessageOnError: false});
++    });
++    it("keeps an allowed extension in the full layout", async () => {
++        expect(await navigate()).toBeUndefined();
++        expect(useExtensionFallback(route()).value).toBe(false);
++    });
++    it("does not swallow a normal route configs denial or discover extensions for it", async () => {
++        probe.configs.mockRejectedValue({response: {status: 403}});
++        expect(await navigate(route("flows/list"))).toEqual({name: "access-denied", replace: true});
++        expect(fetch).not.toHaveBeenCalled();
++    });
++    it("requires the target rather than treating a manifest 200 as login proof", async () => {
++        vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({contractVersion: 1, extensions: []})));
++        expect(await navigate()).toEqual({name: "access-denied", replace: true});
++        expect(probe.configs).not.toHaveBeenCalled();
++        expect(probe.authenticated).not.toHaveBeenCalled();
++    });
++    it("redirects an unauthenticated discovery to the existing login flow", async () => {
++        vi.mocked(fetch).mockImplementation(async () => new Response(null, {status: 401}));
++        expect(await navigate()).toBe(false);
++        expect(probe.login).toHaveBeenCalledOnce();
++        expect(probe.configs).not.toHaveBeenCalled();
++    });
++    it("denies an extension on network failure instead of continuing the route", async () => {
++        vi.mocked(fetch).mockRejectedValue(new TypeError("Network unavailable"));
++        expect(await navigate()).toEqual({name: "access-denied", replace: true});
++        expect(probe.configs).not.toHaveBeenCalled();
++    });
++    it("cancels a late fallback result after a subsequent ordinary navigation", async () => {
++        let reject!: (failure: unknown) => void;
++        probe.configs.mockImplementationOnce(() => new Promise((_, fail) => {reject = fail;}));
++        const first = navigate();
++        await vi.waitFor(() => expect(probe.configs).toHaveBeenCalledOnce());
++        expect(await navigate(route("flows/list"))).toBeUndefined();
++        reject({response: {status: 403}});
++        expect(await first).toBe(false);
++        expect(useExtensionFallback(route()).value).toBe(false);
++    });
++});
+diff --git a/ui/src/extensions/registry.ts b/ui/src/extensions/registry.ts
+index 0cec2e1..ae94d07 100644
+--- a/ui/src/extensions/registry.ts
++++ b/ui/src/extensions/registry.ts
+@@ -1,7 +1,7 @@
+ import {ref, watch, onScopeDispose} from "vue";
+ import {useRoute} from "vue-router";
+ import type {UiExtensionDescriptorV1} from "./protocol";
+-import {hostExtensionPath} from "./runtime";
++import {visibleExtensions} from "./access";
+ 
+ export function useUiExtensions() {
+     const route = useRoute();
+@@ -13,18 +13,8 @@ export function useUiExtensions() {
+         controller = current;
+         extensions.value = [];
+         try {
+-            const response = await fetch(hostExtensionPath(`/ui-extensions/${encodeURIComponent(tenant)}/manifest`), {signal: current.signal, credentials: "same-origin", redirect: "error"});
+-            if (!response.ok) return;
+-            const manifest = await response.json();
+-            if (manifest.contractVersion !== 1 || !Array.isArray(manifest.extensions)) return;
+-            const visible = await Promise.all(manifest.extensions.map(async (descriptor: UiExtensionDescriptorV1) => {
+-                if (!descriptor.capabilityPath) return descriptor;
+-                try {
+-                    const capability = await fetch(hostExtensionPath(descriptor.capabilityPath), {signal: current.signal, credentials: "same-origin", redirect: "error"});
+-                    return capability.ok && (await capability.json()).allowed === true ? descriptor : null;
+-                } catch {return null;}
+-            }));
+-            if (!current.signal.aborted) extensions.value = visible.filter((value): value is UiExtensionDescriptorV1 => value !== null);
++            const visible = await visibleExtensions(tenant, current.signal);
++            if (!current.signal.aborted) extensions.value = visible;
+         } catch {extensions.value = [];}
+     }, {immediate: true});
+     onScopeDispose(() => controller?.abort());
+diff --git a/ui/src/override/stores/misc.ts b/ui/src/override/stores/misc.ts
+index e960664..8e00a06 100644
+--- a/ui/src/override/stores/misc.ts
++++ b/ui/src/override/stores/misc.ts
+@@ -44,8 +44,8 @@ export const useMiscStore = defineStore("misc", () => {
+     const axios = useClient()
+ 
+ 
+-    async function loadConfigs() {
+-        const response = await axios.get(`${apiUrlWithoutTenants()}/configs`)
++    async function loadConfigs(options: {showMessageOnError?: boolean} = {}) {
++        const response = await axios.get(`${apiUrlWithoutTenants()}/configs`, options)
+         configs.value = response.data
+         // Best-effort: flush any queued analytics events once configs are known.
+         void useApiStore().flushQueuedEvents()
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/ExtensionDiscovery.java b/webserver/src/main/java/io/kestra/webserver/rbac/ExtensionDiscovery.java
+new file mode 100644
+index 0000000..c6e8d4e
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/ExtensionDiscovery.java
+@@ -0,0 +1,14 @@
++package io.kestra.webserver.rbac;
++
++import java.util.Set;
++
++final class ExtensionDiscovery {
++    static boolean matches(OssRestOperationAdapter.Request request) {
++        return request != null && request.route() != null
++            && "main".equals(request.variable("tenant"))
++            && "io.kestra.webserver.controllers.api.UiExtensionController".equals(request.route().controller())
++            && "manifest".equals(request.route().handler())
++            && Set.of("GET", "HEAD").contains(request.route().method())
++            && "/ui-extensions/main/manifest".equals(request.route().path());
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+index 0fef9e6..20d8174 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+@@ -62,10 +62,12 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+             Map<String, List<String>> query = new LinkedHashMap<>();
+             request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
+             return body(request).flatMap(bytes -> {
+-                var operations = adapter.resolve(new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(
++                var input = new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(
+                     request.getMethodName(), request.getPath(), query, request.getContentType().map(Object::toString).orElse(null), bytes,
+                     methodRoute.getDeclaringType().getName(), methodRoute.getMethodName(),
+-                    java.util.Arrays.stream(methodRoute.getArgumentTypes()).map(Class::getName).toList()), methodRoute.getVariableValues()));
++                    java.util.Arrays.stream(methodRoute.getArgumentTypes()).map(Class::getName).toList()), methodRoute.getVariableValues());
++                if (ExtensionDiscovery.matches(input)) return Mono.just(true);
++                var operations = adapter.resolve(input);
+                 if (operations.isEmpty()) return Mono.just(false);
+                 var filters = io.kestra.webserver.converters.QueryFilterFormatBinder.getQueryFilters(query, 3, 20);
+                 var requestedDomain = TypedQueryDomains.fromFilters(filters, true);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionDiscoveryRouteTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionDiscoveryRouteTest.java
+new file mode 100644
+index 0000000..162c27b
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionDiscoveryRouteTest.java
+@@ -0,0 +1,28 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class ExtensionDiscoveryRouteTest {
++    private OssRestOperationAdapter.Request request(String method, String path, String controller, String handler, String tenant) {
++        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, path, Map.of(), null, new byte[0],
++            controller, handler, List.of()), Map.of("tenant", tenant));
++    }
++
++    @Test void onlyActualReadOnlyMainManifestDelegatesToDescriptorFiltering() {
++        String controller = "io.kestra.webserver.controllers.api.UiExtensionController";
++        for (String method : List.of("GET", "HEAD")) assertTrue(ExtensionDiscovery.matches(
++            request(method, "/ui-extensions/main/manifest", controller, "manifest", "main")));
++        for (String method : List.of("POST", "PUT", "DELETE")) assertFalse(ExtensionDiscovery.matches(
++            request(method, "/ui-extensions/main/manifest", controller, "manifest", "main")));
++        for (String path : List.of("/api/v1/configs", "/ui-extensions/main/manifest/", "/ui-extensions/main/http-probe/page.js",
++            "/ui-extensions/main/%6danifest", "/ui-extensions/main/../main/manifest", "/ui-extensions/other/manifest")) {
++            assertFalse(ExtensionDiscovery.matches(request("GET", path, controller, "manifest", "main")));
++        }
++        assertFalse(ExtensionDiscovery.matches(request("GET", "/ui-extensions/main/manifest", controller, "asset", "main")));
++        assertFalse(ExtensionDiscovery.matches(request("GET", "/ui-extensions/main/manifest", "external.Controller", "manifest", "main")));
++        assertFalse(ExtensionDiscovery.matches(request("GET", "/ui-extensions/main/manifest", controller, "manifest", "other")));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionEntryHttpTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionEntryHttpTest.java
+new file mode 100644
+index 0000000..2d9a172
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionEntryHttpTest.java
+@@ -0,0 +1,111 @@
++package io.kestra.webserver.ui;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.webserver.rbac.RbacAuthorizer;
++import io.kestra.webserver.rbac.TypedAuthorization;
++import io.kestra.webserver.rbac.TypedAuthorizationResolver;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.security.MessageDigest;
++import java.util.HexFormat;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "ui.extension.entry.probe", value = "true")
++class UiExtensionEntryHttpTest {
++    @Inject EmbeddedServer server;
++
++    private HttpResponse<String> get(String path, String subject) throws Exception {
++        var request = HttpRequest.newBuilder(server.getURI().resolve(path)).GET();
++        if (subject != null) request.header("X-Entry-Probe", subject);
++        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
++    }
++
++    @Test void discoversAllowedExtensionWithoutMetadataPermission() throws Exception {
++        var response = get("/ui-extensions/main/manifest", "recovery");
++        assertEquals(200, response.statusCode());
++        assertTrue(response.body().contains("http-probe"));
++        assertFalse(response.body().contains("hidden-probe"));
++        assertEquals(403, get("/api/v1/configs", "recovery").statusCode());
++        assertEquals(200, get("/ui-extensions/main/http-probe/page.js", "recovery").statusCode());
++        assertEquals(403, get("/ui-extensions/main/hidden-probe/page.js", "recovery").statusCode());
++    }
++
++    @Test void zeroGrantDiscoveryIsEmptyAndAssetsRemainDenied() throws Exception {
++        var response = get("/ui-extensions/main/manifest", "zero");
++        assertEquals(200, response.statusCode());
++        assertTrue(response.body().contains("\"extensions\":[]"));
++        assertEquals(403, get("/api/v1/configs", "zero").statusCode());
++        assertEquals(403, get("/ui-extensions/main/http-probe/page.js", "zero").statusCode());
++    }
++
++    @Test void discoveryRemainsAuthenticatedAndTenantBound() throws Exception {
++        assertEquals(401, get("/ui-extensions/main/manifest", null).statusCode());
++        assertEquals(400, get("/ui-extensions/other/manifest", "recovery").statusCode());
++        assertEquals(403, get("/ui-extensions/main/unknown/page.js", "recovery").statusCode());
++        assertEquals(404, get("/ui-extensions/main/http-probe/missing.js", "recovery").statusCode());
++    }
++
++    @Test void policyFailureCannotExposeDescriptors() throws Exception {
++        var response = get("/ui-extensions/main/manifest", "failure");
++        assertEquals(200, response.statusCode());
++        assertTrue(response.body().contains("\"extensions\":[]"));
++        assertEquals(403, get("/ui-extensions/main/http-probe/page.js", "failure").statusCode());
++    }
++
++    @Singleton
++    @Requires(property = "ui.extension.entry.probe", value = "true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        @Override public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            var subject = request.getHeaders().get("X-Entry-Probe");
++            return subject == null ? Mono.empty() : Mono.just(Authentication.build(subject, List.of()));
++        }
++    }
++
++    @Singleton
++    @Requires(property = "ui.extension.entry.probe", value = "true")
++    static class Policy implements TypedAuthorizationResolver {
++        @Override public CompletionStage<TypedAuthorization.Decision> authorize(RbacAuthorizer.Principal principal, TypedAuthorization.Operation operation) {
++            if (principal.subject().equals("failure")) return CompletableFuture.failedFuture(new IllegalStateException());
++            boolean allowed = principal.subject().equals("recovery") && operation.resource() == TypedAuthorization.Resource.EXTENSION
++                && operation.action() == TypedAuthorization.Action.READ && "http-probe".equals(operation.resourceId());
++            return CompletableFuture.completedFuture(allowed ? TypedAuthorization.Decision.allow(operation.queryDomain()) : TypedAuthorization.Decision.deny("Probe denied"));
++        }
++    }
++
++    @Singleton
++    @Requires(property = "ui.extension.entry.probe", value = "true")
++    static class Pages implements UiExtensionProviderV1 {
++        @Override public List<UiExtensionDescriptorV1> extensions() {
++            try (var resource = getClass().getClassLoader().getResourceAsStream("ui-extensions/http-probe/page.js")) {
++                var hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(resource.readAllBytes()));
++                return List.of(new UiExtensionDescriptorV1(1, "http-probe", "ui-extensions/http-probe", "page.js", List.of(),
++                    Map.of("page.js", new UiExtensionDescriptorV1.Resource(hash, "application/javascript")), Map.of("en", "Entry probe"), null),
++                    new UiExtensionDescriptorV1(1, "hidden-probe", "ui-extensions/hidden-probe", "page.js", List.of(),
++                    Map.of("page.js", new UiExtensionDescriptorV1.Resource(hash, "application/javascript")), Map.of("en", "Hidden probe"), null));
++            } catch (Exception failure) {throw new IllegalStateException(failure);}
++        }
++    }
++}
+diff --git a/webserver/src/test/resources/ui-extensions/hidden-probe/page.js b/webserver/src/test/resources/ui-extensions/hidden-probe/page.js
+new file mode 100644
+index 0000000..48314ae
+--- /dev/null
++++ b/webserver/src/test/resources/ui-extensions/hidden-probe/page.js
+@@ -0,0 +1 @@
++export const contractVersion = 1;

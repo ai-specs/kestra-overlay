@@ -1,5 +1,12 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+> **条件扩展壳层（REQ-0368，已接收、未发布）**：认证 manifest 由控制器逐 descriptor
+> 检查 EXTENSION.READ，不以前置 METADATA 检查阻断发现。路由和模块装载重新核对描述与
+> capability；只有目标获准且业务 configs 返回 403 时使用独立壳层。获准 configs 的页面
+> 保留完整宿主布局；返回普通页面仍执行原配置门。App 不为独立壳层补载业务资源，拒绝页
+> 提供通用的获准扩展链接。该机制不识别 RBAC 项目恢复模型、不新增 Java SPI，不放宽
+> 业务 API 或静态匿名范围。失败证据和检查边界见 [R-EE-RBAC](r-ee-rbac.md)。
+
 > **MCP 异步来源修复（2026-10-18，已接收、未发布）**：0170 在同次工具调用的
 > publisher 中显式传播既有 `AuthorizationInvocationContext`，以恢复执行等待后的可信
 > HTTP 来源。传播从空上下文构造，不携带 JDBC 事务或旧授权评估，不保存到队列或

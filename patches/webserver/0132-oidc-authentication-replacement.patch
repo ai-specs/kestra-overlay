@@ -7,10 +7,36 @@
 # 触达上游文件（13）：UI 认证模块+测试、守卫/401/App/用量/退出；MiscController
 #   旧端点禁用、旧端点 filter+测试、OIDC 登录页与退出+测试、独立认证页面主题适配。
 # 移除条件：上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用。
+# 演进：REQ-0368 通用入口激活按原需求归属；未引入业务逻辑。
+# 来源增量提交：e4939704c15cb3db6e6f123e293c2869b5c2811f
 diff --git a/ui/src/App.vue b/ui/src/App.vue
-index 0dc5c01..3218c96 100644
+index 0dc5c01..63a4a25 100644
 --- a/ui/src/App.vue
 +++ b/ui/src/App.vue
+@@ -2,18 +2,18 @@
+     <DocIdDisplay />
+     <ErrorToast v-if="coreStore.message" :noAutoHide="true" :message="coreStore.message" />
+     <component :is="SdkDriftBanner" v-if="SdkDriftBanner" />
+-    <VersionUpgradeNotice v-if="loaded && route?.name && !route.meta?.anonymous" />
++    <VersionUpgradeNotice v-if="loaded && route?.name && !route.meta?.anonymous && !extensionFallback" />
+     <div id="app-shell">
+-        <AppTopNavBar  v-if="loaded && route?.name && !route.meta?.anonymous"  />
++        <AppTopNavBar  v-if="loaded && route?.name && !route.meta?.anonymous && !extensionFallback"  />
+         <div id="app-body">
+-            <component :is="route.meta.layout ?? DefaultLayout" v-if="loaded">
++            <component :is="extensionFallback ? ExtensionFallbackLayout : route.meta.layout ?? DefaultLayout" v-if="loaded">
+                 <router-view />
+             </component>
+         </div>
+     </div>
+-    <TourOverlay v-if="loaded && route?.name && !route.meta?.anonymous" />
++    <TourOverlay v-if="loaded && route?.name && !route.meta?.anonymous && !extensionFallback" />
+     <UnsavedChangesDialog />
+-    <DrillDownDrawer />
++    <DrillDownDrawer v-if="!extensionFallback" />
+     <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous" />
+ </template>
+ 
 @@ -29,7 +29,7 @@
      import {useDocStore} from "./stores/doc"
      import {useMiscStore} from "override/stores/misc"
@@ -20,7 +46,24 @@ index 0dc5c01..3218c96 100644
      import {applyFontScale, getAppFontSizeMode} from "./utils/appFontSize"
      import {initPosthogIfEnabled} from "./utils/posthog"
      import {SAVED_FILTER_ANALYTICS_INJECTION_KEY, trackSavedFilter} from "./utils/savedFilterTracking"
-@@ -83,7 +83,7 @@
+@@ -44,6 +44,8 @@
+     import PwaInstallPrompt from "./components/PwaInstallPrompt.vue"
+     import {useThemeCycle} from "./composables/useThemeCycle"
+     import {revealApp} from "./utils/loaderReveal"
++    import ExtensionFallbackLayout from "./components/extensions/ExtensionFallbackLayout.vue"
++    import {useExtensionFallback} from "./extensions/entry"
+ 
+     // Dev-only, dynamically imported so the component is entirely absent from production bundles:
+     // `import.meta.env.DEV` is statically replaced with `false` by Vite in prod builds, so this
+@@ -67,6 +69,7 @@
+     provide(SAVED_FILTER_ANALYTICS_INJECTION_KEY, trackSavedFilter)
+ 
+     const route = useRoute()
++    const extensionFallback = useExtensionFallback(route)
+ 
+     const envName = computed(() => layoutStore.envName || miscStore.configs?.environment?.name)
+ 
+@@ -83,7 +86,7 @@
              return newUid
          })()
  
@@ -29,20 +72,31 @@ index 0dc5c01..3218c96 100644
              return null
          }
  
-@@ -108,7 +108,7 @@
+@@ -107,8 +110,8 @@
+         revealApp(() => { loaded.value = true })
      }
  
-     watch(() => route?.meta?.anonymous, async (anonymous) => {
+-    watch(() => route?.meta?.anonymous, async (anonymous) => {
 -        if (!anonymous && BasicAuth.isLoggedIn()) {
-+        if (!anonymous && Authentication.isLoggedIn()) {
++    watch([() => route?.meta?.anonymous, () => route.name, extensionFallback], async ([anonymous]) => {
++        if (!anonymous && !extensionFallback.value && Authentication.isLoggedIn()) {
              try {
                  await loadGeneralResources()
              } catch (error) {
 diff --git a/ui/src/main.ts b/ui/src/main.ts
-index ff14ec0..86046b2 100644
+index ff14ec0..e5460f1 100644
 --- a/ui/src/main.ts
 +++ b/ui/src/main.ts
-@@ -13,7 +13,7 @@ import {useClient} from "@kestra-io/kestra-sdk"
+@@ -6,6 +6,8 @@ import {setupPreloadErrorReloadHandler} from "./utils/preloadErrorReload"
+ 
+ setupPreloadErrorReloadHandler()
+ 
++import {isExtensionRoute, resolveExtensionEntry, setExtensionFallback} from "./extensions/entry"
++
+ import App from "./App.vue"
+ import initApp from "./utils/init"
+ import {setupKestraHttp} from "./utils/kestraHttp"
+@@ -13,7 +15,7 @@ import {useClient} from "@kestra-io/kestra-sdk"
  import routes from "./routes/routes"
  import en from "./translations/en.json"
  import {setupTenantRouter} from "./composables/useTenant"
@@ -51,7 +105,7 @@ index ff14ec0..86046b2 100644
  import {getCsrfToken} from "./utils/csrf"
  import {useCoreStore} from "./stores/core"
  import {useLayoutStore} from "./stores/layout"
-@@ -36,7 +36,11 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
+@@ -36,7 +38,11 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
  // Fail closed: an error probing the pre-auth endpoints is no evidence that setup is needed.
  const handleAuthError = (to: {fullPath: string}, error: unknown) => {
      if ((error as {response?: {status?: number}} | null)?.response?.status === 401) {
@@ -64,7 +118,7 @@ index ff14ec0..86046b2 100644
          const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
          return {name: "login", query: fromPath ? {from: fromPath} : {}}
      } 
-@@ -55,7 +59,7 @@ function setupAxios(router: Router) {
+@@ -55,7 +61,7 @@ function setupAxios(router: Router) {
          document.body.classList.add("login")
          unsavedChangesStore.unsavedChange = false
          layoutStore.setTopNavbar(undefined)
@@ -73,7 +127,7 @@ index ff14ec0..86046b2 100644
      }
  
  
-@@ -63,7 +67,7 @@ function setupAxios(router: Router) {
+@@ -63,7 +69,7 @@ function setupAxios(router: Router) {
          coreStore,
          router,
          beforeLogout,
@@ -82,28 +136,60 @@ index ff14ec0..86046b2 100644
      })
  
      // Add CSRF token to every request - covers both generated-endpoint calls and
-@@ -92,6 +96,20 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+@@ -79,18 +85,52 @@ function setupAxios(router: Router) {
+     return useClient()
+ }
+ 
++let entryController: AbortController | undefined
++
+ // FIXME: any - guard args are untyped in the GuardFn interface
+ async function beforeResolve(router: Router, to: any, from: any): Promise<unknown> { // FIXME: any
++    entryController?.abort()
++    const navigation = new AbortController()
++    entryController = navigation
++
+     if(to.path === from.path && to.query === from.query) {
+         return // Prevent navigation if the path and query are the same
+     }
+ 
+     try {
+         const miscStore = useMiscStore()
++        async function loadRouteConfigs() {
++            if (isExtensionRoute(to)) {
++                const reduced = await resolveExtensionEntry(String(to.params.tenant), String(to.params.extensionId),
++                    () => miscStore.loadConfigs({showMessageOnError: false}), navigation.signal)
++                navigation.signal.throwIfAborted()
++                setExtensionFallback(reduced ? {tenant: String(to.params.tenant), id: String(to.params.extensionId)} : undefined)
++            } else {
++                await miscStore.loadConfigs()
++                navigation.signal.throwIfAborted()
++                setExtensionFallback()
++            }
++        }
+         if(!httpClient) {
+             setupAxios(router)
          }
          const loginConfig = await miscStore.loadLoginConfig()
- 
++        navigation.signal.throwIfAborted()
++
 +        Authentication.configureOidc(loginConfig.oidcAuthEnabled === true)
 +        if (Authentication.isOidc()) {
 +            try {
-+                await miscStore.loadConfigs()
++                await loadRouteConfigs()
 +                Authentication.setAuthenticated(true)
 +            } catch (error) {
-+                return handleAuthError(to, error)
++                if (navigation.signal.aborted) return false
++                return handleAuthError(to, error) ?? (isExtensionRoute(to) ? {name: "access-denied", replace: true} : undefined)
 +            }
 +            if (to.name === "login" || to.name === "setup") {
 +                return {path: "/"}
 +            }
 +            return
 +        }
-+
+ 
          if(!loginConfig.isBasicAuthInitialized) {
              // Since, Configs takes preference
-             // we need to check if any regex validation error in BE.
-@@ -122,7 +140,7 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+@@ -122,7 +162,7 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
              return
          }
  
@@ -112,6 +198,20 @@ index ff14ec0..86046b2 100644
  
          if (!hasCredentials) {
              const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
+@@ -136,10 +176,11 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+         }
+ 
+         // Now that the user is authenticated, load the full instance configuration.
+-        await miscStore.loadConfigs()
++        await loadRouteConfigs()
+     } catch (error) {
++        if (navigation.signal.aborted) return false
+         console.error("Error during authentication check:", error)
+-        return handleAuthError(to, error)
++        return handleAuthError(to, error) ?? (isExtensionRoute(to) ? {name: "access-denied", replace: true} : undefined)
+     }
+ }
+ 
 diff --git a/ui/src/override/components/auth/Auth.vue b/ui/src/override/components/auth/Auth.vue
 index 062ce49..662d49a 100644
 --- a/ui/src/override/components/auth/Auth.vue

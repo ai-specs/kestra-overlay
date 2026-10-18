@@ -4,11 +4,13 @@
 # 来源: 新写；用户要求认证页面兼容宿主主题，按页面用途取舍元素，不在拒绝页复制 K 字母标志
 # 触达上游文件: 1 个（AccessDenied.vue）
 # 移除条件: 上游OSS提供与登录页一致的独立授权拒绝页面
+# 演进：REQ-0368 通用入口激活按原需求归属；未引入业务逻辑。
+# 来源增量提交：d44ef9d1a59c2bba939e28121c80a77e1c1b86c0
 diff --git a/ui/src/components/errors/AccessDenied.vue b/ui/src/components/errors/AccessDenied.vue
-index 67160a9..9727e10 100644
+index 67160a9..9b6ff6e 100644
 --- a/ui/src/components/errors/AccessDenied.vue
 +++ b/ui/src/components/errors/AccessDenied.vue
-@@ -1,9 +1,12 @@
+@@ -1,12 +1,17 @@
  <template>
 -    <main role="main" class="text-center p-5">
 -        <h1>403 — Access denied</h1>
@@ -20,13 +22,18 @@ index 67160a9..9727e10 100644
 +            <h1 id="access-denied-title">{{ $t("errors.403.title") }}</h1>
 +            <p class="status">403</p>
 +            <p class="description">{{ $t("errors.403.content") }}</p>
++            <ExtensionLinks />
 +            <button type="button" data-testid="return-to-login" @click="returnToLogin">{{ $t("setup.login") }}</button>
 +        </main>
 +    </div>
  </template>
  
  <script setup lang="ts">
-@@ -14,3 +17,64 @@
++    import ExtensionLinks from "../extensions/ExtensionLinks.vue"
+     import * as Authentication from "../../utils/authentication"
+ 
+     async function returnToLogin() {
+@@ -14,3 +19,64 @@
          if (!Authentication.isOidc()) window.location.assign("/ui/login")
      }
  </script>
