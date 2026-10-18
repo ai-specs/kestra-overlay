@@ -13,12 +13,12 @@
 #   OidcJwkService（新增）；测试 OidcJwkServiceTest/OidcPostgresTestBase。
 # 移除条件：上游提供原生 OIDC 授权服务器（预期不会）；或 R-OIDC-SERVER 弃用
 diff --git a/webserver/build.gradle b/webserver/build.gradle
-index 7833929..a524496 100644
+index 783392931d8df2c067b8ece107bae19da9a213a5..a524496e8e9de5c3c74abf039b3315db5570f054 100644
 --- a/webserver/build.gradle
 +++ b/webserver/build.gradle
 @@ -23,6 +23,13 @@ dependencies {
      implementation "io.micronaut.cache:micronaut-cache-caffeine"
- 
+
      implementation "io.micronaut.security:micronaut-security-csrf"
 +    // R-OIDC-SERVER（协议标准基础设施层，AGENTS §2 唯一例外：本块依赖行）
 +    implementation project(":jdbc")
@@ -27,9 +27,9 @@ index 7833929..a524496 100644
 +    implementation "io.micronaut.data:micronaut-data-connection-jdbc"
 +    implementation "com.nimbusds:oauth2-oidc-sdk:11.38.2"
 +    implementation "org.mindrot:jbcrypt:0.4"
- 
+
      implementation("com.posthog.java:posthog:1.2.0")
- 
+
 @@ -46,6 +53,10 @@ dependencies {
      testImplementation project(':worker')
      testImplementation project(':indexer')
@@ -40,10 +40,10 @@ index 7833929..a524496 100644
 +    testImplementation "org.postgresql:postgresql"
      testImplementation "org.awaitility:awaitility"
      testImplementation "io.opentelemetry:opentelemetry-sdk-testing"
- 
+
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java
 new file mode 100644
-index 0000000..a99fae5
+index 0000000000000000000000000000000000000000..a99fae51e9dd7b0673306a17c8f812eb31742953
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java
 @@ -0,0 +1,52 @@
@@ -101,10 +101,10 @@ index 0000000..a99fae5
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java
 new file mode 100644
-index 0000000..8f36f52
+index 0000000000000000000000000000000000000000..536fa0ba15960c34836fa2f84a26f76f4a15b8a2
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,162 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.sql.Connection;
@@ -162,7 +162,19 @@ index 0000000..8f36f52
 +    public RSAKey activeSigningKey() {
 +        return findNewestActive()
 +            .map(this::parseJwk)
-+            .orElseGet(this::generateAndStore);
++            .orElseGet(this::generateAndStore
++);
++    }
++
++    /** Internal transaction path: do not borrow a second connection while signing a token. */
++    RSAKey activeSigningKey(Connection connection) {
++        if (connection == null) return activeSigningKey();
++        try (var statement = connection.prepareStatement("SELECT kid,jwk,algorithm,active FROM oidc_jwk WHERE active=TRUE ORDER BY created_at DESC,kid DESC LIMIT 1");
++             var rows = statement.executeQuery()) {
++            if (rows.next()) return parseJwk(map(rows));
++        } catch (SQLException failure) { throw new IllegalStateException("Failed to load active OIDC JWK", failure); }
++        return generateAndStore(connection
++);
 +    }
 +
 +    /** Generates and persists a fresh active key; previous keys stay active (rotation overlap). */
@@ -223,6 +235,12 @@ index 0000000..8f36f52
 +    }
 +
 +    private RSAKey generateAndStore() {
++try (var connection = dataSource.getConnection()) { return generateAndStore(connection); }
++        catch (SQLException failure) { throw new IllegalStateException("Failed to borrow OIDC JWK connection", failure); }
++    }
++
++    private RSAKey generateAndStore(Connection connection) {
++
 +        final RSAKey key;
 +        try {
 +            key = new RSAKeyGenerator(2048)
@@ -237,7 +255,8 @@ index 0000000..8f36f52
 +            INSERT INTO oidc_jwk (kid, jwk, algorithm, active)
 +            VALUES (?, ?, 'RS256', TRUE)
 +            ON CONFLICT (kid) DO NOTHING""";
-+        try (Connection connection = dataSource.getConnection();
++        try (
++
 +             PreparedStatement ps = connection.prepareStatement(sql)) {
 +            ps.setString(1, key.getKeyID());
 +            ps.setString(2, key.toJSONString());
@@ -250,7 +269,7 @@ index 0000000..8f36f52
 +}
 diff --git a/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql b/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql
 new file mode 100644
-index 0000000..e4d32e2
+index 0000000000000000000000000000000000000000..e4d32e2ab4a7e710f20ce086794cb7ccb4727643
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql
 @@ -0,0 +1,17 @@
@@ -273,7 +292,7 @@ index 0000000..e4d32e2
 +);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java
 new file mode 100644
-index 0000000..3477b65
+index 0000000000000000000000000000000000000000..3477b651080561cbaf5d2c6c9a9f1c52b7a700ab
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java
 @@ -0,0 +1,107 @@
@@ -386,7 +405,7 @@ index 0000000..3477b65
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
 new file mode 100644
-index 0000000..3262778
+index 0000000000000000000000000000000000000000..3262778ed4442625d42e6168599ca1002991045b
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
 @@ -0,0 +1,169 @@

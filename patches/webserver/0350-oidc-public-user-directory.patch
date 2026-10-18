@@ -6,7 +6,7 @@
 # 移除条件: 上游 OSS 提供等价公开账号目录与完整认证生命周期失效机制。
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java
 new file mode 100644
-index 0000000..67f8e08
+index 0000000000000000000000000000000000000000..67f8e0867ceb30fb4805623b68b0b7fe11b4e8a7
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java
 @@ -0,0 +1,26 @@
@@ -38,10 +38,10 @@ index 0000000..67f8e08
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
 new file mode 100644
-index 0000000..1981b8a
+index 0000000000000000000000000000000000000000..ef9af326245b7e6805d58275ab5a402101966fb8
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,59 @@
 +package io.kestra.webserver.oidc.controllers;
 +
 +import org.reactivestreams.Publisher;
@@ -63,7 +63,11 @@ index 0000000..1981b8a
 +@Requires(property = "kestra.oidc.enabled", value = "true")
 +public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
 +    private final OidcConfiguration configuration;
-+    private final OidcIdentityLifecycle lifecycle;
++    private final OidcIdentityLifecycle lifecycle
++;
++    @jakarta.inject.Inject
++    private io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.services.OidcTrustedIdentity> projectIdentities
++;
 +    public OidcIdentityLifecycleFilter(OidcConfiguration configuration, OidcIdentityLifecycle lifecycle) {
 +        this.configuration = configuration; this.lifecycle = lifecycle;
 +    }
@@ -78,8 +82,18 @@ index 0000000..1981b8a
 +        if (authentication == null) return chain.proceed(request);
 +        var attributes = authentication.getAttributes();
 +        if (!configuration.getIssuer().equals(String.valueOf(attributes.get("iss")))) return chain.proceed(request);
-+        return Mono.fromCallable(() -> authentication.getName().equals(attributes.get("client_id")) && lifecycle.machineSubject(authentication.getName())
-+                || lifecycle.matches(authentication.getName(), attributes.get(OidcIdentityLifecycle.CLAIM)))
++        return Mono.fromCallable(() ->
++{
++                if (projectIdentities != null && projectIdentities.isPresent()) {
++                    if (!projectIdentities.isUnique()) return false;
++                    projectIdentities.get().validate(authentication);
++                }
++                return
++ authentication.getName().equals(attributes.get("client_id")) && lifecycle.machineSubject(authentication.getName())
++                || lifecycle.matches(authentication.getName(), attributes.get(OidcIdentityLifecycle.CLAIM))
++;
++            }
++)
 +            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
 +            .timeout(java.time.Duration.ofSeconds(5))
 +            .onErrorReturn(false)
@@ -88,7 +102,7 @@ index 0000000..1981b8a
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
-index be5d295..9fd7db2 100644
+index be5d295023b08092ed878451a418b5183c98e46c..9fd7db2f04b03b25e0afa1097a5c7c86640f4495 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcLoginController.java
 @@ -65,14 +65,15 @@ public class OidcLoginController {
@@ -111,7 +125,7 @@ index be5d295..9fd7db2 100644
              .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL, "no-store");
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_99OidcUserDirectoryMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_99OidcUserDirectoryMigration.java
 new file mode 100644
-index 0000000..923dc1c
+index 0000000000000000000000000000000000000000..923dc1c7bd96d363fe4066458fbff064caae251c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_99OidcUserDirectoryMigration.java
 @@ -0,0 +1,18 @@
@@ -134,7 +148,7 @@ index 0000000..923dc1c
 +    @Override public List<String> sqlResources() { return List.of("/migrations/2.0.99-oidc-server-user-directory-postgres.sql"); }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
-index c283ea3..a574f2a 100644
+index c283ea3ba591297af0d753ebef3f33ca8802ea5a..a574f2a53f952d6e54e57a5bf0a42ffc415737f1 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 @@ -47,6 +47,13 @@ public class OidcAuthorizationCodeService {
@@ -153,7 +167,7 @@ index c283ea3..a574f2a 100644
          String code, String clientId, String subject, String redirectUri, List<String> scopes,
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcIdentityLifecycle.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcIdentityLifecycle.java
 new file mode 100644
-index 0000000..768b75f
+index 0000000000000000000000000000000000000000..768b75f3e768122333d6c4ccda7db182a2777fd8
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcIdentityLifecycle.java
 @@ -0,0 +1,80 @@
@@ -238,7 +252,7 @@ index 0000000..768b75f
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-index 7b0aee2..39b077a 100644
+index 7b0aee2f79b5b797dddcc2ff8e957a8f09738478..39b077a69021ec318629fdba6db91dec96c92ef5 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 @@ -26,6 +26,13 @@ public class OidcOwnershipService {
@@ -256,7 +270,7 @@ index 7b0aee2..39b077a 100644
          final int ownerMaximum) {
          this(source, mapper, ownerMaximum, new io.kestra.webserver.oidc.OidcConfiguration());
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
-index 8e2e2a6..03461d7 100644
+index 8e2e2a6e6a30d149225e992a7c0347eeb474ac4c..03461d721ffebc9e5b67a0ad4d203b7fc669be18 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 @@ -37,26 +37,48 @@ public class OidcSessionService {
@@ -339,10 +353,10 @@ index 8e2e2a6..03461d7 100644
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 new file mode 100644
-index 0000000..c978feb
+index 0000000000000000000000000000000000000000..12ec21378894b24ba27b542b0f501f1fb0278108
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,163 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.nio.charset.StandardCharsets;
@@ -362,6 +376,18 @@ index 0000000..c978feb
 +@Requires(property = "kestra.oidc.enabled", value = "true")
 +public final class OidcUserDirectory implements UserDirectoryV1 {
 +    private final DataSource source;
++private io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1> projects;
++    private io.kestra.webserver.oidc.OidcConfiguration configuration;
++
++    @jakarta.inject.Inject
++    public OidcUserDirectory(DataSource source,
++        io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1> projects,
++        io.kestra.webserver.oidc.OidcConfiguration configuration) {
++        this(source);
++        this.projects = projects;
++        this.configuration = configuration;
++    }
++
 +    public OidcUserDirectory(DataSource source) {
 +        this.source = DelegatingDataSource.unwrapDataSource(source);
 +    }
@@ -471,6 +497,11 @@ index 0000000..c978feb
 +        text(subject);
 +        if (revision < 0) throw new DirectoryException(Failure.INVALID);
 +        return transaction(connection -> {
++if (Boolean.FALSE.equals(active) && projects != null) {
++                if (!projects.isUnique()) throw new DirectoryException(Failure.UNAVAILABLE);
++                projects.get().guardSubjectDeactivation(connection, configuration.getIssuer(), subject);
++            }
++
 +            try (var statement = connection.prepareStatement("UPDATE oidc_user SET user_state=COALESCE(?,user_state),"
 +                + "directory_revision=directory_revision+1,authentication_version=authentication_version+1,updated_at=now() "
 +                + "WHERE username=? AND directory_revision=?")) {
@@ -491,7 +522,7 @@ index 0000000..c978feb
 +}
 diff --git a/webserver/src/main/resources/migrations/2.0.99-oidc-server-user-directory-postgres.sql b/webserver/src/main/resources/migrations/2.0.99-oidc-server-user-directory-postgres.sql
 new file mode 100644
-index 0000000..7a210b9
+index 0000000000000000000000000000000000000000..7a210b96b724d77e2bd8ae1ae23ca7a80bf53e92
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.99-oidc-server-user-directory-postgres.sql
 @@ -0,0 +1,3 @@
@@ -500,7 +531,7 @@ index 0000000..7a210b9
 +ALTER TABLE oidc_authorization_code ADD COLUMN IF NOT EXISTS authentication_version BIGINT NOT NULL DEFAULT 0;
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java
 new file mode 100644
-index 0000000..66e85d6
+index 0000000000000000000000000000000000000000..66e85d60f0a9465e6bcd349fb13c6d9ba8690dbb
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java
 @@ -0,0 +1,214 @@

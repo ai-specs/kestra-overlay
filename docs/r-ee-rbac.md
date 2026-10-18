@@ -562,3 +562,87 @@ authorize 和 close 均返回 CompletionStage。配置 `kestra.rbac.evaluation.e
 一致、异步传播、异常／超时／取消 close、嵌套执行边界、旧静态 provider 回归和组件
 缺失拒绝。部署仓再验证真实数据库修改、两个 JVM、REST/MCP/runtime、新请求撤权、
 查询总数与无拒绝副作用。两者都不能用插件单元测试替代。
+
+### UI 项目 scope 选择器（已接收）
+
+`kestra:project-scopes` 是显式 protocol scope，只允许目录登记的第一方 UI client 使用。它展开为该 client 的获批项目 scopes，再与 subject assignment、项目启用状态和用户 consent 求交；selector 不属于 projectScopes，不含本地权限。普通/DCR client 逐名申请实际 scope。未授予请求为 `invalid_scope`；无 assignment 账号可以登录但保持业务零授权。每个实际 project scope 仍必须独立包含完整 ResourceIntent，不因 selector 改变完整权限语义。
+
+### REQ-0362 扩展资源通用授权与 MCP tools/list 失败证据
+
+主控核实 `0340` 的 `UiExtensionController.managementAllowed` 以空 scopes 的 `SYSTEM.EXECUTE` 构造主体，`OssRestOperationAdapter` 默认行政分支也将扩展 API 按 SYSTEM 处理。这不能区分 IDENTITY/LOCAL_POLICY 管理，也会阻断目录 epoch 过期后的本地绑定重新确认。最小宿主修正是通用 `TypedAuthorization.Resource.EXTENSION`：resourceId 为已注册 extensionId；资源发现、装载和只读 API 使用 READ，已注册扩展写 API 使用 UPDATE。路径归宿主适配器和 registry，不加入 RBAC 业务模型。未知 extension、非注册 ID 或不匹配前缀必须拒绝；认证和 CSRF 继续由宿主处理。
+
+manifest 每个 descriptor 单独评估 EXTENSION.READ；扩展 provider 决定其可见性，页面可读不授 API 写权，Controller 仍细分 IDENTITY/LOCAL_POLICY。普通业务无管理意图不暴露页面或资源。旧模式保留失败关闭；新增资源枚举不能放宽旧 provider。应用项目模式的 V2 trusted identity 必须贯通该门。
+
+最新组合证据：根仓 `1cef9d2`、CI `39026951944` 使用正式 overlay digest `1b044df…`。日志先显示 `RBAC COMPOSE ENABLED ALL GREEN`；随后 missing-jar 阶段 `scripts/blackbox-rbac.mjs:287` 失败：REST reader/writer 缺 jar 均 403，writer MCP initialize 200 后 `tools/list` 返回 500。该失败与旧 digest `144de64` 的 reader per-resource 过滤断言失败不同；不能归因正常 provider 列表仍 500，也不得删除断言或只重跑。修复必须保留 fail-closed，将缺组件/授权拒绝转换为稳定 MCP 响应并核对无副作用，同时回归启用正常模式的动态 tools/list 与 tools/call。
+
+### 管理域范围修正（主控冻结）
+
+`IDENTITY` 管理意图是内置 issuer 下的共享身份目录范围，适用于项目创建、scope、成员 client 和 subject 授予；它不授予本地策略或业务实例权限。`LOCAL_POLICY` 与 `BUSINESS_INSTANCE` 才按 project/tenant 范围解释。三域的 `READ` 与 `MANAGE` 必须显式声明，不能按 scope 名称、subject 或 `admin` 字符推断。
+
+
+### LOCAL_POLICY 显式目标项目（主控接收，实施中、未发布）
+
+消费项目为 `kestra-plugin-rbac`。已核实的失败路径是：唯一 UI client 只属于控制台项目，
+`IDENTITY.MANAGE` 可以创建其他应用项目，但原 `LOCAL_POLICY` 只覆盖控制台项目，
+无法从同一正式管理页面为新项目建立本地绑定。已有 client membership、selector 和
+callback 不提供项目切换；不增加多项目 client，不使用 subject 旁路或隐式全域。
+
+最小公开变更是在 `ApplicationDirectoryV1.ManagementIntent` 增加 `projectIds` 精确集合，
+仅 `LOCAL_POLICY` 可以使用非空集合。空集合明确指向该 scope 所属项目，不表示全部。
+非空集合只指向列出的项目 ID，不额外包含所属项目；不支持通配、名称推断或跨 issuer。
+ID 使用既定项目 ID 语法，管理写入必须验证目标项目存在。创建目标项目后，身份管理员必须创建带新稳定标识的管理 scope，显式列出新目标，
+不得扩大既有 scope 的 projectIds 或其他授权语义。先由当前控制台管理 scope 完成本地
+完整恢复并增加新 scope 的独立绑定，再显式批准 UI member 和 subject 授予。每次目录
+mutation 推进 epoch 后必须重新登录；旧 refresh token 不能用来恢复。取得新 scope 后
+完整恢复控制台目录 revision，再创建新目标的本地绑定。共享上界不能自动扩大旧本地 grants。`IDENTITY` 继续是精确 issuer 下的共享身份目录；`BUSINESS_INSTANCE`
+仍只覆盖所属项目和 main tenant。三域互不包含，普通业务权限保持逐 scope 完整授权。
+
+插件本地 `managementGrants.projectIds` 采用相同空集合语义，必须被同 scope 的共享
+管理意图覆盖。正常管理 API 必须将路径中的目标项目 ID 交给管理授权器；授权器不得
+只验证登录项目。首版没有未声明目标的项目创建本地绑定权。请求目标存在与否不能把
+一次拒绝变成允许。恢复过期本地绑定时，当前可信管理 scope 必须继续被最新共享上界
+覆盖；只恢复明确获准目标项目的完整本地绑定，不开放身份 CRUD 或普通业务资源。
+
+旧两参数 Java 构造保留并等价于空集合；已发布前不得消费新字段。宿主测试覆盖空集合、
+精确目标、无效或未知目标、其他管理域非法目标和 epoch 撤权；插件测试覆盖本地扩大、
+跨 scope 拼接管理动作与目标、错误 issuer、错误目标及同名 scope 跨项目。
+部署验收必须通过真实 UI 完成“创建目标项目、显式授权目标、本地绑定、保存刷新、
+未获准项目拒绝”，并检查拒绝写入无副作用。此节不代表生产链或正式发布已经通过。
+
+
+### 身份目录的不可变授权上界快照（主控接收，实施中、未发布）
+
+消费插件保存和评估时需要同一目录修订的项目、scope 上界及管理可达性。现有逐个
+`project/scopes/clients/assignments` 调用各开事务，不能保证同一修订；插件不能读取
+宿主内部 `ProjectDirectoryState` 或 IdP 数据表来拼接快照。最小公开读取为
+`ApplicationDirectoryV1.policyBoundaries()`，在一个短事务内返回不可变的
+`PolicyBoundary` 列表。每项含 project、scopes、audiences、reachableManagementScopes、
+protocolScopes。project 包含 revision 与 authorizationVersion；audiences 是该项目
+获批有效 client 的精确受众并集，不是通配。reachableManagementScopes 只列仍有真实
+active subject 授予且至少有该 subject 可登录的有效获批 client 的 scope；不返回凭据、
+subject 名单或用户资料，不评估插件本地 grants。snapshot 不保留连接，不跨请求缓存。
+
+该读取是可信 classpath 扩展的身份目录投影，不提供 HTTP 匿名端点，不授予身份 CRUD。
+插件负责按当前管理域和目标项目限制 HTTP 投影，仅把目标 project/scopes 返回恢复页。
+插件可以据此验证最后本地管理员：在最新同一快照上，至少有一个完整 scope 同时具有
+共享与本地 LOCAL_POLICY.MANAGE、覆盖实际目标且仍可达；不得把一个 scope 的动作与
+另一个 scope 的可达性拼接。目录错误、损坏或缺项目失败关闭。身份变更仍先提交 epoch，
+本地评估检查版本，跨仓不能原子提交的迁移保持明确失败关闭。
+
+旧公开方法保留兼容；新列表和集合必须不可变、唯一且有上限。宿主测试证明事务一致、
+真实 active/owner/firstPartyUi 可达性、关闭功能可读 schema、异常与损坏拒绝。插件在
+正式产物发布后消费，不得用内部目录对象或未发布 jar 提前编译。
+
+
+### 目录修订与撤权 epoch（候选实现，未发布）
+
+`TrustedIdentityV1.directoryRevision` 等于同一目录快照的 `Project.revision`，表示
+管理授权所确认的目录修订。`authorizationVersion` 等于 `Project.authorizationVersion`，
+表示 token/session 的撤权 epoch。两者是独立概念；即使常规写入同时递增，也不得互换。
+独立宿主探针使用 revision=19、epoch=7，分别核对输出；旧 epoch、未知 scope、错误
+UI audience 和无请求上下文必须拒绝。MCP 当前请求优先消费 Bearer filter 建立的
+认证属性，不能从环境中的 UI cookie 取得另一主体。
+
+`protocolScopes()` 当前是固定标准项与启动配置生成的不可变词汇表，不是数据库中的
+动态目录。多次读取不改变目录修订。未来若允许动态修改，必须将它纳入同一修订快照；
+当前候选不承诺动态修改。身份目录故障或身份核对不匹配继续失败关闭。

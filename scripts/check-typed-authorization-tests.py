@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
-    "TypedAuthorizationContractTest": 3,
+    "TypedAuthorizationContractTest": 6,
     "TypedAuthorizationGateTest": 2,
     "OssRestOperationAdapterTest": 4,
     "TypedQueryDomainsTest": 1,
@@ -17,6 +17,10 @@ for suite, expected in {
     "AuthorizationEvaluationTest": 16,
     "AuthorizationEvaluationRestTest": 2,
     "AuthorizationEvaluationHttpTest": 2,
+    "AuthorizationEvaluationProjectTest": 2,
+    "ExtensionResourceAdapterTest": 2,
+    "TypedResourceDomainBoundaryTest": 3,
+    "QueryDomainFailClosedTest": 4,
 }.items():
     report = ET.parse(results / f"TEST-io.kestra.webserver.rbac.{suite}.xml").getroot()
     if int(report.attrib["tests"]) != expected or any(
@@ -40,11 +44,11 @@ if int(mcp_evaluation.attrib["tests"]) != 3 or any(
 print("PASS: McpEvaluationLifecycleTest: 3 tests executed, no failures or skips")
 
 dynamic_tools = ET.parse(results / "TEST-io.kestra.mcp.McpDynamicToolListTest.xml").getroot()
-if int(dynamic_tools.attrib["tests"]) != 3 or any(
+if int(dynamic_tools.attrib["tests"]) != 4 or any(
     int(dynamic_tools.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
 ):
-    raise SystemExit("FAIL: McpDynamicToolListTest must execute 3 tests without failures or skips")
-print("PASS: McpDynamicToolListTest: 3 tests executed, no failures or skips")
+    raise SystemExit("FAIL: McpDynamicToolListTest must execute 4 tests without failures or skips")
+print("PASS: McpDynamicToolListTest: 4 tests executed, no failures or skips")
 
 for suite, expected in {"UiExtensionRegistryTest": 5, "UiExtensionControllerTest": 4, "UiExtensionHttpTest": 1}.items():
     report = ET.parse(results / f"TEST-io.kestra.webserver.ui.{suite}.xml").getroot()

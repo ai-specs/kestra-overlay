@@ -6,7 +6,7 @@
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 # 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
 diff --git a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
-index f1f7f73..4e74ab2 100644
+index f1f7f730c5fa5f5b647f760ac4e2031ba2041f97..4e74ab21e566f08c33b5da06cfda036b69c393cb 100644
 --- a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
 +++ b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
 @@ -14,7 +14,19 @@ public record McpSession(
@@ -39,7 +39,7 @@ index f1f7f73..4e74ab2 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-index 1e70462..bdf3d4c 100644
+index 1e70462a460e604f3978d20554f9a60735769052..bdf3d4cf9ba1eedb3b2d59da241bdf0c44c5f75b 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
 +++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
 @@ -35,6 +35,12 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
@@ -96,8 +96,24 @@ index 1e70462..bdf3d4c 100644
      private Flux<Event<?>> buildSeeBody(McpStreamableServerSession session, McpSchema.JSONRPCRequest jsonrpcRequest) {
          return Flux.create(sink ->
          {
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java b/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java
+index 35edc9bc8ef154c86d58e0c2a2b8524b5226d435..c434363845fa76788f49853575f913435da825c7 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java
+@@ -15,6 +15,11 @@ import static io.modelcontextprotocol.spec.McpSchema.JSONRPC_VERSION;
+ public class McpErrorResponseMapper {
+     @NonNull
+     public Mono<HttpResponse<?>> exceptionResponse(Throwable t, McpSchema.JSONRPCMessage msg) {
++if (t instanceof io.kestra.webserver.rbac.AuthorizationEvaluations.EvaluationDeniedException) {
++            var error = mcpError(-32003, "Authorization denied");
++            return Mono.just(HttpResponse.status(HttpStatus.FORBIDDEN).body(errorJsonrpcResponse(msg, error)));
++        }
++
+         var error = mcpError(McpSchema.ErrorCodes.INTERNAL_ERROR, "Failed to handle request: " + t.getMessage());
+         return exceptionResponse(error, msg);
+     }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-index c8d3137..e0091f6 100644
+index c8d3137c4959c266143a3679d1180213f6fabe07..e0091f6affd950ef646bc42702bb9edbed29cc25 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 @@ -39,6 +39,7 @@ public class McpServerHandlerTransport {
@@ -177,7 +193,7 @@ index c8d3137..e0091f6 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-index 1e6fd7d..d0b340d 100644
+index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e834aa685 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
 @@ -58,13 +58,16 @@ public class McpSessionService {
@@ -252,7 +268,7 @@ index 1e6fd7d..d0b340d 100644
 +    }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolService.java b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
-index 8c1d54b..d7f296c 100644
+index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..d7f296c34af33ab9a4e29ee3476b696381db2c58 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 @@ -57,6 +57,7 @@ public class McpToolService {
@@ -465,7 +481,7 @@ index 8c1d54b..d7f296c 100644
 
      /**
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
-index d82b6cd..91a9d44 100644
+index d82b6cd7da28990844f420dae5c48309ccce21cd..91a9d449ffa7cbde94ecbe0cc6943c26489897ec 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 @@ -88,6 +88,8 @@ public class McpToolController {
@@ -480,7 +496,7 @@ index d82b6cd..91a9d44 100644
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java
 new file mode 100644
-index 0000000..7473723
+index 0000000000000000000000000000000000000000..747372321c5d42fd41a33f95f15b6a80dd92ee2e
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java
 @@ -0,0 +1,11 @@
@@ -497,7 +513,7 @@ index 0000000..7473723
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
 new file mode 100644
-index 0000000..6f6d041
+index 0000000000000000000000000000000000000000..6f6d041622f9ead05b669e039c4bc3be25e7fa23
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
 @@ -0,0 +1,136 @@
@@ -638,7 +654,7 @@ index 0000000..6f6d041
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
-index 62fdba7..f059c5b 100644
+index 62fdba7e18c1fcd7733873c9120a9ca2e922b44e..f059c5b3c87c2f3516543b0e2cf5a9dc4da1330d 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 @@ -25,6 +25,16 @@ public class OidcConfiguration {
@@ -660,7 +676,7 @@ index 62fdba7..f059c5b 100644
      private List<UserSeed> users = List.of();
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java
 new file mode 100644
-index 0000000..a60acd1
+index 0000000000000000000000000000000000000000..a60acd14a827881d74f522d646d2a2b1d3073969
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java
 @@ -0,0 +1,34 @@
@@ -699,7 +715,7 @@ index 0000000..a60acd1
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
-index d7b4499..2c2d632 100644
+index d7b44992227587faa4c81de542f8132679f5f4c1..2c2d63203cb37a787080c70ee4830baa47a89c1d 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
 @@ -70,7 +70,7 @@ public class OidcRegistrationService {
@@ -713,10 +729,10 @@ index d7b4499..2c2d632 100644
          if (request.containsKey("client_name")
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
 new file mode 100644
-index 0000000..3e30eb9
+index 0000000000000000000000000000000000000000..fb4835fd8c508a496ccc523f79333012ccf63e55
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,148 @@
 +package io.kestra.mcp;
 +
 +import java.time.Duration;
@@ -833,6 +849,22 @@ index 0000000..3e30eb9
 +            assertThat(((McpSchema.JSONRPCResponse) response.body()).id()).isEqualTo("request");
 +        } finally { transport.closeGracefully().block(); }
 +    }
++@Test
++    void shouldReturnStableAuthorizationDenialWithoutListingOrCallingTools() {
++        var sessions = mock(McpSessionService.class);
++        when(sessions.findMcpStreamableServerSession(any())).thenReturn(Optional.of(mock(McpStreamableServerSession.class)));
++        var transport = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(), sessions);
++        transport.setToolListProvider(context -> Mono.error(new AuthorizationEvaluations.EvaluationDeniedException()));
++        try {
++            var response = transport.handleRequest(request("tools/list", "missing-provider"), identity("alice")).block();
++            assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.FORBIDDEN.getCode());
++            var rpc = (McpSchema.JSONRPCResponse) response.body();
++            assertThat(rpc.id()).isEqualTo("missing-provider");
++            assertThat(rpc.result()).isNull();
++            assertThat(rpc.error().code()).isEqualTo(-32003);
++        } finally { transport.closeGracefully().block(); }
++    }
++
 +
 +    private static MutableHttpRequest<String> request(String method, String id) {
 +        return HttpRequest.POST("/mcp", "{\"jsonrpc\":\"2.0\",\"method\":\"" + method + "\",\"id\":\"" + id + "\",\"params\":{}}")
@@ -851,7 +883,7 @@ index 0000000..3e30eb9
 +}
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
 new file mode 100644
-index 0000000..b3caed8
+index 0000000000000000000000000000000000000000..b3caed8de40ef1c43aabefb9f9d04d89a01ea659
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
 @@ -0,0 +1,57 @@
@@ -914,7 +946,7 @@ index 0000000..b3caed8
 +}
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java b/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java
 new file mode 100644
-index 0000000..6defcc0
+index 0000000000000000000000000000000000000000..6defcc0dc57397603705c6f571c08fe2b91d88e5
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java
 @@ -0,0 +1,39 @@
@@ -959,7 +991,7 @@ index 0000000..6defcc0
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java
 new file mode 100644
-index 0000000..4bc0fc0
+index 0000000000000000000000000000000000000000..4bc0fc07ec1917b63f777f12bf1fe713e5b1c393
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java
 @@ -0,0 +1,77 @@
@@ -1042,7 +1074,7 @@ index 0000000..4bc0fc0
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpConsentExposureTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpConsentExposureTest.java
 new file mode 100644
-index 0000000..476b8e0
+index 0000000000000000000000000000000000000000..476b8e0890966fd00ef26bf295dc428ff3edce74
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpConsentExposureTest.java
 @@ -0,0 +1,17 @@
@@ -1064,7 +1096,7 @@ index 0000000..476b8e0
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
-index 0fa89f5..37b39a4 100644
+index 0fa89f55caa3a80e0a351e851c74933b97cea4a4..37b39a49f3d9d56362a3462ad75c2234c02bc111 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 @@ -32,7 +32,21 @@ class McpSdkInstanceTest {

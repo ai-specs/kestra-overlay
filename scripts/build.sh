@@ -61,6 +61,7 @@ python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/tes
   --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest --tests io.kestra.mcp.McpDynamicToolListTest \
   --tests 'io.kestra.webserver.ui.*' --console=plain)
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
+python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)

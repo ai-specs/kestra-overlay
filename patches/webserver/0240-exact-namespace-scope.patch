@@ -5,10 +5,31 @@
 # 触达上游文件: 7 个（详见diff）
 # 移除条件: 上游OSS提供等价Exact scope表达、统一查询翻译与Namespace候选过滤
 diff --git a/core/src/main/java/io/kestra/core/models/AccessScope.java b/core/src/main/java/io/kestra/core/models/AccessScope.java
-index 732d078..d14e6c3 100644
+index 732d078e9112913259d06d99bbc603f6c8bac247..fb01c2a07566596a0d1567fb792774be180a7b80 100644
 --- a/core/src/main/java/io/kestra/core/models/AccessScope.java
 +++ b/core/src/main/java/io/kestra/core/models/AccessScope.java
-@@ -16,9 +16,10 @@ import java.util.List;
+@@ -2,23 +2,29 @@ package io.kestra.core.models;
+
+ import java.util.List;
+
++
+ /**
+  * Backend-agnostic result of an access-control check, translated by each backend into its own query
+  * language (a jOOQ condition, an Elasticsearch query, …).
+- * <p>
+- * Generic on purpose: it carries only <em>what</em> the caller may see, not how to enforce it, so it
+- * can be reused by any namespace-scoped resource (logs, audit logs, secrets, KV, …).
++ *
++ * <p>Generic on purpose: it carries only <em>what</em> the caller may see, not how to enforce it,
++ * so it can be reused by any namespace-scoped resource (logs, audit logs, secrets, KV, …).
+  *
+  * <ul>
+- * <li>{@link Kind#GLOBAL} — no restriction (the caller may read every namespace);</li>
+- * <li>{@link Kind#NAMESPACES} — restrict to the given namespaces (and their children);</li>
+- * <li>{@link Kind#DENY_ALL} — no access, the query must return nothing.</li>
++ *   <li>{@link Kind#GLOBAL} — no restriction (the caller may read every namespace);
++ *   <li>{@link Kind#NAMESPACES} — restrict to the given namespaces (and their children);
++ *   <li>{@link Kind#DENY_ALL} — no access, the query must return nothing.
   * </ul>
   *
   * @param kind the kind of restriction.
@@ -17,31 +38,73 @@ index 732d078..d14e6c3 100644
 + * @param exactNamespaces the allowed namespaces without descendants.
   */
 -public record AccessScope(Kind kind, List<String> namespaces) {
-+public record AccessScope(Kind kind, List<String> namespaces, List<String> exactNamespaces) {
- 
++
++public record AccessScope(Kind kind, List<String> namespaces, List<String> exactNamespaces
++,
++        List<String> resourceIds
++) {
+
      public enum Kind {
          GLOBAL,
-@@ -28,6 +29,11 @@ public record AccessScope(Kind kind, List<String> namespaces) {
- 
+@@ -28,14 +34,31 @@ public record AccessScope(Kind kind, List<String> namespaces) {
+
      public AccessScope {
          namespaces = namespaces == null ? List.of() : List.copyOf(namespaces);
 +        exactNamespaces = exactNamespaces == null ? List.of() : List.copyOf(exactNamespaces);
++resourceIds = resourceIds == null ? List.of() : List.copyOf(resourceIds);
++    }
++
++    public AccessScope(Kind kind, List<String> namespaces, List<String> exactNamespaces) {
++        this(kind, namespaces, exactNamespaces, List.of());
++
 +    }
 +
 +    public AccessScope(Kind kind, List<String> namespaces) {
-+        this(kind, namespaces, List.of());
++        this(kind, namespaces
++, List.of()
++, List.of());
      }
- 
+
      public static AccessScope global() {
-@@ -45,4 +51,20 @@ public record AccessScope(Kind kind, List<String> namespaces) {
+-        return new AccessScope(Kind.GLOBAL, List.of());
++        return new AccessScope(Kind.GLOBAL, List.of()
++, List.of(), List.of()
++);
+     }
+
+     public static AccessScope denyAll() {
+-        return new AccessScope(Kind.DENY_ALL, List.of());
++        return new AccessScope(Kind.DENY_ALL
++, List.of(), List.of()
++, List.of());
+     }
+
+     /**
+@@ -45,4 +68,36 @@ public record AccessScope(Kind kind, List<String> namespaces) {
      public static AccessScope namespaces(List<String> namespaces) {
          return (namespaces == null || namespaces.isEmpty()) ? denyAll() : new AccessScope(Kind.NAMESPACES, namespaces);
      }
 +
 +    /** Returns the union of namespace subtrees and exact namespaces; empty inputs deny all. */
 +    public static AccessScope namespaces(List<String> namespaces, List<String> exactNamespaces) {
-+        AccessScope scope = new AccessScope(Kind.NAMESPACES, namespaces, exactNamespaces);
-+        return scope.namespaces().isEmpty() && scope.exactNamespaces().isEmpty() ? denyAll() : scope;
++        AccessScope scope = new AccessScope(Kind.NAMESPACES, namespaces, exactNamespaces
++, List.of()
++);
++        return scope.namespaces().isEmpty() && scope.exactNamespaces().isEmpty() ? denyAll() : scope
++;
++    }
++
++    public static AccessScope namespacesAndIds(
++            List<String> namespaces, List<String> exactNamespaces, List<String> resourceIds) {
++        if ((namespaces == null || namespaces.isEmpty())
++                && (exactNamespaces == null || exactNamespaces.isEmpty())) return denyAll();
++        return new AccessScope(Kind.NAMESPACES, namespaces, exactNamespaces, resourceIds);
++    }
++
++    public boolean resourceAllowed(String namespace, String resourceId) {
++        return namespaceAllowed(namespace)
++                && (resourceIds.isEmpty() || resourceIds.contains(resourceId))
++;
 +    }
 +
 +    /** Matches exact names and dot-delimited subtrees; GLOBAL retains unrestricted semantics. */
@@ -55,21 +118,33 @@ index 732d078..d14e6c3 100644
 +    }
  }
 diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-index fb6b70e..fb00a71 100644
+index fb6b70e2d8b8434073c459fa4e95fbe6057b901f..f1d9fc873d1305227f25a726fafde2ed649dd1e1 100644
 --- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 +++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-@@ -22,4 +22,9 @@ public interface NamespaceAccessControl {
+@@ -22,4 +22,21 @@ public interface NamespaceAccessControl {
       * @return the namespaces the current caller may see for {@code resource}: global, a set, or none.
       */
      AccessScope namespaceScope(QueryFilter.Resource resource);
 +
-+    /** Applies the same scope to synthesized namespace candidates before pagination and counting. */
++
++/** Only adapters that consume every resourceDomains term may use this projection. */
++    default AccessScope namespaceScopeWithResourceDomains(QueryFilter.Resource resource) {
++        return namespaceScope(resource);
++    }
++
++    /**
++     * Applies the same scope to synthesized namespace candidates before pagination and counting.
++     */
++
 +    default boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
-+        return namespaceScope(resource).namespaceAllowed(namespace);
++        return
++resourceDomains(resource).stream().noneMatch(term -> term.idScope() == ResourceDomain.IdScope.RESTRICTED_IDS)
++            &&
++ namespaceScope(resource).namespaceAllowed(namespace);
 +    }
  }
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
-index bd49dd2..5ee14ab 100644
+index bd49dd2871dc221e1433ab349e2a2a9844edbc70..5ee14ab542692d89137699d66bebcf5c3eef009d 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 @@ -609,6 +609,9 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
@@ -83,7 +158,7 @@ index bd49dd2..5ee14ab 100644
              }
          };
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
-index 2b42eea..03cfa03 100644
+index 2b42eea786eac455b49f9d5d0100f21161efc742..03cfa0397e4ee5364c8ccfd10a428110c5724625 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 @@ -125,6 +125,9 @@ public abstract class AbstractJdbcRepository {
@@ -98,13 +173,13 @@ index 2b42eea..03cfa03 100644
          };
 @@ -864,4 +867,4 @@ public abstract class AbstractJdbcRepository {
              .toList();
- 
+
      }
 -}
 \ No newline at end of file
 +}
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolScope.java b/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
-index 14ebad2..e4bf7e2 100644
+index 14ebad2a2a3a9376fab619e4c60b6f382c115464..e4bf7e278f66bd962717470f48ae748d7e2133d3 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
 @@ -14,12 +14,7 @@ public final class McpToolScope {
@@ -119,7 +194,7 @@ index 14ebad2..e4bf7e2 100644
 -        };
 +        return scope.namespaceAllowed(namespace);
      }
- 
+
      /**
 @@ -30,7 +25,8 @@ public final class McpToolScope {
          return switch (scope.kind()) {
@@ -132,7 +207,7 @@ index 14ebad2..e4bf7e2 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
-index 2ca4e4a..b4a147c 100644
+index 2ca4e4a071871b7a50962e9d48a39a951eb2e0a7..b4a147cd646614446f61583c725f23f2d97c14ab 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
 @@ -13,6 +13,7 @@ import io.kestra.core.models.namespaces.NamespaceInterface;
@@ -146,7 +221,7 @@ index 2ca4e4a..b4a147c 100644
 @@ -55,6 +56,9 @@ public class NamespaceController<N extends Namespace> {
      @Inject
      private Searchable<Namespace> namespaceSearchable;
- 
+
 +    @Inject
 +    private NamespaceAccessControl namespaceAccessControl;
 +
@@ -167,7 +242,7 @@ index 2ca4e4a..b4a147c 100644
 +            && (q == null || Strings.CI.contains(systemFlowsConfiguration.namespace(), q))
              ? List.of(systemFlowsConfiguration.namespace())
              : Collections.emptyList();
- 
+
 @@ -147,6 +153,7 @@ public class NamespaceController<N extends Namespace> {
          )
              .flatMap(n -> NamespaceInterface.asTree(n).stream())
@@ -178,10 +253,10 @@ index 2ca4e4a..b4a147c 100644
          return PagedResults.of((ArrayListTotal<N>) namespaceSearchable.filter(allNamespaces, page, size, sort, filters));
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
 new file mode 100644
-index 0000000..7e37f3a
+index 0000000000000000000000000000000000000000..41094d2e1bece7d2e02960a31009ea54404ae282
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,158 @@
 +
 +package io.kestra.webserver.rbac;
 +
@@ -307,4 +382,36 @@ index 0000000..7e37f3a
 +        field.setAccessible(true);
 +        field.set(target, value);
 +    }
++@Test
++    void shouldApplyAssociatedIdsBeforePagingCountingAndAggregating() throws Exception {
++        var terms = List.of(
++            new NamespaceAccessControl.ResourceDomain(List.of("a"), List.of(), List.of(), List.of(),
++                NamespaceAccessControl.ResourceDomain.ResourceScope.NAMESPACE, NamespaceAccessControl.ResourceDomain.IdScope.ALL_IDS),
++            new NamespaceAccessControl.ResourceDomain(List.of("b"), List.of(), List.of(), List.of("one"),
++                NamespaceAccessControl.ResourceDomain.ResourceScope.NAMESPACE, NamespaceAccessControl.ResourceDomain.IdScope.RESTRICTED_IDS));
++        NamespaceAccessControl control = new NamespaceAccessControl() {
++            public AccessScope namespaceScope(QueryFilter.Resource resource) { return AccessScope.global();
++
 +}
++public List<NamespaceAccessControl.ResourceDomain> resourceDomains(QueryFilter.Resource resource) { return terms; }
++        };
++        AbstractJdbcRepository repository = new AbstractJdbcRepository() {
++            protected NamespaceAccessControl namespaceAccessControl() { return control; }
++        };
++        var method = AbstractJdbcRepository.class.getDeclaredMethod("aclCondition", QueryFilter.Resource.class);
++        method.setAccessible(true);
++        var condition = (Condition) method.invoke(repository, QueryFilter.Resource.FLOW);
++        try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var db = DSL.using(connection, SQLDialect.H2);
++            db.execute("create table candidates(namespace varchar(255), id varchar(255))");
++            db.execute("insert into candidates values ('a','one'),('a','two'),('b','one'),('b','two'),('c','one')");
++            assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(condition))).isEqualTo(3);
++            assertThat(db.select(DSL.field("id", String.class)).from("candidates").where(condition)
++                .orderBy(DSL.field("namespace"), DSL.field("id")).limit(2).offset(1).fetch(0, String.class)).containsExactly("two", "one");
++            assertThat(db.select(DSL.count()).from("candidates").where(condition).fetchOne(0, Integer.class)).isEqualTo(3);
++            var denied = (Condition) method.invoke(repository, QueryFilter.Resource.TRIGGER);
++            assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(denied))).isZero();
++        }
++    }
++}
++

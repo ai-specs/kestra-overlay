@@ -6,7 +6,7 @@
 # 移除条件: 上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 new file mode 100644
-index 0000000..724cc46
+index 0000000000000000000000000000000000000000..724cc46d42370bd4d3a32b538fd59830d7147a4d
 --- /dev/null
 +++ b/ui/src/components/extensions/ExtensionPage.vue
 @@ -0,0 +1,85 @@
@@ -97,7 +97,7 @@ index 0000000..724cc46
 +</script>
 diff --git a/ui/src/extensions/protocol.ts b/ui/src/extensions/protocol.ts
 new file mode 100644
-index 0000000..30ca573
+index 0000000000000000000000000000000000000000..30ca5733d0137a2eca2f837406f1138726862178
 --- /dev/null
 +++ b/ui/src/extensions/protocol.ts
 @@ -0,0 +1,35 @@
@@ -138,7 +138,7 @@ index 0000000..30ca573
 +}
 diff --git a/ui/src/extensions/registry.ts b/ui/src/extensions/registry.ts
 new file mode 100644
-index 0000000..0cec2e1
+index 0000000000000000000000000000000000000000..0cec2e1dd8091a97c7bdb2cf4ac5a6d26cc53ec7
 --- /dev/null
 +++ b/ui/src/extensions/registry.ts
 @@ -0,0 +1,32 @@
@@ -176,7 +176,7 @@ index 0000000..0cec2e1
 +}
 diff --git a/ui/src/extensions/runtime.spec.ts b/ui/src/extensions/runtime.spec.ts
 new file mode 100644
-index 0000000..14b3521
+index 0000000000000000000000000000000000000000..14b3521107429777258e31378b7eb92ed8a1665a
 --- /dev/null
 +++ b/ui/src/extensions/runtime.spec.ts
 @@ -0,0 +1,133 @@
@@ -315,7 +315,7 @@ index 0000000..14b3521
 +})
 diff --git a/ui/src/extensions/runtime.ts b/ui/src/extensions/runtime.ts
 new file mode 100644
-index 0000000..5b9f469
+index 0000000000000000000000000000000000000000..5b9f469aff2e64dc6b2493e9f0b3321b3ea32dbb
 --- /dev/null
 +++ b/ui/src/extensions/runtime.ts
 @@ -0,0 +1,92 @@
@@ -413,7 +413,7 @@ index 0000000..5b9f469
 +}
 diff --git a/ui/src/extensions/sdk.spec.ts b/ui/src/extensions/sdk.spec.ts
 new file mode 100644
-index 0000000..009d80f
+index 0000000000000000000000000000000000000000..009d80fce413c858400539cb7021c8bdaf6315c4
 --- /dev/null
 +++ b/ui/src/extensions/sdk.spec.ts
 @@ -0,0 +1,22 @@
@@ -440,28 +440,28 @@ index 0000000..009d80f
 +    })
 +})
 diff --git a/ui/src/override/components/useLeftMenu.ts b/ui/src/override/components/useLeftMenu.ts
-index 0afc065..4b3cd14 100644
+index 0afc065e7f422cebe296a9f872dae3eedc542f7c..4b3cd1488499d0aae2ef88f31b30e942b01e26f2 100644
 --- a/ui/src/override/components/useLeftMenu.ts
 +++ b/ui/src/override/components/useLeftMenu.ts
 @@ -1,4 +1,5 @@
  import {computed} from "vue"
 +import {useUiExtensions} from "../../extensions/registry"
- 
+
  import {useRoute, useRouter} from "vue-router"
  import type {
 @@ -58,7 +59,8 @@ export function useLeftMenu() {
      const $route = useRoute()
      const $router = useRouter()
- 
+
 -    const {t} = useI18n({useScope: "global"})
 +    const {t, locale} = useI18n({useScope: "global"})
 +    const extensions = useUiExtensions()
- 
+
      /**
       * Returns the names of all registered routes whose name starts with the given prefix.
 @@ -91,7 +93,7 @@ export function useLeftMenu() {
      }
- 
+
      const menu = computed<MenuItem[]>(() => {
 -        const generated = [
 +        const generated: MenuItem[] = [
@@ -471,7 +471,7 @@ index 0afc065..4b3cd14 100644
 @@ -399,6 +401,18 @@ export function useLeftMenu() {
              },
          ]
- 
+
 +        if (extensions.value.length) generated.push({
 +            id: "extensions",
 +            title: t("uiExtensions"),
@@ -489,13 +489,13 @@ index 0afc065..4b3cd14 100644
                  item.id = item.title.toLowerCase().replaceAll(" ", "-")
 @@ -426,4 +440,4 @@ export function useLeftMenu() {
      })
- 
+
      return {menu}
 -}
 \ No newline at end of file
 +}
 diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
-index 6bd429e..04886ac 100644
+index 6bd429eafcbfe14c554566145955b013d7d24a57..04886ac89e32d392460038c92bde160e99404773 100644
 --- a/ui/src/routes/routes.ts
 +++ b/ui/src/routes/routes.ts
 @@ -14,6 +14,7 @@ const routes: KestraRouteRecord[] = [
@@ -503,11 +503,11 @@ index 6bd429e..04886ac 100644
      //Initial
      {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
 +    {name: "extensions/page", path: "/:tenant/extensions/:extensionId/:pathMatch(.*)*", component: () => import("../components/extensions/ExtensionPage.vue")},
- 
+
      {name: "ai",path: "/:tenant?/ai", component: () => import("../components/ai/copilot/CopilotPage.vue")},
- 
+
 diff --git a/ui/src/translations/de.json b/ui/src/translations/de.json
-index b3ce488..a10ff7a 100644
+index b3ce488f928b37d9adff6cce0cbc33fed2a06cbd..a10ff7afa7290793d43f8d03bc4a24bb732a1d33 100644
 --- a/ui/src/translations/de.json
 +++ b/ui/src/translations/de.json
 @@ -1,5 +1,6 @@
@@ -518,7 +518,7 @@ index b3ce488..a10ff7a 100644
        "message": "Kestra wurde auf {version} aktualisiert und kann Breaking Changes enthalten, die Updates deiner Flows erfordern.",
        "cta": "Siehe, was sich geändert hat"
 diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
-index 6c20588..a2d1af2 100644
+index 6c20588704135c8f2f64dcad63072cd5b0a9bea6..a2d1af2fee11f4c9006056160b7f8e86e8b465d0 100644
 --- a/ui/src/translations/en.json
 +++ b/ui/src/translations/en.json
 @@ -1,5 +1,6 @@
@@ -529,7 +529,7 @@ index 6c20588..a2d1af2 100644
        "message": "Kestra was upgraded to {version} and it may include breaking changes that require updates to your flows.",
        "cta": "See what changed"
 diff --git a/ui/src/translations/es.json b/ui/src/translations/es.json
-index 391d249..e7af8bf 100644
+index 391d2492d8e03b7d2ff51511a3e45b003ab7d56b..e7af8bfaf38b95df06d156d57b6956cf3e0380e5 100644
 --- a/ui/src/translations/es.json
 +++ b/ui/src/translations/es.json
 @@ -1,5 +1,6 @@
@@ -540,7 +540,7 @@ index 391d249..e7af8bf 100644
        "message": "Kestra se actualizó a la versión {version} y puede incluir cambios importantes que requieren actualizaciones en tus Flows.",
        "cta": "Ver qué cambió"
 diff --git a/ui/src/translations/fr.json b/ui/src/translations/fr.json
-index fdabf48..1b229eb 100644
+index fdabf48b3c0b846efdafc073ad370198380eb7d8..1b229eb6932b4fe7a7f3e351b72ca911eff7e34d 100644
 --- a/ui/src/translations/fr.json
 +++ b/ui/src/translations/fr.json
 @@ -1,5 +1,6 @@
@@ -551,7 +551,7 @@ index fdabf48..1b229eb 100644
        "message": "Kestra a été mis à niveau vers la version {version} et cela peut inclure des changements majeurs qui nécessitent des mises à jour de vos Flows.",
        "cta": "Voir les modifications"
 diff --git a/ui/src/translations/hi.json b/ui/src/translations/hi.json
-index 98b5a5b..2acbb45 100644
+index 98b5a5bd3a86db3c0d588cb5b2ad392edf729948..2acbb45e8ef2398c9796a3b57fa6db9bedc37319 100644
 --- a/ui/src/translations/hi.json
 +++ b/ui/src/translations/hi.json
 @@ -1,5 +1,6 @@
@@ -562,7 +562,7 @@ index 98b5a5b..2acbb45 100644
        "message": "Kestra को {version} में अपग्रेड किया गया था और इसमें ऐसे ब्रेकिंग बदलाव शामिल हो सकते हैं जिनके लिए आपके Flows में अपडेट की आवश्यकता होती है।",
        "cta": "देखें क्या बदला"
 diff --git a/ui/src/translations/it.json b/ui/src/translations/it.json
-index 500ac50..35cf020 100644
+index 500ac503ead2a259ea8f3fe809860d533897ff54..35cf020cab3be471c260bc26c9666a18b8cfb765 100644
 --- a/ui/src/translations/it.json
 +++ b/ui/src/translations/it.json
 @@ -1,5 +1,6 @@
@@ -573,7 +573,7 @@ index 500ac50..35cf020 100644
        "message": "Kestra è stato aggiornato alla versione {version} e potrebbe includere modifiche che richiedono aggiornamenti ai tuoi Flow.",
        "cta": "Vedi cosa è cambiato"
 diff --git a/ui/src/translations/ja.json b/ui/src/translations/ja.json
-index a9a92ff..e4c02a3 100644
+index a9a92ffa95030aa8c4dd85b57a3e64d3e8645669..e4c02a37b0888d1b8b9b9024a158a3ad872afca5 100644
 --- a/ui/src/translations/ja.json
 +++ b/ui/src/translations/ja.json
 @@ -1,5 +1,6 @@
@@ -591,7 +591,7 @@ index a9a92ff..e4c02a3 100644
 \ No newline at end of file
 +}
 diff --git a/ui/src/translations/ko.json b/ui/src/translations/ko.json
-index d6d6f38..05f854a 100644
+index d6d6f38abcdd582d300a3ac71d3be651688b1a7b..05f854a44012723f62c4823735aa3f6668c3be1f 100644
 --- a/ui/src/translations/ko.json
 +++ b/ui/src/translations/ko.json
 @@ -1,5 +1,6 @@
@@ -602,7 +602,7 @@ index d6d6f38..05f854a 100644
        "message": "Kestra가 {version}으로 업그레이드되었습니다. 이 버전에는 Flow 업데이트가 필요한 변경 사항이 포함될 수 있습니다.",
        "cta": "변경 사항 확인"
 diff --git a/ui/src/translations/pl.json b/ui/src/translations/pl.json
-index d09772a..41c9923 100644
+index d09772aa9aa82ff75680eb658d3437e0f0d59f5d..41c9923fa4bde75df456c42d0cb7ed240c6fe78b 100644
 --- a/ui/src/translations/pl.json
 +++ b/ui/src/translations/pl.json
 @@ -1,5 +1,6 @@
@@ -613,7 +613,7 @@ index d09772a..41c9923 100644
        "message": "Kestra został zaktualizowany do wersji {version} i może zawierać zmiany powodujące niezgodność, które wymagają aktualizacji Twoich Flowów.",
        "cta": "Zobacz, co się zmieniło"
 diff --git a/ui/src/translations/pt.json b/ui/src/translations/pt.json
-index c73df6b..ffd9427 100644
+index c73df6b8689d6f2b4b9481703f270c7461bab981..ffd94279df144c776262e2abd800e3fdb45d5d7d 100644
 --- a/ui/src/translations/pt.json
 +++ b/ui/src/translations/pt.json
 @@ -1,5 +1,6 @@
@@ -624,7 +624,7 @@ index c73df6b..ffd9427 100644
        "message": "O Kestra foi atualizado para a versão {version} e pode incluir alterações que exigem atualizações nos seus Flows.",
        "cta": "Ver o que mudou"
 diff --git a/ui/src/translations/pt_BR.json b/ui/src/translations/pt_BR.json
-index c25d0f1..52271c2 100644
+index c25d0f1225504eb02ad13c3d3c1a32531475ae33..52271c23b9e7d1e8f3b8d7eee81d2db3c8d77c3c 100644
 --- a/ui/src/translations/pt_BR.json
 +++ b/ui/src/translations/pt_BR.json
 @@ -1,5 +1,6 @@
@@ -635,7 +635,7 @@ index c25d0f1..52271c2 100644
        "message": "O Kestra foi atualizado para a versão {version} e pode incluir alterações que exigem atualizações nos seus Flows.",
        "cta": "Ver o que mudou"
 diff --git a/ui/src/translations/ru.json b/ui/src/translations/ru.json
-index b19a83f..bdc97da 100644
+index b19a83ff1727b112b44b359a5c85db977301b263..bdc97daa3973442d6bafadabd0a06d20a9719b67 100644
 --- a/ui/src/translations/ru.json
 +++ b/ui/src/translations/ru.json
 @@ -1,5 +1,6 @@
@@ -653,7 +653,7 @@ index b19a83f..bdc97da 100644
 \ No newline at end of file
 +}
 diff --git a/ui/src/translations/zh_CN.json b/ui/src/translations/zh_CN.json
-index fe010e7..a3e62bd 100644
+index fe010e7063141f8de223c25e326180e79365901a..a3e62bd65c7a9ff2ced16062fe9e4fac6d727234 100644
 --- a/ui/src/translations/zh_CN.json
 +++ b/ui/src/translations/zh_CN.json
 @@ -1,5 +1,6 @@
@@ -665,10 +665,10 @@ index fe010e7..a3e62bd 100644
        "cta": "查看更改"
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
 new file mode 100644
-index 0000000..b5e1295
+index 0000000000000000000000000000000000000000..4801eaa4944667ff9e93cf4eea66112ac51fbc23
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,85 @@
 +package io.kestra.webserver.controllers.api;
 +
 +import io.kestra.webserver.ui.UiExtensionDescriptorV1;
@@ -707,17 +707,37 @@ index 0000000..b5e1295
 +    @Operation(summary = "List registered independent management pages")
 +    public Mono<HttpResponse<Manifest>> manifest(String tenant, HttpRequest<?> request) {
 +        if (!"main".equals(tenant)) return Mono.just(HttpResponse.notFound());
-+        return managementAllowed(tenant, request).map(allowed -> HttpResponse.ok(new Manifest(1, allowed ? registry.descriptors() : List.of()))
++        return
++reactor.core.publisher.Flux.fromIterable(registry.descriptors())
++            .filterWhen(descriptor ->
++ managementAllowed(tenant,
++descriptor.id(),
++ request
++))
++            .collectList(
++).map(
++visible
++ -> HttpResponse.ok(new Manifest(1,
++visible
++))
 +            .header("Cache-Control", "no-store"));
 +    }
 +
-+    private Mono<Boolean> managementAllowed(String tenant, HttpRequest<?> request) {
++    private Mono<Boolean> managementAllowed(String tenant
++, String extensionId
++, HttpRequest<?> request) {
 +        if (!configuration.enabled()) return Mono.just(true);
 +        Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
 +        if (authentication == null) return Mono.just(false);
 +        var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
-+        var operation = new TypedAuthorization.Operation(1, TypedAuthorization.Source.REST, TypedAuthorization.Resource.SYSTEM,
-+            TypedAuthorization.Action.EXECUTE, tenant, null, null, TypedAuthorization.QueryDomain.unrestricted(),
++        var operation = new TypedAuthorization.Operation(1, TypedAuthorization.Source.REST, TypedAuthorization.Resource.
++EXTENSION
++,
++            TypedAuthorization.Action.
++READ
++, tenant, null,
++extensionId
++, TypedAuthorization.QueryDomain.unrestricted(),
 +            TypedAuthorization.Coverage.SINGLE, TypedAuthorization.Aggregate.NONE, TypedAuthorization.SideEffect.READ_ONLY);
 +        return gate.authorize(principal, operation).map(TypedAuthorization.Decision::allowed).onErrorReturn(false);
 +    }
@@ -735,21 +755,25 @@ index 0000000..b5e1295
 +    public record Manifest(int contractVersion, List<UiExtensionDescriptorV1> extensions) { }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
-index df43b5f..7e9749c 100644
+index e9640a51c55e8846d56ca70ed75f892eb8aa65cb..6a7d0eba8d8b25e9132599ec50e43553e2523ab1 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
-@@ -50,6 +50,8 @@ public final class OssRestOperationAdapter {
+@@ -79,6 +79,12 @@ public final class OssRestOperationAdapter {
          String handler = route.handler();
          try {
              return switch (route.controller()) {
 +                case "io.kestra.webserver.controllers.api.UiExtensionController" -> Set.of("manifest", "sdk").contains(handler)
-+                    ? metadata(tenant) : administrative(tenant);
++                    ? metadata(tenant) :
++extension
++(
++request,
++tenant);
                  case "io.kestra.webserver.controllers.api.FlowController" -> flow(request, tenant, namespace, id);
                  case "io.kestra.webserver.controllers.api.ExecutionController" -> execution(request, tenant, namespace, id);
                  case "io.kestra.webserver.controllers.api.OutputController" -> switch (handler) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionDescriptorV1.java b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionDescriptorV1.java
 new file mode 100644
-index 0000000..27155d4
+index 0000000000000000000000000000000000000000..27155d4c14ca7d3c875442b8a8705d316a23a182
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionDescriptorV1.java
 @@ -0,0 +1,19 @@
@@ -774,7 +798,7 @@ index 0000000..27155d4
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionProviderV1.java b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionProviderV1.java
 new file mode 100644
-index 0000000..0e3a6a0
+index 0000000000000000000000000000000000000000..0e3a6a06a3aafd981d4fae2a97549201cedb8105
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionProviderV1.java
 @@ -0,0 +1,8 @@
@@ -788,7 +812,7 @@ index 0000000..0e3a6a0
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionRegistry.java b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionRegistry.java
 new file mode 100644
-index 0000000..a67fdcb
+index 0000000000000000000000000000000000000000..a67fdcbec08ff62c199cb8fc95b7afbc2c7b8f78
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/ui/UiExtensionRegistry.java
 @@ -0,0 +1,129 @@
@@ -923,7 +947,7 @@ index 0000000..a67fdcb
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 new file mode 100644
-index 0000000..927e127
+index 0000000000000000000000000000000000000000..927e127c78a7d167c6148db2cc1147b7344aa59b
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 @@ -0,0 +1,46 @@
@@ -975,7 +999,7 @@ index 0000000..927e127
 +messages or prove translation quality. No host-internal JSON import is supported.
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/check-translations.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/check-translations.mjs
 new file mode 100644
-index 0000000..0269c3b
+index 0000000000000000000000000000000000000000..0269c3b4267b66823be740f3a56acd3453dcb6e5
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/check-translations.mjs
 @@ -0,0 +1,51 @@
@@ -1032,7 +1056,7 @@ index 0000000..0269c3b
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
 new file mode 100644
-index 0000000..93849a9
+index 0000000000000000000000000000000000000000..93849a9f8aa68d297a811a6006c6165e9fc23f6a
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
 @@ -0,0 +1,20 @@
@@ -1058,7 +1082,7 @@ index 0000000..93849a9
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
 new file mode 100644
-index 0000000..30ca573
+index 0000000000000000000000000000000000000000..30ca5733d0137a2eca2f837406f1138726862178
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
 @@ -0,0 +1,35 @@
@@ -1099,7 +1123,7 @@ index 0000000..30ca573
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/locales.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/locales.mjs
 new file mode 100644
-index 0000000..db23815
+index 0000000000000000000000000000000000000000..db23815ee0b0fbb0a88d87218202eb333a2b6a45
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/locales.mjs
 @@ -0,0 +1,7 @@
@@ -1112,7 +1136,7 @@ index 0000000..db23815
 +}
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs
 new file mode 100644
-index 0000000..ade0cf9
+index 0000000000000000000000000000000000000000..ade0cf9b8e3707cd3e0688077ce23f3d03b86541
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs
 @@ -0,0 +1,14 @@
@@ -1132,10 +1156,10 @@ index 0000000..ade0cf9
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java
 new file mode 100644
-index 0000000..c4a2094
+index 0000000000000000000000000000000000000000..2dd069664eba91197a66b4a9620866e58ded6108
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionControllerTest.java
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,70 @@
 +package io.kestra.webserver.ui;
 +
 +import java.util.List;
@@ -1161,7 +1185,9 @@ index 0000000..c4a2094
 +        return new BeanProvider<>() {
 +            @Override public TypedAuthorizationResolver get() {
 +                return (principal, operation) -> CompletableFuture.completedFuture(
-+                    principal.subject().equals("owner") && operation.resource() == TypedAuthorization.Resource.SYSTEM
++                    principal.subject().equals("owner") && operation.resource() == TypedAuthorization.Resource.
++EXTENSION && operation.action() == TypedAuthorization.Action.READ && "probe".equals(operation.resourceId())
++
 +                        ? TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted())
 +                        : TypedAuthorization.Decision.deny("Not a management identity"));
 +            }
@@ -1206,7 +1232,7 @@ index 0000000..c4a2094
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionHttpTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionHttpTest.java
 new file mode 100644
-index 0000000..d1ff7f7
+index 0000000000000000000000000000000000000000..d1ff7f757cd05bca24a3c4f7a2d09aa3746049cb
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionHttpTest.java
 @@ -0,0 +1,88 @@
@@ -1300,7 +1326,7 @@ index 0000000..d1ff7f7
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionRegistryTest.java b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionRegistryTest.java
 new file mode 100644
-index 0000000..746c571
+index 0000000000000000000000000000000000000000..746c5714cefaf872e8c9eb270aed6230dde0d246
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/ui/UiExtensionRegistryTest.java
 @@ -0,0 +1,85 @@
@@ -1391,7 +1417,7 @@ index 0000000..746c571
 +}
 diff --git a/webserver/src/test/resources/ui-extensions/http-probe/page.js b/webserver/src/test/resources/ui-extensions/http-probe/page.js
 new file mode 100644
-index 0000000..48314ae
+index 0000000000000000000000000000000000000000..48314aef3bd2c88bfeb95a53f2df66180bebb895
 --- /dev/null
 +++ b/webserver/src/test/resources/ui-extensions/http-probe/page.js
 @@ -0,0 +1 @@

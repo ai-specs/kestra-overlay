@@ -16,7 +16,7 @@
 # 移除条件：同 REQ-0100
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 new file mode 100644
-index 0000000..62fdba7
+index 0000000000000000000000000000000000000000..62fdba7e18c1fcd7733873c9120a9ca2e922b44e
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 @@ -0,0 +1,82 @@
@@ -102,12 +102,96 @@ index 0000000..62fdba7
 +        this.users = users;
 +    }
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8dfc57d8d82849d58224aa65ee070416b7ce699d
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
+@@ -0,0 +1,78 @@
++package io.kestra.webserver.oidc.controllers;
++
++import java.net.URI;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++
++import com.nimbusds.jose.JWSAlgorithm;
++import com.nimbusds.oauth2.sdk.GrantType;
++import com.nimbusds.oauth2.sdk.ResponseType;
++import com.nimbusds.oauth2.sdk.Scope;
++import com.nimbusds.oauth2.sdk.auth.ClientAuthenticationMethod;
++import com.nimbusds.oauth2.sdk.id.Issuer;
++import com.nimbusds.oauth2.sdk.pkce.CodeChallengeMethod;
++import com.nimbusds.openid.connect.sdk.OIDCScopeValue;
++import com.nimbusds.openid.connect.sdk.SubjectType;
++import com.nimbusds.openid.connect.sdk.op.OIDCProviderMetadata;
++
++import io.kestra.webserver.oidc.OidcConfiguration;
++
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MediaType;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.http.annotation.Produces;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++import jakarta.inject.Inject;
++
++/**
++ * OIDC discovery (RFC 8414 / OpenID Connect Discovery) of the built-in server.
++ * All endpoints derive from the configured issuer.
++ */
++@Controller("/.well-known")
++@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
++@ExecuteOn(TaskExecutors.IO)
++public class OidcDiscoveryController {
++
++    private final OidcConfiguration configuration;
++
++    @Inject
++    public OidcDiscoveryController(final OidcConfiguration configuration) {
++        this.configuration = configuration;
++    }
++
++    @Get("/openid-configuration")
++    @Produces(MediaType.APPLICATION_JSON)
++    public HttpResponse<?> openIdConfiguration() {
++        final String issuer = configuration.getIssuer();
++        final OIDCProviderMetadata metadata = new OIDCProviderMetadata(
++            new Issuer(issuer),
++            Collections.singletonList(SubjectType.PUBLIC),
++            URI.create(issuer + "/oidc/jwks")
++        );
++        metadata.setAuthorizationEndpointURI(URI.create(issuer + "/oidc/authorize"));
++        metadata.setTokenEndpointURI(URI.create(issuer + "/oidc/token"));
++        metadata.setUserInfoEndpointURI(URI.create(issuer + "/oidc/userinfo"));
++        metadata.setIntrospectionEndpointURI(URI.create(issuer + "/oidc/introspect"));
++        metadata.setRevocationEndpointURI(URI.create(issuer + "/oidc/revoke"));
++        metadata.setEndSessionEndpointURI(URI.create(issuer + "/oidc/logout"));
++        metadata.setScopes(new Scope(OIDCScopeValue.OPENID, OIDCScopeValue.PROFILE, OIDCScopeValue.EMAIL));
++        metadata.setResponseTypes(Collections.singletonList(ResponseType.CODE));
++        metadata.setGrantTypes(Arrays.asList(
++            GrantType.AUTHORIZATION_CODE,
++            GrantType.CLIENT_CREDENTIALS,
++            GrantType.REFRESH_TOKEN
++        ));
++        // Hardened persona: S256 only (plain PKCE is not advertised).
++        metadata.setCodeChallengeMethods(List.of(CodeChallengeMethod.S256));
++        metadata.setTokenEndpointAuthMethods(Arrays.asList(
++            ClientAuthenticationMethod.CLIENT_SECRET_BASIC,
++            ClientAuthenticationMethod.CLIENT_SECRET_POST
++        ));
++        metadata.setIDTokenJWSAlgs(Collections.singletonList(JWSAlgorithm.RS256));
++        return HttpResponse.ok(metadata.toJSONObject());
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 new file mode 100644
-index 0000000..8402a3f
+index 0000000000000000000000000000000000000000..30730afa5ef8bcaf83fdd6b0177f870ae799ca64
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,485 @@
 +package io.kestra.webserver.oidc.controllers;
 +
 +import java.net.URI;
@@ -268,12 +352,12 @@ index 0000000..8402a3f
 +            return authorizeError(redirectUri, state, OAuth2Error.UNSUPPORTED_RESPONSE_TYPE);
 +        }
 +
-+        final List<String> requestedScopes = authRequest.getScope() != null
++
++ List<String> requestedScopes = authRequest.getScope() != null
 +            ? authRequest.getScope().toStringList()
 +            : client.scopes();
-+        if (!clientService.isScopeAllowed(client, requestedScopes)) {
-+            return authorizeError(redirectUri, state, OAuth2Error.INVALID_SCOPE);
-+        }
++
++
 +
 +        // A2: public clients must use PKCE with S256.
 +        final CodeChallenge codeChallenge = authRequest.getCodeChallenge();
@@ -302,7 +386,11 @@ index 0000000..8402a3f
 +        );
 +
 +        final AuthorizationSuccessResponse success = new AuthorizationSuccessResponse(
-+            redirectUri, code, null, state, ResponseMode.QUERY
++            redirectUri,
++new AuthorizationCode(tokenService.bindProjectCode(
++ code
++.getValue(), client.clientId(), subject.get(), requestedScopes))
++, null, state, ResponseMode.QUERY
 +        );
 +        sessionService.sessionIdFrom(request).ifPresent(id -> {
 +            if (sessionService.isOneShot(id)) {
@@ -591,7 +679,7 @@ index 0000000..8402a3f
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_92OidcServerTokenMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_92OidcServerTokenMigration.java
 new file mode 100644
-index 0000000..cf712f0
+index 0000000000000000000000000000000000000000..cf712f03138456da7756b0a12a8549288961579e
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_92OidcServerTokenMigration.java
 @@ -0,0 +1,47 @@
@@ -644,7 +732,7 @@ index 0000000..cf712f0
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/NimbusHttpAdapter.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/NimbusHttpAdapter.java
 new file mode 100644
-index 0000000..2b1615f
+index 0000000000000000000000000000000000000000..2b1615fbe9ced3f9e4b096089bf19a15f9ccf0f0
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/NimbusHttpAdapter.java
 @@ -0,0 +1,47 @@
@@ -697,7 +785,7 @@ index 0000000..2b1615f
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 new file mode 100644
-index 0000000..21d1173
+index 0000000000000000000000000000000000000000..21d117314bd5893a889d392c55d3550451796fa2
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 @@ -0,0 +1,195 @@
@@ -898,7 +986,7 @@ index 0000000..21d1173
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 new file mode 100644
-index 0000000..8e2e2a6
+index 0000000000000000000000000000000000000000..8e2e2a6e6a30d149225e992a7c0347eeb474ac4c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 @@ -0,0 +1,134 @@
@@ -1038,7 +1126,7 @@ index 0000000..8e2e2a6
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 new file mode 100644
-index 0000000..1b9c05c
+index 0000000000000000000000000000000000000000..1b9c05c62770f0b966813deb9ca32137710b6b52
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 @@ -0,0 +1,341 @@
@@ -1385,7 +1473,7 @@ index 0000000..1b9c05c
 +}
 diff --git a/webserver/src/main/resources/migrations/2.0.92-oidc-server-token-postgres.sql b/webserver/src/main/resources/migrations/2.0.92-oidc-server-token-postgres.sql
 new file mode 100644
-index 0000000..fafe233
+index 0000000000000000000000000000000000000000..fafe23350e37ef374651109686097daaf43203da
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.92-oidc-server-token-postgres.sql
 @@ -0,0 +1,38 @@
@@ -1429,7 +1517,7 @@ index 0000000..fafe233
 +CREATE INDEX IF NOT EXISTS idx_oidc_token_type ON oidc_token (token_type);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 new file mode 100644
-index 0000000..2759acb
+index 0000000000000000000000000000000000000000..2759acb21a1471bba3d7dd1c12181c69076e9f4d
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 @@ -0,0 +1,145 @@
@@ -1580,7 +1668,7 @@ index 0000000..2759acb
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcDiscoveryControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcDiscoveryControllerTest.java
 new file mode 100644
-index 0000000..c5325c5
+index 0000000000000000000000000000000000000000..c5325c5614ab68bc2a72ca512335fe55070e9c93
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcDiscoveryControllerTest.java
 @@ -0,0 +1,35 @@
@@ -1621,7 +1709,7 @@ index 0000000..c5325c5
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
 new file mode 100644
-index 0000000..dff7ea2
+index 0000000000000000000000000000000000000000..dff7ea2fc3589df9767174e7f067081b732cbdb3
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
 @@ -0,0 +1,122 @@
@@ -1745,89 +1833,5 @@ index 0000000..dff7ea2
 +        assertEquals(ISSUER, claims.getIssuer());
 +        assertEquals("alice", claims.getSubject());
 +        assertEquals("nonce-123", claims.getClaim("nonce"));
-+    }
-+}
-diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
-new file mode 100644
-index 0000000..8dfc57d
---- /dev/null
-+++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
-@@ -0,0 +1,78 @@
-+package io.kestra.webserver.oidc.controllers;
-+
-+import java.net.URI;
-+import java.util.Arrays;
-+import java.util.Collections;
-+import java.util.List;
-+
-+import com.nimbusds.jose.JWSAlgorithm;
-+import com.nimbusds.oauth2.sdk.GrantType;
-+import com.nimbusds.oauth2.sdk.ResponseType;
-+import com.nimbusds.oauth2.sdk.Scope;
-+import com.nimbusds.oauth2.sdk.auth.ClientAuthenticationMethod;
-+import com.nimbusds.oauth2.sdk.id.Issuer;
-+import com.nimbusds.oauth2.sdk.pkce.CodeChallengeMethod;
-+import com.nimbusds.openid.connect.sdk.OIDCScopeValue;
-+import com.nimbusds.openid.connect.sdk.SubjectType;
-+import com.nimbusds.openid.connect.sdk.op.OIDCProviderMetadata;
-+
-+import io.kestra.webserver.oidc.OidcConfiguration;
-+
-+import io.micronaut.context.annotation.Requires;
-+import io.micronaut.http.HttpResponse;
-+import io.micronaut.http.MediaType;
-+import io.micronaut.http.annotation.Controller;
-+import io.micronaut.http.annotation.Get;
-+import io.micronaut.http.annotation.Produces;
-+import io.micronaut.scheduling.TaskExecutors;
-+import io.micronaut.scheduling.annotation.ExecuteOn;
-+import jakarta.inject.Inject;
-+
-+/**
-+ * OIDC discovery (RFC 8414 / OpenID Connect Discovery) of the built-in server.
-+ * All endpoints derive from the configured issuer.
-+ */
-+@Controller("/.well-known")
-+@Requires(property = "kestra.oidc.enabled", value = "true", defaultValue = "false")
-+@ExecuteOn(TaskExecutors.IO)
-+public class OidcDiscoveryController {
-+
-+    private final OidcConfiguration configuration;
-+
-+    @Inject
-+    public OidcDiscoveryController(final OidcConfiguration configuration) {
-+        this.configuration = configuration;
-+    }
-+
-+    @Get("/openid-configuration")
-+    @Produces(MediaType.APPLICATION_JSON)
-+    public HttpResponse<?> openIdConfiguration() {
-+        final String issuer = configuration.getIssuer();
-+        final OIDCProviderMetadata metadata = new OIDCProviderMetadata(
-+            new Issuer(issuer),
-+            Collections.singletonList(SubjectType.PUBLIC),
-+            URI.create(issuer + "/oidc/jwks")
-+        );
-+        metadata.setAuthorizationEndpointURI(URI.create(issuer + "/oidc/authorize"));
-+        metadata.setTokenEndpointURI(URI.create(issuer + "/oidc/token"));
-+        metadata.setUserInfoEndpointURI(URI.create(issuer + "/oidc/userinfo"));
-+        metadata.setIntrospectionEndpointURI(URI.create(issuer + "/oidc/introspect"));
-+        metadata.setRevocationEndpointURI(URI.create(issuer + "/oidc/revoke"));
-+        metadata.setEndSessionEndpointURI(URI.create(issuer + "/oidc/logout"));
-+        metadata.setScopes(new Scope(OIDCScopeValue.OPENID, OIDCScopeValue.PROFILE, OIDCScopeValue.EMAIL));
-+        metadata.setResponseTypes(Collections.singletonList(ResponseType.CODE));
-+        metadata.setGrantTypes(Arrays.asList(
-+            GrantType.AUTHORIZATION_CODE,
-+            GrantType.CLIENT_CREDENTIALS,
-+            GrantType.REFRESH_TOKEN
-+        ));
-+        // Hardened persona: S256 only (plain PKCE is not advertised).
-+        metadata.setCodeChallengeMethods(List.of(CodeChallengeMethod.S256));
-+        metadata.setTokenEndpointAuthMethods(Arrays.asList(
-+            ClientAuthenticationMethod.CLIENT_SECRET_BASIC,
-+            ClientAuthenticationMethod.CLIENT_SECRET_POST
-+        ));
-+        metadata.setIDTokenJWSAlgs(Collections.singletonList(JWSAlgorithm.RS256));
-+        return HttpResponse.ok(metadata.toJSONObject());
 +    }
 +}

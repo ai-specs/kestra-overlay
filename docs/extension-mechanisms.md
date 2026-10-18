@@ -361,3 +361,40 @@ REQ-0330 已接收最小生命周期激活点；provider 只提供不透明句�
 组件探针补证并接收，保留业务授权于插件；评估生命周期 REQ-0330 已接收，
 三项已随 `8d46953` 通过正式发布门；页面标题修复仍须对应提交的 CI。manifest 必须与实际生成的实现 patch 同批加入；页面通用
 激活的窄化例外已同步 AGENTS.md，不允许把业务页面或授权模型移入宿主。
+
+### 应用项目身份机制（已接收，候选实现边界）
+
+`ApplicationDirectoryV1`、`TrustedIdentityV1` 和 `AuthorizationEvaluationProviderV2` 是版本化 classpath 公开契约。`ApplicationDirectoryV1` 只提供项目、scope、成员 client、subject assignment、revision/epoch 和显式三域管理意图；不提供插件 grants、业务页面或名称推断。`TrustedIdentityV1` 只返回宿主验证后的 issuer、subject、client、精确 audiences、tenant、project、protocolScopes、projectScopes、authenticationVersion、authorizationVersion 和 directoryRevision。
+
+开关 `kestra.rbac.application-projects.enabled` 必须同时要求 `kestra.rbac.enabled`、`kestra.rbac.typed.enabled` 和 `kestra.rbac.evaluation.enabled`，且 provider 必须是唯一 V2；缺失、多实例、异常、超时、版本不符失败关闭，不得回退 V1、roles 或 subject。
+
+MCP tools/list 与 tools/call 都按当前请求 token 重新验证身份、项目 epoch、resource audience 和 scope；不得复用 initialize/session 缓存。实际生产 `TypedAuthorization.QueryDomain.resourceDomains` 必须保持 namespace×resourceId 关联，并在分页、total、统计和聚合前编译到 repository 查询。详情/写使用同一完整域；不支持受限 ID 列表时明确拒绝。
+
+
+未发布的独立 `QueryDomainV2` DTO 没有生产消费者，已裁决删除；不作为公开契约或
+插件编译输入。关联域采用既有 `TypedAuthorization.QueryDomain` 的兼容扩展：
+每项显式携带 NAMESPACE/TENANT 与 ALL_IDS/RESTRICTED_IDS，经求交、查询上下文及
+JDBC 消费保持完整。不得把 namespace 与 ID 分别并集后形成笛卡尔积，也不得在中间
+转换时丢弃两个范围枚举。空的受限 ID 域必须拒绝，不解释为全部 ID。最终发布前必须
+验证实际 SQL、分页/total/聚合与 tenant MCP 配置查询，DTO 测试不是查询消费证据。
+
+本地管理显式目标项目和完整恢复入口的边界见 `docs/r-ee-rbac.md` 末节。
+宿主只提供同 scope 管理意图的精确目标上界；本地绑定、恢复页面、完整候选审核和
+原子策略保存归消费插件，宿主不保存本地 grants。
+
+
+候选 `TrustedIdentityV1.directoryRevision` 取目录快照 `Project.revision`，
+`authorizationVersion` 取独立撤权 epoch `Project.authorizationVersion`。两者不得互换。
+`protocolScopes()` 当前只来自固定标准项与启动配置；它没有动态数据库修订。若扩展为
+动态词汇表，必须纳入一致快照后再接收。既有 scope 语义只允许收窄；新目标管理授权
+必须创建新 scope，不能扩大旧 scope 后复用旧同意。
+
+
+关联查询适配边界：JDBC 调用 `namespaceScopeWithResourceDomains()` 后必须消费每个
+term；namespace-only 消费入口不得调用该投影绕过 ID 限制。普通 namespaceScope、
+namespaceAllowed 与日志投影在受限 ID 下拒绝；已核定 FLOW/EXECUTION 的精确资源
+predicate 保持(namespace,id)关联。无 ID 列的 JDBC 资源只对 RESTRICTED_IDS 拒绝，
+全部 ALL_IDS 项继续按 namespace term 过滤。关联交集空结果显式为空拒绝域。
+
+目录可信身份先读后写，写事务持锁复核当前状态；token 内部目录、账号版本和 JWK
+读取复用事务连接。公开目录/身份接口不接收 JDBC Connection，不把连接带出短事务。

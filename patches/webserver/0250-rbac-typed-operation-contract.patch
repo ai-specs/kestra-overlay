@@ -6,10 +6,10 @@
 # 移除条件: 上游 OSS 提供等价稳定 typed 授权 operation、query scope 和 aggregate 契约
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
 new file mode 100644
-index 0000000..9f0f937
+index 0000000000000000000000000000000000000000..c684ab936f7839d22191174962873829ca34e01c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,245 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.List;
@@ -22,7 +22,10 @@ index 0000000..9f0f937
 +
 +    public enum Source { REST, MCP, INTERNAL, DASHBOARD_AGGREGATE }
 +    public enum Resource { FLOW, EXECUTION, NAMESPACE, LOG, METRIC, TRIGGER, KVSTORE,
-+        NAMESPACE_FILE, METADATA, SYSTEM, MCP_SERVER, DASHBOARD, BLUEPRINT }
++        NAMESPACE_FILE, METADATA, SYSTEM, MCP_SERVER, DASHBOARD, BLUEPRINT
++,
++        EXTENSION
++ }
 +    public enum Action { READ, LIST, CREATE, UPDATE, DELETE, EXECUTE, ACCESS_OUTPUTS }
 +    public enum Coverage { SINGLE, COMPLETE_QUERY, COMPLETE_BATCH }
 +    public enum Aggregate { NONE, EXECUTION, LOG, TRIGGER, FLOW_DESCRIPTION }
@@ -31,19 +34,58 @@ index 0000000..9f0f937
 +    public enum DomainKind { GLOBAL, RESTRICTED }
 +
 +    public record QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
-+        List<String> excludedNamespaces, boolean complete, boolean paginated, DomainKind kind) {
++        List<String> excludedNamespaces, boolean complete, boolean paginated, DomainKind kind
++,
++            List<ResourceDomain> resourceDomains
++) {
 +        public QueryDomain {
 +            exactNamespaces = clean(exactNamespaces);
 +            namespaceSubtrees = clean(namespaceSubtrees);
 +            excludedNamespaces = clean(excludedNamespaces);
++resourceDomains = resourceDomains == null ? List.of() : List.copyOf(resourceDomains);
++
 +            Objects.requireNonNull(kind, "Domain kind is required");
++if (resourceDomains.stream().anyMatch(term -> term.resourceScope() == QueryDomain.ResourceScope.TENANT)
++                && (kind != DomainKind.GLOBAL || !excludedNamespaces.isEmpty()
++                    || resourceDomains.stream().anyMatch(term -> term.resourceScope() != QueryDomain.ResourceScope.TENANT)))
++                throw new IllegalArgumentException("Tenant terms require an unrestricted namespace outer domain");
++            boolean hadTerms = !resourceDomains.isEmpty();
++            resourceDomains = resourceDomains.stream().filter(term ->
++                (term.idScope() == QueryDomain.IdScope.ALL_IDS || !term.resourceIds().isEmpty())
++                && (term.resourceScope() == QueryDomain.ResourceScope.TENANT || !term.namespaceSubtrees().isEmpty()
++                    || term.exactNamespaces().stream().anyMatch(value -> !term.excludedNamespaces().contains(value)))).distinct().toList();
++            if (hadTerms && resourceDomains.isEmpty()) {
++                kind = DomainKind.RESTRICTED;
++                exactNamespaces = List.of(); namespaceSubtrees = List.of(); excludedNamespaces = List.of();
++            }
++
 +            if (kind == DomainKind.GLOBAL && (!exactNamespaces.isEmpty() || !namespaceSubtrees.isEmpty()))
 +                throw new IllegalArgumentException("Global domain cannot contain namespace grants");
 +            if (!complete && paginated) throw new IllegalArgumentException("Paginated domain must be complete");
 +        }
 +        public QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
 +            List<String> excludedNamespaces, boolean complete, boolean paginated) {
-+            this(exactNamespaces, namespaceSubtrees, excludedNamespaces, complete, paginated, DomainKind.RESTRICTED);
++            this(exactNamespaces, namespaceSubtrees, excludedNamespaces, complete, paginated, DomainKind.RESTRICTED
++,
++                    List.of());
++        }
++
++        public QueryDomain(
++                List<String> exactNamespaces,
++                List<String> namespaceSubtrees,
++                List<String> excludedNamespaces,
++                boolean complete,
++                boolean paginated,
++                DomainKind kind) {
++            this(
++                    exactNamespaces,
++                    namespaceSubtrees,
++                    excludedNamespaces,
++                    complete,
++                    paginated,
++                    kind,
++                    List.of()
++);
 +        }
 +        public static QueryDomain unrestricted() {
 +            return new QueryDomain(List.of(), List.of(), List.of(), true, false, DomainKind.GLOBAL);
@@ -51,13 +93,89 @@ index 0000000..9f0f937
 +        public static QueryDomain empty() {
 +            return new QueryDomain(List.of(), List.of(), List.of(), true, false);
 +        }
-+        public boolean contains(String namespace) {
++        public boolean
++resourceAllowed(String namespace, String resourceId) {
++            if (resourceDomains.isEmpty()) return contains(namespace);
++            return (namespace == null ? kind == DomainKind.GLOBAL : contains(namespace)) && resourceDomains.stream()
++                    .anyMatch(domain -> domain.allows(namespace, resourceId));
++        }
++
++        public enum ResourceScope { NAMESPACE, TENANT }
++        public enum IdScope { ALL_IDS, RESTRICTED_IDS }
++
++        public record ResourceDomain(
++                List<String> exactNamespaces,
++                List<String> namespaceSubtrees,
++                List<String> excludedNamespaces,
++                List<String> resourceIds,
++                ResourceScope resourceScope,
++                IdScope idScope) {
++            public ResourceDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
++                List<String> excludedNamespaces, List<String> resourceIds) {
++                this(exactNamespaces, namespaceSubtrees, excludedNamespaces, resourceIds, ResourceScope.NAMESPACE, IdScope.RESTRICTED_IDS);
++            }
++            public ResourceDomain {
++                Objects.requireNonNull(resourceScope);
++                Objects.requireNonNull(idScope);
++                exactNamespaces = clean(exactNamespaces);
++                namespaceSubtrees = clean(namespaceSubtrees);
++                excludedNamespaces = clean(excludedNamespaces);
++                if (resourceScope == ResourceScope.TENANT && (!exactNamespaces.isEmpty() || !namespaceSubtrees.isEmpty() || !excludedNamespaces.isEmpty())) throw new IllegalArgumentException("Tenant domain cannot contain namespace selectors");
++                resourceIds = resourceIds == null ? List.of() : List.copyOf(resourceIds);
++                if (idScope == IdScope.ALL_IDS && !resourceIds.isEmpty())
++                    throw new IllegalArgumentException("ALL_IDS cannot contain resource selectors");
++                if (resourceIds.stream().anyMatch(id -> id == null || id.isBlank()))
++                    throw new IllegalArgumentException("Invalid resource ID");
++            }
++
++            public boolean allows(String namespace, String resourceId) {
++                return resourceId != null
++                        && (idScope == IdScope.ALL_IDS || resourceIds.contains(resourceId))
++                        && (resourceScope == ResourceScope.TENANT && namespace == null || resourceScope == ResourceScope.NAMESPACE && namespace != null && !excludedNamespaces.contains(namespace)
++                        && (exactNamespaces.contains(namespace)
++                                || namespaceSubtrees.stream()
++                                        .anyMatch(root -> within(namespace, root))));
++            }
++        }
++
++        public boolean
++ contains(String namespace) {
 +            return namespace != null && !excludedNamespaces.contains(namespace)
 +                && (kind == DomainKind.GLOBAL || exactNamespaces.contains(namespace)
 +                    || namespaceSubtrees.stream().anyMatch(root -> within(namespace, root)));
 +        }
 +        public QueryDomain intersect(QueryDomain other) {
 +            Objects.requireNonNull(other, "Intersection domain is required");
++if (!resourceDomains.isEmpty() || !other.resourceDomains.isEmpty()) {
++                QueryDomain outer = withoutResourceDomains().intersect(other.withoutResourceDomains());
++                var terms = new java.util.ArrayList<ResourceDomain>();
++                var leftTerms = resourceDomains.isEmpty() ? List.of(new ResourceDomain(exactNamespaces,
++                    namespaceSubtrees, excludedNamespaces, List.of(), ResourceScope.NAMESPACE, IdScope.ALL_IDS)) : resourceDomains;
++                var rightTerms = other.resourceDomains.isEmpty() ? List.of(new ResourceDomain(other.exactNamespaces,
++                    other.namespaceSubtrees, other.excludedNamespaces, List.of(), ResourceScope.NAMESPACE, IdScope.ALL_IDS)) : other.resourceDomains;
++                if (resourceDomains.isEmpty() && kind == DomainKind.GLOBAL) leftTerms = other.resourceDomains;
++                if (other.resourceDomains.isEmpty() && other.kind == DomainKind.GLOBAL) rightTerms = resourceDomains;
++                for (var left : leftTerms) for (var right : rightTerms) {
++                    if (left.resourceScope() != right.resourceScope()) continue;
++                    IdScope idsKind = left.idScope() == IdScope.ALL_IDS && right.idScope() == IdScope.ALL_IDS
++                        ? IdScope.ALL_IDS : IdScope.RESTRICTED_IDS;
++                    List<String> ids = left.idScope() == IdScope.ALL_IDS ? right.resourceIds()
++                        : right.idScope() == IdScope.ALL_IDS ? left.resourceIds()
++                        : left.resourceIds().stream().filter(right.resourceIds()::contains).toList();
++                    if (left.resourceScope() == ResourceScope.TENANT) {
++                        terms.add(new ResourceDomain(List.of(), List.of(), List.of(), ids, ResourceScope.TENANT, idsKind));
++                    } else {
++                        var bounded = new QueryDomain(left.exactNamespaces(), left.namespaceSubtrees(), left.excludedNamespaces(), true, false)
++                            .intersect(new QueryDomain(right.exactNamespaces(), right.namespaceSubtrees(), right.excludedNamespaces(), true, false));
++                        terms.add(new ResourceDomain(bounded.exactNamespaces(), bounded.namespaceSubtrees(), bounded.excludedNamespaces(), ids, ResourceScope.NAMESPACE, idsKind));
++                    }
++                }
++                if (terms.isEmpty()) return new QueryDomain(List.of(),List.of(),List.of(),
++                    outer.complete(),outer.paginated(),DomainKind.RESTRICTED,List.of());
++                return new QueryDomain(outer.exactNamespaces(), outer.namespaceSubtrees(), outer.excludedNamespaces(),
++                    outer.complete(), outer.paginated(), outer.kind(), terms);
++            }
++
 +            var exclusions = java.util.stream.Stream.concat(excludedNamespaces.stream(), other.excludedNamespaces.stream()).distinct().toList();
 +            boolean resultComplete = complete && other.complete;
 +            boolean resultPaginated = paginated || other.paginated;
@@ -74,7 +192,13 @@ index 0000000..9f0f937
 +                .filter(Objects::nonNull).distinct().toList();
 +            return new QueryDomain(exact, subtrees, exclusions, resultComplete, resultPaginated);
 +        }
-+        private static boolean within(String namespace, String root) {
++        private
++QueryDomain withoutResourceDomains() {
++            return new QueryDomain(exactNamespaces, namespaceSubtrees, excludedNamespaces, complete, paginated, kind);
++        }
++
++        private
++ static boolean within(String namespace, String root) {
 +            return namespace.equals(root) || namespace.startsWith(root + ".");
 +        }
 +        private static List<String> clean(List<String> values) {
@@ -97,10 +221,18 @@ index 0000000..9f0f937
 +            if (namespace != null && !namespace.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*"))
 +                throw new IllegalArgumentException("Invalid namespace");
 +            if (resourceId != null && resourceId.isBlank()) throw new IllegalArgumentException("Invalid resource ID");
-+            if (namespace != null && !queryDomain.contains(namespace)) throw new IllegalArgumentException("Resource is outside query domain");
++            if (
++resource == Resource.EXTENSION
++                    && (resourceId == null
++                            || !resourceId.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
++                throw new IllegalArgumentException("Registered extension ID is required");
++            if (
++namespace != null && !queryDomain.contains(namespace)) throw new IllegalArgumentException("Resource is outside query domain");
 +            if (coverage == Coverage.COMPLETE_QUERY && !queryDomain.complete()) throw new IllegalArgumentException("Complete query required");
 +            if (coverage == Coverage.SINGLE && namespace == null && resource != Resource.METADATA && resource != Resource.SYSTEM
-+                && resource != Resource.MCP_SERVER && resource != Resource.DASHBOARD && resource != Resource.BLUEPRINT)
++                && resource != Resource.MCP_SERVER && resource != Resource.DASHBOARD && resource != Resource.BLUEPRINT
++&& resource != Resource.EXTENSION
++)
 +                throw new IllegalArgumentException("Single resource namespace is required");
 +            if (aggregate != Aggregate.NONE && (coverage != Coverage.COMPLETE_QUERY && aggregate != Aggregate.FLOW_DESCRIPTION || sideEffect != SideEffect.READ_ONLY
 +                || action != Action.READ && action != Action.LIST)) throw new IllegalArgumentException("Invalid aggregate operation");
@@ -125,7 +257,7 @@ index 0000000..9f0f937
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 new file mode 100644
-index 0000000..201c734
+index 0000000000000000000000000000000000000000..201c7345424bcca10b1fe91c8f6e3213044e0027
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 @@ -0,0 +1,34 @@
@@ -165,7 +297,7 @@ index 0000000..201c734
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
 new file mode 100644
-index 0000000..213990f
+index 0000000000000000000000000000000000000000..213990f643e49b1c99bd09068635daf266647d84
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
 @@ -0,0 +1,10 @@
@@ -181,18 +313,22 @@ index 0000000..213990f
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
 new file mode 100644
-index 0000000..8243987
+index 0000000000000000000000000000000000000000..30ef4b73f5d3adbe77f8ec44ec042cd4a3a43bec
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
-@@ -0,0 +1,62 @@
-+package io.kestra.webserver.rbac;
-+
-+import java.util.Arrays;
-+import java.util.List;
-+import org.junit.jupiter.api.Test;
+@@ -0,0 +1,124 @@
++package io.kestra.webserver.rbac
++;
 +
 +import static io.kestra.webserver.rbac.TypedAuthorization.*;
-+import static org.assertj.core.api.Assertions.*;
++import static org.assertj.core.api.Assertions.*
++;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.Arrays;
++import java.util.List
++;
 +
 +class TypedAuthorizationContractTest {
 +    @Test
@@ -246,10 +382,68 @@ index 0000000..8243987
 +        return new Operation(CONTRACT_VERSION, Source.REST, resource, Action.READ, "main", namespace, null,
 +            domain, coverage, aggregate, SideEffect.READ_ONLY);
 +    }
++@Test
++    void shouldRequireRegisteredExtensionIdForExtensionOperations() {
++        assertThatThrownBy(
++                        () ->
++                                new Operation(
++                                        CONTRACT_VERSION,
++                                        Source.REST,
++                                        Resource.EXTENSION,
++                                        Action.READ,
++                                        "main",
++                                        null,
++                                        null,
++                                        QueryDomain.unrestricted(),
++                                        Coverage.SINGLE,
++                                        Aggregate.NONE,
++                                        SideEffect.READ_ONLY))
++                .isInstanceOf(IllegalArgumentException.class);
++        var operation =
++                new Operation(
++                        CONTRACT_VERSION,
++                        Source.REST,
++                        Resource.EXTENSION,
++                        Action.UPDATE,
++                        "main",
++                        null,
++                        "rbac_ui",
++                        QueryDomain.unrestricted(),
++                        Coverage.SINGLE,
++                        Aggregate.NONE,
++                        SideEffect.STORAGE_WRITE);
++        assertThat(operation.resourceId()).isEqualTo("rbac_ui");
++
 +}
++@Test
++    void shouldPreserveNamespaceAndIdAssociationThroughDecisionIntersection() {
++        var scope = new QueryDomain(List.of("a", "b"), List.of(), List.of(), true, true, DomainKind.RESTRICTED,
++            List.of(new QueryDomain.ResourceDomain(List.of("a"), List.of(), List.of(), List.of("one")),
++                new QueryDomain.ResourceDomain(List.of("b"), List.of(), List.of(), List.of("two"))));
++        var decision = Decision.allow(scope.intersect(QueryDomain.unrestricted()));
++        assertThat(decision.scope().resourceAllowed("a", "one")).isTrue();
++        assertThat(decision.scope().resourceAllowed("b", "two")).isTrue();
++        assertThat(decision.scope().resourceAllowed("a", "two")).isFalse();
++        assertThat(decision.scope().resourceAllowed("b", "one")).isFalse();
++        var narrowed = scope.intersect(new QueryDomain(List.of("a"), List.of(), List.of(), true, true));
++        assertThat(narrowed.resourceAllowed("a", "one")).isTrue();
++        assertThat(narrowed.resourceAllowed("b", "two")).isFalse();
++    }
++    @Test
++    void shouldSupportExplicitAllIdsAndTenantDomains() {
++        var all = new QueryDomain.ResourceDomain(List.of("team"), List.of(), List.of(), List.of(),
++            QueryDomain.ResourceScope.NAMESPACE, QueryDomain.IdScope.ALL_IDS);
++        assertThat(all.allows("team", "any-id")).isTrue();
++        var tenant = new QueryDomain.ResourceDomain(List.of(), List.of(), List.of(), List.of("server"),
++            QueryDomain.ResourceScope.TENANT, QueryDomain.IdScope.RESTRICTED_IDS);
++        assertThat(tenant.allows(null, "server")).isTrue();
++        assertThat(tenant.allows("team", "server")).isFalse();
++    }
++}
++
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
 new file mode 100644
-index 0000000..773a35c
+index 0000000000000000000000000000000000000000..773a35cb139ae3181c8a39da10ac71f3e547ca48
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
 @@ -0,0 +1,54 @@

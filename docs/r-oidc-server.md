@@ -392,3 +392,42 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 插件使用公开测试替身独立验证管理权限和错误转换；部署仓使用发布产物从真实 UI 创建
 账号、零授权登录、授权绑定、撤销及退出换号，并比较拒绝前后目录与策略状态。
 仅源码有方法、编译成功或原 OIDC CI 通过，都不能替代本契约的发布和组合验收。
+
+### 已接收的 UI 项目 scope 选择器（REQ-0360）
+
+UI 不需要因新增项目 scope 修改 Compose。内置 issuer 只允许目录显式登记的第一方 UI client 申请协议 scope `kestra:project-scopes`。签发事务将该选择器展开为该 client 获批的项目 scope 集合，再与当前 subject assignment、项目 active 状态和用户 consent 求交；选择器本身永远不写入 `projectScopes`，不授予本地权限。UI 第一方可以显式免重复 consent，但不能免 subject 授权。普通 client 与 DCR client 必须逐名申请实际项目 scope，不自动展开。未授予请求返回 `invalid_scope`；没有 assignment 的 UI 用户仍可完成协议登录，但业务 projectScopes 为空。access token 的可信上下文只保存实际 project scopes；ID token 不假定标准 `scope` claim，若服务端 cookie 需要恢复上下文，必须使用同一签发事务产生的版本化私有 claim 并在线检查 project epoch。不得从 `roles` 改名为 scope。
+
+### Compose 与关闭模式边界（REQ-0360）
+
+新 Compose 由部署仓设置 `kestra.rbac.application-projects.enabled` 与 RBAC 开关，并在 UI client scopes 中显式加入 `kestra:project-scopes`；不再使用 `management-admin-subjects`。该配置尚未部署到正式镜像。RBAC/project 模式关闭时，未引导目录不得阻断首次 setup、协议登录或 selector 的协议消费；selector 不授项目 scope。project 模式启用而目录未初始化时，受保护业务必须失败关闭。旧 code/access/refresh/UI/IdP/MCP 凭据只在显式切换工具提交批准计划时失效，重启本身不触发迁移。
+
+
+### 应用项目候选链与发布前置（未发布）
+
+共享项目、scope 语义上界、成员 client 与 subject assignment 的事实源为宿主 PostgreSQL
+目录。插件只消费公开目录投影，不读取宿主表，不向宿主写入本地 grants。
+
+| 路径 | 候选实现与安全边界 |
+|---|---|
+| 申请与同意 | `OidcProviderController` 在真实登录后调用 `authorizeScopes`；UI selector 只对第一方获批 UI 成员展开，普通 client 逐名申请；实际 scope 再经用户同意收窄 |
+| 授权码与签发 | 目录激活后授权码绑定项目 epoch；签发交集为启用项目、启用 scope、获批 member、subject assignment 和 consent；签名 claim 分离 protocol/project scopes |
+| UI cookie / REST | ID token 携带与 access token 相同的签名项目 claim；Micronaut callback 完成标准 OIDC 校验；每请求 lifecycle 与可信身份机制核对 issuer、精确配置 UI audience、当前目录和 epoch |
+| MCP | resource-bound access token 校验签名、issuer、有效期、持久化记录、账号、client、资源 audience 和 epoch；每次调用消费当前 Bearer 身份，不缓存 initialize 权限 |
+| 撤权 | 项目、scope、member 或 assignment 写入推进项目 epoch；提交后新请求拒绝旧 cookie/access token；旧 code/refresh 不能恢复旧授权；已开始的不可变授权评估不混入新修订 |
+| 管理引导 | 仅宿主本地 CLI 预览完整计划并核对批准 hash、安装凭据、源修订和源 hash；事务激活后消费一次性引导、撤销旧凭据；正常管理继续要求可信 scope，不提供 subject 永久旁路 |
+
+`directoryRevision` 对应 `Project.revision`；`authorizationVersion` 对应独立的
+`Project.authorizationVersion`。二者不得互换。共享 scope 的现有语义只允许收窄；
+扩大授权必须新建稳定 scope 标识，并显式完成本地绑定、client 批准、subject 授予与
+重新登录。完整新项目管理流程见 `r-ee-rbac.md`，本地策略恢复归消费扩展。
+
+上述为源码与本地独立测试的候选链说明，不能替代正式 HTTP callback、真实浏览器、
+双 client 撤权时限与拒绝无副作用组合验收。发布前必须通过宿主 CI、镜像级 OIDC/MCP
+黑盒和发布门；消费扩展必须等正式产物后独立编译插件 jar。
+
+
+协议上界候选修正：全局 protocolScopes 只负责分类，签发和 refresh 必须另外与当前
+active client 的真实注册协议 scopes 求交；未注册协议项返回 invalid_scope，不把它
+当作项目项继续处理。项目 scope 仍使用获批成员上界，不要求写入旧 client.scopes。
+selector 必须显式注册且匹配安装凭据中的第一方 UI client。独立回归通过生产 DCR
+注册、owner 同意和目录 membership 复现限制，不以手工 principal 代替签发证据。

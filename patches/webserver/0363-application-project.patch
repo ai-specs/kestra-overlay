@@ -1,0 +1,1237 @@
+# 需求: REQ-0363 应用项目公开机制与授权激活
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；实施中，未发布
+# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
+# 触达上游文件: 最小公共契约、宿主激活点与独立测试
+# 移除条件: 上游提供等价公开项目身份与授权机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryBootstrap.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryBootstrap.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b08c545dcbdfcb47268aa7cf2e74fb2bd79a7f4
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryBootstrap.java
+@@ -0,0 +1,48 @@
++package io.kestra.webserver.oidc.projects;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import java.nio.charset.StandardCharsets;
++import java.util.List;
++import java.util.TreeSet;
++import java.util.ArrayList;
++import java.util.Comparator;
++
++public final class ApplicationDirectoryBootstrap {
++    private static final ObjectMapper MAPPER = new ObjectMapper();
++    private ApplicationDirectoryBootstrap() {}
++
++    public record Plan(int formatVersion, String installationId, String uiClientId, long sourceRevision,
++                       String sourceHash, List<ProjectDirectoryState.Snapshot> projects) {
++        public Plan {
++            if (formatVersion != 1 || installationId == null || uiClientId == null || sourceRevision < 0
++                || sourceHash == null || !sourceHash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("Invalid directory plan");
++            projects = List.copyOf(projects);
++        }
++    }
++
++    public static String approvalHash(Plan plan) { return digest(canonical(MAPPER.valueToTree(plan)).toString()); }
++    public static String sourceHash(List<ProjectDirectoryState.Snapshot> source) {
++        return digest(canonical(MAPPER.valueToTree(source)).toString());
++    }
++    public static String digest(String value) {
++        try {
++            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
++                .digest(value.getBytes(StandardCharsets.UTF_8)));
++        } catch (java.security.NoSuchAlgorithmException failure) { throw new IllegalStateException(failure); }
++    }
++    private static JsonNode canonical(JsonNode value) {
++        if (value.isObject()) {
++            var result = MAPPER.createObjectNode();
++            var keys = new TreeSet<String>(); value.fieldNames().forEachRemaining(keys::add);
++            for (String key : keys) result.set(key, canonical(value.get(key)));
++            return result;
++        }
++        if (value.isArray()) {
++            var values = new ArrayList<JsonNode>(); value.forEach(item -> values.add(canonical(item)));
++            values.sort(Comparator.comparing(JsonNode::toString));
++            var result = MAPPER.createArrayNode(); values.forEach(result::add); return result;
++        }
++        return value;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryCommand.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5b6a065e1708ec8765abf8a89041638511d6995
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryCommand.java
+@@ -0,0 +1,67 @@
++package io.kestra.webserver.oidc.projects;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.micronaut.context.ApplicationContext;
++import io.micronaut.context.env.Environment;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.sql.DriverManager;
++import javax.sql.DataSource;
++
++public final class ApplicationDirectoryCommand {
++    private ApplicationDirectoryCommand() {}
++
++    public static void main(String[] arguments) throws Exception {
++        if (arguments.length < 2 || !java.util.Set.of("preview", "apply").contains(arguments[0])) {
++            throw new IllegalArgumentException("Usage: preview <plan.json> | apply <plan.json> <approvedHash>");
++        }
++        var codec = new DirectorySnapshotCodec();
++        var plan = codec.decodePlan(Files.readAllBytes(Path.of(arguments[1])));
++        var builder = ApplicationContext.builder();
++        String yaml = System.getenv("KESTRA_CONFIGURATION");
++        if (yaml != null && !yaml.isBlank()) builder.properties(new io.micronaut.context.env.yaml.YamlPropertySourceLoader()
++            .read("directory-cli", new java.io.ByteArrayInputStream(yaml.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
++        String configPath = System.getenv("KESTRA_CONFIGURATION_PATH");
++        if (configPath != null && !configPath.isBlank()) {
++            try (var input = Files.newInputStream(Path.of(configPath))) {
++                builder.properties(new io.micronaut.context.env.yaml.YamlPropertySourceLoader().read("directory-cli", input));
++            }
++        }
++        try (var context = builder.build()) {
++            Environment environment = context.getEnvironment();
++            environment.start();
++            String clientName = environment.getProperty("kestra.oidc.bootstrap.client-name", String.class).orElse("kestra");
++            String clientId = environment.getRequiredProperty("micronaut.security.oauth2.clients." + clientName + ".client-id", String.class);
++            String issuer = environment.getRequiredProperty("kestra.oidc.issuer", String.class);
++            String storage = environment.getProperty("kestra.storage.local.base-path", String.class).orElse("/app/storage");
++            Path receipt = Path.of(environment.getProperty("kestra.oidc.bootstrap.receipt-path", String.class).orElse(storage + "/.oidc-installation"));
++            String url = environment.getRequiredProperty("datasources.postgres.url", String.class);
++            String user = environment.getRequiredProperty("datasources.postgres.username", String.class);
++            String secret = environment.getRequiredProperty("datasources.postgres.password", String.class);
++            var settings = new OidcConfiguration(); settings.setIssuer(issuer);
++            var directory = new JdbcApplicationDirectoryV1(source(url, user, secret), (io.kestra.webserver.oidc.TrustedIdentityV1) () -> null, settings, new ObjectMapper());
++            if ("preview".equals(arguments[0])) {
++                System.out.println(directory.previewBootstrap(plan, receipt, clientId));
++            } else {
++                if (arguments.length != 3) throw new IllegalArgumentException("Approved hash is required");
++                directory.applyBootstrap(plan, arguments[2], receipt, clientId);
++                System.out.println("Application directory activated");
++            }
++        }
++    }
++
++    private static DataSource source(String url, String user, String password) {
++        return new DataSource() {
++            public java.sql.Connection getConnection() throws java.sql.SQLException { return DriverManager.getConnection(url, user, password); }
++            public java.sql.Connection getConnection(String username, String secret) throws java.sql.SQLException { return DriverManager.getConnection(url, username, secret); }
++            public java.io.PrintWriter getLogWriter() { return null; }
++            public void setLogWriter(java.io.PrintWriter writer) {}
++            public void setLoginTimeout(int timeout) { DriverManager.setLoginTimeout(timeout); }
++            public int getLoginTimeout() { return DriverManager.getLoginTimeout(); }
++            public java.util.logging.Logger getParentLogger() { return java.util.logging.Logger.getGlobal(); }
++            public <T> T unwrap(Class<T> type) throws java.sql.SQLException { throw new java.sql.SQLException("Unsupported wrapper"); }
++            public boolean isWrapperFor(Class<?> type) { return false; }
++        };
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/DirectorySnapshotCodec.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/DirectorySnapshotCodec.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..da442e493a1d81318102ed13022cd7482a347277
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/DirectorySnapshotCodec.java
+@@ -0,0 +1,73 @@
++package io.kestra.webserver.oidc.projects;
++
++import com.fasterxml.jackson.core.JsonFactory;
++import com.fasterxml.jackson.core.StreamReadFeature;
++import com.fasterxml.jackson.databind.DeserializationFeature;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import java.nio.ByteBuffer;
++import java.nio.charset.CodingErrorAction;
++import java.nio.charset.StandardCharsets;
++
++final class DirectorySnapshotCodec {
++    private static final int MAX_BYTES = 8 * 1024 * 1024;
++    private final ObjectMapper mapper = new ObjectMapper(JsonFactory.builder()
++        .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
++        .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
++        .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
++        .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
++        .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
++
++    String encode(ProjectDirectoryState.Snapshot state) throws java.io.IOException {
++        String value = mapper.writeValueAsString(state);
++        if (value.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) throw new IllegalArgumentException("Directory snapshot exceeds its limit");
++        return value;
++    }
++
++    ApplicationDirectoryBootstrap.Plan decodePlan(byte[] input) {
++        try { return mapper.treeToValue(readTree(input), ApplicationDirectoryBootstrap.Plan.class); }
++        catch (java.io.IOException invalid) { throw new IllegalArgumentException("Invalid directory plan", invalid); }
++    }
++
++    ProjectDirectoryState.Snapshot decode(byte[] input) {
++        try { return mapper.treeToValue(readTree(input), ProjectDirectoryState.Snapshot.class); }
++        catch (java.io.IOException invalid) { throw new IllegalArgumentException("Invalid directory snapshot", invalid); }
++    }
++
++    private JsonNode readTree(byte[] input) {
++        if (input == null || input.length > MAX_BYTES) throw new IllegalArgumentException("Invalid directory snapshot size");
++        try {
++            String content = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
++                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(input)).toString();
++            JsonNode tree;
++            try (var parser = mapper.createParser(content)) {
++                tree = mapper.readTree(parser);
++                if (parser.nextToken() != null) throw new IllegalArgumentException("Only one snapshot is accepted");
++            }
++            check(tree, "snapshot", 0);
++            return tree;
++        } catch (java.io.IOException invalid) { throw new IllegalArgumentException("Invalid directory snapshot", invalid); }
++    }
++
++    private void check(JsonNode value, String path, int depth) {
++        if (depth > 32) throw new IllegalArgumentException("Snapshot nesting exceeds limit");
++        if (value == null || value.isNull()) throw new IllegalArgumentException("Null snapshot field: " + path);
++        if (value.isObject()) {
++            if (!value.fieldNames().hasNext()) throw new IllegalArgumentException("Empty snapshot object: " + path);
++            value.fields().forEachRemaining(entry -> {
++                String name = entry.getKey();
++                if (name.isBlank() || name.contains("\0")) throw new IllegalArgumentException("Invalid snapshot field");
++            });
++        }
++        if (value.isArray() && value.size() > 1000) throw new IllegalArgumentException("Snapshot collection exceeds its limit");
++        if (value.isObject()) value.fields().forEachRemaining(entry -> check(entry.getValue(), path + "." + entry.getKey(), depth + 1));
++        if (value.isArray()) {
++            var unique = new java.util.HashSet<String>();
++            for (int index = 0; index < value.size(); index++) {
++                JsonNode item = value.get(index);
++                if (!unique.add(item.toString())) throw new IllegalArgumentException("Duplicate snapshot array entry");
++                check(item, path + "[" + index + "]", depth + 1);
++            }
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..280f074446f8e31c32af70318007845048c5c521
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
+@@ -0,0 +1,698 @@
++package io.kestra.webserver.oidc.projects;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.ApplicationDirectoryV1;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.TrustedIdentityV1;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.BeanProvider;
++import jakarta.inject.Singleton;
++import javax.sql.DataSource;
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Objects;
++import java.util.Optional;
++import java.util.Set;
++import java.util.HashSet;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.util.function.BiFunction;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "kestra.repository.type", value = "postgres")
++public final class JdbcApplicationDirectoryV1 implements ApplicationDirectoryV1, ProjectDirectoryState {
++    private final DataSource source;
++    private final BeanProvider<TrustedIdentityV1> identities;
++    private final OidcConfiguration configuration;
++    private final ObjectMapper mapper;
++    private final DirectorySnapshotCodec codec = new DirectorySnapshotCodec();
++
++    public JdbcApplicationDirectoryV1(DataSource source, TrustedIdentityV1 identities,
++                                      OidcConfiguration configuration, ObjectMapper mapper) {
++        this(source, new DirectIdentityProvider(identities), configuration, mapper);
++    }
++
++    @jakarta.inject.Inject
++    public JdbcApplicationDirectoryV1(DataSource source, BeanProvider<TrustedIdentityV1> identities,
++                                      OidcConfiguration configuration, ObjectMapper mapper) {
++        this.source = Objects.requireNonNull(source);
++        this.identities = Objects.requireNonNull(identities);
++        this.configuration = Objects.requireNonNull(configuration);
++        this.mapper = Objects.requireNonNull(mapper);
++    }
++
++    public void initializeSchema() {
++        transaction(connection -> {
++            lock(connection);
++            try (var input = JdbcApplicationDirectoryV1.class.getResourceAsStream("/migrations/2.0.101-oidc-application-directory-postgres.sql")) {
++                if (input == null) throw new IllegalStateException("Directory migration resource is missing");
++                String sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
++                try (var statement = connection.createStatement()) {
++                    statement.setQueryTimeout(5);
++                    for (String command : sql.split(";")) if (!command.isBlank()) statement.execute(command);
++                }
++            } catch (java.io.IOException failure) {
++                throw new IllegalStateException("Directory migration resource cannot be read", failure);
++            }
++            return null;
++        });
++    }
++
++    public static String migrationChecksum() {
++        try (var input = JdbcApplicationDirectoryV1.class.getResourceAsStream("/migrations/2.0.101-oidc-application-directory-postgres.sql")) {
++            if (input == null) throw new IllegalStateException("Directory migration resource is missing");
++            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(input.readAllBytes()));
++        } catch (Exception failure) { throw new IllegalStateException("Cannot checksum directory migration", failure); }
++    }
++
++    public static void lock(Connection connection) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) {
++            statement.setQueryTimeout(5);
++            statement.execute();
++        }
++    }
++
++    public String previewBootstrap(ApplicationDirectoryBootstrap.Plan plan, java.nio.file.Path receiptPath, String registeredUiClientId) {
++        String installation = new io.kestra.webserver.oidc.services.OidcInstallationReceipt(receiptPath).read().orElseThrow(() -> failure(Failure.FORBIDDEN));
++        require(installation.equals(plan.installationId()) && registeredUiClientId.equals(plan.uiClientId()));
++        return transaction(connection -> {
++            lock(connection);
++            if (activated(connection)) throw failure(Failure.CONFLICT);
++            verifyInstallation(connection, installation);
++            verifyRegisteredUiClient(connection, registeredUiClientId);
++            var source = all(connection);
++            require(source.stream().mapToLong(value -> value.project().revision()).sum() == plan.sourceRevision());
++            require(ApplicationDirectoryBootstrap.sourceHash(source).equals(plan.sourceHash()));
++            validatePlan(connection, plan, registeredUiClientId);
++            var report = mapper.createObjectNode();
++            report.set("plan", mapper.valueToTree(plan));
++            report.set("source", mapper.valueToTree(source));
++            report.put("approvalHash", ApplicationDirectoryBootstrap.approvalHash(plan));
++            report.put("installationId", installation);
++            return report.toString();
++        });
++    }
++
++    private void validatePlan(Connection connection, ApplicationDirectoryBootstrap.Plan plan, String registeredUiClientId) throws SQLException {
++        require(plan != null && !plan.projects().isEmpty());
++        Set<String> projectIds = new HashSet<>(); Set<String> clientIds = new HashSet<>(); boolean firstParty = false;
++        for (var state : plan.projects()) {
++            validateSnapshot(state); require(projectIds.add(state.project().id()));
++            for (var member : state.memberships()) {
++                require(clientIds.add(member.clientId())); requireClient(connection, member.clientId());
++                if (member.firstPartyUi()) { require(member.clientId().equals(registeredUiClientId) && member.approved()); firstParty = true; }
++            }
++            for (var assignment : state.assignments()) requireSubject(connection, assignment.subject());
++        }
++        Set<String> knownProjects = Set.copyOf(projectIds);
++        for (var state : plan.projects()) validateTargets(state, knownProjects);
++        require(firstParty && hasAdministrator(connection, plan.projects(), null));
++    }
++
++    public void applyBootstrap(ApplicationDirectoryBootstrap.Plan plan, String approvedHash,
++                               java.nio.file.Path receiptPath, String registeredUiClientId) {
++        String installation = new io.kestra.webserver.oidc.services.OidcInstallationReceipt(receiptPath).read()
++            .orElseThrow(() -> failure(Failure.FORBIDDEN));
++        require(plan != null && installation.equals(plan.installationId()) && registeredUiClientId.equals(plan.uiClientId()));
++        require(ApplicationDirectoryBootstrap.approvalHash(plan).equals(approvedHash));
++        transaction(connection -> {
++            lock(connection);
++            if (activated(connection)) throw failure(Failure.CONFLICT);
++            verifyInstallation(connection, installation);
++            verifyRegisteredUiClient(connection, registeredUiClientId);
++            validatePlan(connection, plan, registeredUiClientId);
++            var existing = all(connection);
++            if (!ApplicationDirectoryBootstrap.sourceHash(existing).equals(plan.sourceHash())) throw failure(Failure.CONFLICT);
++            long revision = existing.stream().mapToLong(value -> value.project().revision()).sum();
++            if (revision != plan.sourceRevision()) throw failure(Failure.CONFLICT);
++            require(!plan.projects().isEmpty());
++            Set<String> projects = new HashSet<>();
++            Set<String> clients = new HashSet<>();
++            boolean hasUi = false;
++            for (var state : plan.projects()) {
++                validateSnapshot(state);
++                require(projects.add(state.project().id()));
++                for (var member : state.memberships()) {
++                    require(clients.add(member.clientId()));
++                    requireClient(connection, member.clientId());
++                    if (member.firstPartyUi()) {
++                        require(member.clientId().equals(registeredUiClientId) && member.approved());
++                        hasUi = true;
++                    }
++                }
++                for (var assignment : state.assignments()) requireSubject(connection, assignment.subject());
++            }
++            Set<String> knownProjects = new HashSet<>();
++            for (var state : plan.projects()) knownProjects.add(state.project().id());
++            for (var state : plan.projects()) validateTargets(state, knownProjects);
++            require(hasUi && hasAdministrator(connection, plan.projects(), null));
++            try (var statement = connection.createStatement()) { statement.executeUpdate("DELETE FROM oidc_project_state"); }
++            for (var state : plan.projects()) save(connection, state);
++            try (var statement = connection.prepareStatement("INSERT INTO oidc_project_bootstrap(singleton,approval_hash,receipt_hash,source_revision,ui_client_id,consumed) VALUES(1,?,?,?,?,TRUE)")) {
++                statement.setString(1, approvedHash);
++                statement.setString(2, ApplicationDirectoryBootstrap.digest(installation));
++                statement.setLong(3, plan.sourceRevision());
++                statement.setString(4, registeredUiClientId);
++                statement.executeUpdate();
++            }
++            try (var statement = connection.createStatement()) {
++                statement.executeUpdate("UPDATE oidc_token SET revoked=TRUE");
++                statement.executeUpdate("UPDATE oidc_authorization_code SET used=TRUE");
++                statement.executeUpdate("UPDATE oidc_user SET authentication_version=authentication_version+1");
++            }
++            invalidateCredentials(connection, 1, 1);
++            return null;
++        });
++    }
++
++    private void verifyInstallation(Connection connection, String id) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT installation_id FROM oidc_setup WHERE singleton=true FOR UPDATE")) {
++            try (var result = statement.executeQuery()) {
++                if (!result.next() || !id.equals(result.getString(1))) throw failure(Failure.FORBIDDEN);
++            }
++        }
++    }
++
++    private void verifyRegisteredUiClient(Connection connection, String id) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT client_kind,client_secret,active FROM oidc_client WHERE client_id=? FOR UPDATE")) {
++            statement.setString(1, id);
++            try (var result = statement.executeQuery()) {
++                if (!result.next() || !"system".equals(result.getString(1)) || result.getString(2) == null
++                    || result.getString(2).isBlank() || !result.getBoolean(3)) throw failure(Failure.FORBIDDEN);
++            }
++        }
++    }
++
++    @Override
++    public Snapshot snapshot(String projectId) {
++        return transaction(connection -> find(connection, projectId).orElseThrow(() -> failure(Failure.NOT_FOUND)));
++    }
++    @Override
++    public Optional<Snapshot> forClient(String clientId) {
++        return transaction(connection -> forClient(connection, clientId));
++    }
++
++    @Override
++    public Optional<Snapshot> forClient(Connection connection, String clientId) throws SQLException {
++        Snapshot found = null;
++        for (Snapshot state : all(connection)) {
++            boolean belongs = state.memberships().stream().anyMatch(member -> member.clientId().equals(clientId));
++            if (belongs) {
++                if (found != null) throw failure(Failure.CONFLICT);
++                found = state;
++            }
++        }
++        return Optional.ofNullable(found);
++    }
++
++    @Override
++    public Invalidation invalidation() {
++        return transaction(connection -> {
++            try (var statement = connection.prepareStatement("SELECT authentication_version, authorization_version FROM oidc_project_invalidation WHERE singleton=1")) {
++                try (var result = statement.executeQuery()) {
++                    if (!result.next()) return new Invalidation(0, 0);
++                    return new Invalidation(result.getLong(1), result.getLong(2));
++                }
++            }
++        });
++    }
++
++    public Invalidation invalidateCredentials(Connection connection, long authenticationVersion, long authorizationVersion) throws SQLException {
++        if (authenticationVersion < 0 || authorizationVersion < 0) throw failure(Failure.INVALID);
++        try (var statement = connection.prepareStatement("INSERT INTO oidc_project_invalidation(singleton,authentication_version,authorization_version) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET authentication_version=EXCLUDED.authentication_version, authorization_version=EXCLUDED.authorization_version, updated_at=now()")) {
++            statement.setLong(1, authenticationVersion); statement.setLong(2, authorizationVersion); statement.executeUpdate();
++        }
++        return new Invalidation(authenticationVersion, authorizationVersion);
++    }
++
++    @Override
++    public boolean activated() { return transaction(this::activated); }
++
++    @Override
++    public boolean activated(Connection connection) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT singleton FROM oidc_project_bootstrap WHERE singleton=1")) {
++            statement.setQueryTimeout(5);
++            try (var result = statement.executeQuery()) { return result.next(); }
++        }
++    }
++
++    @Override
++    public Page<Project> projects(int page, int size) {
++        return transaction(connection -> page(all(connection).stream().map(Snapshot::project).toList(), page, size));
++    }
++
++    @Override
++    public Optional<Project> project(String id) {
++        return transaction(connection -> find(connection, id).map(Snapshot::project));
++    }
++
++    @Override
++    public Project createProject(ProjectInput input) {
++        var identity = requireIdentity().current();
++        return transaction(connection -> {
++            lock(connection);
++            authorize(connection, identity, "MANAGE");
++            require(input != null && "main".equals(input.tenant()) && input.displayName() != null);
++            require(input.id() != null && input.id().matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"));
++            if (find(connection, input.id()).isPresent()) throw failure(Failure.CONFLICT);
++            Project project = new Project(input.id(), "main", configuration.getIssuer(), input.displayName(), true, 1, 1);
++            save(connection, new Snapshot(project, List.of(), List.of(), List.of(), 1));
++            return project;
++        });
++    }
++
++    @Override
++    public Project updateProject(String id, long revision, String name, boolean active) {
++        return mutate(id, revision, (connection, state) -> {
++            require(name != null);
++            var old = state.project();
++            return new Snapshot(new Project(old.id(), old.tenant(), old.issuer(), name, active,
++                old.revision(), old.authorizationVersion()), state.scopes(), state.memberships(), state.assignments(), state.directoryRevision());
++        }).project();
++    }
++
++    @Override public Page<ScopeDefinition> scopes(String project, int page, int size) { return page(snapshot(project).scopes(), page, size); }
++    @Override public Optional<ScopeDefinition> scope(String project, String scope) { return snapshot(project).scopes().stream().filter(value -> value.scope().equals(scope)).findFirst(); }
++    @Override public Page<ClientMembership> clients(String project, int page, int size) { return page(snapshot(project).memberships(), page, size); }
++    @Override public Page<SubjectAssignment> assignments(String project, int page, int size) { return page(snapshot(project).assignments(), page, size); }
++    @Override public Optional<SubjectAssignment> assignment(String project, String issuer, String subject) { return snapshot(project).assignments().stream().filter(value -> value.issuer().equals(issuer) && value.subject().equals(subject)).findFirst(); }
++
++    @Override
++    public ScopeDefinition createScope(String project, long revision, ScopeInput input) {
++        return mutate(project, revision, (connection, state) -> {
++            validateScope(input);
++            if (state.scopes().stream().anyMatch(value -> value.scope().equals(input.scope()))) throw failure(Failure.CONFLICT);
++            var scopes = new ArrayList<>(state.scopes());
++            scopes.add(new ScopeDefinition(project, input.scope(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), 1));
++            return copy(state, scopes, state.memberships(), state.assignments());
++        }).scopes().stream().filter(value -> value.scope().equals(input.scope())).findFirst().orElseThrow();
++    }
++
++    @Override
++    public ScopeDefinition updateScope(String project, String scope, long revision, ScopeInput input) {
++        require(input != null && scope.equals(input.scope()));
++        mutate(project, Long.MAX_VALUE, (connection, state) -> {
++            validateScope(input);
++            var scopes = new ArrayList<>(state.scopes());
++            var previous = scopes.stream().filter(value -> value.scope().equals(scope)).findFirst().orElseThrow(() -> failure(Failure.NOT_FOUND));
++            if (previous.revision() != revision) throw failure(Failure.CONFLICT);
++            require(isNarrower(input, previous));
++            scopes.remove(previous);
++            scopes.add(new ScopeDefinition(project, scope, input.description(), input.active(), input.resourceIntents(), input.managementIntents(), Math.addExact(previous.revision(), 1)));
++            return copy(state, scopes, state.memberships(), state.assignments());
++        });
++        return scope(project, scope).orElseThrow();
++    }
++
++    @Override
++    public ClientMembership approveClient(String project, long revision, MembershipInput input) {
++        return membership(project, revision, input, true);
++    }
++    @Override
++    public ClientMembership updateClient(String project, String client, long revision, MembershipInput input) {
++        require(input != null && client.equals(input.clientId()));
++        return membership(project, revision, input, false);
++    }
++    private ClientMembership membership(String project, long revision, MembershipInput input, boolean create) {
++        var result = mutate(project, create ? revision : Long.MAX_VALUE, (connection, state) -> {
++            require(input != null && input.clientId() != null && !input.audiences().isEmpty());
++            input.audiences().forEach(JdbcApplicationDirectoryV1::exact);
++            requireClient(connection, input.clientId());
++            if (input.firstPartyUi()) {
++                try { verifyRegisteredUiClient(connection, input.clientId()); } catch (SQLException failure) { throw failure(Failure.UNAVAILABLE); }
++                try (var statement = connection.prepareStatement("SELECT ui_client_id FROM oidc_project_bootstrap WHERE singleton=1 AND consumed=TRUE")) {
++                    try (var receiptRow = statement.executeQuery()) { require(receiptRow.next() && input.clientId().equals(receiptRow.getString(1))); }
++                } catch (SQLException failure) { throw failure(Failure.UNAVAILABLE); }
++            }
++            var memberships = new ArrayList<>(state.memberships());
++            var old = memberships.stream().filter(value -> value.clientId().equals(input.clientId())).findFirst();
++            if (!create && old.isPresent()) if (old.get().revision() != revision) throw failure(Failure.CONFLICT);
++            if (create == old.isPresent()) throw failure(create ? Failure.CONFLICT : Failure.NOT_FOUND);
++            validateScopes(state, input.allowedProjectScopes());
++            memberships.removeIf(value -> value.clientId().equals(input.clientId()));
++            memberships.add(new ClientMembership(project, input.clientId(), input.approved(), input.audiences(), input.allowedProjectScopes(), input.firstPartyUi(), old.map(value -> value.revision() + 1).orElse(1L)));
++            return copy(state, state.scopes(), memberships, state.assignments());
++        });
++        return result.memberships().stream().filter(value -> value.clientId().equals(input.clientId())).findFirst().orElseThrow();
++    }
++    @Override
++    public void removeClient(String project, String client, long revision) {
++        mutate(project, Long.MAX_VALUE, (connection, state) -> {
++            var memberships = new ArrayList<>(state.memberships());
++            var existing = memberships.stream().filter(value -> value.clientId().equals(client)).findFirst().orElseThrow(() -> failure(Failure.NOT_FOUND));
++            if (existing.revision() != revision) throw failure(Failure.CONFLICT);
++            memberships.remove(existing);
++            return copy(state, state.scopes(), memberships, state.assignments());
++        });
++    }
++    @Override public SubjectAssignment assign(String project, long revision, AssignmentInput input) { return assignmentMutation(project, revision, input, true); }
++    @Override public SubjectAssignment replaceAssignment(String project, String issuer, String subject, long revision, AssignmentInput input) {
++        require(input != null && issuer.equals(input.issuer()) && subject.equals(input.subject()));
++        return assignmentMutation(project, revision, input, false);
++    }
++    private SubjectAssignment assignmentMutation(String project, long revision, AssignmentInput input, boolean create) {
++        var result = mutate(project, create ? revision : Long.MAX_VALUE, (connection, state) -> {
++            require(input != null && state.project().issuer().equals(input.issuer()));
++            requireSubject(connection, input.subject());
++            validateScopes(state, input.projectScopes());
++            var assignments = new ArrayList<>(state.assignments());
++            var previous = assignments.stream().filter(value -> value.subject().equals(input.subject()) && value.issuer().equals(input.issuer())).findFirst();
++            if (!create && previous.isPresent()) if (previous.get().revision() != revision) throw failure(Failure.CONFLICT);
++            if (create == previous.isPresent()) throw failure(create ? Failure.CONFLICT : Failure.NOT_FOUND);
++            assignments.removeIf(value -> value.subject().equals(input.subject()) && value.issuer().equals(input.issuer()));
++            assignments.add(new SubjectAssignment(project, input.issuer(), input.subject(), input.projectScopes(),
++                previous.map(value -> value.revision() + 1).orElse(1L), previous.map(value -> value.authorizationVersion() + 1).orElse(1L)));
++            return copy(state, state.scopes(), state.memberships(), assignments);
++        });
++        return result.assignments().stream().filter(value -> value.subject().equals(input.subject()) && value.issuer().equals(input.issuer())).findFirst().orElseThrow();
++    }
++    @Override
++    public void revokeAssignment(String project, String issuer, String subject, long revision) {
++        mutate(project, Long.MAX_VALUE, (connection, state) -> {
++            var assignments = new ArrayList<>(state.assignments());
++            var existing = assignments.stream().filter(value -> value.issuer().equals(issuer) && value.subject().equals(subject)).findFirst().orElseThrow(() -> failure(Failure.NOT_FOUND));
++            if (existing.revision() != revision) throw failure(Failure.CONFLICT);
++            assignments.remove(existing);
++            return copy(state, state.scopes(), state.memberships(), assignments);
++        });
++    }
++    @Override
++    public List<PolicyBoundary> policyBoundaries() {
++        return transaction(connection -> {
++            lock(connection);
++            var projections = new ArrayList<PolicyBoundary>();
++            for (var state : all(connection)) {
++                Set<String> audiences = new HashSet<>();
++                Set<String> reachable = new HashSet<>();
++                for (var member : state.memberships()) {
++                    if (member.approved() && isActiveClient(connection, member.clientId())) audiences.addAll(member.audiences());
++                }
++                if (state.project().active()) for (var scope : state.scopes()) {
++                    if (!scope.active() || scope.managementIntents().isEmpty()) continue;
++                    for (var assignment : state.assignments()) {
++                        if (!assignment.projectScopes().contains(scope.scope()) || !isActiveSubject(connection, assignment.subject())) continue;
++                        for (var member : state.memberships()) {
++                            if (member.approved() && member.allowedProjectScopes().contains(scope.scope()) && canLogin(connection, member, assignment.subject())) reachable.add(scope.scope());
++                        }
++                    }
++                }
++                projections.add(new PolicyBoundary(state.project(), state.scopes(), audiences, reachable, protocolScopes()));
++            }
++            return List.copyOf(projections);
++        });
++    }
++
++    /** Configuration-derived immutable vocabulary; no database revision or request cache. */
++    @Override
++    public List<ProtocolScope> protocolScopes() {
++        var result = new ArrayList<ProtocolScope>();
++        for (String name : List.of("openid", "profile", "email", "offline_access", "kestra:project-scopes")) result.add(new ProtocolScope(name, "OIDC"));
++        for (String name : configuration.getMcpScopes()) result.add(new ProtocolScope(name, "MCP"));
++        return List.copyOf(result);
++    }
++
++    private Snapshot mutate(String project, long expected, BiFunction<Connection, Snapshot, Snapshot> change) {
++        var identity = requireIdentity().current();
++        return transaction(connection -> {
++            lock(connection);
++            authorize(connection, identity, "MANAGE");
++            Snapshot old = find(connection, project).orElseThrow(() -> failure(Failure.NOT_FOUND));
++            if (expected <= 0 || expected != Long.MAX_VALUE && old.project().revision() != expected) throw failure(Failure.CONFLICT);
++            Snapshot candidate = change.apply(connection, old);
++            var previous = candidate.project();
++            Project bumped = new Project(previous.id(), previous.tenant(), previous.issuer(), previous.displayName(), previous.active(),
++                Math.addExact(old.project().revision(), 1), Math.addExact(old.project().authorizationVersion(), 1));
++            candidate = new Snapshot(bumped, candidate.scopes(), candidate.memberships(), candidate.assignments(), bumped.revision());
++            validateUniqueClients(connection, candidate);
++            var knownProjects = new HashSet<String>();
++            for (var state : all(connection)) knownProjects.add(state.project().id());
++            validateTargets(candidate, knownProjects);
++            var states = new ArrayList<>(all(connection));
++            states.removeIf(value -> value.project().id().equals(project));
++            states.add(candidate);
++            if (hasAdministrator(connection, all(connection), null) && !hasAdministrator(connection, states, null)) throw failure(Failure.LAST_ADMIN);
++            save(connection, candidate);
++            return candidate;
++        });
++    }
++
++    private TrustedIdentityV1 requireIdentity() {
++        if (!identities.isUnique()) throw failure(Failure.UNAVAILABLE);
++        return identities.get();
++    }
++
++    private void authorize(Connection connection, TrustedIdentityV1.Identity identity, String action) throws SQLException {
++        if (identity == null || !"main".equals(identity.tenant()) || !configuration.getIssuer().equals(identity.issuer())) throw failure(Failure.FORBIDDEN);
++        Snapshot state = find(connection, identity.projectId()).orElseThrow(() -> failure(Failure.FORBIDDEN));
++        var project = state.project();
++        if (!project.active() || project.revision() != identity.directoryRevision() || project.authorizationVersion() != identity.authorizationVersion()) throw failure(Failure.FORBIDDEN);
++        requireSubject(connection, identity.subject());
++        if (io.kestra.webserver.oidc.services.OidcIdentityLifecycle.activeVersion(connection, identity.subject()).orElse(-1)
++            != identity.authenticationVersion()) throw failure(Failure.FORBIDDEN);
++        requireClient(connection, identity.clientId());
++        var assignment = state.assignments().stream().filter(value -> value.issuer().equals(identity.issuer()) && value.subject().equals(identity.subject())).findFirst().orElseThrow(() -> failure(Failure.FORBIDDEN));
++        var member = state.memberships().stream().filter(value -> value.clientId().equals(identity.clientId()) && value.approved()).findFirst().orElseThrow(() -> failure(Failure.FORBIDDEN));
++        if (!member.audiences().containsAll(identity.audiences()) || identity.audiences().isEmpty()) throw failure(Failure.FORBIDDEN);
++        boolean allowed = false;
++        for (String name : identity.projectScopes()) {
++            var scope = state.scopes().stream().filter(value -> value.scope().equals(name) && value.active()).findFirst().orElseThrow(() -> failure(Failure.FORBIDDEN));
++            if (!assignment.projectScopes().contains(name) || !member.allowedProjectScopes().contains(name)) throw failure(Failure.FORBIDDEN);
++            if (scope.managementIntents().stream().anyMatch(intent -> intent.domain() == ManagementDomain.IDENTITY && intent.actions().contains(action))) allowed = true;
++        }
++        if (!allowed) throw failure(Failure.FORBIDDEN);
++    }
++
++    public void guardSubjectDeactivation(Connection connection, String issuer, String subject) throws SQLException {
++        lock(connection);
++        if (!configuration.getIssuer().equals(issuer)) throw failure(Failure.INVALID);
++        var states = all(connection);
++        if (hasAdministrator(connection, states, null) && !hasAdministrator(connection, states, subject)) throw failure(Failure.LAST_ADMIN);
++    }
++
++    private boolean hasAdministrator(Connection connection, List<Snapshot> states, String excludedSubject) throws SQLException {
++        for (Snapshot state : states) {
++            if (!state.project().active()) continue;
++            for (var assignment : state.assignments()) {
++                if (assignment.subject().equals(excludedSubject) || !isActiveSubject(connection, assignment.subject())) continue;
++                for (String name : assignment.projectScopes()) {
++                    boolean manage = state.scopes().stream().anyMatch(scope -> scope.active() && scope.scope().equals(name)
++                        && scope.managementIntents().stream().anyMatch(intent -> intent.domain() == ManagementDomain.IDENTITY && intent.actions().contains("MANAGE")));
++                    boolean client = false;
++                    for (var member : state.memberships()) {
++                        if (member.approved() && !member.audiences().isEmpty() && member.allowedProjectScopes().contains(name)
++                            && canLogin(connection, member, assignment.subject())) client = true;
++                    }
++                    if (manage && client) return true;
++                }
++            }
++        }
++        return false;
++    }
++
++    private void validateUniqueClients(Connection connection, Snapshot candidate) throws SQLException {
++        for (Snapshot state : all(connection)) if (!state.project().id().equals(candidate.project().id())) {
++            for (var member : candidate.memberships()) if (state.memberships().stream().anyMatch(other -> other.clientId().equals(member.clientId()))) throw failure(Failure.CONFLICT);
++        }
++    }
++    private void validateScopes(Snapshot state, Set<String> names) {
++        require(names != null);
++        for (String name : names) require(state.scopes().stream().anyMatch(scope -> scope.scope().equals(name) && scope.active()));
++    }
++    private void validateScope(ScopeInput input) {
++        require(input != null && input.description() != null && input.resourceIntents() != null && input.managementIntents() != null
++            && (!input.resourceIntents().isEmpty() || !input.managementIntents().isEmpty()));
++        new ScopeDefinition("validation", input.scope(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), 1);
++        require(protocolScopes().stream().noneMatch(protocol -> protocol.scope().equals(input.scope())));
++        Set<String> resources = Set.of("FLOW", "EXECUTION", "TRIGGER", "NAMESPACE", "KVSTORE", "SECRET", "NAMESPACE_FILE", "LOG", "METRIC", "DASHBOARD", "BLUEPRINT", "AI", "MCP_SERVER", "METADATA");
++        Set<String> actions = Set.of("READ", "LIST", "CREATE", "UPDATE", "DELETE", "EXECUTE", "ACCESS_OUTPUTS");
++        for (var intent : input.resourceIntents()) {
++            require("kestra-resources-v1".equals(intent.vocabularyVersion()));
++            require(resources.contains(intent.resourceType()));
++            require(!intent.actions().isEmpty() && actions.containsAll(intent.actions()));
++            if (intent.resourceType().equals("METADATA")) {
++                require(intent.namespaces().kind() == DomainKind.ALL && intent.namespaces().exact().isEmpty() && intent.namespaces().subtrees().isEmpty());
++                require(intent.resourceIds().kind() == DomainKind.ALL && intent.resourceIds().ids().isEmpty());
++                require(intent.actions().stream().allMatch(action -> Set.of("READ", "LIST").contains(action)));
++            } else if (intent.resourceType().equals("MCP_SERVER")) {
++                require(intent.namespaces().kind() == DomainKind.ALL && intent.namespaces().exact().isEmpty() && intent.namespaces().subtrees().isEmpty());
++                require(intent.actions().stream().allMatch(action -> Set.of("READ", "LIST", "CREATE", "UPDATE", "DELETE").contains(action)));
++            } else {
++                require(intent.namespaces().kind() == DomainKind.RESTRICTED);
++                require(!intent.namespaces().exact().isEmpty() || !intent.namespaces().subtrees().isEmpty());
++            }
++            require(intent.resourceIds().kind() == DomainKind.ALL || !intent.resourceIds().ids().isEmpty());
++            intent.actions().forEach(JdbcApplicationDirectoryV1::exact);
++        }
++        var domains = new java.util.HashSet<ManagementDomain>();
++        for (var intent : input.managementIntents()) require(!intent.actions().isEmpty() && domains.add(intent.domain()));
++    }
++    private Set<String> effectiveTargets(ManagementIntent intent, String owner) {
++        return intent.projectIds().isEmpty() ? Set.of(owner) : intent.projectIds();
++    }
++
++    private void validateTargets(Snapshot state, Set<String> knownProjects) {
++        for (var scope : state.scopes()) for (var intent : scope.managementIntents()) {
++            require(intent.domain() == ManagementDomain.LOCAL_POLICY || intent.projectIds().isEmpty());
++            for (String target : intent.projectIds()) {
++                require(target.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}") && knownProjects.contains(target));
++            }
++        }
++    }
++
++    private boolean isNarrower(ScopeInput input, ScopeDefinition previous) {
++        for (var intent : input.managementIntents()) if (previous.managementIntents().stream().noneMatch(bound -> bound.domain() == intent.domain() && bound.actions().containsAll(intent.actions())
++            && effectiveTargets(bound, previous.projectId()).containsAll(effectiveTargets(intent, previous.projectId())))) return false;
++        for (var intent : input.resourceIntents()) if (previous.resourceIntents().stream().noneMatch(bound -> resourceCovered(bound, intent))) return false;
++        return true;
++    }
++    private boolean resourceCovered(ResourceIntent upper, ResourceIntent lower) {
++        if (!upper.vocabularyVersion().equals(lower.vocabularyVersion()) || !upper.resourceType().equals(lower.resourceType()) || !upper.actions().containsAll(lower.actions())) return false;
++        if (upper.resourceIds().kind() != DomainKind.ALL && (lower.resourceIds().kind() == DomainKind.ALL || !upper.resourceIds().ids().containsAll(lower.resourceIds().ids()))) return false;
++        if (upper.namespaces().kind() == DomainKind.ALL) return true;
++        if (lower.namespaces().kind() == DomainKind.ALL) return false;
++        for (String exact : lower.namespaces().exact()) if (!upper.namespaces().exact().contains(exact) && upper.namespaces().subtrees().stream().noneMatch(root -> exact.equals(root) || exact.startsWith(root + "."))) return false;
++        for (String subtree : lower.namespaces().subtrees()) if (upper.namespaces().subtrees().stream().noneMatch(root -> subtree.equals(root) || subtree.startsWith(root + "."))) return false;
++        return true;
++    }
++    private static Snapshot copy(Snapshot state, List<ScopeDefinition> scopes, List<ClientMembership> clients, List<SubjectAssignment> assignments) {
++        return new Snapshot(state.project(), scopes, clients, assignments, state.directoryRevision());
++    }
++    private Optional<Snapshot> find(Connection connection, String project) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT document_json FROM oidc_project_state WHERE project_id=?")) {
++            statement.setQueryTimeout(5); statement.setString(1, project);
++            try (var result = statement.executeQuery()) { return result.next() ? Optional.of(decode(result.getString(1))) : Optional.empty(); }
++        }
++    }
++    private List<Snapshot> all(Connection connection) throws SQLException {
++        var result = new ArrayList<Snapshot>();
++        try (var statement = connection.prepareStatement("SELECT document_json FROM oidc_project_state ORDER BY project_id")) {
++            statement.setQueryTimeout(5);
++            try (var rows = statement.executeQuery()) { while (rows.next()) result.add(decode(rows.getString(1))); }
++        }
++        return List.copyOf(result);
++    }
++    private Snapshot decode(String json) {
++        Snapshot state = codec.decode(json.getBytes(StandardCharsets.UTF_8));
++        validateSnapshot(state);
++        return state;
++    }
++    private void validateSnapshot(Snapshot state) {
++        require(state.project().issuer().equals(configuration.getIssuer()) && "main".equals(state.project().tenant()));
++        require(state.project().revision() > 0 && state.project().authorizationVersion() > 0 && state.directoryRevision() == state.project().revision());
++        Set<String> scopes = new HashSet<>();
++        for (var scope : state.scopes()) {
++            require(scope.projectId().equals(state.project().id()) && scope.revision() > 0 && scopes.add(scope.scope()));
++            validateScope(new ScopeInput(scope.scope(), scope.description(), scope.active(), scope.resourceIntents(), scope.managementIntents()));
++        }
++        Set<String> clients = new HashSet<>();
++        for (var member : state.memberships()) {
++            require(member.projectId().equals(state.project().id()) && member.revision() > 0 && clients.add(member.clientId()));
++            require(!member.audiences().isEmpty() && scopes.containsAll(member.allowedProjectScopes()));
++            member.audiences().forEach(JdbcApplicationDirectoryV1::exact);
++        }
++        Set<String> subjects = new HashSet<>();
++        for (var assignment : state.assignments()) {
++            require(assignment.projectId().equals(state.project().id()) && assignment.issuer().equals(state.project().issuer()));
++            require(assignment.revision() > 0 && assignment.authorizationVersion() > 0 && subjects.add(assignment.subject()));
++            require(scopes.containsAll(assignment.projectScopes()));
++        }
++    }
++    private void save(Connection connection, Snapshot state) throws SQLException {
++        try (var statement = connection.prepareStatement("INSERT INTO oidc_project_state(project_id,document_json) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET document_json=EXCLUDED.document_json")) {
++            statement.setQueryTimeout(5); statement.setString(1, state.project().id());
++            try { statement.setString(2, codec.encode(state)); }
++            catch (java.io.IOException invalid) { throw failure(Failure.INVALID); }
++            statement.executeUpdate();
++        }
++    }
++    private void requireSubject(Connection connection, String subject) {
++        try { if (!isActiveSubject(connection, subject)) throw failure(Failure.INVALID); }
++        catch (SQLException unavailable) { throw failure(Failure.UNAVAILABLE); }
++    }
++    private boolean isActiveSubject(Connection connection, String subject) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT user_state FROM oidc_user WHERE username=? FOR UPDATE")) {
++            statement.setQueryTimeout(5);
++            statement.setString(1, subject);
++            try (var rows = statement.executeQuery()) { return rows.next() && "ACTIVE".equals(rows.getString(1)); }
++        }
++    }
++    private boolean isConfidentialUiClient(Connection connection, String clientId) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT client_secret, active FROM oidc_client WHERE client_id=? FOR UPDATE")) {
++            statement.setString(1, clientId); statement.setQueryTimeout(5);
++            try (var rows = statement.executeQuery()) { return rows.next() && rows.getBoolean(2) && rows.getString(1) != null && !rows.getString(1).isBlank(); }
++        }
++    }
++
++    private boolean canLogin(Connection connection, ClientMembership membership, String subject) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT active,client_kind,owner_subject,client_secret,grant_types::text,redirect_uris::text FROM oidc_client WHERE client_id=?")) {
++            statement.setQueryTimeout(5);
++            statement.setString(1, membership.clientId());
++            try (var result = statement.executeQuery()) {
++                if (!result.next() || !result.getBoolean(1)) return false;
++                String kind = result.getString(2);
++                boolean owner = "owned".equals(kind) && subject.equals(result.getString(3));
++                boolean system = false;
++                if ("system".equals(kind) && result.getString(4) != null && !result.getString(4).isBlank()) {
++                    try (var receipt = connection.prepareStatement("SELECT ui_client_id FROM oidc_project_bootstrap WHERE singleton=1 AND consumed=TRUE")) {
++                        try (var row = receipt.executeQuery()) { system = row.next() && membership.clientId().equals(row.getString(1)); }
++                    }
++                    // Before activation the approved plan itself supplies the registered UI membership.
++                    if (!activated(connection)) system = membership.firstPartyUi();
++                }
++                if (!owner && !system) return false;
++                try {
++                    var grants = mapper.readTree(result.getString(5));
++                    var redirects = mapper.readTree(result.getString(6));
++                    if (!grants.isArray() || !redirects.isArray() || redirects.isEmpty()) return false;
++                    boolean code = false;
++                    for (var grant : grants) if ("authorization_code".equals(grant.asText())) code = true;
++                    for (var redirect : redirects) {
++                        var uri = java.net.URI.create(redirect.asText());
++                        if (!uri.isAbsolute() || uri.getFragment() != null) return false;
++                    }
++                    return code && !membership.audiences().isEmpty();
++                } catch (java.io.IOException | IllegalArgumentException invalid) { return false; }
++            }
++        }
++    }
++
++    private boolean isActiveClient(Connection connection, String client) throws SQLException {
++        try (var statement = connection.prepareStatement("SELECT active FROM oidc_client WHERE client_id=? FOR UPDATE")) {
++            statement.setQueryTimeout(5);
++            statement.setString(1, client);
++            try (var rows = statement.executeQuery()) { return rows.next() && rows.getBoolean(1); }
++        }
++    }
++    private void requireClient(Connection connection, String client) {
++        try (var statement = connection.prepareStatement("SELECT active FROM oidc_client WHERE client_id=? FOR UPDATE")) {
++            statement.setQueryTimeout(5);
++            statement.setString(1, client);
++            try (var rows = statement.executeQuery()) { require(rows.next() && rows.getBoolean(1)); }
++        } catch (SQLException unavailable) { throw failure(Failure.UNAVAILABLE); }
++    }
++    private record DirectIdentityProvider(TrustedIdentityV1 value) implements BeanProvider<TrustedIdentityV1> {
++        public boolean isUnique() { return true; }
++        public TrustedIdentityV1 get() { return value; }
++    }
++
++    private static void exact(String value) { require(value != null && !value.isBlank() && value.equals(value.trim()) && !value.contains("*") && value.chars().noneMatch(Character::isISOControl)); }
++    private static void require(boolean condition) { if (!condition) throw failure(Failure.INVALID); }
++    private static DirectoryException failure(Failure failure) { return new DirectoryException(failure); }
++    private static <T> Page<T> page(List<T> values, int page, int size) {
++        require(page > 0 && size > 0 && size <= 100);
++        long offset = (long) (page - 1) * size;
++        return new Page<>(offset >= values.size() ? List.of() : values.subList((int) offset, (int) Math.min(values.size(), offset + size)), values.size(), page, size);
++    }
++    private interface Work<T> { T run(Connection connection) throws SQLException; }
++    private <T> T transaction(Work<T> work) {
++        try (var connection = source.getConnection()) {
++            connection.setAutoCommit(false); connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
++            try { T result = work.run(connection); connection.commit(); return result; }
++            catch (SQLException | RuntimeException failure) { connection.rollback(); throw failure; }
++        } catch (SQLException failure) { throw failure(Failure.UNAVAILABLE); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/ProjectDirectoryState.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ProjectDirectoryState.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..29c2c321ce2b9e13c0a9de4e92b64f426bcf3e73
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ProjectDirectoryState.java
+@@ -0,0 +1,25 @@
++package io.kestra.webserver.oidc.projects;
++
++import io.kestra.webserver.oidc.ApplicationDirectoryV1;
++import java.util.List;
++import java.util.Optional;
++import java.sql.Connection;
++
++public interface ProjectDirectoryState {
++    Snapshot snapshot(String projectId);
++    Optional<Snapshot> forClient(String clientId);
++    Optional<Snapshot> forClient(Connection connection, String clientId) throws java.sql.SQLException;
++    boolean activated();
++    boolean activated(Connection connection) throws java.sql.SQLException;
++    default List<ApplicationDirectoryV1.ProtocolScope> protocolScopes() { return List.of(); }
++    default List<ApplicationDirectoryV1.ProtocolScope> protocolScopes(Connection connection) throws java.sql.SQLException { return protocolScopes(); }
++    Invalidation invalidation();
++    record Invalidation(long authenticationVersion, long authorizationVersion) {}
++    record Snapshot(ApplicationDirectoryV1.Project project,
++                   List<ApplicationDirectoryV1.ScopeDefinition> scopes,
++                   List<ApplicationDirectoryV1.ClientMembership> memberships,
++                   List<ApplicationDirectoryV1.SubjectAssignment> assignments,
++                   long directoryRevision) {
++        public Snapshot { scopes=List.copyOf(scopes); memberships=List.copyOf(memberships); assignments=List.copyOf(assignments); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/V1ApplicationDirectoryMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/V1ApplicationDirectoryMigration.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ddfaf0cd8c1645d271ab396c6a7d251470499b64
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/V1ApplicationDirectoryMigration.java
+@@ -0,0 +1,18 @@
++package io.kestra.webserver.oidc.projects;
++
++import io.kestra.core.migration.MigrationScript;
++import io.micronaut.context.annotation.Requires;
++import jakarta.inject.Singleton;
++import javax.sql.DataSource;
++
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "kestra.repository.type", value = "postgres")
++public final class V1ApplicationDirectoryMigration implements MigrationScript {
++    private final JdbcApplicationDirectoryV1 directory;
++    public V1ApplicationDirectoryMigration(JdbcApplicationDirectoryV1 directory) { this.directory=directory; }
++    @Override public String scriptId() { return "2.0.101-oidc-application-directory-v1"; }
++    @Override public String description() { return "Create application project directory tables"; }
++    @Override public String checksum() { return JdbcApplicationDirectoryV1.migrationChecksum(); }
++    @Override public void migrate() { directory.initializeSchema(); }
++}
+diff --git a/webserver/src/main/resources/migrations/2.0.101-oidc-application-directory-postgres.sql b/webserver/src/main/resources/migrations/2.0.101-oidc-application-directory-postgres.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..56b9cdef5eb986d0ad210689b1f48e0d04d69702
+--- /dev/null
++++ b/webserver/src/main/resources/migrations/2.0.101-oidc-application-directory-postgres.sql
+@@ -0,0 +1,3 @@
++CREATE TABLE IF NOT EXISTS oidc_project_state (project_id VARCHAR(128) PRIMARY KEY, document_json TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
++CREATE TABLE IF NOT EXISTS oidc_project_bootstrap (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), approval_hash VARCHAR(64) NOT NULL, receipt_hash VARCHAR(64) NOT NULL, source_revision BIGINT NOT NULL, ui_client_id VARCHAR(512) NOT NULL, consumed BOOLEAN NOT NULL DEFAULT FALSE, activated_at TIMESTAMPTZ NOT NULL DEFAULT now());
++CREATE TABLE IF NOT EXISTS oidc_project_invalidation (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), authentication_version BIGINT NOT NULL, authorization_version BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..150abd04138f3e56e554a44a03e4e0020acb07d5
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
+@@ -0,0 +1,31 @@
++package io.kestra.webserver.oidc.projects;
++
++import io.micronaut.context.ApplicationContext;
++import io.kestra.webserver.oidc.OidcPostgresTestBase;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++
++class DirectoryContextTest extends OidcPostgresTestBase {
++    @Test void shouldCreateDirectoryWhenProjectIdentityFeatureIsDisabled() {
++        var properties = new java.util.HashMap<String,Object>();
++        properties.put("kestra.server-type","WORKER");
++        properties.put("kestra.worker.controllers.type", "STATIC");
++        properties.put("kestra.worker.controllers.static.endpoints[0].host", "127.0.0.1");
++        properties.put("kestra.worker.controllers.static.endpoints[0].port", 65534);
++        properties.put("kestra.storage.type","local");
++        properties.put("kestra.storage.local.base-path",System.getProperty("java.io.tmpdir")+"/directory-context-storage");
++        properties.put("kestra.oidc.enabled",true);
++        properties.put("kestra.repository.type","postgres");
++        properties.put("kestra.rbac.application-projects.enabled",false);
++        properties.put("datasources.postgres.url",POSTGRES.getJdbcUrl());
++        properties.put("datasources.postgres.username",POSTGRES.getUsername());
++        properties.put("datasources.postgres.password",POSTGRES.getPassword());
++        properties.put("datasources.postgres.driver-class-name","org.postgresql.Driver");
++        properties.put("datasources.postgres.dialect","POSTGRES");
++        try (var context = ApplicationContext.builder().environments("directory-beans").deduceEnvironment(false).properties(properties).build()) {
++            context.start();
++            assertThat(context.getBean(JdbcApplicationDirectoryV1.class)).isNotNull();
++            assertThat(context.getBean(V1ApplicationDirectoryMigration.class)).isNotNull();
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a035031901286d
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
+@@ -0,0 +1,214 @@
++package io.kestra.webserver.oidc.projects;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.ApplicationDirectoryV1.*;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.OidcPostgresTestBase;
++import io.kestra.webserver.oidc.TrustedIdentityV1;
++import io.kestra.webserver.oidc.services.OidcInstallationReceipt;
++import org.junit.jupiter.api.Test;
++import org.postgresql.ds.PGSimpleDataSource;
++import java.nio.file.Files;
++import java.util.List;
++import java.util.Set;
++import java.util.UUID;
++import static org.assertj.core.api.Assertions.*;
++
++class JdbcApplicationDirectoryV1PostgresTest extends OidcPostgresTestBase {
++    private final java.util.List<PGSimpleDataSource> schemas = new java.util.ArrayList<>();
++    @org.junit.jupiter.api.AfterEach
++    void cleanupSchemas() throws Exception {
++        for (var source : schemas) {
++            String schema = source.getCurrentSchema();
++            try (var connection = source.getConnection(); var statement = connection.createStatement()) { statement.execute("DROP SCHEMA " + schema + " CASCADE"); }
++        }
++    }
++    private static final String ISSUER = "https://identity.example.invalid";
++    private static final class Actor implements TrustedIdentityV1 {
++        private TrustedIdentityV1.Identity value;
++        public TrustedIdentityV1.Identity current() { return value; }
++    }
++    private record Context(PGSimpleDataSource source, Actor actor, JdbcApplicationDirectoryV1 directory,
++                           java.nio.file.Path receipt, ApplicationDirectoryBootstrap.Plan plan) {
++        void login() {
++            var state = directory.snapshot("project");
++            actor.value = new TrustedIdentityV1.Identity(1,ISSUER,"admin","ui",Set.of("ui-aud"),"main","project",
++                Set.of("openid"),Set.of("admin-scope"),1,state.project().authorizationVersion(),state.project().revision());
++        }
++        void apply() { directory.applyBootstrap(plan,ApplicationDirectoryBootstrap.approvalHash(plan),receipt,"ui"); login(); }
++    }
++    private Context context() throws Exception {
++        String url = System.getenv("DIRECTORY_TEST_JDBC");
++        var source = new PGSimpleDataSource();
++        if (url != null && !url.isBlank()) { source.setURL(url); source.setUser("postgres"); source.setPassword("policy-test-only"); }
++        else { source.setURL(POSTGRES.getJdbcUrl()); source.setUser(POSTGRES.getUsername()); source.setPassword(POSTGRES.getPassword()); }
++        String schema = "directory_" + UUID.randomUUID().toString().replace("-", "");
++        try(var connection=source.getConnection();var statement=connection.createStatement()){statement.execute("CREATE SCHEMA " + schema);}
++        source.setCurrentSchema(schema);
++        schemas.add(source);
++        String installation=UUID.randomUUID().toString();
++        try(var connection=source.getConnection();var statement=connection.createStatement()) {
++            for (String migration : List.of("2.0.90-oidc-server-jwk-postgres.sql", "2.0.91-oidc-server-directory-postgres.sql", "2.0.92-oidc-server-token-postgres.sql", "2.0.93-oidc-server-setup-postgres.sql", "2.0.94-oidc-server-installation-postgres.sql", "2.0.95-oidc-server-owner-postgres.sql", "2.0.96-oidc-server-resource-postgres.sql", "2.0.97-oidc-server-rate-postgres.sql", "2.0.98-oidc-server-client-secret-postgres.sql", "2.0.99-oidc-server-user-directory-postgres.sql")) {
++                try (var input = getClass().getResourceAsStream("/migrations/" + migration)) {
++                    if (input == null) throw new IllegalStateException("Missing production migration " + migration);
++                    StringBuilder sql = new StringBuilder();
++                    for (String line : new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).split("\\n")) {
++                        if (!line.strip().startsWith("--")) sql.append(line).append('\n');
++                    }
++                    statement.execute(sql.toString());
++                }
++            }
++            statement.execute("INSERT INTO oidc_client(client_id,client_secret,active,client_kind,grant_types,redirect_uris,owner_subject) VALUES('ui','secret',TRUE,'system','[\"authorization_code\"]','[\"https://identity.example.invalid/callback\"]',NULL),('other','secret',TRUE,'owned','[\"authorization_code\"]','[\"https://identity.example.invalid/callback\"]','admin'),('public','',TRUE,'system','[\"authorization_code\"]','[\"https://identity.example.invalid/callback\"]',NULL)");
++            statement.execute("INSERT INTO oidc_user(username,name,email,user_state) VALUES('admin','Admin','admin@example.invalid','ACTIVE'),('second','Second','second@example.invalid','ACTIVE')");
++            statement.execute("INSERT INTO oidc_user_auth_method(user_id,type,state,credential) VALUES('admin','PASSWORD','ACTIVE','$2a$10$localtest'),('second','PASSWORD','ACTIVE','$2a$10$localtest')");
++            statement.execute("INSERT INTO oidc_setup(singleton,installation_id) VALUES(TRUE,'"+installation+"')");
++            statement.execute("INSERT INTO oidc_token(client_id,subject,token_type,value,revoked) VALUES('ui','admin','access','old-access',FALSE),('ui','admin','refresh','old-refresh',FALSE)");
++            statement.execute("INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,expires_at,used) VALUES('old-code','ui','admin','https://identity.example.invalid/callback',now()+interval '1 hour',FALSE)");
++        }
++        var actor=new Actor();var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
++        var directory=new JdbcApplicationDirectoryV1(source,actor,configuration,new ObjectMapper());directory.initializeSchema();
++        var manager=new ScopeDefinition("project","admin-scope","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
++        var snapshot=new ProjectDirectoryState.Snapshot(new Project("project","main",ISSUER,"Project",true,1,1),List.of(manager),
++            List.of(new ClientMembership("project","ui",true,Set.of("ui-aud"),Set.of("admin-scope"),true,1)),
++            List.of(new SubjectAssignment("project",ISSUER,"admin",Set.of("admin-scope"),1,1)),1);
++        var plan=new ApplicationDirectoryBootstrap.Plan(1,installation,"ui",0,ApplicationDirectoryBootstrap.sourceHash(List.of()),List.of(snapshot));
++        var receipt=Files.createTempDirectory("directory-receipt").resolve("receipt");new OidcInstallationReceipt(receipt).create(installation);
++        return new Context(source,actor,directory,receipt,plan);
++    }
++    private ScopeInput readScope() {
++        return new ScopeInput("read","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",
++            new NamespaceDomain(DomainKind.RESTRICTED,Set.of("a"),Set.of()),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST"))),List.of());
++    }
++    @Test void shouldBootstrapReadRealSnapshotAndInvalidateLegacyCredentials() throws Exception {
++        var context=context();assertThat(context.directory.activated()).isFalse();context.apply();
++        assertThat(context.directory.forClient("ui").orElseThrow().memberships().getFirst().firstPartyUi()).isTrue();
++        assertThat(context.directory.assignment("project",ISSUER,"unassigned")).isEmpty();
++        assertThat(context.directory.invalidation().authenticationVersion()).isEqualTo(1);
++        try(var connection=context.source.getConnection();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT revoked FROM oidc_token")){assertThat(rows.next()).isTrue();assertThat(rows.getBoolean(1)).isTrue();}
++        assertThatThrownBy(context::apply).isInstanceOf(DirectoryException.class);
++    }
++    @Test void shouldRejectForgedReceiptUiPlanAndStaleSourceWithoutWrites() throws Exception {
++        var context=context();
++        assertThatThrownBy(()->context.directory.applyBootstrap(context.plan,"0".repeat(64),context.receipt,"ui")).isInstanceOf(RuntimeException.class);
++        assertThatThrownBy(()->context.directory.applyBootstrap(context.plan,ApplicationDirectoryBootstrap.approvalHash(context.plan),context.receipt,"other")).isInstanceOf(DirectoryException.class);
++        var stale=new ApplicationDirectoryBootstrap.Plan(1,context.plan.installationId(),"ui",1,context.plan.sourceHash(),context.plan.projects());
++        assertThatThrownBy(()->context.directory.applyBootstrap(stale,ApplicationDirectoryBootstrap.approvalHash(stale),context.receipt,"ui")).isInstanceOf(DirectoryException.class);
++        var fake=Files.createTempDirectory("fake-receipt").resolve("receipt");new OidcInstallationReceipt(fake).create(UUID.randomUUID().toString());
++        assertThatThrownBy(()->context.directory.applyBootstrap(context.plan,ApplicationDirectoryBootstrap.approvalHash(context.plan),fake,"ui")).isInstanceOf(DirectoryException.class);
++        assertThat(context.directory.project("project")).isEmpty();assertThat(context.directory.activated()).isFalse();
++    }
++    @Test void shouldRollbackAfterSnapshotWritesIfCredentialInvalidationFails() throws Exception {
++        var context=context();try(var connection=context.source.getConnection();var statement=connection.createStatement()){statement.execute("DROP TABLE oidc_token");}
++        assertThatThrownBy(context::apply).isInstanceOf(DirectoryException.class);
++        assertThat(context.directory.project("project")).isEmpty();assertThat(context.directory.activated()).isFalse();
++    }
++    @Test void shouldUseObjectCasAndRejectOldEpoch() throws Exception {
++        var context=context();context.apply();var scope=context.directory.createScope("project",1,readScope());
++        assertThatThrownBy(()->context.directory.createScope("project",2,readScope())).isInstanceOf(DirectoryException.class);
++        context.login();var changed=context.directory.updateScope("project","read",scope.revision(),new ScopeInput("read","changed",true,readScope().resourceIntents(),List.of()));
++        assertThat(changed.revision()).isEqualTo(2);context.login();
++        assertThatThrownBy(()->context.directory.updateScope("project","read",1,readScope())).isInstanceOf(DirectoryException.class);
++        assertThat(context.directory.snapshot("project").project().authorizationVersion()).isEqualTo(3);
++    }
++    @Test void shouldProtectLastAdminAndAllowExplicitSecondAdminThenRevoke() throws Exception {
++        var context=context();context.apply();
++        assertThatThrownBy(()->context.directory.revokeAssignment("project",ISSUER,"admin",1)).isInstanceOf(DirectoryException.class);
++        try(var connection=context.source.getConnection()){connection.setAutoCommit(false);assertThatThrownBy(()->context.directory.guardSubjectDeactivation(connection,ISSUER,"admin")).isInstanceOf(DirectoryException.class);connection.rollback();}
++        context.directory.assign("project",1,new AssignmentInput(ISSUER,"second",Set.of("admin-scope")));context.login();
++        context.directory.revokeAssignment("project",ISSUER,"admin",1);
++        assertThat(context.directory.assignment("project",ISSUER,"admin")).isEmpty();
++    }
++    @Test void shouldRejectUnknownAndExpandedIntentAndCorruptedSnapshot() throws Exception {
++        var context=context();context.apply();context.directory.createScope("project",1,readScope());context.login();
++        var expanded=new ScopeInput("read","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",readScope().resourceIntents().getFirst().namespaces(),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST","UPDATE"))),List.of());
++        assertThatThrownBy(()->context.directory.updateScope("project","read",1,expanded)).isInstanceOf(DirectoryException.class);
++        var unknown=new ScopeInput("unknown","",true,List.of(new ResourceIntent("kestra-resources-v1","UNKNOWN",readScope().resourceIntents().getFirst().namespaces(),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ"))),List.of());
++        assertThatThrownBy(()->context.directory.createScope("project",2,unknown)).isInstanceOf(DirectoryException.class);
++        try(var connection=context.source.getConnection();var statement=connection.createStatement()){statement.execute("UPDATE oidc_project_state SET document_json='{}'");}
++        assertThatThrownBy(()->context.directory.snapshot("project")).isInstanceOf(RuntimeException.class);
++    }
++    @Test void shouldRejectMalformedUtf8DuplicatesAndTrailingDocuments() {
++        var codec=new DirectorySnapshotCodec();
++        assertThatThrownBy(()->codec.decode(new byte[]{(byte)0xc3,0x28})).isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(()->codec.decode("{\"project\":{},\"project\":{}}".getBytes())).isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(()->codec.decode("{} {}".getBytes())).isInstanceOf(IllegalArgumentException.class);
++    }
++    @Test void shouldEnforceClientAndAssignmentObjectCasAndProjectTargetSubset() throws Exception {
++        var context = context(); context.apply();
++        context.login();
++        var scope = new ScopeDefinition("project", "local", "", true, List.of(), List.of(
++            new ManagementIntent(ManagementDomain.LOCAL_POLICY, Set.of("MANAGE"), Set.of("project"))), 1);
++        var changed = context.directory().createScope("project", 1, new ScopeInput("local", "", true, List.of(), scope.managementIntents()));
++        context.login();
++        context.directory().createProject(new ProjectInput("target", "main", "Target"));
++        var beforeExpansion = context.directory().snapshot("project");
++        var expandedTargets = new ManagementIntent(ManagementDomain.LOCAL_POLICY, Set.of("MANAGE"), Set.of("project", "target"));
++        assertThatThrownBy(() -> context.directory().updateScope("project", "local", changed.revision(),
++            new ScopeInput("local", "", true, List.of(), List.of(expandedTargets)))).isInstanceOf(DirectoryException.class);
++        assertThat(context.directory().snapshot("project")).isEqualTo(beforeExpansion);
++        var member = new MembershipInput("other", true, Set.of("aud"), Set.of("local"), false);
++        var created = context.directory().approveClient("project", 2, member);
++        context.login();
++        assertThatThrownBy(() -> context.directory().updateClient("project", "other", created.revision() - 1, member)).isInstanceOf(DirectoryException.class);
++        context.login();
++        var assignment = context.directory().assign("project", 3, new AssignmentInput(ISSUER, "second", Set.of("local")));
++        context.login();
++        assertThatThrownBy(() -> context.directory().replaceAssignment("project", ISSUER, "second", assignment.revision() - 1, new AssignmentInput(ISSUER, "second", Set.of("local")))).isInstanceOf(DirectoryException.class);
++        assertThatThrownBy(() -> context.directory().revokeAssignment("project", ISSUER, "second", assignment.revision() - 1)).isInstanceOf(DirectoryException.class);
++        var target = new ManagementIntent(ManagementDomain.LOCAL_POLICY, Set.of("READ"), Set.of("missing-project"));
++        assertThatThrownBy(() -> context.directory().createScope("project", 4, new ScopeInput("bad-target", "", true, List.of(), List.of(target)))).isInstanceOf(DirectoryException.class);
++    }
++
++    @Test void shouldRejectConcurrentLastAdministratorDeactivation() throws Exception {
++        var context = context(); context.apply();
++        context.directory().assign("project",1,new AssignmentInput(ISSUER,"second",Set.of("admin-scope")));
++        var ready = new java.util.concurrent.CountDownLatch(2);
++        var start = new java.util.concurrent.CountDownLatch(1);
++        java.util.concurrent.Callable<Boolean> deactivateAdmin = () -> deactivate(context,"admin",ready,start);
++        java.util.concurrent.Callable<Boolean> deactivateSecond = () -> deactivate(context,"second",ready,start);
++        try(var executor=java.util.concurrent.Executors.newFixedThreadPool(2)) {
++            var first=executor.submit(deactivateAdmin); var second=executor.submit(deactivateSecond);
++            assertThat(ready.await(10,java.util.concurrent.TimeUnit.SECONDS)).isTrue();start.countDown();
++            assertThat(java.util.List.of(first.get(15,java.util.concurrent.TimeUnit.SECONDS),second.get(15,java.util.concurrent.TimeUnit.SECONDS)))
++                .containsExactlyInAnyOrder(true,false);
++        }
++    }
++    private boolean deactivate(Context context,String subject,java.util.concurrent.CountDownLatch ready,java.util.concurrent.CountDownLatch start)throws Exception {
++        try(var connection=context.source().getConnection()) {
++            connection.setAutoCommit(false);ready.countDown();start.await();
++            try {
++                context.directory().guardSubjectDeactivation(connection,ISSUER,subject);
++                try(var statement=connection.prepareStatement("UPDATE oidc_user SET user_state='INACTIVE' WHERE username=?")){statement.setString(1,subject);statement.executeUpdate();}
++                connection.commit();return true;
++            } catch(DirectoryException denied){connection.rollback();return false;}
++        }
++    }
++
++
++    @Test void shouldPreviewFullPlanWithoutWritingSecretsOrActivation() throws Exception {
++        var context = context();
++        String report = context.directory().previewBootstrap(context.plan, context.receipt, "ui");
++        assertThat(report).contains("source").contains("plan").doesNotContain("secret");
++        assertThat(context.directory().activated()).isFalse();
++        assertThat(context.directory().project("project")).isEmpty();
++        var invalid = new ApplicationDirectoryBootstrap.Plan(1, context.plan.installationId(), "ui", 0, "0".repeat(64), List.of());
++        assertThatThrownBy(() -> context.directory().previewBootstrap(invalid, context.receipt, "ui")).isInstanceOf(DirectoryException.class);
++    }
++
++    @Test void shouldRejectPseudoFirstPartySystemOwnedMismatchAndPendingClients() throws Exception {
++        for (String client : List.of("public", "other")) {
++            var context = context();
++            var original = context.plan.projects().getFirst();
++            var member = new ClientMembership("project", client, true, Set.of("ui-aud"), Set.of("admin-scope"), true, 1);
++            var replacement = new ProjectDirectoryState.Snapshot(original.project(), original.scopes(), List.of(member), original.assignments(), 1);
++            var forged = new ApplicationDirectoryBootstrap.Plan(1, context.plan.installationId(), "ui", 0, context.plan.sourceHash(), List.of(replacement));
++            assertThatThrownBy(() -> context.directory().previewBootstrap(forged, context.receipt, "ui")).isInstanceOf(RuntimeException.class);
++        }
++        var context = context();
++        try (var connection = context.source().getConnection(); var statement = connection.createStatement()) {
++            statement.execute("UPDATE oidc_client SET client_kind='pending' WHERE client_id='ui'");
++        }
++        assertThatThrownBy(context::apply).isInstanceOf(RuntimeException.class);
++    }
++
++}

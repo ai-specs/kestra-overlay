@@ -6,7 +6,7 @@
 # 移除条件: 上游OSS提供等价请求授权上下文传播和显式内部调用机制
 # 演进理由: REQ-0330 沿用本需求原授权激活点，加入完整评估边界或查询释放；避免后续补丁重复改写同一来源行。
 diff --git a/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java b/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java
-index 5bf8701..296e7cc 100644
+index 5bf870170fa268e40839026f28329019c7d5b582..296e7ccf97fd8020fb86e5a6af3a77548e6d3412 100644
 --- a/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java
 +++ b/core/src/main/java/io/kestra/core/namespace/DefaultNamespaceFileMetadataStateStore.java
 @@ -25,6 +25,7 @@ import jakarta.inject.Singleton;
@@ -19,7 +19,7 @@ index 5bf8701..296e7cc 100644
      private final NamespaceFileMetadataRepositoryInterface repository;
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java
 new file mode 100644
-index 0000000..a6a23b3
+index 0000000000000000000000000000000000000000..a6a23b33bc395cf010a00bf7756def3cac237a9c
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationInvocationContext.java
 @@ -0,0 +1,48 @@
@@ -73,7 +73,7 @@ index 0000000..a6a23b3
 +}
 diff --git a/core/src/main/java/io/kestra/core/repositories/InternalInvocation.java b/core/src/main/java/io/kestra/core/repositories/InternalInvocation.java
 new file mode 100644
-index 0000000..e7bb7a0
+index 0000000000000000000000000000000000000000..e7bb7a084743822d38fe64491de3515993ba1867
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/InternalInvocation.java
 @@ -0,0 +1,12 @@
@@ -91,7 +91,7 @@ index 0000000..e7bb7a0
 +public @interface InternalInvocation {}
 diff --git a/core/src/main/java/io/kestra/core/repositories/InternalInvocationInterceptor.java b/core/src/main/java/io/kestra/core/repositories/InternalInvocationInterceptor.java
 new file mode 100644
-index 0000000..35dc2e5
+index 0000000000000000000000000000000000000000..35dc2e54a11461f668e8dd51c5a3457223d9d26f
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/InternalInvocationInterceptor.java
 @@ -0,0 +1,17 @@
@@ -113,7 +113,7 @@ index 0000000..35dc2e5
 +    }
 +}
 diff --git a/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java b/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
-index a84a23a..8ec8b30 100644
+index a84a23a3a7c098e6a527a72efb9ac7856185a87c..8ec8b30ffd115533e42de7e13569f0b6c2d7f3d9 100644
 --- a/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
 +++ b/core/src/main/java/io/kestra/core/runners/DefaultKVMetadataStateStore.java
 @@ -23,6 +23,7 @@ import jakarta.inject.Singleton;
@@ -125,7 +125,7 @@ index a84a23a..8ec8b30 100644
 
      private final KvMetadataRepositoryInterface kvMetadataRepository;
 diff --git a/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java b/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
-index 9cbc0d4..edc6366 100644
+index 9cbc0d4fa1c35f18b1e104f63511ac6069a007cd..edc636687a8c87857f9477b3f1d34572e307b5ae 100644
 --- a/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
 +++ b/core/src/main/java/io/kestra/core/storages/kv/KVPurgeCleaner.java
 @@ -43,6 +43,7 @@ public class KVPurgeCleaner {
@@ -138,7 +138,7 @@ index 9cbc0d4..edc6366 100644
          List<String> tenants = findTenants();
 diff --git a/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java b/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java
 new file mode 100644
-index 0000000..6b7c062
+index 0000000000000000000000000000000000000000..6b7c062a685cdb5f505795da46eb89db04305623
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/utils/AuthorizationContextExecutors.java
 @@ -0,0 +1,50 @@
@@ -193,7 +193,7 @@ index 0000000..6b7c062
 +    }
 +}
 diff --git a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
-index a83210e..d5f829c 100644
+index a83210e81174e78942ef3405e0d76a491d0048a4..d5f829c0e7cc14588938297a787adf3b7ab2352e 100644
 --- a/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
 +++ b/core/src/main/java/io/kestra/core/utils/ExecutorsUtils.java
 @@ -127,19 +127,19 @@ public class ExecutorsUtils {
@@ -221,7 +221,7 @@ index a83210e..d5f829c 100644
 
      /**
 diff --git a/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java b/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
-index d769f4b..73262a1 100644
+index d769f4bc2c60df954fc83c72da2d240b9d74fb08..73262a1b373cc05f16c53f03da3ca3d3595b3f36 100644
 --- a/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
 +++ b/core/src/main/java/io/kestra/core/utils/NamespaceFilesUtils.java
 @@ -31,14 +31,14 @@ import static io.kestra.core.utils.Rethrow.throwConsumer;
@@ -242,7 +242,7 @@ index d769f4b..73262a1 100644
      private NamespaceFilesUtils() {
          // utility class pattern
 diff --git a/queue/src/main/java/io/kestra/queue/QueueService.java b/queue/src/main/java/io/kestra/queue/QueueService.java
-index 0aa05ba..d68b52d 100644
+index 0aa05baf6f5a30cc61a8d84b43617ab2dead0319..d68b52d463b1712f67a42a95cc1b9a7d2a1afe4a 100644
 --- a/queue/src/main/java/io/kestra/queue/QueueService.java
 +++ b/queue/src/main/java/io/kestra/queue/QueueService.java
 @@ -72,7 +72,7 @@ public class QueueService {
@@ -256,7 +256,7 @@ index 0aa05ba..d68b52d 100644
      public int computeVNode(String key) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationInvocationFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationInvocationFilter.java
 new file mode 100644
-index 0000000..3e38fa6
+index 0000000000000000000000000000000000000000..3e38fa64ade13621571e85c8ce5e970524f958eb
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationInvocationFilter.java
 @@ -0,0 +1,23 @@
@@ -284,7 +284,7 @@ index 0000000..3e38fa6
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
-index 2f16bcc..22a372d 100644
+index 2f16bccc703e84d9a070f2a5075b1b085e6deadf..22a372d95575f442448db387def028a18f0c5eb5 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
 @@ -52,7 +52,7 @@ public final class TypedDashboardGate implements io.kestra.core.services.Dashboa
@@ -297,10 +297,10 @@ index 2f16bcc..22a372d 100644
          var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
          Resource resource;
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
-index ad213a0..1ab3a71 100644
+index c36a540201f67a7d8717de3518d50c48083aaaee..78df11fab6282559c878f6d4203e15cc8edb8e6b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
-@@ -27,8 +27,23 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
+@@ -39,8 +39,23 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
      }
 
      public QueryDomain domain(QueryFilter.Resource resource) {
@@ -326,7 +326,7 @@ index ad213a0..1ab3a71 100644
          var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
          if (authentication == null || resource == null) return QueryDomain.empty();
          String cacheKey = TypedNamespaceAccessControl.class.getName() + "." + resource.name();
-@@ -60,6 +75,25 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
+@@ -72,6 +87,27 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
          }
      }
 
@@ -348,13 +348,15 @@ index ad213a0..1ab3a71 100644
 +        var decision = gate.authorize(owner.principal, operation).block();
 +        return decision != null && decision.allowed() ? decision.scope() : QueryDomain.empty();
 +    }
++/** Namespace-only consumers have no ID adapter: reject the whole restricted domain. */
++
 +
      @Override
      public AccessScope namespaceScope(QueryFilter.Resource resource) {
          QueryDomain scope = domain(resource);
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java
 new file mode 100644
-index 0000000..79b62e4
+index 0000000000000000000000000000000000000000..79b62e4ddfa8fe407b441e9c5b46d9a0e76401bb
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInvocationContextTest.java
 @@ -0,0 +1,70 @@
@@ -429,7 +431,7 @@ index 0000000..79b62e4
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
-index ea4a75d..550da4e 100644
+index ea4a75d1a870f74e660f333407c782cffb523018..550da4e1b4244917be9af41c5e431e87bd6f1af9 100644
 --- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
 @@ -46,7 +46,7 @@ class TypedRbacHttpProbeTest {

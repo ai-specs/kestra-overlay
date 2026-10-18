@@ -1,0 +1,514 @@
+# 需求: REQ-0360 应用项目公开机制与授权激活
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；实施中，未发布
+# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
+# 触达上游文件: 最小公共契约、宿主激活点与独立测试
+# 移除条件: 上游提供等价公开项目身份与授权机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationDirectoryV1.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d46fdf0e7ea5890abb902e7476884b9a2403e13
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationDirectoryV1.java
+@@ -0,0 +1,265 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Objects;
++import java.util.Optional;
++import java.util.Set;
++
++/**
++ * Server-local directory V1. Writes require current IDENTITY.MANAGE and optimistic revision checks.
++ * RESTRICTED empty sets deny all; ALL must carry no selectors. No local policy grants are stored.
++ */
++public interface ApplicationDirectoryV1 {
++    int CONTRACT_VERSION = 1;
++
++    final class DirectoryException extends RuntimeException {
++        private final Failure failure;
++
++        public DirectoryException(Failure failure) {
++            super("Application directory: " + Objects.requireNonNull(failure));
++            this.failure = failure;
++        }
++
++        public Failure failure() {
++            return failure;
++        }
++    }
++
++    enum ManagementDomain {
++        IDENTITY,
++        LOCAL_POLICY,
++        BUSINESS_INSTANCE
++    }
++
++    enum DomainKind {
++        ALL,
++        RESTRICTED
++    }
++
++    enum Failure {
++        INVALID,
++        NOT_FOUND,
++        CONFLICT,
++        FORBIDDEN,
++        LAST_ADMIN,
++        UNAVAILABLE,
++        UNSUPPORTED
++    }
++
++    record NamespaceDomain(DomainKind kind, Set<String> exact, Set<String> subtrees) {
++        public NamespaceDomain {
++            kind = Objects.requireNonNull(kind);
++            exact = Set.copyOf(exact);
++            subtrees = Set.copyOf(subtrees);
++            if (java.util.stream.Stream.concat(exact.stream(), subtrees.stream()).anyMatch(value ->
++                !value.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*")))
++                throw new IllegalArgumentException("Invalid namespace intent");
++            if (kind == DomainKind.ALL && (!exact.isEmpty() || !subtrees.isEmpty())) {
++                throw new IllegalArgumentException("ALL namespace domain cannot contain selectors");
++            }
++        }
++    }
++
++    record ResourceIdDomain(DomainKind kind, Set<String> ids) {
++        public ResourceIdDomain {
++            kind = Objects.requireNonNull(kind);
++            ids = Set.copyOf(ids);
++            if (ids.stream().anyMatch(value -> value.isBlank() || !value.equals(value.trim())
++                || value.chars().anyMatch(Character::isISOControl)))
++                throw new IllegalArgumentException("Invalid opaque resource identifier");
++            if (kind == DomainKind.ALL && !ids.isEmpty()) {
++                throw new IllegalArgumentException(
++                        "ALL resource domain cannot contain identifiers");
++            }
++        }
++    }
++
++    record ResourceIntent(
++            String vocabularyVersion,
++            String resourceType,
++            NamespaceDomain namespaces,
++            ResourceIdDomain resourceIds,
++            Set<String> actions) {
++        public ResourceIntent {
++            vocabularyVersion = Objects.requireNonNull(vocabularyVersion);
++            resourceType = Objects.requireNonNull(resourceType);
++            namespaces = Objects.requireNonNull(namespaces);
++            resourceIds = Objects.requireNonNull(resourceIds);
++            actions = Set.copyOf(actions);
++        }
++    }
++
++    record ManagementIntent(ManagementDomain domain, Set<String> actions, Set<String> projectIds) {
++        public ManagementIntent {
++            domain = Objects.requireNonNull(domain);
++            actions = Set.copyOf(actions);
++            projectIds = Set.copyOf(projectIds);
++            if (!Set.of("READ", "MANAGE").containsAll(actions)) {
++                throw new IllegalArgumentException("Unknown management action");
++            }
++            if (domain != ManagementDomain.LOCAL_POLICY && !projectIds.isEmpty()) {
++                throw new IllegalArgumentException("Only local policy may target projects");
++            }
++            if (projectIds.stream().anyMatch(value -> !value.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) {
++                throw new IllegalArgumentException("Invalid management project id");
++            }
++        }
++        public ManagementIntent(ManagementDomain domain, Set<String> actions) {
++            this(domain, actions, Set.of());
++        }
++    }
++
++    record Project(
++            String id,
++            String tenant,
++            String issuer,
++            String displayName,
++            boolean active,
++            long revision,
++            long authorizationVersion) {
++        public Project {
++            if (!id.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))
++                throw new IllegalArgumentException("Invalid project id");
++        }
++    }
++
++    record ScopeDefinition(
++            String projectId,
++            String scope,
++            String description,
++            boolean active,
++            List<ResourceIntent> resourceIntents,
++            List<ManagementIntent> managementIntents,
++            long revision) {
++        public ScopeDefinition {
++            if (scope.isBlank()
++                    || scope.chars().anyMatch(c -> c <= 0x20 || c == 0x22 || c == 0x5c || c > 0x7e))
++                throw new IllegalArgumentException("Invalid scope");
++            resourceIntents = List.copyOf(resourceIntents);
++            managementIntents = List.copyOf(managementIntents);
++        }
++    }
++
++    record ClientMembership(
++            String projectId,
++            String clientId,
++            boolean approved,
++            Set<String> audiences,
++            Set<String> allowedProjectScopes,
++            boolean firstPartyUi,
++            long revision) {
++        public ClientMembership {
++            audiences = Set.copyOf(audiences);
++            allowedProjectScopes = Set.copyOf(allowedProjectScopes);
++        }
++
++        public ClientMembership(
++                String projectId,
++                String clientId,
++                boolean approved,
++                Set<String> audiences,
++                Set<String> allowedProjectScopes,
++                long revision) {
++            this(projectId, clientId, approved, audiences, allowedProjectScopes, false, revision);
++        }
++    }
++
++    record SubjectAssignment(
++            String projectId,
++            String issuer,
++            String subject,
++            Set<String> projectScopes,
++            long revision,
++            long authorizationVersion) {
++        public SubjectAssignment {
++            projectScopes = Set.copyOf(projectScopes);
++        }
++    }
++
++    record Page<T>(List<T> items, long total, int page, int size) {
++        public Page {
++            items = List.copyOf(items);
++        }
++    }
++
++    record ProjectInput(String id, String tenant, String displayName) {}
++
++    record ScopeInput(
++            String scope,
++            String description,
++            boolean active,
++            List<ResourceIntent> resourceIntents,
++            List<ManagementIntent> managementIntents) {}
++
++    record MembershipInput(
++            String clientId,
++            boolean approved,
++            Set<String> audiences,
++            Set<String> allowedProjectScopes,
++            boolean firstPartyUi) {
++        public MembershipInput(
++                String clientId,
++                boolean approved,
++                Set<String> audiences,
++                Set<String> allowedProjectScopes) {
++            this(clientId, approved, audiences, allowedProjectScopes, false);
++        }
++    }
++
++    record AssignmentInput(String issuer, String subject, Set<String> projectScopes) {}
++
++    record ProtocolScope(String scope, String category) {}
++
++    Page<Project> projects(int page, int size);
++
++    Optional<Project> project(String id);
++
++    Project createProject(ProjectInput input);
++
++    Project updateProject(String id, long revision, String name, boolean active);
++
++    Page<ScopeDefinition> scopes(String project, int page, int size);
++
++    Optional<ScopeDefinition> scope(String project, String scope);
++
++    ScopeDefinition createScope(String project, long revision, ScopeInput input);
++
++    ScopeDefinition updateScope(String project, String scope, long revision, ScopeInput input);
++
++    Page<ClientMembership> clients(String project, int page, int size);
++
++    ClientMembership approveClient(String project, long revision, MembershipInput input);
++
++    ClientMembership updateClient(
++            String project, String client, long revision, MembershipInput input);
++
++    void removeClient(String project, String client, long revision);
++
++    Page<SubjectAssignment> assignments(String project, int page, int size);
++
++    Optional<SubjectAssignment> assignment(String project, String issuer, String subject);
++
++    SubjectAssignment assign(String project, long revision, AssignmentInput input);
++
++    SubjectAssignment replaceAssignment(
++            String project, String issuer, String subject, long revision, AssignmentInput input);
++
++    void revokeAssignment(String project, String issuer, String subject, long revision);
++
++    record PolicyBoundary(Project project, List<ScopeDefinition> scopes, Set<String> audiences,
++        Set<String> reachableManagementScopes, List<ProtocolScope> protocolScopes) {
++        public PolicyBoundary {
++            project = Objects.requireNonNull(project);
++            scopes = List.copyOf(scopes);
++            audiences = Set.copyOf(audiences);
++            reachableManagementScopes = Set.copyOf(reachableManagementScopes);
++            protocolScopes = List.copyOf(protocolScopes);
++        }
++    }
++
++    default List<PolicyBoundary> policyBoundaries() {
++        throw new DirectoryException(Failure.UNSUPPORTED);
++    }
++
++    List<ProtocolScope> protocolScopes();
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV1.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..55799b34f7fd06c583fcd3e92f6ff3badbfb9467
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV1.java
+@@ -0,0 +1,51 @@
++package io.kestra.webserver.oidc;
++
++import java.util.Set;
++
++/**
++ * Reads the current host-validated identity. Constructing an Identity DTO does not authenticate it.
++ * The host must validate signature, audience and project epoch before establishing this context.
++ */
++public interface TrustedIdentityV1 {
++    Identity current();
++
++    /**
++     * directoryRevision is the immutable directory snapshot revision (Project.revision).
++     * authorizationVersion is the independently validated token/session revocation epoch
++     * (Project.authorizationVersion). These values need not be equal.
++     */
++    record Identity(
++            int contractVersion,
++            String issuer,
++            String subject,
++            String clientId,
++            Set<String> audiences,
++            String tenant,
++            String projectId,
++            Set<String> protocolScopes,
++            Set<String> projectScopes,
++            long authenticationVersion,
++            long authorizationVersion,
++            long directoryRevision) {
++        public Identity {
++            if (contractVersion != 1
++                    || issuer == null
++                    || subject == null
++                    || clientId == null
++                    || tenant == null
++                    || projectId == null)
++                throw new IllegalArgumentException("Invalid trusted identity");
++            audiences = Set.copyOf(audiences);
++            protocolScopes = Set.copyOf(protocolScopes);
++            projectScopes = Set.copyOf(projectScopes);
++        }
++    }
++
++    enum Failure {
++        UNAUTHENTICATED,
++        INVALID,
++        REVOKED,
++        UNAVAILABLE,
++        UNSUPPORTED
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV2.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV2.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..310b0fe48621cea1200942684b94164b1f67b2a7
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV2.java
+@@ -0,0 +1,10 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.webserver.oidc.TrustedIdentityV1;
++
++import java.util.concurrent.CompletionStage;
++
++public interface AuthorizationEvaluationProviderV2 {
++    CompletionStage<AuthorizationEvaluationV1> begin(
++            TrustedIdentityV1.Identity identity, String tenant);
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationDirectoryV1Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationDirectoryV1Test.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b45573e6e918af5edbe6f9e5879a249504fddfb
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationDirectoryV1Test.java
+@@ -0,0 +1,108 @@
++package io.kestra.webserver.oidc;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.List;
++import java.util.Set;
++
++class ApplicationDirectoryV1Test {
++    @Test
++    void shouldValidateFrozenIdentifiers() {
++        var project =
++                new ApplicationDirectoryV1.Project(
++                        "team_A-1", "main", "issuer", "Team", true, 1, 2);
++        assertThat(project.id()).isEqualTo("team_A-1");
++        assertThatThrownBy(
++                        () ->
++                                new ApplicationDirectoryV1.Project(
++                                        "bad:id", "main", "issuer", "x", true, 1, 1))
++                .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(
++                        () ->
++                                new ApplicationDirectoryV1.ScopeDefinition(
++                                        "p", "bad scope", "x", true, List.of(), List.of(), 1))
++                .isInstanceOf(IllegalArgumentException.class);
++    }
++
++    @Test
++    void shouldKeepManagementDomainExplicit() {
++        var intent =
++                new ApplicationDirectoryV1.ManagementIntent(
++                        ApplicationDirectoryV1.ManagementDomain.IDENTITY, Set.of("READ", "MANAGE"));
++        assertThat(intent.domain()).isEqualTo(ApplicationDirectoryV1.ManagementDomain.IDENTITY);
++    }
++
++    @Test
++    void shouldRejectAmbiguousAllDomainsAndUnknownManagementActions() {
++        assertThatThrownBy(
++                        () ->
++                                new ApplicationDirectoryV1.NamespaceDomain(
++                                        ApplicationDirectoryV1.DomainKind.ALL,
++                                        Set.of("team"),
++                                        Set.of()))
++                .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(
++                        () ->
++                                new ApplicationDirectoryV1.ResourceIdDomain(
++                                        ApplicationDirectoryV1.DomainKind.ALL, Set.of("flow")))
++                .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(
++                        () ->
++                                new ApplicationDirectoryV1.ManagementIntent(
++                                        ApplicationDirectoryV1.ManagementDomain.IDENTITY,
++                                        Set.of("ADMIN")))
++                .isInstanceOf(IllegalArgumentException.class);
++    }
++
++    @Test
++    void shouldDefaultMembershipToNonFirstParty() {
++        var membership =
++                new ApplicationDirectoryV1.ClientMembership(
++                        "p", "client", true, Set.of("ui"), Set.of("read"), 1);
++        assertThat(membership.firstPartyUi()).isFalse();
++        var input =
++                new ApplicationDirectoryV1.MembershipInput(
++                        "client", true, Set.of("ui"), Set.of("read"));
++        assertThat(input.firstPartyUi()).isFalse();
++    }
++    @Test
++    void shouldRestrictManagementTargetsToLocalPolicy() {
++        var local = new ApplicationDirectoryV1.ManagementIntent(
++            ApplicationDirectoryV1.ManagementDomain.LOCAL_POLICY, Set.of("MANAGE"), Set.of("p2"));
++        assertThat(local.projectIds()).containsExactly("p2");
++        assertThat(new ApplicationDirectoryV1.ManagementIntent(
++            ApplicationDirectoryV1.ManagementDomain.IDENTITY, Set.of("READ")).projectIds()).isEmpty();
++        assertThatThrownBy(() -> new ApplicationDirectoryV1.ManagementIntent(
++            ApplicationDirectoryV1.ManagementDomain.BUSINESS_INSTANCE, Set.of("READ"), Set.of("p2")))
++            .isInstanceOf(IllegalArgumentException.class);
++    }
++    @Test
++    void shouldFreezePolicyBoundaryCollectionsWithoutSubjectDetails() {
++        var scopes = new java.util.ArrayList<ApplicationDirectoryV1.ScopeDefinition>();
++        var audiences = new java.util.HashSet<>(Set.of("ui"));
++        var boundary = new ApplicationDirectoryV1.PolicyBoundary(
++            new ApplicationDirectoryV1.Project("p", "main", "issuer", "P", true, 1, 1),
++            scopes, audiences, Set.of(), List.of());
++        scopes.clear(); audiences.clear();
++        assertThat(boundary.audiences()).containsExactly("ui");
++        assertThatThrownBy(() -> boundary.scopes().add(null)).isInstanceOf(UnsupportedOperationException.class);
++        assertThat(java.util.Arrays.stream(ApplicationDirectoryV1.PolicyBoundary.class.getRecordComponents())
++            .map(java.lang.reflect.RecordComponent::getName)).doesNotContain("subjects", "assignments", "credentials", "grants");
++    }
++    @Test void rejectsInvalidNamespaceAndOpaqueIdIntentsWithoutNormalization() {
++        for (String name : List.of("a..b", ".a", "a.", "a.*", " a", "a/b", "a\n")) {
++            assertThatThrownBy(() -> new ApplicationDirectoryV1.NamespaceDomain(ApplicationDirectoryV1.DomainKind.RESTRICTED,Set.of(name),Set.of())).isInstanceOf(IllegalArgumentException.class);
++            assertThatThrownBy(() -> new ApplicationDirectoryV1.NamespaceDomain(ApplicationDirectoryV1.DomainKind.RESTRICTED,Set.of(),Set.of(name))).isInstanceOf(IllegalArgumentException.class);
++        }
++        for (String id : List.of("", " ", " a", "a ", "a\n", "a\u0001b"))
++            assertThatThrownBy(() -> new ApplicationDirectoryV1.ResourceIdDomain(ApplicationDirectoryV1.DomainKind.RESTRICTED,Set.of(id))).isInstanceOf(IllegalArgumentException.class);
++        var names = new ApplicationDirectoryV1.NamespaceDomain(ApplicationDirectoryV1.DomainKind.RESTRICTED,Set.of("team_A-1.child"),Set.of("sub_tree"));
++        assertThat(names.exact()).containsExactly("team_A-1.child");
++        var ids = new ApplicationDirectoryV1.ResourceIdDomain(ApplicationDirectoryV1.DomainKind.RESTRICTED,Set.of("opaque:a/b%_中文"));
++        assertThat(ids.ids()).containsExactly("opaque:a/b%_中文");
++    }
++
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityV1Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityV1Test.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..db68c82a1236fb7333b428a3e9501c635b8f37f2
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityV1Test.java
+@@ -0,0 +1,44 @@
++package io.kestra.webserver.oidc;
++
++import static org.assertj.core.api.Assertions.*;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.Set;
++
++class TrustedIdentityV1Test {
++    @Test
++    void rejectsWrongVersionAndPreservesSets() {
++        assertThatThrownBy(
++                        () ->
++                                new TrustedIdentityV1.Identity(
++                                        2,
++                                        "i",
++                                        "s",
++                                        "c",
++                                        Set.of("a"),
++                                        "t",
++                                        "p",
++                                        Set.of(),
++                                        Set.of(),
++                                        0,
++                                        0,
++                                        0))
++                .isInstanceOf(IllegalArgumentException.class);
++        var x =
++                new TrustedIdentityV1.Identity(
++                        1,
++                        "i",
++                        "s",
++                        "c",
++                        Set.of("a"),
++                        "t",
++                        "p",
++                        Set.of("openid"),
++                        Set.of("read"),
++                        1,
++                        2,
++                        3);
++        assertThat(x.projectScopes()).containsExactly("read");
++    }
++}

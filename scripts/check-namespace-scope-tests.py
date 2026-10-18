@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
-    "io.kestra.webserver.rbac.NamespaceScopeContractTest": 2,
+    "io.kestra.webserver.rbac.NamespaceScopeContractTest": 3,
     "io.kestra.mcp.McpToolScopeTest": 3,
 }.items():
     report = ET.parse(results / f"TEST-{suite}.xml").getroot()

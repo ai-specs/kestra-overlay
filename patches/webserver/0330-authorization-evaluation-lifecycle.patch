@@ -6,7 +6,7 @@
 # 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
 new file mode 100644
-index 0000000..82756d5
+index 0000000000000000000000000000000000000000..82756d506217b3615cf7680757d5d32101cdbb9a
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
 @@ -0,0 +1,35 @@
@@ -47,7 +47,7 @@ index 0000000..82756d5
 +}
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationQueryContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationQueryContext.java
 new file mode 100644
-index 0000000..a8516e4
+index 0000000000000000000000000000000000000000..a8516e4560d7d70f2c4f22d76456d988ee858ab8
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationQueryContext.java
 @@ -0,0 +1,5 @@
@@ -57,7 +57,7 @@ index 0000000..a8516e4
 +
 +public record AuthorizationQueryContext(Object reference) implements PropagatedContextElement {}
 diff --git a/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java b/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
-index 685d8f4..d1e6ba5 100644
+index 685d8f4ea08b3af9f49e64f2334ade335dd5e869..d1e6ba51fde71cde67ad38fab25d1b340e37017d 100644
 --- a/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
 +++ b/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
 @@ -172,8 +172,9 @@ public class FlowInputOutput {
@@ -79,11 +79,11 @@ index 685d8f4..d1e6ba5 100644
 -            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
 +            .collectMap(Map.Entry::getKey, Map.Entry::getValue));
      }
- 
+
      private static boolean acceptsFileUpload(Type type) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java
 new file mode 100644
-index 0000000..f84407c
+index 0000000000000000000000000000000000000000..f84407c4614415739be08aa104dca9b0f12b33d5
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java
 @@ -0,0 +1,8 @@
@@ -97,7 +97,7 @@ index 0000000..f84407c
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationV1.java
 new file mode 100644
-index 0000000..5471c85
+index 0000000000000000000000000000000000000000..5471c854106358ba5fe7ecbfafd940d7769ba761
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationV1.java
 @@ -0,0 +1,9 @@
@@ -112,10 +112,10 @@ index 0000000..5471c85
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
 new file mode 100644
-index 0000000..3f6dbc6
+index 0000000000000000000000000000000000000000..defb0f34c3510cabbdf983417247fbce21e4181d
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,209 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -146,6 +146,28 @@ index 0000000..3f6dbc6
 +    private static final Duration TIMEOUT = Duration.ofSeconds(5);
 +    private final boolean enabled;
 +    private final BeanProvider<AuthorizationEvaluationProviderV1> providers;
++private BeanProvider<AuthorizationEvaluationProviderV2> projectProviders;
++    private BeanProvider<io.kestra.webserver.oidc.TrustedIdentityV1> identities;
++    private boolean applicationProjects;
++
++    @jakarta.inject.Inject
++    public AuthorizationEvaluations(
++        @Value("${kestra.rbac.evaluation.enabled:false}") boolean enabled,
++        RbacConfiguration configuration,
++        @Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled,
++        BeanProvider<AuthorizationEvaluationProviderV1> providers,
++        BeanProvider<AuthorizationEvaluationProviderV2> projectProviders,
++        BeanProvider<io.kestra.webserver.oidc.TrustedIdentityV1> identities,
++        @Value("${kestra.rbac.application-projects.enabled:false}") boolean applicationProjects) {
++        this(enabled, configuration, typedEnabled, providers);
++        if (applicationProjects && (!enabled || !typedEnabled || !configuration.enabled())) {
++            throw new IllegalArgumentException("Application projects require unified typed evaluation");
++        }
++        this.projectProviders = projectProviders;
++        this.identities = identities;
++        this.applicationProjects = applicationProjects;
++    }
++
 +
 +    public AuthorizationEvaluations(@Value("${kestra.rbac.evaluation.enabled:false}") boolean enabled,
 +        RbacConfiguration configuration, @Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled,
@@ -163,12 +185,27 @@ index 0000000..3f6dbc6
 +        Supplier<? extends Publisher<Result>> action) {
 +        if (!enabled) return Flux.defer(action);
 +        return Flux.defer(() -> {
-+            if (!providers.isUnique() || principal == null || principal.subject() == null || principal.subject().isBlank()
++            if (
++(applicationProjects ? !projectProviders.isUnique() || !identities.isUnique() :
++!providers.isUnique(
++)
++) || principal == null || principal.subject() == null || principal.subject().isBlank()
 +                || tenant == null || tenant.isBlank()) return Flux.error(denied());
 +            var identity = new RbacAuthorizer.Principal(principal.subject(), List.copyOf(principal.roles()),
 +                principal.clientId(), principal.audience(), List.copyOf(principal.scopes()));
++final AuthorizationEvaluationProviderV1 provider;
++            if (applicationProjects) {
++                var trusted = identities.get().current();
++                if (!trusted.subject().equals(principal.subject()) || !trusted.tenant().equals(tenant)) return Flux.error(denied());
++                provider = (ignoredPrincipal, ignoredTenant) -> projectProviders.get().begin(trusted, tenant);
++            } else {
++                provider = providers.get();
++            }
++
 +            var owner = new Owner(identity, tenant);
-+            return Flux.usingWhen(Mono.just(owner), active -> active.acquire(providers.get()).flatMapMany(ignored -> {
++            return Flux.usingWhen(Mono.just(owner), active -> active.acquire(
++provider
++).flatMapMany(ignored -> {
 +                var context = minimalContext().plus(new AuthorizationEvaluationContext(active));
 +                return Flux.from(ReactivePropagation.propagate(context, Flux.defer(() -> {
 +                    try (var scope = context.propagate()) { return Flux.from(action.get()); }
@@ -194,8 +231,15 @@ index 0000000..3f6dbc6
 +        var reference = AuthorizationEvaluationContext.current().orElse(null);
 +        return reference != null && reference.reference() instanceof Owner owner ? owner : null;
 +    }
++public static final class EvaluationDeniedException extends IllegalStateException {
++        public EvaluationDeniedException() { super("Authorization evaluation is unavailable."); }
++    }
 +
-+    static IllegalStateException denied() { return new IllegalStateException("Authorization evaluation is unavailable."); }
++
++    static IllegalStateException denied() { return new
++EvaluationDeniedException
++(
++); }
 +
 +    static final class Owner {
 +        final RbacAuthorizer.Principal principal;
@@ -282,7 +326,7 @@ index 0000000..3f6dbc6
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
-index 9488059..ca33508 100644
+index 94880596c227cdf30c4a46c1c37d20deaa3d78e6..ca33508552d4a3a54a8fe1f56e0f4a61a7d5830c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
 @@ -22,6 +22,11 @@ public class RbacGate {
@@ -298,7 +342,7 @@ index 9488059..ca33508 100644
          RbacAuthorizer.Action action, boolean completeQuery) {
          return Mono.defer(() -> {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
-index 201c734..9e098fe 100644
+index 201c7345424bcca10b1fe91c8f6e3213044e0027..9e098fefb4b1335c7d22d3c852cf61cbe56a3cd8 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 @@ -10,16 +10,42 @@ import static io.kestra.webserver.rbac.TypedAuthorization.*;
@@ -306,11 +350,11 @@ index 201c734..9e098fe 100644
  public final class TypedAuthorizationGate {
      private final BeanProvider<TypedAuthorizationResolver> policies;
 +    private AuthorizationEvaluations evaluations;
- 
+
      public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies) {
          this.policies = policies;
      }
- 
+
 +    @jakarta.inject.Inject
 +    public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies, AuthorizationEvaluations evaluations) {
 +        this(policies);
@@ -348,7 +392,7 @@ index 201c734..9e098fe 100644
                      if (!decision.allowed()) return Decision.deny(decision.reason());
                      QueryDomain effective = operation.queryDomain().intersect(decision.scope());
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-index 06722d6..0fef9e6 100644
+index 06722d6e5213068b5b30305901ee07cdb32c2304..0fef9e66cfd42ad0a6f0a0ca4688c85b45a07c11 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 @@ -45,10 +45,20 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
@@ -382,11 +426,11 @@ index 06722d6..0fef9e6 100644
 -            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
 +        });
      }
- 
+
      private Mono<byte[]> body(HttpRequest<?> request) {
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 new file mode 100644
-index 0000000..415af8f
+index 0000000000000000000000000000000000000000..415af8f85db8bae2da50e84f5f71333ead5f71b0
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 @@ -0,0 +1,148 @@
@@ -540,7 +584,7 @@ index 0000000..415af8f
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
 new file mode 100644
-index 0000000..5b8a415
+index 0000000000000000000000000000000000000000..5b8a41527ec9e2837fde464152421ce533e7f342
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
 @@ -0,0 +1,138 @@
@@ -684,7 +728,7 @@ index 0000000..5b8a415
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java
 new file mode 100644
-index 0000000..dd4b3d7
+index 0000000000000000000000000000000000000000..dd4b3d74735fdb80e45fbe6595b4ce29d0e516e3
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java
 @@ -0,0 +1,84 @@
@@ -774,7 +818,7 @@ index 0000000..dd4b3d7
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
 new file mode 100644
-index 0000000..af85f2f
+index 0000000000000000000000000000000000000000..af85f2f88f64fbab429b3e07bb56a1522541032c
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
 @@ -0,0 +1,328 @@

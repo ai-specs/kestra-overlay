@@ -1,0 +1,201 @@
+# 需求: REQ-0361 应用项目公开机制与授权激活
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；实施中，未发布
+# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
+# 触达上游文件: 最小公共契约、宿主激活点与独立测试
+# 移除条件: 上游提供等价公开项目身份与授权机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ProjectScopeIssuance.java b/webserver/src/main/java/io/kestra/webserver/oidc/ProjectScopeIssuance.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4c522cffa58db368df494ad03a6b938e01f376b
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/ProjectScopeIssuance.java
+@@ -0,0 +1,66 @@
++package io.kestra.webserver.oidc;
++
++import java.util.HashSet;
++import java.util.Set;
++
++public final class ProjectScopeIssuance {
++    public static final String UI_SELECTOR = "kestra:project-scopes";
++
++    private ProjectScopeIssuance() {}
++
++    public record Result(Set<String> protocolScopes, Set<String> projectScopes) {
++        public Result {
++            protocolScopes = Set.copyOf(protocolScopes);
++            projectScopes = Set.copyOf(projectScopes);
++        }
++    }
++
++    public static Result resolve(
++            Set<String> requested,
++            Set<String> registeredProtocolScopes,
++            Set<String> activeProjectScopes,
++            Set<String> clientAllowedScopes,
++            Set<String> subjectAssignments,
++            Set<String> consentedScopes,
++            boolean approvedFirstPartyUi,
++            boolean projectActive) {
++        requested = Set.copyOf(requested);
++        registeredProtocolScopes = Set.copyOf(registeredProtocolScopes);
++        activeProjectScopes = Set.copyOf(activeProjectScopes);
++        clientAllowedScopes = Set.copyOf(clientAllowedScopes);
++        subjectAssignments = Set.copyOf(subjectAssignments);
++        consentedScopes = Set.copyOf(consentedScopes);
++        var protocols = new HashSet<String>();
++        var projects = new HashSet<String>();
++        var eligible = new HashSet<>(activeProjectScopes);
++        eligible.retainAll(clientAllowedScopes);
++        eligible.retainAll(subjectAssignments);
++        if (!projectActive) eligible.clear();
++        for (String scope : requested) {
++            if (UI_SELECTOR.equals(scope)) {
++                if (!approvedFirstPartyUi || !registeredProtocolScopes.contains(UI_SELECTOR)) {
++                    throw new InvalidScopeException();
++                }
++                protocols.add(scope);
++                projects.addAll(eligible);
++            } else if (registeredProtocolScopes.contains(scope)) {
++                protocols.add(scope);
++            } else if (eligible.contains(scope)) {
++                projects.add(scope);
++            } else {
++                throw new InvalidScopeException();
++            }
++        }
++        projects.retainAll(consentedScopes);
++        var retainedProtocols = new HashSet<>(consentedScopes);
++        if (requested.contains(UI_SELECTOR)) retainedProtocols.add(UI_SELECTOR);
++        protocols.retainAll(retainedProtocols);
++        return new Result(protocols, projects);
++    }
++
++    public static final class InvalidScopeException extends RuntimeException {
++        public InvalidScopeException() {
++            super("invalid_scope");
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ProjectScopeIssuanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/ProjectScopeIssuanceTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac1d89f15374336e5c14dd09ba2f7aedadb4e452
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/ProjectScopeIssuanceTest.java
+@@ -0,0 +1,117 @@
++package io.kestra.webserver.oidc;
++
++import static org.assertj.core.api.Assertions.*;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.Set;
++
++class ProjectScopeIssuanceTest {
++    private final Set<String> protocols =
++            Set.of(
++                    "openid",
++                    "profile",
++                    "email",
++                    "mcp:flows:read",
++                    ProjectScopeIssuance.UI_SELECTOR);
++
++    @Test
++    void shouldExpandOnlyApprovedUiIntersectionWithoutGrantingSelector() {
++        var result =
++                ProjectScopeIssuance.resolve(
++                        Set.of("openid", ProjectScopeIssuance.UI_SELECTOR),
++                        protocols,
++                        Set.of("A", "B", "C"),
++                        Set.of("A", "B"),
++                        Set.of("A", "C"),
++                        Set.of("openid", "A"),
++                        true,
++                        true);
++        assertThat(result.projectScopes()).containsExactly("A");
++        assertThat(result.protocolScopes())
++                .containsExactlyInAnyOrder("openid", ProjectScopeIssuance.UI_SELECTOR);
++    }
++
++    @Test
++    void shouldAllowProtocolLoginWithNoUiAssignments() {
++        var result =
++                ProjectScopeIssuance.resolve(
++                        Set.of("openid", ProjectScopeIssuance.UI_SELECTOR),
++                        protocols,
++                        Set.of("A"),
++                        Set.of("A"),
++                        Set.of(),
++                        Set.of("openid"),
++                        true,
++                        true);
++        assertThat(result.projectScopes()).isEmpty();
++        assertThat(result.protocolScopes()).contains("openid");
++    }
++
++    @Test
++    void shouldRejectDcrSelectorAndUngrantableExplicitScopes() {
++        assertThatThrownBy(
++                        () ->
++                                ProjectScopeIssuance.resolve(
++                                        Set.of(ProjectScopeIssuance.UI_SELECTOR),
++                                        protocols,
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        false,
++                                        true))
++                .isInstanceOf(ProjectScopeIssuance.InvalidScopeException.class);
++        assertThatThrownBy(
++                        () ->
++                                ProjectScopeIssuance.resolve(
++                                        Set.of("A"),
++                                        protocols,
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        Set.of(),
++                                        Set.of("A"),
++                                        false,
++                                        true))
++                .isInstanceOf(ProjectScopeIssuance.InvalidScopeException.class);
++        assertThatThrownBy(
++                        () ->
++                                ProjectScopeIssuance.resolve(
++                                        Set.of("mcp:unknown"),
++                                        protocols,
++                                        Set.of(),
++                                        Set.of(),
++                                        Set.of(),
++                                        Set.of(),
++                                        false,
++                                        true))
++                .isInstanceOf(ProjectScopeIssuance.InvalidScopeException.class);
++    }
++
++    @Test
++    void shouldNarrowConsentAndRejectExplicitScopesForDisabledProject() {
++        var result =
++                ProjectScopeIssuance.resolve(
++                        Set.of("A", "B"),
++                        protocols,
++                        Set.of("A", "B"),
++                        Set.of("A", "B"),
++                        Set.of("A", "B"),
++                        Set.of("A"),
++                        false,
++                        true);
++        assertThat(result.projectScopes()).containsExactly("A");
++        assertThatThrownBy(
++                        () ->
++                                ProjectScopeIssuance.resolve(
++                                        Set.of("A"),
++                                        protocols,
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        Set.of("A"),
++                                        false,
++                                        false))
++                .isInstanceOf(ProjectScopeIssuance.InvalidScopeException.class);
++    }
++}

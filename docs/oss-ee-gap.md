@@ -167,3 +167,50 @@ UI 定制或插件授权业务。所有能力仍须通过实现检查与正式�
 管理 CRUD 的历史宿主非目标不限制独立插件业务演进。权限细分枚举、插件策略表及策略
 热更新存储均不进入宿主；首期管理员 API 优先复用认证、SYSTEM gate 与 CSRF，但外部
 控制器稳定分类须先公开确认。目录不判断插件管理员，目录发布不阻塞角色／授权线路。
+
+### REQ-APPLICATION-PROJECTS（2026-10-17，已接收，实施中）
+
+消费项目：`ai-specs/kestra-plugin-rbac`。主控已接收窄边界：内置 issuer 单源；一个 client 只归一个项目；精确 audience 集合；项目 scope 与 protocol scope 显式分类；`ApplicationDirectoryV1`、`TrustedIdentityV1`、`AuthorizationEvaluationProviderV2`；应用开关 `kestra.rbac.application-projects.enabled`，要求 typed/evaluation 且仅 V2，禁止回退旧 roles/subject。
+
+宿主归属：可信身份签发、项目目录、成员 client 审批、subject 项目授予、epoch 在线失效、UI/IdP/access/refresh/MCP 传播、MCP tools/list 每请求重算、TypedAuthorization.QueryDomain.resourceDomains 的 namespace×resourceId 过滤和一次性迁移激活点。插件归属：本地策略绑定、ResourceIntent 子集校验、业务管理页面和 schema1 迁移。部署仓归属：正式镜像、插件 jar 和双 client Compose 验收。
+
+资源 ID 详情/写必须支持；受限 ID 列表、total、统计和聚合必须在 SQL 分页前使用保持 namespace×ID 关联的 V2 域。未适配入口必须明确拒绝，不能全域或先分页后过滤。根仓旧失败 CI `39026310136` 的 `scripts/blackbox-rbac.mjs:269` tools/list per-resource 用例是必需复测入口；旧 digest `144de64` 只作失败证据，先复测正式 `1b044df`。
+
+### REQ-0362 扩展资源授权激活（已接收）
+
+消费项目：`ai-specs/kestra-plugin-rbac`。证据：0340 管理页面使用 SYSTEM.EXECUTE 空 scope；OssRestOperationAdapter 行政默认分支无法表达 extensionId、身份管理与本地管理边界。宿主最小面为通用 `Resource.EXTENSION`、注册 extensionId 的 READ/UPDATE 评估、逐 descriptor manifest 门和旧模式失败关闭；插件 provider 与 Controller 细分管理权，业务模型不进入 overlay。根仓 CI `39026951944` 的 missing-jar tools/list 500（:287）是必需回归证据。
+
+
+### 应用项目管理目标与查询消费收敛（已接收，实施中、未发布）
+
+消费项目仍为 `ai-specs/kestra-plugin-rbac`。单 UI client 的所属项目与目标项目本地
+绑定管理之间缺少明确范围，已接收 `ManagementIntent.projectIds` 最小扩展：仅
+LOCAL_POLICY 非空可用，空集合只代表所属项目，非空只代表精确列出的项目，不能通配。
+身份端负责共享管理意图上界；插件负责本地收窄、实际目标授权和完整绑定原子恢复。
+证据、边界、兼容构造与验收门见 `docs/r-ee-rbac.md` 的 LOCAL_POLICY 末节。
+
+未发布且无生产消费者的独立 QueryDomainV2 已裁决删除。实际关联查询域使用
+`TypedAuthorization.QueryDomain.resourceDomains`，显式保留资源范围和 ID 范围；
+现有类型保持旧构造兼容。SQL、分页、total 与统计必须消费同一关联域，不能把 DTO
+测试当作实际支持。完整语义见 `docs/extension-mechanisms.md` 应用项目机制末节。
+
+
+### 应用项目候选的安全修正（未发布）
+
+共享 scope 的授权含义只允许收窄；扩大必须创建新稳定标识并显式批准、绑定和授予。
+`directoryRevision` 是 Project.revision；authorizationVersion 是独立撤权 epoch。
+关联域相交无有效项时必须为空拒绝，不能回退旧 namespace-only 域；TENANT term 与
+受限 namespace 外层矛盾时拒绝构造。未适配 ID 的 namespace-only、日志及其他后端
+遇 RESTRICTED_IDS 拒绝；ALL_IDS 的 namespace 过滤必须可用。JDBC 首版仅 FLOW、
+EXECUTION 通用查询和 tenant MCP_SERVER 列表有 ID 适配；范围表见 README。
+
+目录写入必须在取写连接前取得可信身份，并在同一写事务复核认证版本、目录修订、
+epoch、active subject/client、audience 与 scope 授予。token 交换的目录受众、账号版本
+及 JWK 签名查询复用同一连接，不能依靠扩大连接池掩盖嵌套借连接。独立回归使用真实
+PostgreSQL 与最多一个活动连接的受限 DataSource，不将连接暴露给插件公开接口。
+
+
+应用项目模式不得丢失真实 client 的协议 scope 注册上界。全局词汇表只作分类；
+签发和 refresh 在同一连接核对 active client 注册范围，项目项继续按 member 上界
+解释。目录 namespace 与 opaque resource ID 在公开构造边界严格校验，非法共享
+意图不得保存后再交由插件拒绝。上述均为未发布候选的必要拒绝语义。

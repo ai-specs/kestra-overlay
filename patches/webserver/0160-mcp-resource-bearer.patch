@@ -6,7 +6,7 @@
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 # 演进理由: REQ-0350 沿用协议授权码发行与consent激活点，生产身份版本检查留目录能力。
 diff --git a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
-index 9903d69..d936d67 100644
+index 9903d69ae2ba475234648e885092988bd5cc4b96..d936d6730e4451e40e1fe123da69885452987a97 100644
 --- a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
 +++ b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
 @@ -17,6 +17,8 @@ import jakarta.inject.Singleton;
@@ -19,7 +19,7 @@ index 9903d69..d936d67 100644
      }
 
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
-index e93c3ee..a044504 100644
+index e93c3ee1749c32bbb29d0002c770bcf6a58db796..a0445047e921aacb9de29245f659e32c9c61e02c 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
 +++ b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
 @@ -11,11 +11,15 @@ import lombok.EqualsAndHashCode;
@@ -51,7 +51,7 @@ index e93c3ee..a044504 100644
          };
      }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-index 2bef821..c8d3137 100644
+index 2bef8211d277b3608833d9f0b90e78c65da7a7c6..c8d3137c4959c266143a3679d1180213f6fabe07 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 @@ -204,12 +204,22 @@ public class McpServerHandlerTransport {
@@ -80,7 +80,7 @@ index 2bef821..c8d3137 100644
          }
      }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
-index d7e2233..40e0a1f 100644
+index d7e2233fa99e42ae661ccbd36118a3372e8468c0..40e0a1f78115d53acb69bcce617d6e0a1218d4ae 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 @@ -7,12 +7,21 @@ import jakarta.inject.Singleton;
@@ -107,7 +107,7 @@ index d7e2233..40e0a1f 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
-index 5195153..d82b6cd 100644
+index 5195153a15b2f86e03563880c99a09350280a342..d82b6cd7da28990844f420dae5c48309ccce21cd 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 @@ -81,9 +81,12 @@ public class McpToolController {
@@ -128,7 +128,7 @@ index 5195153..d82b6cd 100644
      }
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java
 new file mode 100644
-index 0000000..bf3be71
+index 0000000000000000000000000000000000000000..bf3be71d0557793ba923d26b8d461e8fff33c8be
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java
 @@ -0,0 +1,21 @@
@@ -155,10 +155,10 @@ index 0000000..bf3be71
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
 new file mode 100644
-index 0000000..f93f721
+index 0000000000000000000000000000000000000000..bf759ecdda742511cd48593688040dd61a64595a
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,101 @@
 +package io.kestra.webserver.mcp;
 +
 +import java.util.Map;
@@ -207,8 +207,50 @@ index 0000000..f93f721
 +            final var claims = tokens.validateResourceAccessToken(header.substring(7), resource);
 +            final var stored = tokens.findByValue(header.substring(7)).orElseThrow();
 +            final var roles = claims.getStringListClaim("roles") == null ? java.util.List.<String>of() : java.util.List.copyOf(claims.getStringListClaim("roles"));
-+            request.setAttribute("io.kestra.mcp.identity", Map.of("subject", claims.getSubject(), "client_id", stored.clientId(), "resource", resource, "scopes", stored.scopes(), "roles", roles));
-+            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), roles, Map.of("client_id", stored.clientId(), "resource", resource, "scope", stored.scopes())));
++var identity = new java.util.HashMap<String, Object>();
++            identity.put("subject", claims.getSubject());
++            identity.put("client_id", stored.clientId());
++            identity.put("resource", resource);
++            identity.put("scopes", stored.scopes());
++            identity.put("roles", roles);
++            Object projectClaim = claims.getClaim(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM);
++            if (projectClaim != null) identity.put(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, projectClaim);
++
++            request.setAttribute("io.kestra.mcp.identity", Map.
++copyOf
++(
++identity));
++            var attributes = new java.util.HashMap<String
++,
++Object>
++()
++;
++            attributes.put(
++ "client_id", stored.clientId()
++);
++            attributes.put(
++ "resource", resource
++);
++            attributes.put("scope"
++, stored.scopes()
++);
++            attributes.put("iss"
++,
++claims.getIssuer());
++            attributes.put("aud"
++,
++claims.getAudience(
++)
++);
++            Object version = claims.getClaim(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.CLAIM);
++            if (version != null) attributes.put(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.CLAIM, version);
++            if (projectClaim != null) attributes.put(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, projectClaim
++);
++            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), roles, Map.
++copyOf
++(
++attributes
++)));
 +            return true;
 +        }).subscribeOn(Schedulers.boundedElastic()).onErrorResume(McpResourceUrl.UnknownResourceException.class,
 +            exception -> Mono.empty()).onErrorReturn(false)
@@ -220,7 +262,7 @@ index 0000000..f93f721
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java
 new file mode 100644
-index 0000000..e231218
+index 0000000000000000000000000000000000000000..e231218ffc944f8833a6f03399d8443fd454cfef
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceMetadataController.java
 @@ -0,0 +1,33 @@
@@ -259,7 +301,7 @@ index 0000000..e231218
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java
 new file mode 100644
-index 0000000..7cfecf7
+index 0000000000000000000000000000000000000000..7cfecf7cd6edc7f74c804c0187a1f20967973adf
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpResourceUrl.java
 @@ -0,0 +1,81 @@
@@ -346,7 +388,7 @@ index 0000000..7cfecf7
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java
 new file mode 100644
-index 0000000..6adf696
+index 0000000000000000000000000000000000000000..6adf69681be238662b1acfb1bc4dcd138a7c9c49
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_96OidcServerResourceMigration.java
 @@ -0,0 +1,27 @@
@@ -378,7 +420,7 @@ index 0000000..6adf696
 +    public List<String> sqlResources() { return List.of("/migrations/2.0.96-oidc-server-resource-postgres.sql"); }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
-index 21d1173..c283ea3 100644
+index 21d117314bd5893a889d392c55d3550451796fa2..c283ea3ba591297af0d753ebef3f33ca8802ea5a 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 @@ -50,7 +50,7 @@ public class OidcAuthorizationCodeService {
@@ -440,7 +482,7 @@ index 21d1173..c283ea3 100644
              throw new IllegalStateException("Failed to mark OIDC authorization code used", e);
          }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-index cd3f6e2..deec90f 100644
+index cd3f6e23655284b463916ffc5f73da3373bc234d..deec90f6718e272b3bc0e21753ad54829de99d7e 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 @@ -169,7 +169,7 @@ public class OidcOwnershipService {
@@ -461,10 +503,69 @@ index cd3f6e2..deec90f 100644
                      }
                  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-index 9885dcd..b380515 100644
+index 9885dcd837aed33df5805558ea0a32c5320cceec..365726b17c67ce2e2bbc44d2fdbea86f81570a7d 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-@@ -77,9 +77,37 @@ public class OidcTokenService {
+@@ -8,7 +8,12 @@ import java.sql.Timestamp;
+ import java.time.Instant;
+ import java.util.Date;
+ import java.util.List;
+-import java.util.Optional;
++import java.util.Optional
++;
++import java.util.Map;
++import java.util.Set;
++import java.util.HashSet
++;
+
+ import javax.sql.DataSource;
+
+@@ -36,7 +41,12 @@ import com.nimbusds.openid.connect.sdk.claims.IDTokenClaimsSet;
+ import io.kestra.webserver.oidc.OidcConfiguration;
+ import io.kestra.webserver.oidc.OidcException;
+
+-import io.micronaut.context.annotation.Requires;
++import io.
++kestra.webserver.oidc.ProjectScopeIssuance;
++import io.kestra.webserver.oidc.projects.ProjectDirectoryState;
++
++import io.
++micronaut.context.annotation.Requires;
+ import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
+ import jakarta.inject.Inject;
+ import jakarta.inject.Singleton;
+@@ -60,6 +70,14 @@ public class OidcTokenService {
+     private final ObjectMapper objectMapper;
+     private final OidcConfiguration configuration;
+     private final OidcJwkService jwkService;
++private final io.micronaut.context.BeanProvider<ProjectDirectoryState> projectDirectory;
++    @io.micronaut.context.annotation.Value("${kestra.rbac.application-projects.enabled:false}")
++    private boolean applicationProjects;
++
++    public OidcTokenService(DataSource source, ObjectMapper mapper, OidcConfiguration configuration, OidcJwkService keys) {
++        this(source, mapper, configuration, keys, null);
++    }
++
+
+     @Inject
+     public OidcTokenService(
+@@ -67,19 +85,71 @@ public class OidcTokenService {
+         final ObjectMapper objectMapper,
+         final OidcConfiguration configuration,
+         final OidcJwkService jwkService
++, io.micronaut.context.BeanProvider<ProjectDirectoryState> projectDirectory
++
+     ) {
+         this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
+         this.objectMapper = objectMapper;
+         this.configuration = configuration;
+-        this.jwkService = jwkService;
++        this.jwkService = jwkService
++;
++        this.projectDirectory = projectDirectory
++;
+     }
+
      /** A stored token record (mirror of the table row). */
      public record StoredToken(
          long id, String clientId, String subject, String tokenType, String value,
@@ -477,6 +578,12 @@ index 9885dcd..b380515 100644
 +        try (var connection = dataSource.getConnection()) {
 +            connection.setAutoCommit(false);
 +            try {
++if (applicationProjects && projectDirectory != null) {
++                    try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) { lock.execute(); }
++                }
++                var authorization = projectAuthorization(connection, clientId, user.sub(), scope.toStringList());
++                scope = authorization.scope();
++
 +                long version;
 +                try (var statement = connection.prepareStatement("SELECT authentication_version FROM oidc_user WHERE username=? AND user_state='ACTIVE' FOR SHARE")) {
 +                    statement.setString(1, user.sub());
@@ -491,9 +598,22 @@ index 9885dcd..b380515 100644
 +                        if (!rows.next() || rows.getLong(1) != version) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +                    }
 +                }
-+                var access = issueAccessToken(connection, clientId, user.sub(), user.name(), user.email(), user.roles(), scope, resource);
++                var
++projectClaim = authorization.claim();
++                if (applicationProjects && (projectClaim == null || !code.startsWith("project-v1." + projectClaim.get("project_id") + "." + projectClaim.get("authorization_version") + "."))) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                validateProjectAudience(connection, projectClaim, clientId, resource);
++                var
++ access = issueAccessToken(connection, clientId, user.sub(), user.name(), user.email(), user.roles(), scope, resource
++, projectClaim
++);
 +                var refresh = issueRefreshToken(connection, clientId, user.sub(), scope, resource);
-+                var identity = scope.contains("openid") ? issueIdToken(clientId, user.sub(), user.name(), user.email(), user.roles(), nonce) : null;
++                var identity = scope.contains("openid") ?
++issueIdTokenWithProjectClaim
++(
++connection,
++clientId, user.sub(), user.name(), user.email(), user.roles(), nonce
++, projectClaim
++) : null;
 +                connection.commit();
 +                return new com.nimbusds.openid.connect.sdk.token.OIDCTokens(identity, access, refresh);
 +            } catch (RuntimeException | SQLException failure) { connection.rollback(); throw failure; }
@@ -503,7 +623,7 @@ index 9885dcd..b380515 100644
      /** Issues an access token (RS256 JWT), signs it with the newest active key and persists it. */
      public BearerAccessToken issueAccessToken(
          final String clientId,
-@@ -89,12 +117,23 @@ public class OidcTokenService {
+@@ -89,12 +159,30 @@ public class OidcTokenService {
          final List<String> roles,
          final Scope scope
      ) {
@@ -517,6 +637,13 @@ index 9885dcd..b380515 100644
 +
 +    private BearerAccessToken issueAccessToken(final Connection connection, final String clientId, final String subject,
 +        final String name, final String email, final List<String> roles, final Scope scope, final String resource) {
++return issueAccessToken(connection, clientId, subject, name, email, roles, scope, resource, null);
++    }
++
++    private BearerAccessToken issueAccessToken(final Connection connection, final String clientId, final String subject,
++        final String name, final String email, final List<String> roles, final Scope scope, final String resource,
++        final Map<String, Object> projectClaim) {
++
          final Instant now = Instant.now();
          final Instant exp = now.plus(configuration.getAccessTokenTtl());
          final JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
@@ -528,10 +655,14 @@ index 9885dcd..b380515 100644
              .expirationTime(Date.from(exp))
              .issueTime(Date.from(now))
              .jwtID(java.util.UUID.randomUUID().toString())
-@@ -109,19 +148,98 @@ public class OidcTokenService {
+@@ -109,19 +197,237 @@ public class OidcTokenService {
          if (roles != null && !roles.isEmpty()) {
              claims.claim("roles", roles);
          }
+-        final String jwt = sign(claims.build()).serialize();
+-        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
++if (projectDirectory != null && projectClaim != null) claims.claim("kestra_project_v1", projectClaim);
++
 +        try {
 +            if (connection != null) {
 +                var version = OidcIdentityLifecycle.activeVersion(connection, subject);
@@ -541,14 +672,16 @@ index 9885dcd..b380515 100644
 +                if (version.isPresent()) claims.claim(OidcIdentityLifecycle.CLAIM, version.getAsLong());
 +            }
 +        } catch (SQLException failure) { throw new IllegalStateException("Cannot issue identity version"); }
-         final String jwt = sign(claims.build()).serialize();
--        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
++        final String jwt = sign(
++connection,
++claims.build()).serialize();
 +        persist(connection, "access", clientId, subject, scope.toStringList(), jwt, now, exp, resource);
          return new BearerAccessToken(jwt, configuration.getAccessTokenTtl().getSeconds(), scope);
      }
 
      /** Issues a new opaque refresh token and persists it. */
      public RefreshToken issueRefreshToken(final String clientId, final String subject, final Scope scope) {
+-        final RefreshToken refreshToken = new RefreshToken();
 +        return issueRefreshToken(clientId, subject, scope, null);
 +    }
 +
@@ -558,7 +691,14 @@ index 9885dcd..b380515 100644
 +
 +    private RefreshToken issueRefreshToken(final Connection connection, final String clientId, final String subject,
 +        final Scope scope, final String resource) {
-         final RefreshToken refreshToken = new RefreshToken();
++
++ RefreshToken refreshToken = new RefreshToken();
++if (applicationProjects && connection != null) {
++            var authorization = projectAuthorization(connection, clientId, subject, scope.toStringList());
++            if (authorization.claim() != null) refreshToken = new RefreshToken("project-v1." + authorization.claim().get("project_id") + "."
++                + authorization.claim().get("authorization_version") + "." + refreshToken.getValue());
++        }
++
          final Instant now = Instant.now();
 -        persist("refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()));
 +        persist(connection, "refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
@@ -570,6 +710,10 @@ index 9885dcd..b380515 100644
 +        try (Connection connection = dataSource.getConnection()) {
 +            connection.setAutoCommit(false);
 +            try {
++if (applicationProjects) {
++                    try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) { lock.execute(); }
++                }
++
 +                try (PreparedStatement lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) {
 +                    lock.execute();
 +                }
@@ -595,7 +739,9 @@ index 9885dcd..b380515 100644
 +                    statement.setString(1, current.clientId());
 +                    try (ResultSet result = statement.executeQuery()) {
 +                        if (!result.next()) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+                        if (!fromJson(result.getString(1)).containsAll(scope.toStringList())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                        if (!
++applicationProjects && !
++fromJson(result.getString(1)).containsAll(scope.toStringList())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +                    }
 +                }
 +                try (PreparedStatement statement = connection.prepareStatement(
@@ -603,9 +749,26 @@ index 9885dcd..b380515 100644
 +                    statement.setLong(1, stored.id());
 +                    if (statement.executeUpdate() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +                }
++var refreshScopes = new java.util.ArrayList<>(scope.toStringList());
++                refreshScopes.remove(ProjectScopeIssuance.UI_SELECTOR);
++                final var authorization = projectAuthorization(connection, stored.clientId(), user.sub(), refreshScopes);
++                final var projectClaim = authorization.claim();
++                if (applicationProjects && (projectClaim == null || !stored.value().startsWith("project-v1." + projectClaim.get("project_id") + "." + projectClaim.get("authorization_version") + "."))) throw new OidcException(OAuth2Error.INVALID_GRANT);
++                validateProjectAudience(connection, projectClaim, stored.clientId(), stored.resource());
++
 +                final var access = issueAccessToken(connection, stored.clientId(), user.sub(), user.name(), user.email(),
-+                    user.roles(), scope, stored.resource());
-+                final var refresh = issueRefreshToken(connection, stored.clientId(), user.sub(), scope, stored.resource());
++                    user.roles(),
++authorization.
++ scope
++()
++, stored.resource()
++, projectClaim
++);
++                final var refresh = issueRefreshToken(connection, stored.clientId(), user.sub(),
++authorization.
++ scope
++()
++, stored.resource());
 +                connection.commit();
 +                return new com.nimbusds.oauth2.sdk.token.Tokens(access, refresh);
 +            } catch (RuntimeException | SQLException exception) {
@@ -625,19 +788,154 @@ index 9885dcd..b380515 100644
 +            || !java.util.Objects.equals(claims.getSubject(), stored.subject())) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +        return claims;
 +    }
++private SignedJWT issueIdTokenWithProjectClaim(Connection connection, String clientId, String subject, String name, String email, List<String> roles, String nonce, Map<String,Object> claim) {
++        var token = issueIdToken(connection, clientId, subject, name, email, roles, nonce);
++        try { return sign(connection, new com.nimbusds.jwt.JWTClaimsSet.Builder(token.getJWTClaimsSet()).claim("kestra_project_v1", claim).build()); }
++        catch (java.text.ParseException failure) { throw new IllegalStateException("Cannot add project identity claim", failure); }
++    }
++
++    public record ProjectAuthorization(Scope scope, Map<String, Object> claim) {}
++
++    public String bindProjectCode(String code, String clientId, String subject, List<String> scopes) {
++        if (!applicationProjects) return code;
++        try (var connection = dataSource.getConnection()) {
++            connection.setAutoCommit(false);
++            var authorization = projectAuthorization(connection, clientId, subject, scopes);
++            String bound = "project-v1." + authorization.claim().get("project_id") + "."
++                + authorization.claim().get("authorization_version") + "." + code;
++            try (var update = connection.prepareStatement("UPDATE oidc_authorization_code SET code=? WHERE code=? AND client_id=? AND subject=? AND NOT used")) {
++                update.setString(1, bound); update.setString(2, code); update.setString(3, clientId); update.setString(4, subject);
++                if (update.executeUpdate() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
++            }
++            connection.commit();
++            return bound;
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot bind project authorization code", failure); }
++    }
++
++
++    public Scope authorizeScopes(String clientId, String subject, List<String> requested) {
++        try (var connection = dataSource.getConnection()) {
++            connection.setAutoCommit(false);
++            var result = projectAuthorization(connection, clientId, subject, requested);
++            connection.commit();
++            return result.scope();
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot authorize project scopes", failure); }
++    }
++
++    private ProjectAuthorization projectAuthorization(Connection connection, String clientId, String subject, List<String> requested) {
++        if (!applicationProjects) {
++            try (var statement = connection.prepareStatement("SELECT scopes,client_kind,client_secret FROM oidc_client WHERE client_id=? AND active")) {
++                statement.setString(1, clientId);
++                try (var rows = statement.executeQuery()) {
++                    if (!rows.next()) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                    var approved = fromJson(rows.getString(1));
++                    var ordinary = requested.stream().filter(value -> !ProjectScopeIssuance.UI_SELECTOR.equals(value)).toList();
++                    if (!approved.containsAll(ordinary)) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                    if (requested.contains(ProjectScopeIssuance.UI_SELECTOR) && (!"system".equals(rows.getString(2)) || rows.getString(3).isBlank())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                    return new ProjectAuthorization(new Scope(ordinary.toArray(new String[0])), null);
++                }
++            } catch (SQLException failure) { throw new IllegalStateException("Cannot validate client scopes", failure); }
++        }
++        if (projectDirectory == null) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        try {
++            if (!projectDirectory.get().activated(connection)) {
++                throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            }
++            try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) { lock.execute(); }
++            var snapshot = projectDirectory.get().forClient(connection, clientId).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
++            var member = snapshot.memberships().stream().filter(value -> value.clientId().equals(clientId) && value.approved())
++                .findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
++            var assignment = snapshot.assignments().stream().filter(value -> value.subject().equals(subject)
++                && value.issuer().equals(configuration.getIssuer())).findFirst();
++            var active = snapshot.scopes().stream().filter(value -> value.active()).map(value -> value.scope())
++                .collect(java.util.stream.Collectors.toUnmodifiableSet());
++            var assigned = assignment.map(value -> value.projectScopes()).orElse(Set.of());
++            var protocols = new HashSet<>(configuration.getMcpScopes());
++            protocols.addAll(projectDirectory.get().protocolScopes(connection).stream().map(value -> value.scope()).toList());
++            protocols.addAll(Set.of("openid", "profile", "email", ProjectScopeIssuance.UI_SELECTOR));
++            // Classification vocabulary and the current client's protocol upper bound are distinct.
++            Set<String> registeredProtocols;
++            String registeredKind;
++            try (var statement = connection.prepareStatement("SELECT scopes,client_kind FROM oidc_client WHERE client_id=? AND active FOR SHARE")) {
++                statement.setString(1,clientId);
++                try (var rows = statement.executeQuery()) {
++                    if (!rows.next()) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                    registeredProtocols = Set.copyOf(fromJson(rows.getString(1)));
++                    registeredKind = rows.getString(2);
++                }
++            }
++            for (String requestedScope : requested) {
++                if (protocols.contains(requestedScope) && !registeredProtocols.contains(requestedScope))
++                    throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            }
++            if (requested.contains(ProjectScopeIssuance.UI_SELECTOR)) {
++                if (!member.firstPartyUi() || !"system".equals(registeredKind)) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                try (var receipt = connection.prepareStatement("SELECT ui_client_id FROM oidc_project_bootstrap WHERE singleton=1 AND consumed=TRUE")) {
++                    try (var row = receipt.executeQuery()) {
++                        if (!row.next() || !clientId.equals(row.getString(1))) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                    }
++                }
++            }
++            var consent = new HashSet<>(requested);
++            if (requested.contains(ProjectScopeIssuance.UI_SELECTOR)) consent.addAll(active);
++            final ProjectScopeIssuance.Result issued;
++            try {
++                issued = ProjectScopeIssuance.resolve(Set.copyOf(requested), protocols, active,
++                    member.allowedProjectScopes(), assigned, consent, member.firstPartyUi(), snapshot.project().active());
++            } catch (ProjectScopeIssuance.InvalidScopeException invalid) { throw new OidcException(OAuth2Error.INVALID_SCOPE); }
++            var actual = new HashSet<>(issued.protocolScopes());
++            actual.remove(ProjectScopeIssuance.UI_SELECTOR);
++            actual.addAll(issued.projectScopes());
++            var claim = Map.<String, Object>of("project_id", snapshot.project().id(), "client_id", clientId,
++                "project_scopes", issued.projectScopes(), "protocol_scopes", issued.protocolScopes().stream().filter(value -> !ProjectScopeIssuance.UI_SELECTOR.equals(value)).collect(java.util.stream.Collectors.toUnmodifiableSet()),
++                "authorization_version", snapshot.project().authorizationVersion());
++            return new ProjectAuthorization(new Scope(actual.toArray(new String[0])), claim);
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot read project authorization", failure); }
++    }
++
 +
      /** Issues an OIDC ID token (RS256 JWT) for the given client (audience). */
      public SignedJWT issueIdToken(
          final String clientId,
-@@ -154,6 +272,7 @@ public class OidcTokenService {
+@@ -129,7 +435,15 @@ public class OidcTokenService {
+         final String name,
+         final String email,
+         final List<String> roles,
+-        final String nonce
++        final
++String nonce
++    ) {
++        return issueIdToken(null, clientId, subject, name, email, roles, nonce);
++    }
++
++    private SignedJWT issueIdToken(Connection connection, String clientId, String subject, String name,
++        String email, List<String> roles,
++ String nonce
+     ) {
+         final Instant now = Instant.now();
+         final Instant exp = now.plus(configuration.getAccessTokenTtl());
+@@ -154,9 +468,18 @@ public class OidcTokenService {
              final JWTClaimsSet base = idTokenClaims.toJWTClaimsSet();
              final JWTClaimsSet jwtClaims = new JWTClaimsSet.Builder(base)
                  .jwtID(java.util.UUID.randomUUID().toString())
-+                .claim(OidcIdentityLifecycle.CLAIM, new OidcIdentityLifecycle(dataSource).activeVersion(subject).orElse(0))
++                .claim(OidcIdentityLifecycle.CLAIM,
++(connection == null ?
++ new OidcIdentityLifecycle(dataSource).activeVersion(subject
++) : OidcIdentityLifecycle.activeVersion(connection, subject)
++).orElse(0))
                  .build();
-             return sign(jwtClaims);
-         } catch (com.nimbusds.oauth2.sdk.ParseException e) {
-@@ -175,6 +294,9 @@ public class OidcTokenService {
+-            return sign(jwtClaims);
+-        } catch (com.nimbusds.oauth2.sdk.ParseException e) {
++            return sign(
++connection,
++jwtClaims);
++        } catch (com.nimbusds.oauth2.sdk.ParseException
++| SQLException
++ e) {
+             throw new IllegalStateException("Failed to build ID token claims", e);
+         }
+     }
+@@ -175,6 +498,9 @@ public class OidcTokenService {
          if (exp == null || exp.before(new Date())) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": token expired"));
          }
@@ -647,17 +945,45 @@ index 9885dcd..b380515 100644
          final StoredToken stored = findByValue(value)
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown token")));
          if (stored.revoked()) {
-@@ -184,6 +306,9 @@ public class OidcTokenService {
+@@ -184,7 +510,36 @@ public class OidcTokenService {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
          }
          validateClientAndSubject(stored);
+-        return claims;
 +        var lifecycle = new OidcIdentityLifecycle(dataSource);
 +        if (!(stored.clientId().equals(stored.subject()) && lifecycle.machineSubject(stored.subject())) && !lifecycle.matches(
 +            stored.subject(), claims.getClaim(OidcIdentityLifecycle.CLAIM))) throw new OidcException(OAuth2Error.INVALID_GRANT);
-         return claims;
++if (applicationProjects) validateProjectClaims(claims);
++
++        return claims
++;
++    }
++
++    public void validateProjectClaims(JWTClaimsSet claims) {
++        if (!applicationProjects) return;
++        Object raw = claims.getClaim("kestra_project_v1");
++        if (!(raw instanceof Map<?, ?> claim) || projectDirectory == null) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        var snapshot = projectDirectory.get().forClient(String.valueOf(claim.get("client_id"))).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT));
++        if (!snapshot.project().active() || !snapshot.project().id().equals(claim.get("project_id"))
++            || !(claim.get("authorization_version") instanceof Number epoch) || epoch.longValue() != snapshot.project().authorizationVersion()) throw new OidcException(OAuth2Error.INVALID_GRANT);
++        var membership = snapshot.memberships().stream().filter(member -> member.approved() && member.clientId().equals(claim.get("client_id"))).findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT));
++        if (claims.getAudience().isEmpty() || !membership.audiences().containsAll(claims.getAudience())) throw new OidcException(OAuth2Error.INVALID_GRANT);
++    }
++
++    private void validateProjectAudience(Connection connection, Map<String, Object> claim, String clientId, String resource) {
++        if (!applicationProjects) return;
++        if (claim == null) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        final java.util.Optional<ProjectDirectoryState.Snapshot> snapshot;
++        try { snapshot = projectDirectory.get().forClient(connection, clientId); }
++        catch (SQLException failure) { throw new IllegalStateException("Cannot validate project audience", failure); }
++        var membership = snapshot.orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE))
++            .memberships().stream().filter(member -> member.approved() && member.clientId().equals(clientId)).findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
++        if (!membership.audiences().contains(resource == null ? clientId : resource)) throw new OidcException(OAuth2Error.INVALID_SCOPE)
++;
      }
 
-@@ -235,9 +360,15 @@ public class OidcTokenService {
+     /** Validates a refresh token for exchange, returning its stored record. */
+@@ -235,9 +590,15 @@ public class OidcTokenService {
          }
      }
 
@@ -674,7 +1000,22 @@ index 9885dcd..b380515 100644
              FROM oidc_token WHERE value = ?""";
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
-@@ -317,13 +448,25 @@ public class OidcTokenService {
+@@ -263,7 +624,13 @@ public class OidcTokenService {
+     }
+
+     private SignedJWT sign(final JWTClaimsSet claims) {
+-        final var key = jwkService.activeSigningKey();
++return sign(null, claims); }
++
++    private SignedJWT sign(Connection connection, final JWTClaimsSet claims) {
++
++        final var key = jwkService.activeSigningKey(
++connection
++);
+         try {
+             final JWSSigner signer = new RSASSASigner(key);
+             final SignedJWT jwt = new SignedJWT(
+@@ -317,13 +684,25 @@ public class OidcTokenService {
 
      private void persist(
          final String type, final String clientId, final String subject,
@@ -705,7 +1046,7 @@ index 9885dcd..b380515 100644
              ps.setString(1, clientId);
              ps.setString(2, subject);
              ps.setString(3, type);
-@@ -331,6 +474,7 @@ public class OidcTokenService {
+@@ -331,6 +710,7 @@ public class OidcTokenService {
              ps.setString(5, toJson(scopes));
              ps.setTimestamp(6, Timestamp.from(issuedAt));
              ps.setTimestamp(7, Timestamp.from(expiresAt));
@@ -713,7 +1054,7 @@ index 9885dcd..b380515 100644
              ps.executeUpdate();
          } catch (SQLException e) {
              throw new IllegalStateException("Failed to persist OIDC token", e);
-@@ -349,7 +493,7 @@ public class OidcTokenService {
+@@ -349,7 +729,7 @@ public class OidcTokenService {
              fromJson(rs.getString("scopes")),
              issuedAt == null ? null : issuedAt.toInstant(),
              expiresAt == null ? null : expiresAt.toInstant(),
@@ -724,14 +1065,14 @@ index 9885dcd..b380515 100644
 
 diff --git a/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql b/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql
 new file mode 100644
-index 0000000..295ed40
+index 0000000000000000000000000000000000000000..295ed40dd33d61998ea5de2be79ccdae7a51875f
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql
 @@ -0,0 +1,2 @@
 +ALTER TABLE oidc_authorization_code ADD COLUMN resource TEXT;
 +ALTER TABLE oidc_token ADD COLUMN resource TEXT;
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java b/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java
-index 7d64c04..fd20578 100644
+index 7d64c04cbf1f8b30519ad07b5889908abcd27fc3..fd20578444c299a6add2c5f3023eb37ad7f59a42 100644
 --- a/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java
 +++ b/webserver/src/test/java/io/kestra/mcp/McpServerHandlerTransportTest.java
 @@ -49,6 +49,24 @@ class McpServerHandlerTransportTest {
@@ -761,7 +1102,7 @@ index 7d64c04..fd20578 100644
          // Given / When / Then — closing an untouched registry must not block or throw
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpBearerFilterTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpBearerFilterTest.java
 new file mode 100644
-index 0000000..65c3570
+index 0000000000000000000000000000000000000000..65c3570b3679c9740d48ffc8f62ab630c2286888
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpBearerFilterTest.java
 @@ -0,0 +1,49 @@
@@ -816,7 +1157,7 @@ index 0000000..65c3570
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpSecurityTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpSecurityTest.java
 new file mode 100644
-index 0000000..dcc306c
+index 0000000000000000000000000000000000000000..dcc306c5285c43229650eb5742bb88a194a35f21
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpSecurityTest.java
 @@ -0,0 +1,74 @@
@@ -896,7 +1237,7 @@ index 0000000..dcc306c
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpTestClientFilter.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpTestClientFilter.java
 new file mode 100644
-index 0000000..4324996
+index 0000000000000000000000000000000000000000..43249960e4e05e1431b28a6de1403542397677a1
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpHttpTestClientFilter.java
 @@ -0,0 +1,20 @@
@@ -922,7 +1263,7 @@ index 0000000..4324996
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpIdentityPropagationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpIdentityPropagationTest.java
 new file mode 100644
-index 0000000..1d4a40e
+index 0000000000000000000000000000000000000000..1d4a40ee372fdfaf00b372d3eb1080f61a364276
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpIdentityPropagationTest.java
 @@ -0,0 +1,32 @@
@@ -960,7 +1301,7 @@ index 0000000..1d4a40e
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java
 new file mode 100644
-index 0000000..0dfc9a0
+index 0000000000000000000000000000000000000000..0dfc9a082c142b1e2bcad1180eb11b058674459a
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpResourceUrlTest.java
 @@ -0,0 +1,52 @@
@@ -1018,7 +1359,7 @@ index 0000000..0dfc9a0
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 new file mode 100644
-index 0000000..0fa89f5
+index 0000000000000000000000000000000000000000..0fa89f55caa3a80e0a351e851c74933b97cea4a4
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 @@ -0,0 +1,40 @@
@@ -1063,7 +1404,7 @@ index 0000000..0fa89f5
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
-index 39da5c9..f72b236 100644
+index 39da5c9016ccb805b1e385f905b5d136c9accf40..f72b236b238180de26b05a6219c8c42d70da700b 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 @@ -49,6 +49,7 @@ class OidcAuthorizationCodeServiceTest extends OidcPostgresTestBase {
@@ -1076,7 +1417,7 @@ index 39da5c9..f72b236 100644
              keys, new io.kestra.webserver.oidc.services.OidcUserService(source, mapper),
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAuthorizationCodeTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAuthorizationCodeTest.java
 new file mode 100644
-index 0000000..2698e27
+index 0000000000000000000000000000000000000000..2698e27a6d404e392306944d42d8110535e803a7
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAuthorizationCodeTest.java
 @@ -0,0 +1,165 @@
@@ -1247,7 +1588,7 @@ index 0000000..2698e27
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceTokenTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceTokenTest.java
 new file mode 100644
-index 0000000..34cad3e
+index 0000000000000000000000000000000000000000..34cad3e7dc6e0b018196f1cc24f4365f5946f94b
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceTokenTest.java
 @@ -0,0 +1,216 @@

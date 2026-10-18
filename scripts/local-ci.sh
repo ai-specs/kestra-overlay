@@ -52,15 +52,22 @@ fi
 
 python3 -m unittest discover -s "$REPO/scripts/tests" -v
 
-echo "== scoped tests (filter: $TESTS) =="
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
   export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || true)"
 fi
+
+echo "== namespace scope contract tests =="
+(cd "$WORK" && ./gradlew :webserver:test --tests io.kestra.webserver.rbac.NamespaceScopeContractTest \
+  --tests io.kestra.mcp.McpToolScopeTest --console=plain)
+python3 "$REPO/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
+
+echo "== scoped tests (filter: $TESTS) =="
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest --tests io.kestra.mcp.McpDynamicToolListTest \
   --tests 'io.kestra.webserver.ui.*' --console=plain)
 python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
+python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 
 echo "== executable jar =="
 (cd "$WORK/ui" && npm ci && npm run build)

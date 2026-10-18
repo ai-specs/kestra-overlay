@@ -579,3 +579,167 @@ Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
 - [MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)
 - [OIDC 服务与首次安装契约](docs/r-oidc-server.md)
 - [R-EE-RBAC 扩展边界](docs/r-ee-rbac.md)
+
+## 应用项目公开契约候选（未发布）
+
+本节对应隔离候选源码，不属于上文已发布镜像的能力承诺。必须先由宿主完成 CI、镜像级
+OIDC/MCP 黑盒与镜像发布，消费扩展再从该正式镜像取得编译输入。不得从相邻开发树或
+候选 executable 编译正式插件 jar。实际部署还须执行 Compose 与真实浏览器验收。
+
+宿主只维护共享身份目录与 scope 的语义上界，不保存插件本地 grants。公开 classpath
+接口为 `io.kestra.webserver.oidc.ApplicationDirectoryV1`、`TrustedIdentityV1` 和
+`io.kestra.webserver.rbac.AuthorizationEvaluationProviderV2`。接口版本为 1、1、2；
+V2 provider 接收宿主可信身份和 tenant，返回既有 `AuthorizationEvaluationV1` 句柄。
+未发布的独立 QueryDomainV2 已删除；查询使用 `TypedAuthorization.QueryDomain` 的
+兼容扩展 `resourceDomains`，每个 term 保留 namespace 与 resource ID 的关联。
+
+启用新模式必须同时配置：
+
+```yaml
+kestra:
+  oidc:
+    enabled: true
+  repository:
+    type: postgres
+  rbac:
+    enabled: true
+    typed:
+      enabled: true
+    evaluation:
+      enabled: true
+    application-projects:
+      enabled: true
+micronaut:
+  security:
+    oauth2:
+      clients:
+        kestra:
+          scopes: [openid, profile, email, 'kestra:project-scopes']
+```
+
+这段配置须合并到前面的完整 OIDC 配置，不能替代数据库、issuer、凭据、回调和安全
+过滤配置。当前宿主目录实现仅支持 PostgreSQL。新模式要求唯一 V2 provider 和唯一
+可信身份服务；缺组件、重复组件、身份不匹配或目录故障拒绝操作，不回退 V1、roles
+或 subject 授权。关闭新模式保持既有入口语义。
+
+`TrustedIdentityV1.Identity` 的字段语义如下：
+
+| 字段 | 含义与校验 |
+|---|---|
+| contractVersion | 必须为 1；构造 DTO 不代表身份已经认证 |
+| issuer、subject、clientId | 来自已验证的身份；issuer 必须精确匹配内置可信 issuer |
+| audiences | 当前 token 的精确受众集合；REST/UI 要求配置的第一方 UI client，MCP 要求精确 resource audience |
+| tenant、projectId | 来自当前获批目录成员关系；不得用 client ID 替代项目 ID |
+| protocolScopes | 显式登记的协议能力；不生成本地业务权限，不包含 UI selector |
+| projectScopes | 签发时经项目启用、scope 启用、member 批准、subject 授予和 consent 求交的项目角色 |
+| authenticationVersion | 当前账号认证版本，账号停用或密码重置使旧版本失效 |
+| authorizationVersion | `Project.authorizationVersion`，项目 token/session 的撤权 epoch |
+| directoryRevision | 同一目录快照的 `Project.revision`，表示目录修订；不得与 epoch 互换，两者可以不同 |
+
+UI ID token 与 access token 携带同源签名项目 claim；UI cookie 后续请求仍检查当前
+账号和项目 epoch。MCP 每次请求读取当前 Bearer 身份，不复用 initialize 的授权。
+`ApplicationDirectoryV1.policyBoundaries()` 在短事务内返回不可变上界投影，不保留
+数据库连接，不提供匿名 HTTP API。协议词汇表当前由标准项与启动配置生成，不是
+动态数据库目录。所有扩展 HTTP 管理入口仍须独立检查管理域、目标和 CSRF。
+
+共享管理意图区分 IDENTITY、LOCAL_POLICY 和 BUSINESS_INSTANCE；互不包含。
+LOCAL_POLICY 的空 `projectIds` 只表示 scope 所属项目，非空集合只表示精确列出的
+目标。既有 scope 只能收窄；扩大含义必须创建新的稳定 scope 标识，重新完成本地绑定、
+client 批准、subject 授予和登录，不得给旧名称增加权限后复用旧同意。
+
+新目标项目的分步流程为：创建目标项目；在控制台项目创建新的目标管理 scope；由
+仍获准的控制台 manager 完整恢复本地控制台策略并绑定该新 scope；显式批准 UI member
+和 subject 授予；重新登录并确认最新控制台修订；再建立目标的本地绑定。修改现有
+项目目录会推进 epoch，每次后续写入前可能都需要重新登录。旧 refresh token 不能
+恢复旧授权。宿主不替插件执行本地策略恢复，也不承诺跨数据库原子事务。
+
+### 本地 CLI 首次激活计划（候选）
+
+`io.kestra.webserver.oidc.projects.ApplicationDirectoryCommand` 只用于宿主本地的受信
+维护过程，不提供 HTTP 引导入口。需要已经完成 OIDC 首装的数据库、原安装凭据文件、
+已注册 UI client 和真实 active subject。它读取 `KESTRA_CONFIGURATION`，也可读取
+`KESTRA_CONFIGURATION_PATH` 指向的 YAML；后者覆盖前者同名项。必须使用与服务一致
+的 issuer、数据库、UI client ID、存储路径和安装凭据路径。不要将凭据写入计划。
+
+计划格式为严格 UTF-8 JSON；拒绝未知字段、重复键、重复集合项、尾随文档与 null。
+下面仅演示首次建立空共享目录的身份端计划，所有 placeholder 必须替换为实际值。
+它不转换插件旧本地 roles、subjects 或 grants。已有本地策略的迁移计划归消费扩展。
+
+```json
+{
+  "formatVersion": 1,
+  "installationId": "<原安装凭据中的UUID，不含文件前缀与换行>",
+  "uiClientId": "kestra-ui",
+  "sourceRevision": 0,
+  "sourceHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "projects": [{
+    "project": {
+      "id": "console", "tenant": "main", "issuer": "https://kestra.example.org",
+      "displayName": "Console", "active": true, "revision": 1, "authorizationVersion": 1
+    },
+    "scopes": [{
+      "projectId": "console", "scope": "console-manage-v1", "description": "Console management",
+      "active": true, "resourceIntents": [],
+      "managementIntents": [
+        {"domain": "IDENTITY", "actions": ["READ", "MANAGE"], "projectIds": []},
+        {"domain": "LOCAL_POLICY", "actions": ["READ", "MANAGE"], "projectIds": []}
+      ],
+      "revision": 1
+    }],
+    "memberships": [{
+      "projectId": "console", "clientId": "kestra-ui", "approved": true,
+      "audiences": ["kestra-ui"], "allowedProjectScopes": ["console-manage-v1"],
+      "firstPartyUi": true, "revision": 1
+    }],
+    "assignments": [{
+      "projectId": "console", "issuer": "https://kestra.example.org", "subject": "<已有管理员登录名>",
+      "projectScopes": ["console-manage-v1"], "revision": 1, "authorizationVersion": 1
+    }],
+    "directoryRevision": 1
+  }]
+}
+```
+
+`sourceHash` 是规范化源目录的 SHA-256，示例值只适用于空列表 `[]`；`sourceRevision`
+是源项目 revision 之和。非空目录不得沿用这两个示例值。当前 CLI 没有通用导出命令；
+非空源计划必须先通过公开目录读取取得和核对源快照，不得猜测 hash。已消费引导的
+目录不能再次 apply。计划最多 8 MiB、嵌套深度最多 32、每个集合最多 1000 项。
+
+在兼容正式镜像中，将计划挂载为 `/work/directory-plan.json`，保留原持久卷和配置，执行：
+
+```bash
+java -cp /app/kestra io.kestra.webserver.oidc.projects.ApplicationDirectoryCommand \
+  preview /work/directory-plan.json > /work/directory-preview.json
+java -cp /app/kestra io.kestra.webserver.oidc.projects.ApplicationDirectoryCommand \
+  apply /work/directory-plan.json <预览报告中的approvalHash>
+```
+
+先审核预览的完整计划、源修订、源 hash 和 approvalHash，再显式批准 apply。apply 在
+同一事务核对原安装身份、注册 UI client、source 与批准 hash；要求至少一个真实可登录
+的身份管理员。激活会一次性消费引导、撤销旧 token/code、推进账号认证版本，旧会话
+必须重新登录。失败回滚不能开放匿名引导。此命令不创建永久 subject 管理员豁免。
+CLI 入口与目录组件已有本地探针；容器内完整 CLI、浏览器引导及最终组合仍须发布验收。
+
+### ID 查询域的首版适配范围（候选）
+
+| 消费入口 | 受限 resource ID |
+|---|---|
+| JDBC 通用查询的 FLOW、EXECUTION | 每个 term 独立编译 namespace 与 `id` 条件，分页、total、聚合前过滤 |
+| FLOW、EXECUTION 精确资源 predicate | 按完整 `(namespace,id)` term 判断，不做笛卡尔积 |
+| JDBC tenant MCP_SERVER 列表 | 用独立 tenant 资源域限制 server ID，不解释 namespace |
+| NAMESPACE、LOG、TRIGGER、KV_METADATA、NAMESPACE_FILE_METADATA 的通用 JDBC 查询 | ALL_IDS 按 namespace term 过滤；RESTRICTED_IDS 未适配，明确拒绝 |
+| namespace-only predicate、日志 AccessScope 与未适配后端 | 不丢弃 ID 后降级允许；RESTRICTED_IDS 明确拒绝 |
+
+MCP 工具业务仍须同时满足协议能力门和扩展本地授权。以上支持表不意味着其他后端、
+全量业务页面或所有 ID 维度已经验收；新增适配必须重新提供真实查询和无泄露证据。
+
+
+协议 scope 的分类词汇表与 client 注册上界是两件事。项目模式在同一连接读取当前
+active client 的 `oidc_client.scopes`：协议项必须在该上界内，refresh 也重新检查；
+项目项只受 member.allowedProjectScopes、subject assignment 和项目启用约束，不要求
+重复写入旧 client.scopes。UI selector 除显式注册外，还须匹配第一方成员、system
+client 和已消费安装凭据中的 UI client ID。全局 MCP 能力词汇表不能扩大注册范围。
+
+目录 namespace exact/subtrees 逐值使用 `[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*`；
+资源 ID 必须非空、不带首尾空白或控制字符。有效 opaque ID 保留原字节，不按冒号、
+斜线或其他符号推断资源含义。codec 的结构校验不能替代这些构造边界的语义检查。
