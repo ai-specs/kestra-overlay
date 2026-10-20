@@ -435,13 +435,17 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 
 `dd5f6c3` 的正式镜像通过 CI 后，部署仓隔离组合又发现 `/oauth/callback/kestra` 跳转的 UI 文档返回 401。实际失败路径是宿主 `OidcIdentityLifecycleFilter` 调用 `OidcTrustedIdentity.validate`，后者在声明组件缺失时拒绝已经签发的零应用组 scope 身份。修正的最小边界：可信身份仍逐项验证签名后的 issuer、audience、client、目录成员、用户状态与 epoch；缺声明组件时只接受空应用组 scope，任何非空 scope 整体拒绝。业务评估提供者仍缺席并拒绝全部资源操作。对应 `0362` 测试验证零 scope 身份与非零 scope 拒绝；正式镜像和根仓缺插件组合门仍待重跑。
 
-### 应用组管理授权边界提案（待接收、未发布）
+### 应用组管理授权边界提案（已接收、未实施、未发布）
 
 消费项目仍为 `kestra-plugin-rbac`。目标要求应用组 scope 仅有 `key/name/description`；当前 `ApplicationDirectoryV1.ScopeDefinition` 保存 `resourceIntents/managementIntents`，`JdbcApplicationDirectoryV1.authorize` 和 `hasAdministrator` 依赖这些字段，插件 `ProjectPolicyBoundary` 将其作为 Kestra 实际权限上界。管理员更改 scope 名称或成员登记会推进全组目录修订，插件随后要求“完整项目恢复”。这些是目标模型的实际失败路径；代码入口见 `patches/webserver/0360-application-project.patch`、`0363-application-project.patch` 与插件当前组合失败的待补探针。OSS 没有独立应用组管理授权入口；已发布的 typed 资源授权只接收宿主已解析的资源操作，不能直接替代目录事务内的管理决策。
 
 候选最小契约：宿主目录 CRUD 在原事务内向唯一版本化管理决策 SPI 提交已验证的主体、应用组、client、scope key、目标与动作；插件只返回允许或拒绝，不能改写宿主目录。首次安装由安装凭据和显式批准计划完成，不使用普通 HTTP 决策旁路。最后管理员保护由宿主枚举实际可登录的主体、成员和 scope，交由同一 SPI 判断候选操作后仍有管理员；插件从自身 Kestra 运行时策略读取管理 grant。宿主不保存 Kestra 资源意图、管理意图或插件策略。缺 provider、多实例、版本不符、数据库错误、异常、超时和未解析目标均拒绝，事务回滚且不改变目录或会话。显示名称和说明变化不要求全组人工恢复；撤权仍逐请求检查。候选需要评估共享事务连接的公开边界，避免目录持锁时插件再借连接导致单连接池死锁。
 
-兼容性：新安装只使用新公开契约，不保留旧意图字段、旧全组恢复 API 或项目 claim。宿主独立探针须覆盖同 scope 完整管理权限、READ/MANAGE 分离、最后管理员、并发写入、缺组件、存储故障、候选失败回滚和关闭功能。插件独立测试须证明 Kestra 实际策略是唯一资源授权事实来源；根仓用正式产物复测用户授予、应用支持交集、撤权、refresh、REST/MCP/UI 与无副作用。主控尚未接收该提案为实现，先调查事务边界和最小 SPI，再决定具体签名。
+兼容性：新安装只使用新公开契约，不保留旧意图字段、旧全组恢复 API 或项目 claim。宿主独立探针须覆盖同 scope 完整管理权限、READ/MANAGE 分离、最后管理员、并发写入、缺组件、存储故障、候选失败回滚和关闭功能。插件独立测试须证明 Kestra 实际策略是唯一资源授权事实来源；根仓用正式产物复测用户授予、应用支持交集、撤权、refresh、REST/MCP/UI 与无副作用。
+
+主控裁决：接收移除共享意图及完整恢复的最小机制需求。新公开接口在宿主事务中接收已经验证的当前身份、目标应用组、动作和当前目录快照，只返回允许或拒绝；用于最后管理员检查的候选快照必须另设只读方法，不能把候选主体伪装成已登录身份。插件只从自己的已提交 Kestra 实际策略读取管理 grant；声明元数据 `key/name` 不参与决策。宿主先核对 issuer、client、audience、用户状态、scope 授予和应用支持，再调用唯一 provider；provider 不能读取宿主表或调用宿主写 API。跨连接一致性必须用真实 PostgreSQL 并发探针验证，当前没有跨仓共享事务承诺。内置应用组首次激活由安装凭据和批准计划控制，不能调用普通管理授权接口；其后写入缺 provider 时失败关闭。此裁决未冻结 Java 方法签名，须以独立探针确认事务访问路径后再实施。
+
+候选实现进度：验证树已新增 `ApplicationGroupManagementV1` 和目录写入激活点；普通管理写入先由宿主核对可信身份、应用组成员、用户授予和 scope 状态，再要求唯一 provider 返回允许。缺 provider 或拒绝均不写库，独立 PostgreSQL 探针已复现。候选 `reachable` 方法尚未接入最后管理员检查，旧 `resourceIntents/managementIntents`、目录上界和完整恢复仍在公开模型中，因此该候选不得发布为完整目标契约。下一步先完成候选 reachability、移除共享意图并更新插件独立策略，再执行宿主全链构建。
 
 ### 已接收的 UI 项目 scope 选择器（REQ-0360）
 

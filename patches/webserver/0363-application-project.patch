@@ -212,14 +212,15 @@ index 0000000..da442e4
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 new file mode 100644
-index 0000000..3e3f694
+index 0000000..2be41e5
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
-@@ -0,0 +1,716 @@
+@@ -0,0 +1,736 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
 +import io.kestra.webserver.oidc.ApplicationDirectoryV1;
++import io.kestra.webserver.oidc.ApplicationGroupManagementV1;
 +import io.kestra.webserver.oidc.OidcConfiguration;
 +import io.kestra.webserver.oidc.TrustedIdentityV1;
 +import io.micronaut.context.annotation.Requires;
@@ -245,20 +246,29 @@ index 0000000..3e3f694
 +public final class JdbcApplicationDirectoryV1 implements ApplicationDirectoryV1, ProjectDirectoryState {
 +    private final DataSource source;
 +    private final BeanProvider<TrustedIdentityV1> identities;
++    private final BeanProvider<ApplicationGroupManagementV1> management;
 +    private final OidcConfiguration configuration;
 +    private final ObjectMapper mapper;
 +    private final DirectorySnapshotCodec codec = new DirectorySnapshotCodec();
 +
 +    public JdbcApplicationDirectoryV1(DataSource source, TrustedIdentityV1 identities,
 +                                      OidcConfiguration configuration, ObjectMapper mapper) {
-+        this(source, new DirectIdentityProvider(identities), configuration, mapper);
++        this(source, new DirectIdentityProvider(identities), new MissingManagementProvider(), configuration, mapper);
++    }
++
++    public JdbcApplicationDirectoryV1(DataSource source, TrustedIdentityV1 identities,
++                                      ApplicationGroupManagementV1 management,
++                                      OidcConfiguration configuration, ObjectMapper mapper) {
++        this(source, new DirectIdentityProvider(identities), new DirectManagementProvider(management), configuration, mapper);
 +    }
 +
 +    @jakarta.inject.Inject
 +    public JdbcApplicationDirectoryV1(DataSource source, BeanProvider<TrustedIdentityV1> identities,
++                                      BeanProvider<ApplicationGroupManagementV1> management,
 +                                      OidcConfiguration configuration, ObjectMapper mapper) {
 +        this.source = Objects.requireNonNull(source);
 +        this.identities = Objects.requireNonNull(identities);
++        this.management = Objects.requireNonNull(management);
 +        this.configuration = Objects.requireNonNull(configuration);
 +        this.mapper = Objects.requireNonNull(mapper);
 +    }
@@ -473,9 +483,9 @@ index 0000000..3e3f694
 +        var identity = requireIdentity().current();
 +        return transaction(connection -> {
 +            lock(connection);
-+            authorize(connection, identity, "MANAGE");
 +            require(input != null && "main".equals(input.tenant()) && input.displayName() != null);
 +            require(input.id() != null && input.id().matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"));
++            authorize(connection, identity, input.id(), ApplicationGroupManagementV1.Action.MANAGE);
 +            if (find(connection, input.id()).isPresent()) throw failure(Failure.CONFLICT);
 +            Project project = new Project(input.id(), "main", configuration.getIssuer(), input.displayName(), true, 1, 1);
 +            save(connection, new Snapshot(project, List.of(), List.of(), List.of(), 1));
@@ -653,7 +663,7 @@ index 0000000..3e3f694
 +        var identity = requireIdentity().current();
 +        return transaction(connection -> {
 +            lock(connection);
-+            authorize(connection, identity, "MANAGE");
++            authorize(connection, identity, project, ApplicationGroupManagementV1.Action.MANAGE);
 +            Snapshot old = find(connection, project).orElseThrow(() -> failure(Failure.NOT_FOUND));
 +            if (expected <= 0 || expected != Long.MAX_VALUE && old.project().revision() != expected) throw failure(Failure.CONFLICT);
 +            Snapshot candidate = change.apply(connection, old);
@@ -679,7 +689,8 @@ index 0000000..3e3f694
 +        return identities.get();
 +    }
 +
-+    private void authorize(Connection connection, TrustedIdentityV1.Identity identity, String action) throws SQLException {
++    private void authorize(Connection connection, TrustedIdentityV1.Identity identity,
++                           String targetApplicationGroupId, ApplicationGroupManagementV1.Action action) throws SQLException {
 +        if (identity == null || !"main".equals(identity.tenant()) || !configuration.getIssuer().equals(identity.issuer())) throw failure(Failure.FORBIDDEN);
 +        Snapshot state = find(connection, identity.projectId()).orElseThrow(() -> failure(Failure.FORBIDDEN));
 +        var project = state.project();
@@ -691,13 +702,12 @@ index 0000000..3e3f694
 +        var assignment = state.assignments().stream().filter(value -> value.issuer().equals(identity.issuer()) && value.subject().equals(identity.subject())).findFirst().orElseThrow(() -> failure(Failure.FORBIDDEN));
 +        var member = state.memberships().stream().filter(value -> value.clientId().equals(identity.clientId()) && value.approved()).findFirst().orElseThrow(() -> failure(Failure.FORBIDDEN));
 +        if (!member.audiences().containsAll(identity.audiences()) || identity.audiences().isEmpty()) throw failure(Failure.FORBIDDEN);
-+        boolean allowed = false;
 +        for (String name : identity.projectScopes()) {
 +            var scope = state.scopes().stream().filter(value -> value.scope().equals(name) && value.active()).findFirst().orElseThrow(() -> failure(Failure.FORBIDDEN));
 +            if (!assignment.projectScopes().contains(name) || !member.allowedProjectScopes().contains(name)) throw failure(Failure.FORBIDDEN);
-+            if (scope.managementIntents().stream().anyMatch(intent -> intent.domain() == ManagementDomain.IDENTITY && intent.actions().contains(action))) allowed = true;
 +        }
-+        if (!allowed) throw failure(Failure.FORBIDDEN);
++        if (!management.isUnique()) throw failure(Failure.UNAVAILABLE);
++        if (!management.get().authorize(identity, targetApplicationGroupId, action)) throw failure(Failure.FORBIDDEN);
 +    }
 +
 +    public void guardSubjectDeactivation(Connection connection, String issuer, String subject) throws SQLException {
@@ -915,6 +925,16 @@ index 0000000..3e3f694
 +        public TrustedIdentityV1 get() { return value; }
 +    }
 +
++    private record DirectManagementProvider(ApplicationGroupManagementV1 value) implements BeanProvider<ApplicationGroupManagementV1> {
++        public boolean isUnique() { return true; }
++        public ApplicationGroupManagementV1 get() { return value; }
++    }
++
++    private static final class MissingManagementProvider implements BeanProvider<ApplicationGroupManagementV1> {
++        public boolean isUnique() { return false; }
++        public ApplicationGroupManagementV1 get() { throw new IllegalStateException("Application group management is unavailable"); }
++    }
++
 +    private static void exact(String value) { require(value != null && !value.isBlank() && value.equals(value.trim()) && !value.contains("*") && value.chars().noneMatch(Character::isISOControl)); }
 +    private static void require(boolean condition) { if (!condition) throw failure(Failure.INVALID); }
 +    private static DirectoryException failure(Failure failure) { return new DirectoryException(failure); }
@@ -1035,15 +1055,16 @@ index 0000000..9e9f2c8
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
 new file mode 100644
-index 0000000..16abe18
+index 0000000..c7fb90d
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,257 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
 +import io.kestra.webserver.oidc.ApplicationDirectoryV1.*;
 +import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.ApplicationGroupManagementV1;
 +import io.kestra.webserver.oidc.OidcPostgresTestBase;
 +import io.kestra.webserver.oidc.TrustedIdentityV1;
 +import io.kestra.webserver.oidc.services.OidcInstallationReceipt;
@@ -1065,6 +1086,16 @@ index 0000000..16abe18
 +        }
 +    }
 +    private static final String ISSUER = "https://identity.example.invalid";
++    private static ApplicationGroupManagementV1 management() {
++        return new ApplicationGroupManagementV1() {
++            public boolean authorize(TrustedIdentityV1.Identity identity, String target, Action action) {
++                return identity.projectScopes().contains("admin-scope") && action == Action.MANAGE;
++            }
++            public boolean reachable(Candidate candidate, String target, Action action) {
++                return candidate.scopeKeys().contains("admin-scope") && action == Action.MANAGE;
++            }
++        };
++    }
 +    private static final class Actor implements TrustedIdentityV1 {
 +        private TrustedIdentityV1.Identity value;
 +        public TrustedIdentityV1.Identity current() { return value; }
@@ -1107,7 +1138,7 @@ index 0000000..16abe18
 +            statement.execute("INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,expires_at,used) VALUES('old-code','ui','admin','https://identity.example.invalid/callback',now()+interval '1 hour',FALSE)");
 +        }
 +        var actor=new Actor();var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
-+        var directory=new JdbcApplicationDirectoryV1(source,actor,configuration,new ObjectMapper());directory.initializeSchema();
++        var directory=new JdbcApplicationDirectoryV1(source,actor,management(),configuration,new ObjectMapper());directory.initializeSchema();
 +        var manager=new ScopeDefinition("project","admin-scope","Administrator","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
 +        var snapshot=new ProjectDirectoryState.Snapshot(new Project("project","main",ISSUER,"Project",true,1,1),List.of(manager),
 +            List.of(new ClientMembership("project","ui",true,Set.of("ui-aud"),Set.of("admin-scope"),true,1)),
@@ -1150,6 +1181,24 @@ index 0000000..16abe18
 +        assertThat(changed.revision()).isEqualTo(2);context.login();
 +        assertThatThrownBy(()->context.directory.updateScope("project","read",1,readScope())).isInstanceOf(DirectoryException.class);
 +        assertThat(context.directory.snapshot("project").project().authorizationVersion()).isEqualTo(3);
++    }
++    @Test void shouldRejectDirectoryWriteWhenManagementProviderIsMissingOrDenies() throws Exception {
++        var context=context();context.apply();
++        var settings=new OidcConfiguration();settings.setIssuer(ISSUER);
++        var before=context.directory.snapshot("project");
++        var missing=new JdbcApplicationDirectoryV1(context.source,context.actor,settings,new ObjectMapper());
++        assertThatThrownBy(()->missing.updateProject("project",before.project().revision(),"Denied",true))
++            .isInstanceOf(DirectoryException.class).satisfies(error ->
++                assertThat(((DirectoryException)error).failure()).isEqualTo(Failure.UNAVAILABLE));
++        ApplicationGroupManagementV1 denied=new ApplicationGroupManagementV1() {
++            public boolean authorize(TrustedIdentityV1.Identity identity,String target,Action action){return false;}
++            public boolean reachable(Candidate candidate,String target,Action action){return false;}
++        };
++        var forbidden=new JdbcApplicationDirectoryV1(context.source,context.actor,denied,settings,new ObjectMapper());
++        assertThatThrownBy(()->forbidden.updateProject("project",before.project().revision(),"Denied",true))
++            .isInstanceOf(DirectoryException.class).satisfies(error ->
++                assertThat(((DirectoryException)error).failure()).isEqualTo(Failure.FORBIDDEN));
++        assertThat(context.directory.snapshot("project")).isEqualTo(before);
 +    }
 +    @Test void shouldDeleteScopeOnlyAfterAllMembersAndUsersReleaseIt() throws Exception {
 +        var context=context();context.apply();var scope=context.directory.createScope("project",1,readScope());context.login();

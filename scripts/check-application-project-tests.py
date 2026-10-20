@@ -16,7 +16,7 @@ REQUIRED = {
     "io.kestra.webserver.oidc.OidcProjectTokenIssuanceTest": 4,
     "io.kestra.webserver.oidc.OidcApplicationProjectIntegrationTest": 8,
     "io.kestra.webserver.oidc.projects.DirectoryContextTest": 1,
-    "io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1PostgresTest": 12,
+    "io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1PostgresTest": 13,
     "io.kestra.webserver.rbac.AuthorizationEvaluationProjectTest": 2,
     "io.kestra.webserver.rbac.ExtensionResourceAdapterTest": 2,
     "io.kestra.webserver.rbac.TypedResourceDomainBoundaryTest": 3,

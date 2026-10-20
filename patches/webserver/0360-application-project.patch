@@ -281,6 +281,41 @@ index 0000000..8165af0
 +
 +    List<ProtocolScope> protocolScopes();
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupManagementV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupManagementV1.java
+new file mode 100644
+index 0000000..28ecace
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupManagementV1.java
+@@ -0,0 +1,29 @@
++package io.kestra.webserver.oidc;
++
++import java.util.Objects;
++import java.util.Set;
++
++public interface ApplicationGroupManagementV1 {
++    int CONTRACT_VERSION = 1;
++
++    enum Action { READ, MANAGE }
++
++    record Candidate(String applicationGroupId, String issuer, String subject, String clientId,
++                     Set<String> audiences, Set<String> scopeKeys) {
++        public Candidate {
++            applicationGroupId = Objects.requireNonNull(applicationGroupId);
++            issuer = Objects.requireNonNull(issuer);
++            subject = Objects.requireNonNull(subject);
++            clientId = Objects.requireNonNull(clientId);
++            audiences = Set.copyOf(audiences);
++            scopeKeys = Set.copyOf(scopeKeys);
++            if (applicationGroupId.isBlank() || issuer.isBlank() || subject.isBlank()
++                || clientId.isBlank() || audiences.isEmpty() || scopeKeys.isEmpty())
++                throw new IllegalArgumentException("Incomplete application group candidate");
++        }
++    }
++
++    boolean authorize(TrustedIdentityV1.Identity identity, String targetApplicationGroupId, Action action);
++
++    boolean reachable(Candidate candidate, String targetApplicationGroupId, Action action);
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationScopeDeclarationsV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationScopeDeclarationsV1.java
 new file mode 100644
 index 0000000..6f77e24

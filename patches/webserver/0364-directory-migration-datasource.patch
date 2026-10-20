@@ -5,20 +5,20 @@
 # 触达上游文件: JdbcApplicationDirectoryV1 与注入数据源迁移测试
 # 移除条件: 上游提供等价无请求上下文目录迁移
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
-index 280f074..e00fa12 100644
+index 2be41e5..bbc9d98 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
-@@ -39,7 +39,7 @@ public final class JdbcApplicationDirectoryV1 implements ApplicationDirectoryV1,
-     @jakarta.inject.Inject
+@@ -48,7 +48,7 @@ public final class JdbcApplicationDirectoryV1 implements ApplicationDirectoryV1,
      public JdbcApplicationDirectoryV1(DataSource source, BeanProvider<TrustedIdentityV1> identities,
+                                       BeanProvider<ApplicationGroupManagementV1> management,
                                        OidcConfiguration configuration, ObjectMapper mapper) {
 -        this.source = Objects.requireNonNull(source);
 +        this.source = io.micronaut.data.connection.jdbc.advice.DelegatingDataSource.unwrapDataSource(Objects.requireNonNull(source));
          this.identities = Objects.requireNonNull(identities);
+         this.management = Objects.requireNonNull(management);
          this.configuration = Objects.requireNonNull(configuration);
-         this.mapper = Objects.requireNonNull(mapper);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
-index 150abd0..248208e 100644
+index 9e9f2c8..9dacb42 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
 @@ -25,7 +25,12 @@ class DirectoryContextTest extends OidcPostgresTestBase {

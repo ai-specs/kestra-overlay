@@ -243,10 +243,10 @@ index 0000000..fddecfb
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationProjectIntegrationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationProjectIntegrationTest.java
 new file mode 100644
-index 0000000..1cbfae5
+index 0000000..a80939f
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationProjectIntegrationTest.java
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,265 @@
 +package io.kestra.webserver.oidc;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -268,6 +268,16 @@ index 0000000..1cbfae5
 + */
 +class OidcApplicationProjectIntegrationTest extends OidcPostgresTestBase {
 +    private static final String ISSUER="https://identity.example.invalid";
++    private static ApplicationGroupManagementV1 management() {
++        return new ApplicationGroupManagementV1() {
++            public boolean authorize(TrustedIdentityV1.Identity identity, String target, Action action) {
++                return identity.projectScopes().contains("manage") && action == Action.MANAGE;
++            }
++            public boolean reachable(Candidate candidate, String target, Action action) {
++                return candidate.scopeKeys().contains("manage") && action == Action.MANAGE;
++            }
++        };
++    }
 +    private static final String CALLBACK=ISSUER+"/oauth/callback/kestra";
 +    private static final class Actor implements TrustedIdentityV1 {
 +        Identity identity;
@@ -308,7 +318,7 @@ index 0000000..1cbfae5
 +                new OidcInstallationReceipt(receipt).create(installation);
 +            }
 +            config.setIssuer(ISSUER);
-+            var mapper=new ObjectMapper();directory=new JdbcApplicationDirectoryV1(source,actor,config,mapper);directory.initializeSchema();
++            var mapper=new ObjectMapper();directory=new JdbcApplicationDirectoryV1(source,actor,management(),config,mapper);directory.initializeSchema();
 +            var manager=new ScopeDefinition("project","manage","Manager","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
 +            var read=new ScopeDefinition("project","read","Reader","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",new NamespaceDomain(DomainKind.RESTRICTED,Set.of("a"),Set.of()),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST"))),List.of(),1);
 +            var project=new Project("project","main",ISSUER,"Project",true,1,1);
@@ -410,7 +420,7 @@ index 0000000..1cbfae5
 +    private SingleConnectionSource singleConnection(Fixture f) { return new SingleConnectionSource(f.source); }
 +    @Test void exchangeAndRefreshUseOneConnectionWithoutNestedPoolBorrow() throws Exception {
 +        try (var f = new Fixture(); var pool = singleConnection(f)) {
-+            var directory = new JdbcApplicationDirectoryV1(pool, f.actor, f.config, new ObjectMapper());
++            var directory = new JdbcApplicationDirectoryV1(pool, f.actor, management(), f.config, new ObjectMapper());
 +            var tokens = new OidcTokenService(pool, new ObjectMapper(), f.config, new OidcJwkService(pool), provider(directory),provider(declarations()));
 +            var flag = OidcTokenService.class.getDeclaredField("applicationProjects"); flag.setAccessible(true); flag.set(tokens,true);
 +            var requested = new Scope("openid","read");
@@ -435,7 +445,7 @@ index 0000000..1cbfae5
 +            org.mockito.Mockito.when(environment.getProperty("kestra.oidc.bootstrap.client-name",String.class)).thenReturn(Optional.of("kestra"));
 +            org.mockito.Mockito.when(environment.getProperty("micronaut.security.oauth2.clients.kestra.client-id",String.class)).thenReturn(Optional.of("ui"));
 +            var environmentField = OidcTrustedIdentity.class.getDeclaredField("environment"); environmentField.setAccessible(true); environmentField.set(trusted,environment);
-+            directory[0] = new JdbcApplicationDirectoryV1(pool,trusted,f.config,new ObjectMapper());
++            directory[0] = new JdbcApplicationDirectoryV1(pool,trusted,management(),f.config,new ObjectMapper());
 +            var request = io.micronaut.http.HttpRequest.GET("/api/v1/main/extensions/probe/projects");
 +            request.setAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION,
 +                io.micronaut.security.authentication.Authentication.build("admin",List.of(),Map.of("iss",ISSUER,"aud",List.of("ui"),OidcIdentityLifecycle.CLAIM,1L,
