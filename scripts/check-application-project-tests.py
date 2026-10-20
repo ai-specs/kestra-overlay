@@ -13,7 +13,7 @@ REQUIRED = {
     "io.kestra.webserver.oidc.TrustedIdentityV1Test": 1,
     "io.kestra.webserver.oidc.ApplicationGroupScopeIssuanceTest": 4,
     "io.kestra.webserver.oidc.OidcTrustedIdentityTest": 6,
-    "io.kestra.webserver.oidc.OidcProjectTokenIssuanceTest": 3,
+    "io.kestra.webserver.oidc.OidcProjectTokenIssuanceTest": 4,
     "io.kestra.webserver.oidc.OidcApplicationProjectIntegrationTest": 8,
     "io.kestra.webserver.oidc.projects.DirectoryContextTest": 1,
     "io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1PostgresTest": 12,

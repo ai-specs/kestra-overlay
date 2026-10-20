@@ -502,7 +502,7 @@ index cd3f6e2..deec90f 100644
                      }
                  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-index 9885dcd..716a9de 100644
+index 9885dcd..9330a3c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 @@ -8,7 +8,12 @@ import java.sql.Timestamp;
@@ -660,7 +660,7 @@ index 9885dcd..716a9de 100644
              .expirationTime(Date.from(exp))
              .issueTime(Date.from(now))
              .jwtID(java.util.UUID.randomUUID().toString())
-@@ -109,19 +201,241 @@ public class OidcTokenService {
+@@ -109,19 +201,245 @@ public class OidcTokenService {
          if (roles != null && !roles.isEmpty()) {
              claims.claim("roles", roles);
          }
@@ -841,7 +841,7 @@ index 9885dcd..716a9de 100644
 +                }
 +            } catch (SQLException failure) { throw new IllegalStateException("Cannot validate client scopes", failure); }
 +        }
-+        if (projectDirectory == null || declarations == null || !declarations.isUnique()) throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        if (projectDirectory == null) throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +        try {
 +            if (!projectDirectory.get().activated(connection)) {
 +                throw new OidcException(OAuth2Error.INVALID_SCOPE);
@@ -855,9 +855,13 @@ index 9885dcd..716a9de 100644
 +            var active = snapshot.scopes().stream().filter(value -> value.active()).map(value -> value.scope())
 +                .collect(java.util.stream.Collectors.toUnmodifiableSet());
 +            var assigned = assignment.map(value -> value.projectScopes()).orElse(Set.of());
-+            var declared = declarations.get().current(connection, snapshot.project().id(), clientId);
-+            if (!snapshot.project().id().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId()))
-+                throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            Set<String> declaredScopes = Set.of();
++            if (declarations != null && declarations.isUnique()) {
++                var declared = declarations.get().current(connection, snapshot.project().id(), clientId);
++                if (!snapshot.project().id().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId()))
++                    throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                declaredScopes = declared.supportedScopeKeys();
++            }
 +            var protocols = new HashSet<>(configuration.getMcpScopes());
 +            protocols.addAll(projectDirectory.get().protocolScopes(connection).stream().map(value -> value.scope()).toList());
 +            protocols.addAll(Set.of("openid", "profile", "email", ApplicationGroupScopeIssuance.UI_SELECTOR));
@@ -889,7 +893,7 @@ index 9885dcd..716a9de 100644
 +            final ApplicationGroupScopeIssuance.Result issued;
 +            try {
 +                issued = ApplicationGroupScopeIssuance.resolve(Set.copyOf(requested), protocols, active,
-+                    intersection(member.allowedProjectScopes(), declared.supportedScopeKeys()), assigned, consent,
++                    intersection(member.allowedProjectScopes(), declaredScopes), assigned, consent,
 +                    member.firstPartyUi(), snapshot.project().active());
 +            } catch (ApplicationGroupScopeIssuance.InvalidScopeException invalid) { throw new OidcException(OAuth2Error.INVALID_SCOPE); }
 +            var actual = new HashSet<>(issued.protocolScopes());
@@ -906,7 +910,7 @@ index 9885dcd..716a9de 100644
      /** Issues an OIDC ID token (RS256 JWT) for the given client (audience). */
      public SignedJWT issueIdToken(
          final String clientId,
-@@ -129,7 +443,15 @@ public class OidcTokenService {
+@@ -129,7 +447,15 @@ public class OidcTokenService {
          final String name,
          final String email,
          final List<String> roles,
@@ -923,7 +927,7 @@ index 9885dcd..716a9de 100644
      ) {
          final Instant now = Instant.now();
          final Instant exp = now.plus(configuration.getAccessTokenTtl());
-@@ -154,9 +476,18 @@ public class OidcTokenService {
+@@ -154,9 +480,18 @@ public class OidcTokenService {
              final JWTClaimsSet base = idTokenClaims.toJWTClaimsSet();
              final JWTClaimsSet jwtClaims = new JWTClaimsSet.Builder(base)
                  .jwtID(java.util.UUID.randomUUID().toString())
@@ -944,7 +948,7 @@ index 9885dcd..716a9de 100644
              throw new IllegalStateException("Failed to build ID token claims", e);
          }
      }
-@@ -175,6 +506,9 @@ public class OidcTokenService {
+@@ -175,6 +510,9 @@ public class OidcTokenService {
          if (exp == null || exp.before(new Date())) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": token expired"));
          }
@@ -954,7 +958,7 @@ index 9885dcd..716a9de 100644
          final StoredToken stored = findByValue(value)
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown token")));
          if (stored.revoked()) {
-@@ -184,7 +518,60 @@ public class OidcTokenService {
+@@ -184,7 +522,60 @@ public class OidcTokenService {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
          }
          validateClientAndSubject(stored);
@@ -1016,7 +1020,7 @@ index 9885dcd..716a9de 100644
      }
  
      /** Validates a refresh token for exchange, returning its stored record. */
-@@ -235,9 +622,15 @@ public class OidcTokenService {
+@@ -235,9 +626,15 @@ public class OidcTokenService {
          }
      }
  
@@ -1033,7 +1037,7 @@ index 9885dcd..716a9de 100644
              FROM oidc_token WHERE value = ?""";
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
-@@ -263,7 +656,13 @@ public class OidcTokenService {
+@@ -263,7 +660,13 @@ public class OidcTokenService {
      }
  
      private SignedJWT sign(final JWTClaimsSet claims) {
@@ -1048,7 +1052,7 @@ index 9885dcd..716a9de 100644
          try {
              final JWSSigner signer = new RSASSASigner(key);
              final SignedJWT jwt = new SignedJWT(
-@@ -317,13 +716,25 @@ public class OidcTokenService {
+@@ -317,13 +720,25 @@ public class OidcTokenService {
  
      private void persist(
          final String type, final String clientId, final String subject,
@@ -1079,7 +1083,7 @@ index 9885dcd..716a9de 100644
              ps.setString(1, clientId);
              ps.setString(2, subject);
              ps.setString(3, type);
-@@ -331,6 +742,7 @@ public class OidcTokenService {
+@@ -331,6 +746,7 @@ public class OidcTokenService {
              ps.setString(5, toJson(scopes));
              ps.setTimestamp(6, Timestamp.from(issuedAt));
              ps.setTimestamp(7, Timestamp.from(expiresAt));
@@ -1087,7 +1091,7 @@ index 9885dcd..716a9de 100644
              ps.executeUpdate();
          } catch (SQLException e) {
              throw new IllegalStateException("Failed to persist OIDC token", e);
-@@ -349,7 +761,7 @@ public class OidcTokenService {
+@@ -349,7 +765,7 @@ public class OidcTokenService {
              fromJson(rs.getString("scopes")),
              issuedAt == null ? null : issuedAt.toInstant(),
              expiresAt == null ? null : expiresAt.toInstant(),
@@ -1096,7 +1100,7 @@ index 9885dcd..716a9de 100644
          );
      }
  
-@@ -368,4 +780,10 @@ public class OidcTokenService {
+@@ -368,4 +784,10 @@ public class OidcTokenService {
              throw new IllegalStateException("Failed to parse scopes", e);
          }
      }

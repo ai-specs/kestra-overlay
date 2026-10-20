@@ -503,10 +503,10 @@ index 0000000..1cbfae5
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcProjectTokenIssuanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProjectTokenIssuanceTest.java
 new file mode 100644
-index 0000000..0321640
+index 0000000..e4e4745
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProjectTokenIssuanceTest.java
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,122 @@
 +package io.kestra.webserver.oidc;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -557,6 +557,19 @@ index 0000000..0321640
 +    }
 +
 +    @Test
++    void missingDeclarationProviderAllowsProtocolLoginButNoApplicationScope() throws Exception {
++        var directory = directory(Set.of("read"), 1);
++        var service = service(directory, null);
++        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "profile"), null, null,
++            "application-group-v1.project.1.code");
++        var claim = (Map<?, ?>) com.nimbusds.jwt.SignedJWT.parse(tokens.getIDTokenString())
++            .getJWTClaimsSet().getClaim("kestra_application_group_v1");
++        assertThat((java.util.Collection<?>) claim.get("application_group_scopes")).isEmpty();
++        assertThatThrownBy(() -> service.issueAuthorizationTokens("ui", user(), new Scope("openid", "read"),
++            null, null, "application-group-v1.project.1.code")).isInstanceOf(RuntimeException.class);
++    }
++
++    @Test
 +    void shouldRejectAccessAfterProjectEpochChanges() throws Exception {
 +        var directory = directory(Set.of("read"), 1);
 +        var service = service(directory);
@@ -567,6 +580,10 @@ index 0000000..0321640
 +    }
 +
 +    private OidcTokenService service(ProjectDirectoryState directory) throws Exception {
++        return service(directory, declarations());
++    }
++
++    private OidcTokenService service(ProjectDirectoryState directory, ApplicationScopeDeclarationsV1 declarations) throws Exception {
 +        var configuration = new OidcConfiguration();
 +        configuration.setIssuer(ISSUER);
 +        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
@@ -575,7 +592,7 @@ index 0000000..0321640
 +            statement.execute("INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,expires_at,used,authentication_version) VALUES('application-group-v1.project.1.code','ui','alice','https://identity.example.invalid/callback',now()+interval '5 minutes',true,0) ON CONFLICT(code) DO UPDATE SET used=true,authentication_version=0");
 +        }
 +        var service = new OidcTokenService(dataSource(), new ObjectMapper(), configuration,
-+            new OidcJwkService(dataSource()), provider(directory), provider(declarations()));
++            new OidcJwkService(dataSource()), provider(directory), declarations == null ? null : provider(declarations));
 +        var mode = OidcTokenService.class.getDeclaredField("applicationProjects");
 +        mode.setAccessible(true); mode.set(service, true);
 +        return service;

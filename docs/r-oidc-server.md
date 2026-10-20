@@ -427,6 +427,12 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 
 兼容与升级：本轮 `new-install` 空库初始化目标 schema，不为旧 `project` API、配置、字段或 claim 建立别名。历史 schema1 和物理回滚只进入显式 `legacy-migration` profile。宿主先独立构建、测试、通过 CI 并发布镜像；插件从正式镜像获取公开类型后独立编译和发布 jar。宿主测试覆盖错误 issuer/audience/client/应用组、签名 claim、防伪造、范围外整体拒绝、撤权/refresh、scope key 不可改和受限删除、组件缺失及关闭回归。根仓以正式镜像和 jar 执行 OAuth2、REST、MCP、真实 UI 与拒绝无副作用组合验收。提案已同步差异表和机制文档；当前发布只证明 scope 名称、受限删除、声明投影 SPI、部分签发与旧凭据在线复查，不能称为目标模型交付。
 
+### 缺声明组件的首方协议登录（已接收、待发布）
+
+消费项目 `kestra-plugin-rbac` 缺失时，部署仓隔离 `new-install` 的 REST `56/56` 通过，随后缺插件用例在生产 `/oauth/login/kestra` 流程循环，报告位于本仓外部署仓 `.work/application-group-acceptance/local-run.log` 对应的隔离报告。失败来自 `OidcTokenService.projectAuthorization` 在取目录成员后要求唯一声明提供者；它把无法签发任何应用组 scope 的情况升级为整个标准 OIDC 登录失败。用户必须能登录后看到受保护业务拒绝并退出换号。
+
+裁决：声明组件缺失或不唯一时，宿主仍可对已批准的首方 UI client 签发标准协议 scope，应用组 scope 集合必须为空。普通应用组 scope 请求仍整体拒绝；签名 claim 中不出现伪造的授权。业务 REST、MCP 和 UI 授权入口继续因缺插件拒绝，不能把零 scope 登录当作资源权限。组件恢复后的新请求按当前登记重新评估，不复活旧 token 的业务 scope。宿主独立测试须覆盖首方无组件协议登录、普通应用组 scope 拒绝、旧 token 复查和关闭功能；部署仓复测缺 jar 的真实登录、拒绝、无副作用与退出。候选源码已加入 `0160`/`0362` 需求补丁及定向测试，正式 CI 和镜像发布尚未通过，不能引用上一镜像作为修复产物。
+
 ### 应用组管理授权边界提案（待接收、未发布）
 
 消费项目仍为 `kestra-plugin-rbac`。目标要求应用组 scope 仅有 `key/name/description`；当前 `ApplicationDirectoryV1.ScopeDefinition` 保存 `resourceIntents/managementIntents`，`JdbcApplicationDirectoryV1.authorize` 和 `hasAdministrator` 依赖这些字段，插件 `ProjectPolicyBoundary` 将其作为 Kestra 实际权限上界。管理员更改 scope 名称或成员登记会推进全组目录修订，插件随后要求“完整项目恢复”。这些是目标模型的实际失败路径；代码入口见 `patches/webserver/0360-application-project.patch`、`0363-application-project.patch` 与插件当前组合失败的待补探针。OSS 没有独立应用组管理授权入口；已发布的 typed 资源授权只接收宿主已解析的资源操作，不能直接替代目录事务内的管理决策。
