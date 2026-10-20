@@ -388,7 +388,8 @@ REQ-0330 已接收最小生命周期激活点；provider 只提供不透明句�
 
 ### 应用项目身份机制（已接收，候选实现边界）
 
-> 新应用组目标已替代本节旧 project 契约。`ApplicationDirectoryV1` 和 `TrustedIdentityV1` 是当前已发布输入，不能直接表示 scope `key/name/description`、应用权限声明元数据或新签名应用组 claim。未发布的最小宿主演进提案、拒绝规则与测试门见 `docs/r-oidc-server.md`“应用组签发与目录契约重构提案”。本节保留当前源码事实供差异调查，不作为新模型的实现规范。
+> 新应用组目标已替代本节旧 project 契约。`0361458` 已发布 scope 名称、声明只读 SPI 与新签名 claim 的部分机制，但 `ApplicationDirectoryV1` 和 `TrustedIdentityV1` 仍保留旧项目字段、应用组级意图与恢复联锁。完整目标与拒绝规则见 `docs/r-oidc-server.md`“应用组签发与目录契约重构提案”。本节保留旧源码事实供差异调查，不作为新模型的实现规范。
+> 旧 `resourceIntents/managementIntents` 与全组目录修订恢复仍须移除。事务内的应用组管理授权缺口见 `docs/r-oidc-server.md`“应用组管理授权边界提案”；该提案待接收、未发布，不能作为当前插件编译输入。
 
 `ApplicationDirectoryV1`、`TrustedIdentityV1` 和 `AuthorizationEvaluationProviderV2` 是版本化 classpath 公开契约。`ApplicationDirectoryV1` 只提供项目、scope、成员 client、subject assignment、revision/epoch 和显式三域管理意图；不提供插件 grants、业务页面或名称推断。`TrustedIdentityV1` 只返回宿主验证后的 issuer、subject、client、精确 audiences、tenant、project、protocolScopes、projectScopes、authenticationVersion、authorizationVersion 和 directoryRevision。
 

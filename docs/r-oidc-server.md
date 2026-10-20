@@ -419,13 +419,21 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 账号、零授权登录、授权绑定、撤销及退出换号，并比较拒绝前后目录与策略状态。
 仅源码有方法、编译成功或原 OIDC CI 通过，都不能替代本契约的发布和组合验收。
 
-### 应用组签发与目录契约重构提案（已接收、部分候选实现未发布）
+### 应用组签发与目录契约重构提案（部分已发布，目标未交付）
 
-消费项目为 `kestra-plugin-rbac`。用户需要按应用组授予用户 scope，并由应用主动登记支持范围；OAuth2 授权页需要展示该应用对 scope 的权限声明名称。当前已发布 `ApplicationDirectoryV1.ScopeDefinition` 只有 `scope/description`，`ClientMembership` 只有 `allowedProjectScopes`，签名身份 claim 使用 `kestra_project_v1/project_id/project_scopes`；插件没有可登记权限 `key/name` 的公开机制。现有已发布契约不能表示目标三字段、应用权限元数据，也不能以目标 claim 区分应用组。证据入口为 `patches/webserver/0360-application-project.patch`、`0362-application-project.patch` 和 `0363-application-project.patch`；当前镜像仍是旧模型。
+消费项目为 `kestra-plugin-rbac`。用户需要按应用组授予用户 scope，并由应用主动登记支持范围；OAuth2 授权页需要展示该应用对 scope 的权限声明名称。旧发布 `ApplicationDirectoryV1.ScopeDefinition` 只有 `scope/description`，`ClientMembership` 只有 `allowedProjectScopes`，签名身份 claim 使用 `kestra_project_v1/project_id/project_scopes`。`0361458` 的正式 CI `39453574911` 已通过，并发布镜像 digest `sha256:f42f4bc98b419e59f165287ea460f0f9900a33ae76562784e9bbe2d5d6e11881`；该版本增加 scope `name`、声明只读 SPI、新 claim 和部分在线复查，但仍保留旧项目对象、意图字段与恢复机制。证据入口为 `patches/webserver/0360-application-project.patch`、`0362-application-project.patch` 和 `0363-application-project.patch`；不能把该镜像描述为应用组目标模型已交付。
 
 裁决：保持单一 issuer、共享 discovery/authorization/token 和标准 `iss` 精确校验。将宿主共享目录的公开身份对象改为应用组、scope `key/name/description`、应用成员支持的 scope key 与用户 scope 授予；签名并验证 `kestra_application_group_v1` 私有 claim。scope 的权限声明 `key/name` 是消费扩展管理的应用元数据，宿主只通过最小只读公开 SPI 在授权页获取展示投影和当前支持范围，不读取插件策略、完整 grants 或数据库表。未安装声明提供者、多个提供者、版本不符、读取异常、未知 scope 或范围外请求都拒绝；不根据声明元数据授予 Kestra 资源访问。`openid` 等协议 scope 按标准机制处理；refresh 重新验证当前成员、授予和支持集合。内置组标识由安装事务持久化，删除和改标识必须拒绝。
 
-兼容与升级：本轮 `new-install` 空库初始化目标 schema，不为旧 `project` API、配置、字段或 claim 建立别名。历史 schema1 和物理回滚只进入显式 `legacy-migration` profile。宿主先独立构建、测试、通过 CI 并发布镜像；插件从正式镜像获取公开类型后独立编译和发布 jar。宿主测试覆盖错误 issuer/audience/client/应用组、签名 claim、防伪造、范围外整体拒绝、撤权/refresh、scope key 不可改和受限删除、组件缺失及关闭回归。根仓以正式镜像和 jar 执行 OAuth2、REST、MCP、真实 UI 与拒绝无副作用组合验收。提案已同步差异表和机制文档；当前只实现 scope 名称、受限删除、声明投影 SPI、部分签发与旧凭据在线复查，仍保留旧项目对象和应用组级意图，不能称为目标模型交付。
+兼容与升级：本轮 `new-install` 空库初始化目标 schema，不为旧 `project` API、配置、字段或 claim 建立别名。历史 schema1 和物理回滚只进入显式 `legacy-migration` profile。宿主先独立构建、测试、通过 CI 并发布镜像；插件从正式镜像获取公开类型后独立编译和发布 jar。宿主测试覆盖错误 issuer/audience/client/应用组、签名 claim、防伪造、范围外整体拒绝、撤权/refresh、scope key 不可改和受限删除、组件缺失及关闭回归。根仓以正式镜像和 jar 执行 OAuth2、REST、MCP、真实 UI 与拒绝无副作用组合验收。提案已同步差异表和机制文档；当前发布只证明 scope 名称、受限删除、声明投影 SPI、部分签发与旧凭据在线复查，不能称为目标模型交付。
+
+### 应用组管理授权边界提案（待接收、未发布）
+
+消费项目仍为 `kestra-plugin-rbac`。目标要求应用组 scope 仅有 `key/name/description`；当前 `ApplicationDirectoryV1.ScopeDefinition` 保存 `resourceIntents/managementIntents`，`JdbcApplicationDirectoryV1.authorize` 和 `hasAdministrator` 依赖这些字段，插件 `ProjectPolicyBoundary` 将其作为 Kestra 实际权限上界。管理员更改 scope 名称或成员登记会推进全组目录修订，插件随后要求“完整项目恢复”。这些是目标模型的实际失败路径；代码入口见 `patches/webserver/0360-application-project.patch`、`0363-application-project.patch` 与插件当前组合失败的待补探针。OSS 没有独立应用组管理授权入口；已发布的 typed 资源授权只接收宿主已解析的资源操作，不能直接替代目录事务内的管理决策。
+
+候选最小契约：宿主目录 CRUD 在原事务内向唯一版本化管理决策 SPI 提交已验证的主体、应用组、client、scope key、目标与动作；插件只返回允许或拒绝，不能改写宿主目录。首次安装由安装凭据和显式批准计划完成，不使用普通 HTTP 决策旁路。最后管理员保护由宿主枚举实际可登录的主体、成员和 scope，交由同一 SPI 判断候选操作后仍有管理员；插件从自身 Kestra 运行时策略读取管理 grant。宿主不保存 Kestra 资源意图、管理意图或插件策略。缺 provider、多实例、版本不符、数据库错误、异常、超时和未解析目标均拒绝，事务回滚且不改变目录或会话。显示名称和说明变化不要求全组人工恢复；撤权仍逐请求检查。候选需要评估共享事务连接的公开边界，避免目录持锁时插件再借连接导致单连接池死锁。
+
+兼容性：新安装只使用新公开契约，不保留旧意图字段、旧全组恢复 API 或项目 claim。宿主独立探针须覆盖同 scope 完整管理权限、READ/MANAGE 分离、最后管理员、并发写入、缺组件、存储故障、候选失败回滚和关闭功能。插件独立测试须证明 Kestra 实际策略是唯一资源授权事实来源；根仓用正式产物复测用户授予、应用支持交集、撤权、refresh、REST/MCP/UI 与无副作用。主控尚未接收该提案为实现，先调查事务边界和最小 SPI，再决定具体签名。
 
 ### 已接收的 UI 项目 scope 选择器（REQ-0360）
 
