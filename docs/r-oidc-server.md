@@ -433,6 +433,8 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 
 裁决：声明组件缺失或不唯一时，宿主仍可对已批准的首方 UI client 签发标准协议 scope，应用组 scope 集合必须为空。普通应用组 scope 请求仍整体拒绝；签名 claim 中不出现伪造的授权。业务 REST、MCP 和 UI 授权入口继续因缺插件拒绝，不能把零 scope 登录当作资源权限。组件恢复后的新请求按当前登记重新评估，不复活旧 token 的业务 scope。宿主独立测试须覆盖首方无组件协议登录、普通应用组 scope 拒绝、旧 token 复查和关闭功能；部署仓复测缺 jar 的真实登录、拒绝、无副作用与退出。候选源码已加入 `0160`/`0362` 需求补丁及定向测试，正式 CI 和镜像发布尚未通过，不能引用上一镜像作为修复产物。
 
+`dd5f6c3` 的正式镜像通过 CI 后，部署仓隔离组合又发现 `/oauth/callback/kestra` 跳转的 UI 文档返回 401。实际失败路径是宿主 `OidcIdentityLifecycleFilter` 调用 `OidcTrustedIdentity.validate`，后者在声明组件缺失时拒绝已经签发的零应用组 scope 身份。修正的最小边界：可信身份仍逐项验证签名后的 issuer、audience、client、目录成员、用户状态与 epoch；缺声明组件时只接受空应用组 scope，任何非空 scope 整体拒绝。业务评估提供者仍缺席并拒绝全部资源操作。对应 `0362` 测试验证零 scope 身份与非零 scope 拒绝；正式镜像和根仓缺插件组合门仍待重跑。
+
 ### 应用组管理授权边界提案（待接收、未发布）
 
 消费项目仍为 `kestra-plugin-rbac`。目标要求应用组 scope 仅有 `key/name/description`；当前 `ApplicationDirectoryV1.ScopeDefinition` 保存 `resourceIntents/managementIntents`，`JdbcApplicationDirectoryV1.authorize` 和 `hasAdministrator` 依赖这些字段，插件 `ProjectPolicyBoundary` 将其作为 Kestra 实际权限上界。管理员更改 scope 名称或成员登记会推进全组目录修订，插件随后要求“完整项目恢复”。这些是目标模型的实际失败路径；代码入口见 `patches/webserver/0360-application-project.patch`、`0363-application-project.patch` 与插件当前组合失败的待补探针。OSS 没有独立应用组管理授权入口；已发布的 typed 资源授权只接收宿主已解析的资源操作，不能直接替代目录事务内的管理决策。

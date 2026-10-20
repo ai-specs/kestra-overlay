@@ -78,10 +78,10 @@ index 22b6a5e..1de5120 100644
      @Override
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 new file mode 100644
-index 0000000..27f6d57
+index 0000000..0749330
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,116 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import io.kestra.core.repositories.AuthorizationInvocationContext;
@@ -130,8 +130,7 @@ index 0000000..27f6d57
 +
 +    public Identity validate(Authentication authentication) {
 +        var attributes = authentication.getAttributes();
-+        if (!configuration.getIssuer().equals(attributes.get("iss")) || !directories.isUnique()
-+            || !declarations.isUnique()) throw denied();
++        if (!configuration.getIssuer().equals(attributes.get("iss")) || !directories.isUnique()) throw denied();
 +        Object raw = attributes.get(CLAIM);
 +        if (!(raw instanceof Map<?, ?> claim)) throw denied();
 +        String projectId = text(claim.get("application_group_id"));
@@ -165,9 +164,11 @@ index 0000000..27f6d57
 +        var allowed = snapshot.scopes().stream().filter(value -> value.active()).map(value -> value.scope()).collect(Collectors.toSet());
 +        allowed.retainAll(member.allowedProjectScopes());
 +        allowed.retainAll(assignment.map(value -> value.projectScopes()).orElse(Set.of()));
-+        var declared = declarations.get().current(project.id(), clientId);
-+        if (!project.id().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId())) throw denied();
-+        allowed.retainAll(declared.supportedScopeKeys());
++        if (declarations != null && declarations.isUnique()) {
++            var declared = declarations.get().current(project.id(), clientId);
++            if (!project.id().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId())) throw denied();
++            allowed.retainAll(declared.supportedScopeKeys());
++        } else allowed.clear();
 +        if (!allowed.containsAll(scopes)) throw denied();
 +        var knownProtocols = new java.util.HashSet<>(Set.of("openid", "profile", "email"));
 +        knownProtocols.addAll(directories.get().protocolScopes().stream().map(value -> value.scope()).toList());
@@ -631,10 +632,10 @@ index 0000000..e4e4745
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
 new file mode 100644
-index 0000000..6818f60
+index 0000000..a9548ce
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,125 @@
 +package io.kestra.webserver.oidc;
 +
 +import io.kestra.core.repositories.AuthorizationInvocationContext;
@@ -733,8 +734,14 @@ index 0000000..6818f60
 +        assertThatThrownBy(() -> service.validate(identity("ui", 7, Set.of("read"))))
 +            .isInstanceOf(IllegalStateException.class);
 +    }
-+    @Test void missingDeclarationProviderRejectsTrustedIdentity() throws Exception {
++    @Test void missingDeclarationProviderAllowsZeroScopeIdentityButRejectsBusinessScope() throws Exception {
 +        configuration.setIssuer(ISSUER);
++        when(lifecycle.matches("alice", 3L)).thenReturn(true);
++        var project = new ApplicationDirectoryV1.Project("project", "main", ISSUER, "Project", true, 19, 7);
++        var member = new ApplicationDirectoryV1.ClientMembership("project", "ui", true, Set.of("ui"), Set.of("read"), true, 1);
++        when(directory.snapshot("project")).thenReturn(new ProjectDirectoryState.Snapshot(project,
++            List.of(new ApplicationDirectoryV1.ScopeDefinition("project", "read", "Reader", "", true, List.of(), List.of(), 1)),
++            List.of(member), List.of(new ApplicationDirectoryV1.SubjectAssignment("project", ISSUER, "alice", Set.of("read"), 1, 1)), 19));
 +        BeanProvider<ApplicationScopeDeclarationsV1> absent = new BeanProvider<>() {
 +            public ApplicationScopeDeclarationsV1 get() { throw new IllegalStateException("missing"); }
 +            public boolean isUnique() { return false; }
@@ -743,6 +750,13 @@ index 0000000..6818f60
 +            public ProjectDirectoryState get() { return directory; }
 +            public boolean isUnique() { return true; }
 +        }, absent, configuration, lifecycle);
++        var environment = mock(Environment.class);
++        when(environment.getProperty("kestra.oidc.bootstrap.client-name", String.class)).thenReturn(Optional.of("kestra"));
++        when(environment.getProperty("micronaut.security.oauth2.clients.kestra.client-id", String.class)).thenReturn(Optional.of("ui"));
++        var field = OidcTrustedIdentity.class.getDeclaredField("environment");
++        field.setAccessible(true);
++        field.set(service, environment);
++        assertThat(service.validate(identity("ui", 7, Set.of())).projectScopes()).isEmpty();
 +        assertThatThrownBy(() -> service.validate(identity("ui", 7, Set.of("read"))))
 +            .isInstanceOf(IllegalStateException.class);
 +    }
