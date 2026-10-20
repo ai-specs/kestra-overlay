@@ -1,15 +1,15 @@
-# 需求: REQ-0360 应用项目公开机制与授权激活
+# 需求: REQ-0360 应用组公开目录契约与声明投影
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；实施中，未发布
+# 状态: core；应用组候选部分实现，本地 CI 通过，未发布
 # 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
 # 触达上游文件: 最小公共契约、宿主激活点与独立测试
-# 移除条件: 上游提供等价公开项目身份与授权机制
+# 移除条件: 上游提供等价公开应用组身份与授权机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationDirectoryV1.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d46fdf0e7ea5890abb902e7476884b9a2403e13
+index 0000000..8165af0
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationDirectoryV1.java
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,271 @@
 +package io.kestra.webserver.oidc;
 +
 +import java.util.List;
@@ -138,15 +138,18 @@ index 0000000000000000000000000000000000000000..5d46fdf0e7ea5890abb902e7476884b9
 +    record ScopeDefinition(
 +            String projectId,
 +            String scope,
++            String name,
 +            String description,
 +            boolean active,
 +            List<ResourceIntent> resourceIntents,
 +            List<ManagementIntent> managementIntents,
 +            long revision) {
 +        public ScopeDefinition {
-+            if (scope.isBlank()
-+                    || scope.chars().anyMatch(c -> c <= 0x20 || c == 0x22 || c == 0x5c || c > 0x7e))
-+                throw new IllegalArgumentException("Invalid scope");
++            if (!scope.matches("[a-z][a-z0-9-]{0,63}"))
++                throw new IllegalArgumentException("Invalid scope key");
++            if (name == null || name.isBlank() || !name.equals(name.trim()))
++                throw new IllegalArgumentException("Scope name required");
++            if (description == null) throw new IllegalArgumentException("Scope description required");
 +            resourceIntents = List.copyOf(resourceIntents);
 +            managementIntents = List.copyOf(managementIntents);
 +        }
@@ -198,6 +201,7 @@ index 0000000000000000000000000000000000000000..5d46fdf0e7ea5890abb902e7476884b9
 +
 +    record ScopeInput(
 +            String scope,
++            String name,
 +            String description,
 +            boolean active,
 +            List<ResourceIntent> resourceIntents,
@@ -238,6 +242,8 @@ index 0000000000000000000000000000000000000000..5d46fdf0e7ea5890abb902e7476884b9
 +
 +    ScopeDefinition updateScope(String project, String scope, long revision, ScopeInput input);
 +
++    void deleteScope(String project, String scope, long revision);
++
 +    Page<ClientMembership> clients(String project, int page, int size);
 +
 +    ClientMembership approveClient(String project, long revision, MembershipInput input);
@@ -275,9 +281,60 @@ index 0000000000000000000000000000000000000000..5d46fdf0e7ea5890abb902e7476884b9
 +
 +    List<ProtocolScope> protocolScopes();
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationScopeDeclarationsV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationScopeDeclarationsV1.java
+new file mode 100644
+index 0000000..6f77e24
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationScopeDeclarationsV1.java
+@@ -0,0 +1,45 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Set;
++
++public interface ApplicationScopeDeclarationsV1 {
++    int CONTRACT_VERSION = 1;
++
++    record Permission(String key, String name) {
++        public Permission {
++            if (key == null || !key.matches("[a-z][a-z0-9-]{0,63}") || name == null || name.isBlank())
++                throw new IllegalArgumentException("Invalid application permission declaration");
++        }
++    }
++
++    record Scope(String key, List<Permission> permissions) {
++        public Scope {
++            if (key == null || !key.matches("[a-z][a-z0-9-]{0,63}") || permissions == null || permissions.isEmpty())
++                throw new IllegalArgumentException("Invalid application scope declaration");
++            permissions = List.copyOf(permissions);
++            if (permissions.stream().map(Permission::key).distinct().count() != permissions.size())
++                throw new IllegalArgumentException("Duplicate application permission key");
++        }
++    }
++
++    record Projection(String applicationGroupId, String clientId, List<Scope> scopes) {
++        public Projection {
++            if (applicationGroupId == null || applicationGroupId.isBlank() || clientId == null || clientId.isBlank()
++                || scopes == null) throw new IllegalArgumentException("Invalid application declaration target");
++            scopes = List.copyOf(scopes);
++            if (scopes.stream().map(Scope::key).distinct().count() != scopes.size())
++                throw new IllegalArgumentException("Duplicate application scope key");
++        }
++
++        public Set<String> supportedScopeKeys() {
++            return scopes.stream().map(Scope::key).collect(java.util.stream.Collectors.toUnmodifiableSet());
++        }
++    }
++
++    Projection current(String applicationGroupId, String clientId);
++
++    default Projection current(java.sql.Connection connection, String applicationGroupId, String clientId) {
++        return current(applicationGroupId, clientId);
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV1.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..55799b34f7fd06c583fcd3e92f6ff3badbfb9467
+index 0000000..55799b3
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV1.java
 @@ -0,0 +1,51 @@
@@ -334,7 +391,7 @@ index 0000000000000000000000000000000000000000..55799b34f7fd06c583fcd3e92f6ff3ba
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV2.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV2.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..310b0fe48621cea1200942684b94164b1f67b2a7
+index 0000000..310b0fe
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV2.java
 @@ -0,0 +1,10 @@
@@ -350,7 +407,7 @@ index 0000000000000000000000000000000000000000..310b0fe48621cea1200942684b94164b
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationDirectoryV1Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationDirectoryV1Test.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..4b45573e6e918af5edbe6f9e5879a249504fddfb
+index 0000000..e4b4fb3
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationDirectoryV1Test.java
 @@ -0,0 +1,108 @@
@@ -379,7 +436,7 @@ index 0000000000000000000000000000000000000000..4b45573e6e918af5edbe6f9e5879a249
 +        assertThatThrownBy(
 +                        () ->
 +                                new ApplicationDirectoryV1.ScopeDefinition(
-+                                        "p", "bad scope", "x", true, List.of(), List.of(), 1))
++                                        "p", "bad scope", "Invalid", "x", true, List.of(), List.of(), 1))
 +                .isInstanceOf(IllegalArgumentException.class);
 +    }
 +
@@ -464,7 +521,7 @@ index 0000000000000000000000000000000000000000..4b45573e6e918af5edbe6f9e5879a249
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityV1Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityV1Test.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..db68c82a1236fb7333b428a3e9501c635b8f37f2
+index 0000000..db68c82
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityV1Test.java
 @@ -0,0 +1,44 @@

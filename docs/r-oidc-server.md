@@ -419,6 +419,14 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 账号、零授权登录、授权绑定、撤销及退出换号，并比较拒绝前后目录与策略状态。
 仅源码有方法、编译成功或原 OIDC CI 通过，都不能替代本契约的发布和组合验收。
 
+### 应用组签发与目录契约重构提案（已接收、部分候选实现未发布）
+
+消费项目为 `kestra-plugin-rbac`。用户需要按应用组授予用户 scope，并由应用主动登记支持范围；OAuth2 授权页需要展示该应用对 scope 的权限声明名称。当前已发布 `ApplicationDirectoryV1.ScopeDefinition` 只有 `scope/description`，`ClientMembership` 只有 `allowedProjectScopes`，签名身份 claim 使用 `kestra_project_v1/project_id/project_scopes`；插件没有可登记权限 `key/name` 的公开机制。现有已发布契约不能表示目标三字段、应用权限元数据，也不能以目标 claim 区分应用组。证据入口为 `patches/webserver/0360-application-project.patch`、`0362-application-project.patch` 和 `0363-application-project.patch`；当前镜像仍是旧模型。
+
+裁决：保持单一 issuer、共享 discovery/authorization/token 和标准 `iss` 精确校验。将宿主共享目录的公开身份对象改为应用组、scope `key/name/description`、应用成员支持的 scope key 与用户 scope 授予；签名并验证 `kestra_application_group_v1` 私有 claim。scope 的权限声明 `key/name` 是消费扩展管理的应用元数据，宿主只通过最小只读公开 SPI 在授权页获取展示投影和当前支持范围，不读取插件策略、完整 grants 或数据库表。未安装声明提供者、多个提供者、版本不符、读取异常、未知 scope 或范围外请求都拒绝；不根据声明元数据授予 Kestra 资源访问。`openid` 等协议 scope 按标准机制处理；refresh 重新验证当前成员、授予和支持集合。内置组标识由安装事务持久化，删除和改标识必须拒绝。
+
+兼容与升级：本轮 `new-install` 空库初始化目标 schema，不为旧 `project` API、配置、字段或 claim 建立别名。历史 schema1 和物理回滚只进入显式 `legacy-migration` profile。宿主先独立构建、测试、通过 CI 并发布镜像；插件从正式镜像获取公开类型后独立编译和发布 jar。宿主测试覆盖错误 issuer/audience/client/应用组、签名 claim、防伪造、范围外整体拒绝、撤权/refresh、scope key 不可改和受限删除、组件缺失及关闭回归。根仓以正式镜像和 jar 执行 OAuth2、REST、MCP、真实 UI 与拒绝无副作用组合验收。提案已同步差异表和机制文档；当前只实现 scope 名称、受限删除、声明投影 SPI、部分签发与旧凭据在线复查，仍保留旧项目对象和应用组级意图，不能称为目标模型交付。
+
 ### 已接收的 UI 项目 scope 选择器（REQ-0360）
 
 UI 不需要因新增项目 scope 修改 Compose。内置 issuer 只允许目录显式登记的第一方 UI client 申请协议 scope `kestra:project-scopes`。签发事务将该选择器展开为该 client 获批的项目 scope 集合，再与当前 subject assignment、项目 active 状态和用户 consent 求交；选择器本身永远不写入 `projectScopes`，不授予本地权限。UI 第一方可以显式免重复 consent，但不能免 subject 授权。普通 client 与 DCR client 必须逐名申请实际项目 scope，不自动展开。未授予请求返回 `invalid_scope`；没有 assignment 的 UI 用户仍可完成协议登录，但业务 projectScopes 为空。access token 的可信上下文只保存实际 project scopes；ID token 不假定标准 `scope` claim，若服务端 cookie 需要恢复上下文，必须使用同一签发事务产生的版本化私有 claim 并在线检查 project epoch。不得从 `roles` 改名为 scope。

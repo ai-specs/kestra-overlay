@@ -1,12 +1,12 @@
-# 需求: REQ-0363 应用项目公开机制与授权激活
+# 需求: REQ-0363 应用组共享目录与受限删除
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；实施中，未发布
+# 状态: core；应用组候选部分实现，本地 CI 通过，未发布
 # 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
 # 触达上游文件: 最小公共契约、宿主激活点与独立测试
-# 移除条件: 上游提供等价公开项目身份与授权机制
+# 移除条件: 上游提供等价公开应用组目录与受限删除机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryBootstrap.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryBootstrap.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b08c545dcbdfcb47268aa7cf2e74fb2bd79a7f4
+index 0000000..2b08c54
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryBootstrap.java
 @@ -0,0 +1,48 @@
@@ -60,7 +60,7 @@ index 0000000000000000000000000000000000000000..2b08c545dcbdfcb47268aa7cf2e74fb2
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryCommand.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryCommand.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..a5b6a065e1708ec8765abf8a89041638511d6995
+index 0000000..a5b6a06
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ApplicationDirectoryCommand.java
 @@ -0,0 +1,67 @@
@@ -133,7 +133,7 @@ index 0000000000000000000000000000000000000000..a5b6a065e1708ec8765abf8a89041638
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/DirectorySnapshotCodec.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/DirectorySnapshotCodec.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..da442e493a1d81318102ed13022cd7482a347277
+index 0000000..da442e4
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/DirectorySnapshotCodec.java
 @@ -0,0 +1,73 @@
@@ -212,10 +212,10 @@ index 0000000000000000000000000000000000000000..da442e493a1d81318102ed13022cd748
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..280f074446f8e31c32af70318007845048c5c521
+index 0000000..3e3f694
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
-@@ -0,0 +1,698 @@
+@@ -0,0 +1,716 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -503,9 +503,9 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +    public ScopeDefinition createScope(String project, long revision, ScopeInput input) {
 +        return mutate(project, revision, (connection, state) -> {
 +            validateScope(input);
-+            if (state.scopes().stream().anyMatch(value -> value.scope().equals(input.scope()))) throw failure(Failure.CONFLICT);
++            if (state.scopes().stream().anyMatch(value -> value.scope().equals(input.scope()) || value.name().equals(input.name()))) throw failure(Failure.CONFLICT);
 +            var scopes = new ArrayList<>(state.scopes());
-+            scopes.add(new ScopeDefinition(project, input.scope(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), 1));
++            scopes.add(new ScopeDefinition(project, input.scope(), input.name(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), 1));
 +            return copy(state, scopes, state.memberships(), state.assignments());
 +        }).scopes().stream().filter(value -> value.scope().equals(input.scope())).findFirst().orElseThrow();
 +    }
@@ -518,12 +518,28 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +            var scopes = new ArrayList<>(state.scopes());
 +            var previous = scopes.stream().filter(value -> value.scope().equals(scope)).findFirst().orElseThrow(() -> failure(Failure.NOT_FOUND));
 +            if (previous.revision() != revision) throw failure(Failure.CONFLICT);
++            if (scopes.stream().anyMatch(value -> !value.scope().equals(scope) && value.name().equals(input.name()))) throw failure(Failure.CONFLICT);
 +            require(isNarrower(input, previous));
 +            scopes.remove(previous);
-+            scopes.add(new ScopeDefinition(project, scope, input.description(), input.active(), input.resourceIntents(), input.managementIntents(), Math.addExact(previous.revision(), 1)));
++            scopes.add(new ScopeDefinition(project, scope, input.name(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), Math.addExact(previous.revision(), 1)));
 +            return copy(state, scopes, state.memberships(), state.assignments());
 +        });
 +        return scope(project, scope).orElseThrow();
++    }
++
++    @Override
++    public void deleteScope(String project, String scope, long revision) {
++        mutate(project, Long.MAX_VALUE, (connection, state) -> {
++            var existing = state.scopes().stream().filter(value -> value.scope().equals(scope))
++                .findFirst().orElseThrow(() -> failure(Failure.NOT_FOUND));
++            if (existing.revision() != revision) throw failure(Failure.CONFLICT);
++            if (state.memberships().stream().anyMatch(member -> member.allowedProjectScopes().contains(scope))
++                || state.assignments().stream().anyMatch(assignment -> assignment.projectScopes().contains(scope)))
++                throw failure(Failure.CONFLICT);
++            var scopes = new ArrayList<>(state.scopes());
++            scopes.remove(existing);
++            return copy(state, scopes, state.memberships(), state.assignments());
++        });
 +    }
 +
 +    @Override
@@ -628,7 +644,7 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +    @Override
 +    public List<ProtocolScope> protocolScopes() {
 +        var result = new ArrayList<ProtocolScope>();
-+        for (String name : List.of("openid", "profile", "email", "offline_access", "kestra:project-scopes")) result.add(new ProtocolScope(name, "OIDC"));
++        for (String name : List.of("openid", "profile", "email", "offline_access", "kestra:application-group-scopes")) result.add(new ProtocolScope(name, "OIDC"));
 +        for (String name : configuration.getMcpScopes()) result.add(new ProtocolScope(name, "MCP"));
 +        return List.copyOf(result);
 +    }
@@ -723,7 +739,7 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +    private void validateScope(ScopeInput input) {
 +        require(input != null && input.description() != null && input.resourceIntents() != null && input.managementIntents() != null
 +            && (!input.resourceIntents().isEmpty() || !input.managementIntents().isEmpty()));
-+        new ScopeDefinition("validation", input.scope(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), 1);
++        new ScopeDefinition("validation", input.scope(), input.name(), input.description(), input.active(), input.resourceIntents(), input.managementIntents(), 1);
 +        require(protocolScopes().stream().noneMatch(protocol -> protocol.scope().equals(input.scope())));
 +        Set<String> resources = Set.of("FLOW", "EXECUTION", "TRIGGER", "NAMESPACE", "KVSTORE", "SECRET", "NAMESPACE_FILE", "LOG", "METRIC", "DASHBOARD", "BLUEPRINT", "AI", "MCP_SERVER", "METADATA");
 +        Set<String> actions = Set.of("READ", "LIST", "CREATE", "UPDATE", "DELETE", "EXECUTE", "ACCESS_OUTPUTS");
@@ -780,14 +796,14 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +        return new Snapshot(state.project(), scopes, clients, assignments, state.directoryRevision());
 +    }
 +    private Optional<Snapshot> find(Connection connection, String project) throws SQLException {
-+        try (var statement = connection.prepareStatement("SELECT document_json FROM oidc_project_state WHERE project_id=?")) {
++        try (var statement = connection.prepareStatement("SELECT document_json FROM oidc_project_state WHERE application_group_id=?")) {
 +            statement.setQueryTimeout(5); statement.setString(1, project);
 +            try (var result = statement.executeQuery()) { return result.next() ? Optional.of(decode(result.getString(1))) : Optional.empty(); }
 +        }
 +    }
 +    private List<Snapshot> all(Connection connection) throws SQLException {
 +        var result = new ArrayList<Snapshot>();
-+        try (var statement = connection.prepareStatement("SELECT document_json FROM oidc_project_state ORDER BY project_id")) {
++        try (var statement = connection.prepareStatement("SELECT document_json FROM oidc_project_state ORDER BY application_group_id")) {
 +            statement.setQueryTimeout(5);
 +            try (var rows = statement.executeQuery()) { while (rows.next()) result.add(decode(rows.getString(1))); }
 +        }
@@ -802,9 +818,11 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +        require(state.project().issuer().equals(configuration.getIssuer()) && "main".equals(state.project().tenant()));
 +        require(state.project().revision() > 0 && state.project().authorizationVersion() > 0 && state.directoryRevision() == state.project().revision());
 +        Set<String> scopes = new HashSet<>();
++        Set<String> scopeNames = new HashSet<>();
 +        for (var scope : state.scopes()) {
-+            require(scope.projectId().equals(state.project().id()) && scope.revision() > 0 && scopes.add(scope.scope()));
-+            validateScope(new ScopeInput(scope.scope(), scope.description(), scope.active(), scope.resourceIntents(), scope.managementIntents()));
++            require(scope.projectId().equals(state.project().id()) && scope.revision() > 0
++                && scopes.add(scope.scope()) && scopeNames.add(scope.name()));
++            validateScope(new ScopeInput(scope.scope(), scope.name(), scope.description(), scope.active(), scope.resourceIntents(), scope.managementIntents()));
 +        }
 +        Set<String> clients = new HashSet<>();
 +        for (var member : state.memberships()) {
@@ -820,7 +838,7 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +        }
 +    }
 +    private void save(Connection connection, Snapshot state) throws SQLException {
-+        try (var statement = connection.prepareStatement("INSERT INTO oidc_project_state(project_id,document_json) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET document_json=EXCLUDED.document_json")) {
++        try (var statement = connection.prepareStatement("INSERT INTO oidc_project_state(application_group_id,document_json) VALUES(?,?) ON CONFLICT(application_group_id) DO UPDATE SET document_json=EXCLUDED.document_json")) {
 +            statement.setQueryTimeout(5); statement.setString(1, state.project().id());
 +            try { statement.setString(2, codec.encode(state)); }
 +            catch (java.io.IOException invalid) { throw failure(Failure.INVALID); }
@@ -916,7 +934,7 @@ index 0000000000000000000000000000000000000000..280f074446f8e31c32af703180078450
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/ProjectDirectoryState.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ProjectDirectoryState.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..29c2c321ce2b9e13c0a9de4e92b64f426bcf3e73
+index 0000000..29c2c32
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/ProjectDirectoryState.java
 @@ -0,0 +1,25 @@
@@ -947,7 +965,7 @@ index 0000000000000000000000000000000000000000..29c2c321ce2b9e13c0a9de4e92b64f42
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/V1ApplicationDirectoryMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/V1ApplicationDirectoryMigration.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..ddfaf0cd8c1645d271ab396c6a7d251470499b64
+index 0000000..ddfaf0c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/V1ApplicationDirectoryMigration.java
 @@ -0,0 +1,18 @@
@@ -971,16 +989,16 @@ index 0000000000000000000000000000000000000000..ddfaf0cd8c1645d271ab396c6a7d2514
 +}
 diff --git a/webserver/src/main/resources/migrations/2.0.101-oidc-application-directory-postgres.sql b/webserver/src/main/resources/migrations/2.0.101-oidc-application-directory-postgres.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..56b9cdef5eb986d0ad210689b1f48e0d04d69702
+index 0000000..69275cb
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.101-oidc-application-directory-postgres.sql
 @@ -0,0 +1,3 @@
-+CREATE TABLE IF NOT EXISTS oidc_project_state (project_id VARCHAR(128) PRIMARY KEY, document_json TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
++CREATE TABLE IF NOT EXISTS oidc_project_state (application_group_id VARCHAR(128) PRIMARY KEY, document_json TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 +CREATE TABLE IF NOT EXISTS oidc_project_bootstrap (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), approval_hash VARCHAR(64) NOT NULL, receipt_hash VARCHAR(64) NOT NULL, source_revision BIGINT NOT NULL, ui_client_id VARCHAR(512) NOT NULL, consumed BOOLEAN NOT NULL DEFAULT FALSE, activated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 +CREATE TABLE IF NOT EXISTS oidc_project_invalidation (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), authentication_version BIGINT NOT NULL, authorization_version BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..150abd04138f3e56e554a44a03e4e0020acb07d5
+index 0000000..9e9f2c8
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/DirectoryContextTest.java
 @@ -0,0 +1,31 @@
@@ -1002,7 +1020,7 @@ index 0000000000000000000000000000000000000000..150abd04138f3e56e554a44a03e4e002
 +        properties.put("kestra.storage.local.base-path",System.getProperty("java.io.tmpdir")+"/directory-context-storage");
 +        properties.put("kestra.oidc.enabled",true);
 +        properties.put("kestra.repository.type","postgres");
-+        properties.put("kestra.rbac.application-projects.enabled",false);
++        properties.put("kestra.rbac.application-groups.enabled",false);
 +        properties.put("datasources.postgres.url",POSTGRES.getJdbcUrl());
 +        properties.put("datasources.postgres.username",POSTGRES.getUsername());
 +        properties.put("datasources.postgres.password",POSTGRES.getPassword());
@@ -1017,10 +1035,10 @@ index 0000000000000000000000000000000000000000..150abd04138f3e56e554a44a03e4e002
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a035031901286d
+index 0000000..16abe18
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,228 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1090,7 +1108,7 @@ index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a03503
 +        }
 +        var actor=new Actor();var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
 +        var directory=new JdbcApplicationDirectoryV1(source,actor,configuration,new ObjectMapper());directory.initializeSchema();
-+        var manager=new ScopeDefinition("project","admin-scope","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
++        var manager=new ScopeDefinition("project","admin-scope","Administrator","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
 +        var snapshot=new ProjectDirectoryState.Snapshot(new Project("project","main",ISSUER,"Project",true,1,1),List.of(manager),
 +            List.of(new ClientMembership("project","ui",true,Set.of("ui-aud"),Set.of("admin-scope"),true,1)),
 +            List.of(new SubjectAssignment("project",ISSUER,"admin",Set.of("admin-scope"),1,1)),1);
@@ -1099,7 +1117,7 @@ index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a03503
 +        return new Context(source,actor,directory,receipt,plan);
 +    }
 +    private ScopeInput readScope() {
-+        return new ScopeInput("read","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",
++        return new ScopeInput("read","Reader","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",
 +            new NamespaceDomain(DomainKind.RESTRICTED,Set.of("a"),Set.of()),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST"))),List.of());
 +    }
 +    @Test void shouldBootstrapReadRealSnapshotAndInvalidateLegacyCredentials() throws Exception {
@@ -1128,10 +1146,24 @@ index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a03503
 +    @Test void shouldUseObjectCasAndRejectOldEpoch() throws Exception {
 +        var context=context();context.apply();var scope=context.directory.createScope("project",1,readScope());
 +        assertThatThrownBy(()->context.directory.createScope("project",2,readScope())).isInstanceOf(DirectoryException.class);
-+        context.login();var changed=context.directory.updateScope("project","read",scope.revision(),new ScopeInput("read","changed",true,readScope().resourceIntents(),List.of()));
++        context.login();var changed=context.directory.updateScope("project","read",scope.revision(),new ScopeInput("read","Reader","changed",true,readScope().resourceIntents(),List.of()));
 +        assertThat(changed.revision()).isEqualTo(2);context.login();
 +        assertThatThrownBy(()->context.directory.updateScope("project","read",1,readScope())).isInstanceOf(DirectoryException.class);
 +        assertThat(context.directory.snapshot("project").project().authorizationVersion()).isEqualTo(3);
++    }
++    @Test void shouldDeleteScopeOnlyAfterAllMembersAndUsersReleaseIt() throws Exception {
++        var context=context();context.apply();var scope=context.directory.createScope("project",1,readScope());context.login();
++        var member=context.directory.approveClient("project",2,new MembershipInput("other",true,Set.of("other-aud"),Set.of("read"),false));
++        context.login();
++        assertThatThrownBy(()->context.directory.deleteScope("project","read",scope.revision())).isInstanceOf(DirectoryException.class);
++        assertThat(context.directory.scope("project","read")).isPresent();
++        context.directory.updateClient("project","other",member.revision(),new MembershipInput("other",true,Set.of("other-aud"),Set.of(),false));
++        context.login();var assignment=context.directory.assign("project",4,new AssignmentInput(ISSUER,"second",Set.of("read")));
++        context.login();
++        assertThatThrownBy(()->context.directory.deleteScope("project","read",scope.revision())).isInstanceOf(DirectoryException.class);
++        context.directory.revokeAssignment("project",ISSUER,"second",assignment.revision());
++        context.login();context.directory.deleteScope("project","read",scope.revision());
++        assertThat(context.directory.scope("project","read")).isEmpty();
 +    }
 +    @Test void shouldProtectLastAdminAndAllowExplicitSecondAdminThenRevoke() throws Exception {
 +        var context=context();context.apply();
@@ -1143,9 +1175,9 @@ index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a03503
 +    }
 +    @Test void shouldRejectUnknownAndExpandedIntentAndCorruptedSnapshot() throws Exception {
 +        var context=context();context.apply();context.directory.createScope("project",1,readScope());context.login();
-+        var expanded=new ScopeInput("read","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",readScope().resourceIntents().getFirst().namespaces(),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST","UPDATE"))),List.of());
++        var expanded=new ScopeInput("read","Reader","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",readScope().resourceIntents().getFirst().namespaces(),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST","UPDATE"))),List.of());
 +        assertThatThrownBy(()->context.directory.updateScope("project","read",1,expanded)).isInstanceOf(DirectoryException.class);
-+        var unknown=new ScopeInput("unknown","",true,List.of(new ResourceIntent("kestra-resources-v1","UNKNOWN",readScope().resourceIntents().getFirst().namespaces(),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ"))),List.of());
++        var unknown=new ScopeInput("unknown","Unknown","",true,List.of(new ResourceIntent("kestra-resources-v1","UNKNOWN",readScope().resourceIntents().getFirst().namespaces(),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ"))),List.of());
 +        assertThatThrownBy(()->context.directory.createScope("project",2,unknown)).isInstanceOf(DirectoryException.class);
 +        try(var connection=context.source.getConnection();var statement=connection.createStatement()){statement.execute("UPDATE oidc_project_state SET document_json='{}'");}
 +        assertThatThrownBy(()->context.directory.snapshot("project")).isInstanceOf(RuntimeException.class);
@@ -1159,15 +1191,15 @@ index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a03503
 +    @Test void shouldEnforceClientAndAssignmentObjectCasAndProjectTargetSubset() throws Exception {
 +        var context = context(); context.apply();
 +        context.login();
-+        var scope = new ScopeDefinition("project", "local", "", true, List.of(), List.of(
++        var scope = new ScopeDefinition("project", "local", "Local", "", true, List.of(), List.of(
 +            new ManagementIntent(ManagementDomain.LOCAL_POLICY, Set.of("MANAGE"), Set.of("project"))), 1);
-+        var changed = context.directory().createScope("project", 1, new ScopeInput("local", "", true, List.of(), scope.managementIntents()));
++        var changed = context.directory().createScope("project", 1, new ScopeInput("local", "Local", "", true, List.of(), scope.managementIntents()));
 +        context.login();
 +        context.directory().createProject(new ProjectInput("target", "main", "Target"));
 +        var beforeExpansion = context.directory().snapshot("project");
 +        var expandedTargets = new ManagementIntent(ManagementDomain.LOCAL_POLICY, Set.of("MANAGE"), Set.of("project", "target"));
 +        assertThatThrownBy(() -> context.directory().updateScope("project", "local", changed.revision(),
-+            new ScopeInput("local", "", true, List.of(), List.of(expandedTargets)))).isInstanceOf(DirectoryException.class);
++            new ScopeInput("local", "Local", "", true, List.of(), List.of(expandedTargets)))).isInstanceOf(DirectoryException.class);
 +        assertThat(context.directory().snapshot("project")).isEqualTo(beforeExpansion);
 +        var member = new MembershipInput("other", true, Set.of("aud"), Set.of("local"), false);
 +        var created = context.directory().approveClient("project", 2, member);
@@ -1179,7 +1211,7 @@ index 0000000000000000000000000000000000000000..71846afe93d77722649536a826a03503
 +        assertThatThrownBy(() -> context.directory().replaceAssignment("project", ISSUER, "second", assignment.revision() - 1, new AssignmentInput(ISSUER, "second", Set.of("local")))).isInstanceOf(DirectoryException.class);
 +        assertThatThrownBy(() -> context.directory().revokeAssignment("project", ISSUER, "second", assignment.revision() - 1)).isInstanceOf(DirectoryException.class);
 +        var target = new ManagementIntent(ManagementDomain.LOCAL_POLICY, Set.of("READ"), Set.of("missing-project"));
-+        assertThatThrownBy(() -> context.directory().createScope("project", 4, new ScopeInput("bad-target", "", true, List.of(), List.of(target)))).isInstanceOf(DirectoryException.class);
++        assertThatThrownBy(() -> context.directory().createScope("project", 4, new ScopeInput("bad-target", "Invalid target", "", true, List.of(), List.of(target)))).isInstanceOf(DirectoryException.class);
 +    }
 +
 +    @Test void shouldRejectConcurrentLastAdministratorDeactivation() throws Exception {

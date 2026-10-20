@@ -225,6 +225,8 @@ PostgreSQL 与最多一个活动连接的受限 DataSource，不将连接暴露�
 
 ### 应用项目宿主发布状态（2026-10-18）
 
+> 应用组目标已替代旧应用项目模型。当前发布状态仅证明旧契约；`kestra-plugin-rbac` 消费所需的 scope 名称、签名应用组 claim、应用登记支持范围和授权页声明投影仍属未发布的 R-OIDC-SERVER 演进提案，实际失败路径及最小面见 `docs/r-oidc-server.md`“应用组签发与目录契约重构提案”。不得将本节历史 CI 作为新契约通过证据。
+
 上述应用项目机制及目录迁移数据源修正已在 `4b017f6` 的正式 CI
 [39087229293](https://github.com/ai-specs/kestra-overlay/actions/runs/39087229293) 通过，
 镜像已推广为 `sha256:ba19764bf232306e6501c5226af015d3e18d006da75a4e96a55c6baecee457af`。

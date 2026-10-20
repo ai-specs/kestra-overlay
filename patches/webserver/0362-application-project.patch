@@ -1,12 +1,12 @@
-# 需求: REQ-0362 应用项目公开机制与授权激活
+# 需求: REQ-0362 应用组可信身份与声明复查
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；实施中，未发布
+# 状态: core；应用组候选部分实现，本地 CI 通过，未发布
 # 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
 # 触达上游文件: 最小公共契约、宿主激活点与独立测试
-# 移除条件: 上游提供等价公开项目身份与授权机制
+# 移除条件: 上游提供等价公开应用组可信身份机制
 diff --git a/core/src/main/java/io/kestra/core/repositories/GlobalTenantResourceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/GlobalTenantResourceAccessControl.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..083fb269bc8375494589a1ae48ab02678d5e88d9
+index 0000000..083fb26
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/GlobalTenantResourceAccessControl.java
 @@ -0,0 +1,9 @@
@@ -21,7 +21,7 @@ index 0000000000000000000000000000000000000000..083fb269bc8375494589a1ae48ab0267
 +}
 diff --git a/core/src/main/java/io/kestra/core/repositories/TenantResourceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/TenantResourceAccessControl.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..16618cc401982b9d0ab71e37004a941f4ffa5bb2
+index 0000000..16618cc
 --- /dev/null
 +++ b/core/src/main/java/io/kestra/core/repositories/TenantResourceAccessControl.java
 @@ -0,0 +1,16 @@
@@ -42,7 +42,7 @@ index 0000000000000000000000000000000000000000..16618cc401982b9d0ab71e37004a941f
 +    Domain domain(String resource, String tenant);
 +}
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcMcpServerRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcMcpServerRepository.java
-index 22b6a5e7b39ae109971106ba063a3e9faee20049..1de5120b1789c2bf6a1da6298354ba8aef96d40e 100644
+index 22b6a5e..1de5120 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcMcpServerRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcMcpServerRepository.java
 @@ -25,6 +25,17 @@ import lombok.extern.slf4j.Slf4j;
@@ -60,11 +60,11 @@ index 22b6a5e7b39ae109971106ba063a3e9faee20049..1de5120b1789c2bf6a1da6298354ba8a
 +            ? DSL.noCondition() : field("id", String.class).in(domain.ids());
 +    }
 +
-
+ 
      public AbstractJdbcMcpServerRepository(io.kestra.jdbc.AbstractJdbcRepository<McpServer> jdbcRepository,
          ApplicationEventPublisher<CrudEvent<McpServer>> eventPublisher,
 @@ -66,7 +77,11 @@ public abstract class AbstractJdbcMcpServerRepository extends AbstractJdbcCrudRe
-
+ 
      @Override
      public ArrayListTotal<McpServer> find(Pageable pageable, String tenantId) {
 -        return findPage(pageable, tenantId, DSL.noCondition());
@@ -74,18 +74,19 @@ index 22b6a5e7b39ae109971106ba063a3e9faee20049..1de5120b1789c2bf6a1da6298354ba8a
 +tenantId
 +));
      }
-
+ 
      @Override
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef4211726b7d31e9fec796ba9ac078b58fcdf612
+index 0000000..27f6d57
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,115 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import io.kestra.core.repositories.AuthorizationInvocationContext;
 +import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.ApplicationScopeDeclarationsV1;
 +import io.kestra.webserver.oidc.TrustedIdentityV1;
 +import io.kestra.webserver.oidc.projects.ProjectDirectoryState;
 +import io.micronaut.context.BeanProvider;
@@ -99,18 +100,21 @@ index 0000000000000000000000000000000000000000..ef4211726b7d31e9fec796ba9ac078b5
 +import java.util.stream.Collectors;
 +
 +@Singleton
-+@Requires(property = "kestra.rbac.application-projects.enabled", value = "true")
++@Requires(property = "kestra.rbac.application-groups.enabled", value = "true")
 +public final class OidcTrustedIdentity implements TrustedIdentityV1 {
-+    public static final String CLAIM = "kestra_project_v1";
++    public static final String CLAIM = "kestra_application_group_v1";
 +    private final BeanProvider<ProjectDirectoryState> directories;
++    private final BeanProvider<ApplicationScopeDeclarationsV1> declarations;
 +    private final OidcConfiguration configuration;
 +    private final OidcIdentityLifecycle lifecycle;
 +    @jakarta.inject.Inject
 +    private io.micronaut.context.env.Environment environment;
 +
 +    public OidcTrustedIdentity(BeanProvider<ProjectDirectoryState> directories,
++        BeanProvider<ApplicationScopeDeclarationsV1> declarations,
 +        OidcConfiguration configuration, OidcIdentityLifecycle lifecycle) {
 +        this.directories = directories;
++        this.declarations = declarations;
 +        this.configuration = configuration;
 +        this.lifecycle = lifecycle;
 +    }
@@ -126,10 +130,11 @@ index 0000000000000000000000000000000000000000..ef4211726b7d31e9fec796ba9ac078b5
 +
 +    public Identity validate(Authentication authentication) {
 +        var attributes = authentication.getAttributes();
-+        if (!configuration.getIssuer().equals(attributes.get("iss")) || !directories.isUnique()) throw denied();
++        if (!configuration.getIssuer().equals(attributes.get("iss")) || !directories.isUnique()
++            || !declarations.isUnique()) throw denied();
 +        Object raw = attributes.get(CLAIM);
 +        if (!(raw instanceof Map<?, ?> claim)) throw denied();
-+        String projectId = text(claim.get("project_id"));
++        String projectId = text(claim.get("application_group_id"));
 +        var snapshot = directories.get().snapshot(projectId);
 +        var project = snapshot.project();
 +        long epoch = number(claim.get("authorization_version"));
@@ -153,17 +158,20 @@ index 0000000000000000000000000000000000000000..ef4211726b7d31e9fec796ba9ac078b5
 +            String uiClient = environment.getProperty("micronaut.security.oauth2.clients." + name + ".client-id", String.class).orElseThrow(() -> denied());
 +            if (!clientId.equals(uiClient) || !audiences.equals(Set.of(uiClient)) || !member.firstPartyUi()) throw denied();
 +        }
-+        var scopes = strings(claim.get("project_scopes"));
++        var scopes = strings(claim.get("application_group_scopes"));
 +        var protocols = strings(claim.get("protocol_scopes"));
 +        var assignment = snapshot.assignments().stream().filter(value -> value.subject().equals(authentication.getName())
 +            && value.issuer().equals(project.issuer())).findFirst();
 +        var allowed = snapshot.scopes().stream().filter(value -> value.active()).map(value -> value.scope()).collect(Collectors.toSet());
 +        allowed.retainAll(member.allowedProjectScopes());
 +        allowed.retainAll(assignment.map(value -> value.projectScopes()).orElse(Set.of()));
++        var declared = declarations.get().current(project.id(), clientId);
++        if (!project.id().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId())) throw denied();
++        allowed.retainAll(declared.supportedScopeKeys());
 +        if (!allowed.containsAll(scopes)) throw denied();
 +        var knownProtocols = new java.util.HashSet<>(Set.of("openid", "profile", "email"));
 +        knownProtocols.addAll(directories.get().protocolScopes().stream().map(value -> value.scope()).toList());
-+        if (!knownProtocols.containsAll(protocols) || protocols.contains("kestra:project-scopes")) throw denied();
++        if (!knownProtocols.containsAll(protocols) || protocols.contains("kestra:application-group-scopes")) throw denied();
 +        return new Identity(1, project.issuer(), authentication.getName(), clientId, audiences,
 +            project.tenant(), project.id(), protocols, scopes, authenticationVersion, epoch, snapshot.directoryRevision());
 +    }
@@ -191,7 +199,7 @@ index 0000000000000000000000000000000000000000..ef4211726b7d31e9fec796ba9ac078b5
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..fddecfb7ac66712433cbe7349bf8298009c27beb
+index 0000000..fddecfb
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java
 @@ -0,0 +1,37 @@
@@ -234,10 +242,10 @@ index 0000000000000000000000000000000000000000..fddecfb7ac66712433cbe7349bf82980
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationProjectIntegrationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationProjectIntegrationTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9ddc5bf019d
+index 0000000..1cbfae5
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationProjectIntegrationTest.java
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,255 @@
 +package io.kestra.webserver.oidc;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -265,6 +273,11 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +        public Identity current(){return identity;}
 +    }
 +    private static <T> BeanProvider<T> provider(T value) { return new BeanProvider<>() { public T get() { return value; } public boolean isUnique() { return true; } public boolean isPresent() { return true; } }; }
++    private static ApplicationScopeDeclarationsV1 declarations() {
++        return (groupId, clientId) -> new ApplicationScopeDeclarationsV1.Projection(groupId, clientId, List.of(
++            new ApplicationScopeDeclarationsV1.Scope("read", List.of(new ApplicationScopeDeclarationsV1.Permission("view-flows", "View flows"))),
++            new ApplicationScopeDeclarationsV1.Scope("manage", List.of(new ApplicationScopeDeclarationsV1.Permission("manage-users", "Manage users")))));
++    }
 +    private static final class Fixture implements AutoCloseable {
 +        final PGSimpleDataSource source=new PGSimpleDataSource();
 +        final String schema="project_integration_"+UUID.randomUUID().toString().replace("-","");
@@ -288,20 +301,20 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +                try(var insert=c.prepareStatement("INSERT INTO oidc_user_auth_method(user_id,type,state,credential) VALUES(?,'PASSWORD','ACTIVE',?)")) {
 +                    for(String user:List.of("admin","unassigned")){insert.setString(1,user);insert.setString(2,hash);insert.executeUpdate();}
 +                }
-+                s.execute("INSERT INTO oidc_client(client_id,client_secret,active,client_kind,grant_types,redirect_uris,scopes) VALUES('ui','secret',TRUE,'system','[\"authorization_code\",\"refresh_token\"]','[\""+CALLBACK+"\"]','[\"openid\",\"profile\",\"email\",\"kestra:project-scopes\"]')");
++                s.execute("INSERT INTO oidc_client(client_id,client_secret,active,client_kind,grant_types,redirect_uris,scopes) VALUES('ui','secret',TRUE,'system','[\"authorization_code\",\"refresh_token\"]','[\""+CALLBACK+"\"]','[\"openid\",\"profile\",\"email\",\"kestra:application-group-scopes\"]')");
 +                String installation=UUID.randomUUID().toString();
 +                s.execute("INSERT INTO oidc_setup(singleton,installation_id) VALUES(TRUE,'"+installation+"')");
 +                new OidcInstallationReceipt(receipt).create(installation);
 +            }
 +            config.setIssuer(ISSUER);
 +            var mapper=new ObjectMapper();directory=new JdbcApplicationDirectoryV1(source,actor,config,mapper);directory.initializeSchema();
-+            var manager=new ScopeDefinition("project","manage","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
-+            var read=new ScopeDefinition("project","read","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",new NamespaceDomain(DomainKind.RESTRICTED,Set.of("a"),Set.of()),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST"))),List.of(),1);
++            var manager=new ScopeDefinition("project","manage","Manager","",true,List.of(),List.of(new ManagementIntent(ManagementDomain.IDENTITY,Set.of("READ","MANAGE"))),1);
++            var read=new ScopeDefinition("project","read","Reader","",true,List.of(new ResourceIntent("kestra-resources-v1","FLOW",new NamespaceDomain(DomainKind.RESTRICTED,Set.of("a"),Set.of()),new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ","LIST"))),List.of(),1);
 +            var project=new Project("project","main",ISSUER,"Project",true,1,1);
 +            var snapshot=new ProjectDirectoryState.Snapshot(project,List.of(manager,read),List.of(new ClientMembership("project","ui",true,Set.of("ui"),Set.of("read","manage"),true,1)),List.of(new SubjectAssignment("project",ISSUER,"admin",Set.of("read","manage"),1,1)),1);
 +            var plan=new ApplicationDirectoryBootstrap.Plan(1,new OidcInstallationReceipt(receipt).read().orElseThrow(),"ui",0,ApplicationDirectoryBootstrap.sourceHash(List.of()),List.of(snapshot));
 +            directory.applyBootstrap(plan,ApplicationDirectoryBootstrap.approvalHash(plan),receipt,"ui");loginAdmin();
-+            tokens=new OidcTokenService(source,mapper,config,new OidcJwkService(source),provider(directory));
++            tokens=new OidcTokenService(source,mapper,config,new OidcJwkService(source),provider(directory),provider(declarations()));
 +            var mode=OidcTokenService.class.getDeclaredField("applicationProjects");mode.setAccessible(true);mode.set(tokens,true);
 +            codes=new OidcAuthorizationCodeService(source,mapper,config);
 +        }
@@ -323,14 +336,14 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +    }
 +    @Test void actualDirectoryCodeAndSignedTokensShareOneScopeClassification()throws Exception {
 +        try(var f=new Fixture()) {
-+            var requested=new Scope("openid","profile","kestra:project-scopes");
++            var requested=new Scope("openid","profile","kestra:application-group-scopes");
 +            String code=f.code("admin",requested);
 +            var tokens=f.exchange("admin",requested,code);
 +            var access=f.tokens.validateAccessToken(tokens.getAccessToken().getValue());
 +            var identity=SignedJWT.parse(tokens.getIDTokenString()).getJWTClaimsSet();
-+            assertThat(identity.getClaim("kestra_project_v1")).isEqualTo(access.getClaim("kestra_project_v1"));
-+            var claim=(Map<?,?>)access.getClaim("kestra_project_v1");
-+            assertThat(new HashSet<>((Collection<?>)claim.get("project_scopes"))).isEqualTo(Set.of("read","manage"));
++            assertThat(identity.getClaim("kestra_application_group_v1")).isEqualTo(access.getClaim("kestra_application_group_v1"));
++            var claim=(Map<?,?>)access.getClaim("kestra_application_group_v1");
++            assertThat(new HashSet<>((Collection<?>)claim.get("application_group_scopes"))).isEqualTo(Set.of("read","manage"));
 +            assertThat(new HashSet<>((Collection<?>)claim.get("protocol_scopes"))).isEqualTo(Set.of("openid","profile"));
 +            assertThat(access.getStringClaim("scope").split(" ")).containsExactlyInAnyOrder("openid","profile","read","manage");
 +            assertThatThrownBy(()->f.codes.consume(code,"ui",CALLBACK,null)).isInstanceOf(RuntimeException.class);
@@ -339,10 +352,10 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +    }
 +    @Test void actualDirectoryUnassignedSubjectGetsProtocolOnlyAndCannotRequestProjectScope()throws Exception {
 +        try(var f=new Fixture()) {
-+            var scope=new Scope("openid","kestra:project-scopes");
++            var scope=new Scope("openid","kestra:application-group-scopes");
 +            var tokens=f.exchange("unassigned",scope,f.code("unassigned",scope));
-+            var claim=(Map<?,?>)f.tokens.validateAccessToken(tokens.getAccessToken().getValue()).getClaim("kestra_project_v1");
-+            assertThat((Collection<?>)claim.get("project_scopes")).isEmpty();
++            var claim=(Map<?,?>)f.tokens.validateAccessToken(tokens.getAccessToken().getValue()).getClaim("kestra_application_group_v1");
++            assertThat((Collection<?>)claim.get("application_group_scopes")).isEmpty();
 +            long before=f.tokenCount();
 +            assertThatThrownBy(()->f.tokens.authorizeScopes("ui","unassigned",List.of("openid","read"))).isInstanceOf(OidcException.class);
 +            assertThat(f.tokenCount()).isEqualTo(before);
@@ -355,7 +368,7 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +            String pending=f.code("admin",scope);
 +            var refresh=f.tokens.findByValue(issued.getRefreshToken().getValue()).orElseThrow();
 +            long before=f.tokenCount();
-+            f.directory.updateScope("project","read",1,new ScopeInput("read","revoked",false,f.directory.scope("project","read").orElseThrow().resourceIntents(),List.of()));
++            f.directory.updateScope("project","read",1,new ScopeInput("read","Reader","revoked",false,f.directory.scope("project","read").orElseThrow().resourceIntents(),List.of()));
 +            assertThatThrownBy(()->f.tokens.validateAccessToken(issued.getAccessToken().getValue())).isInstanceOf(OidcException.class);
 +            assertThatThrownBy(()->f.exchange("admin",scope,pending)).isInstanceOf(OidcException.class);
 +            assertThatThrownBy(()->f.tokens.rotateRefreshToken(refresh,new OidcUserService.OidcUser("admin","Admin","admin@example.invalid",false,List.of()),scope)).isInstanceOf(OidcException.class);
@@ -397,7 +410,7 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +    @Test void exchangeAndRefreshUseOneConnectionWithoutNestedPoolBorrow() throws Exception {
 +        try (var f = new Fixture(); var pool = singleConnection(f)) {
 +            var directory = new JdbcApplicationDirectoryV1(pool, f.actor, f.config, new ObjectMapper());
-+            var tokens = new OidcTokenService(pool, new ObjectMapper(), f.config, new OidcJwkService(pool), provider(directory));
++            var tokens = new OidcTokenService(pool, new ObjectMapper(), f.config, new OidcJwkService(pool), provider(directory),provider(declarations()));
 +            var flag = OidcTokenService.class.getDeclaredField("applicationProjects"); flag.setAccessible(true); flag.set(tokens,true);
 +            var requested = new Scope("openid","read");
 +            String code = f.code("admin",requested); var consumed = f.codes.consume(code,"ui",CALLBACK,null);
@@ -416,7 +429,7 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +                public ProjectDirectoryState get() { return directory[0]; }
 +                public boolean isUnique() { return true; }
 +            };
-+            var trusted = new OidcTrustedIdentity(directories,f.config,new OidcIdentityLifecycle(pool));
++            var trusted = new OidcTrustedIdentity(directories,provider(declarations()),f.config,new OidcIdentityLifecycle(pool));
 +            var environment = org.mockito.Mockito.mock(io.micronaut.context.env.Environment.class);
 +            org.mockito.Mockito.when(environment.getProperty("kestra.oidc.bootstrap.client-name",String.class)).thenReturn(Optional.of("kestra"));
 +            org.mockito.Mockito.when(environment.getProperty("micronaut.security.oauth2.clients.kestra.client-id",String.class)).thenReturn(Optional.of("ui"));
@@ -425,7 +438,7 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +            var request = io.micronaut.http.HttpRequest.GET("/api/v1/main/extensions/probe/projects");
 +            request.setAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION,
 +                io.micronaut.security.authentication.Authentication.build("admin",List.of(),Map.of("iss",ISSUER,"aud",List.of("ui"),OidcIdentityLifecycle.CLAIM,1L,
-+                    OidcTrustedIdentity.CLAIM,Map.of("project_id","project","client_id","ui","authorization_version",1L,"project_scopes",Set.of("manage"),"protocol_scopes",Set.of("openid")))));
++                    OidcTrustedIdentity.CLAIM,Map.of("application_group_id","project","client_id","ui","authorization_version",1L,"application_group_scopes",Set.of("manage"),"protocol_scopes",Set.of("openid")))));
 +            try (var scope = io.micronaut.core.propagation.PropagatedContext.getOrEmpty().plus(new io.kestra.core.repositories.AuthorizationInvocationContext(request,false)).propagate()) {
 +                assertThat(directory[0].createProject(new ProjectInput("target","main","Target")).id()).isEqualTo("target");
 +                directory[0].updateProject("project",1,"Updated",true);
@@ -460,10 +473,10 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +    @Test void registeredProtocolUpperBoundCannotBeExpandedByProjectMembership() throws Exception {
 +        try (var f = new Fixture()) {
 +            String client = registeredLimitedClient(f); long before=f.tokenCount();
-+            for (String denied : List.of("mcp:executions:write","email","kestra:project-scopes"))
++            for (String denied : List.of("mcp:executions:write","email","kestra:application-group-scopes"))
 +                assertThatThrownBy(() -> f.tokens.authorizeScopes(client,"admin",List.of("openid",denied,"read"))).isInstanceOf(OidcException.class);
 +            try (var c=f.source.getConnection();var statement=c.createStatement()) { statement.execute("UPDATE oidc_client SET scopes='[\"openid\",\"profile\",\"email\"]' WHERE client_id='ui'"); }
-+            assertThatThrownBy(() -> f.tokens.authorizeScopes("ui","admin",List.of("openid","kestra:project-scopes"))).isInstanceOf(OidcException.class);
++            assertThatThrownBy(() -> f.tokens.authorizeScopes("ui","admin",List.of("openid","kestra:application-group-scopes"))).isInstanceOf(OidcException.class);
 +            assertThat(f.tokenCount()).isEqualTo(before);
 +        }
 +    }
@@ -490,10 +503,10 @@ index 0000000000000000000000000000000000000000..6f259a3a0fd97ed6945a66715656a9dd
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcProjectTokenIssuanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProjectTokenIssuanceTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..498df7f1af2f9b98bc3b04b04fe1a2da0d31408b
+index 0000000..0321640
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProjectTokenIssuanceTest.java
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,105 @@
 +package io.kestra.webserver.oidc;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -525,10 +538,11 @@ index 0000000000000000000000000000000000000000..498df7f1af2f9b98bc3b04b04fe1a2da
 +    void shouldSignSeparatedProtocolAndProjectClaims() throws Exception {
 +        var directory = directory(Set.of("read"), 1);
 +        var service = service(directory);
-+        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "profile", "read"), null, "nonce", "project-v1.project.1.code");
++        assertThat(service.applicationScopeDescription("ui", "read")).contains("Reader", "View flows");
++        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "profile", "read"), null, "nonce", "application-group-v1.project.1.code");
 +        JWTClaimsSet claims = service.validateAccessToken(tokens.getAccessToken().getValue());
-+        var claim = (Map<?, ?>) claims.getClaim("kestra_project_v1");
-+        assertThat((java.util.Collection<?>) claim.get("project_scopes")).extracting(Object::toString).containsExactly("read");
++        var claim = (Map<?, ?>) claims.getClaim("kestra_application_group_v1");
++        assertThat((java.util.Collection<?>) claim.get("application_group_scopes")).extracting(Object::toString).containsExactly("read");
 +        assertThat((java.util.Collection<?>) claim.get("protocol_scopes")).extracting(Object::toString).containsExactlyInAnyOrder("openid", "profile");
 +        assertThat(claims.getStringClaim("scope").split(" ")).containsExactlyInAnyOrder("openid", "profile", "read");
 +    }
@@ -537,16 +551,16 @@ index 0000000000000000000000000000000000000000..498df7f1af2f9b98bc3b04b04fe1a2da
 +    void shouldIssueZeroProjectScopesForUnassignedSubject() throws Exception {
 +        var directory = directory(Set.of(), 1);
 +        var service = service(directory);
-+        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "profile"), null, null, "project-v1.project.1.code");
-+        var claim = (Map<?, ?>) service.validateAccessToken(tokens.getAccessToken().getValue()).getClaim("kestra_project_v1");
-+        assertThat((java.util.Collection<?>) claim.get("project_scopes")).isEmpty();
++        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "profile"), null, null, "application-group-v1.project.1.code");
++        var claim = (Map<?, ?>) service.validateAccessToken(tokens.getAccessToken().getValue()).getClaim("kestra_application_group_v1");
++        assertThat((java.util.Collection<?>) claim.get("application_group_scopes")).isEmpty();
 +    }
 +
 +    @Test
 +    void shouldRejectAccessAfterProjectEpochChanges() throws Exception {
 +        var directory = directory(Set.of("read"), 1);
 +        var service = service(directory);
-+        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "read"), null, null, "project-v1.project.1.code");
++        var tokens = service.issueAuthorizationTokens("ui", user(), new Scope("openid", "read"), null, null, "application-group-v1.project.1.code");
 +        when(directory.forClient(anyString())).thenReturn(Optional.of(snapshot(Set.of("read"), 2)));
 +        assertThatThrownBy(() -> service.validateAccessToken(tokens.getAccessToken().getValue()))
 +            .isInstanceOf(RuntimeException.class);
@@ -558,16 +572,22 @@ index 0000000000000000000000000000000000000000..498df7f1af2f9b98bc3b04b04fe1a2da
 +        try (var connection = dataSource().getConnection(); var statement = connection.createStatement()) {
 +            statement.execute("INSERT INTO oidc_user(username,name,email) VALUES('alice','Alice','alice@example.invalid') ON CONFLICT(username) DO UPDATE SET user_state='ACTIVE'");
 +            statement.execute("INSERT INTO oidc_client(client_id,client_secret,client_kind,scopes,active) VALUES('ui','secret','system','[\"openid\",\"profile\"]',true) ON CONFLICT(client_id) DO UPDATE SET active=true,client_kind='system'");
-+            statement.execute("INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,expires_at,used,authentication_version) VALUES('project-v1.project.1.code','ui','alice','https://identity.example.invalid/callback',now()+interval '5 minutes',true,0) ON CONFLICT(code) DO UPDATE SET used=true,authentication_version=0");
++            statement.execute("INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,expires_at,used,authentication_version) VALUES('application-group-v1.project.1.code','ui','alice','https://identity.example.invalid/callback',now()+interval '5 minutes',true,0) ON CONFLICT(code) DO UPDATE SET used=true,authentication_version=0");
 +        }
 +        var service = new OidcTokenService(dataSource(), new ObjectMapper(), configuration,
-+            new OidcJwkService(dataSource()), provider(directory));
++            new OidcJwkService(dataSource()), provider(directory), provider(declarations()));
 +        var mode = OidcTokenService.class.getDeclaredField("applicationProjects");
 +        mode.setAccessible(true); mode.set(service, true);
 +        return service;
 +    }
 +
 +    private static <T> BeanProvider<T> provider(T value) { return new BeanProvider<>() { public T get() { return value; } public boolean isUnique() { return true; } public boolean isPresent() { return true; } }; }
++
++    private static ApplicationScopeDeclarationsV1 declarations() {
++        return (groupId, clientId) -> new ApplicationScopeDeclarationsV1.Projection(groupId, clientId,
++            List.of(new ApplicationScopeDeclarationsV1.Scope("read",
++                List.of(new ApplicationScopeDeclarationsV1.Permission("view-flows", "View flows")))));
++    }
 +
 +    private ProjectDirectoryState directory(Set<String> assignment, long epoch) throws Exception {
 +        var state = mock(ProjectDirectoryState.class);
@@ -582,7 +602,7 @@ index 0000000000000000000000000000000000000000..498df7f1af2f9b98bc3b04b04fe1a2da
 +
 +    private ProjectDirectoryState.Snapshot snapshot(Set<String> assignment, long epoch) {
 +        var project = new ApplicationDirectoryV1.Project("project", "main", ISSUER, "Project", true, 1, epoch);
-+        var definition = new ApplicationDirectoryV1.ScopeDefinition("project", "read", "", true, List.of(), List.of(), 1);
++        var definition = new ApplicationDirectoryV1.ScopeDefinition("project", "read", "Reader", "", true, List.of(), List.of(), 1);
 +        var member = new ApplicationDirectoryV1.ClientMembership("project", "ui", true, Set.of("ui"), Set.of("read"), true, 1);
 +        var subject = new ApplicationDirectoryV1.SubjectAssignment("project", ISSUER, "alice", assignment, 1, epoch);
 +        return new ProjectDirectoryState.Snapshot(project, List.of(definition), List.of(member), List.of(subject), 1);
@@ -594,10 +614,10 @@ index 0000000000000000000000000000000000000000..498df7f1af2f9b98bc3b04b04fe1a2da
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..45b7669a346b0e00d08bbab564182884625c1ffe
+index 0000000..6818f60
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,112 @@
 +package io.kestra.webserver.oidc;
 +
 +import io.kestra.core.repositories.AuthorizationInvocationContext;
@@ -625,12 +645,13 @@ index 0000000000000000000000000000000000000000..45b7669a346b0e00d08bbab564182884
 +    private final ProjectDirectoryState directory = mock(ProjectDirectoryState.class);
 +    private final OidcIdentityLifecycle lifecycle = mock(OidcIdentityLifecycle.class);
 +    private final OidcConfiguration configuration = new OidcConfiguration();
++    private Set<String> declaredScopes = Set.of("read");
 +
 +    private OidcTrustedIdentity service() throws Exception {
 +        configuration.setIssuer(ISSUER);
 +        when(lifecycle.matches("alice", 3L)).thenReturn(true);
 +        var project = new ApplicationDirectoryV1.Project("project", "main", ISSUER, "Project", true, 19, 7);
-+        var scope = new ApplicationDirectoryV1.ScopeDefinition("project", "read", "", true, List.of(), List.of(), 1);
++        var scope = new ApplicationDirectoryV1.ScopeDefinition("project", "read", "Reader", "", true, List.of(), List.of(), 1);
 +        var member = new ApplicationDirectoryV1.ClientMembership("project", "ui", true, Set.of("ui", RESOURCE), Set.of("read"), true, 1);
 +        var assignment = new ApplicationDirectoryV1.SubjectAssignment("project", ISSUER, "alice", Set.of("read"), 1, 1);
 +        when(directory.snapshot("project")).thenReturn(new ProjectDirectoryState.Snapshot(project, List.of(scope), List.of(member), List.of(assignment), 19));
@@ -638,7 +659,14 @@ index 0000000000000000000000000000000000000000..45b7669a346b0e00d08bbab564182884
 +            public ProjectDirectoryState get() { return directory; }
 +            public boolean isUnique() { return true; }
 +        };
-+        var result = new OidcTrustedIdentity(provider, configuration, lifecycle);
++        ApplicationScopeDeclarationsV1 declarations = (groupId, clientId) -> new ApplicationScopeDeclarationsV1.Projection(
++            groupId, clientId, declaredScopes.stream().map(key -> new ApplicationScopeDeclarationsV1.Scope(key,
++                List.of(new ApplicationScopeDeclarationsV1.Permission("view-flows", "View flows")))).toList());
++        var declarationProvider = new BeanProvider<ApplicationScopeDeclarationsV1>() {
++            public ApplicationScopeDeclarationsV1 get() { return declarations; }
++            public boolean isUnique() { return true; }
++        };
++        var result = new OidcTrustedIdentity(provider, declarationProvider, configuration, lifecycle);
 +        var environment = mock(Environment.class);
 +        when(environment.getProperty("kestra.oidc.bootstrap.client-name", String.class)).thenReturn(Optional.of("kestra"));
 +        when(environment.getProperty("micronaut.security.oauth2.clients.kestra.client-id", String.class)).thenReturn(Optional.of("ui"));
@@ -646,8 +674,8 @@ index 0000000000000000000000000000000000000000..45b7669a346b0e00d08bbab564182884
 +        return result;
 +    }
 +    private Authentication identity(String audience, long epoch, Set<String> scopes) {
-+        var claim = Map.of("project_id", "project", "client_id", "ui", "authorization_version", epoch,
-+            "project_scopes", scopes, "protocol_scopes", Set.of("openid"));
++        var claim = Map.of("application_group_id", "project", "client_id", "ui", "authorization_version", epoch,
++            "application_group_scopes", scopes, "protocol_scopes", Set.of("openid"));
 +        return Authentication.build("alice", List.of("legacy-admin"), Map.of("iss", ISSUER, "aud", List.of(audience),
 +            OidcTrustedIdentity.CLAIM, claim, OidcIdentityLifecycle.CLAIM, 3L, "resource", RESOURCE));
 +    }
@@ -681,10 +709,30 @@ index 0000000000000000000000000000000000000000..45b7669a346b0e00d08bbab564182884
 +        var service = service();
 +        assertThatThrownBy(service::current).isInstanceOf(IllegalStateException.class);
 +    }
++    @Test void revokedApplicationDeclarationRejectsExistingIdentity() throws Exception {
++        var service = service();
++        assertThat(service.validate(identity("ui", 7, Set.of("read"))).projectScopes()).containsExactly("read");
++        declaredScopes = Set.of();
++        assertThatThrownBy(() -> service.validate(identity("ui", 7, Set.of("read"))))
++            .isInstanceOf(IllegalStateException.class);
++    }
++    @Test void missingDeclarationProviderRejectsTrustedIdentity() throws Exception {
++        configuration.setIssuer(ISSUER);
++        BeanProvider<ApplicationScopeDeclarationsV1> absent = new BeanProvider<>() {
++            public ApplicationScopeDeclarationsV1 get() { throw new IllegalStateException("missing"); }
++            public boolean isUnique() { return false; }
++        };
++        var service = new OidcTrustedIdentity(new BeanProvider<>() {
++            public ProjectDirectoryState get() { return directory; }
++            public boolean isUnique() { return true; }
++        }, absent, configuration, lifecycle);
++        assertThatThrownBy(() -> service.validate(identity("ui", 7, Set.of("read"))))
++            .isInstanceOf(IllegalStateException.class);
++    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationProjectTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationProjectTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9a53c5280737dd638934ac88e29b9fc7c422fc5
+index 0000000..c9a53c5
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationProjectTest.java
 @@ -0,0 +1,33 @@
@@ -723,7 +771,7 @@ index 0000000000000000000000000000000000000000..c9a53c5280737dd638934ac88e29b9fc
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b880529e5f2cda05f8f35a5317871951000d121f
+index 0000000..b880529
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java
 @@ -0,0 +1,38 @@
@@ -767,7 +815,7 @@ index 0000000000000000000000000000000000000000..b880529e5f2cda05f8f35a5317871951
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..46d81772a28ef17dbbe3f85b543fad731f51517d
+index 0000000..46d8177
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java
 @@ -0,0 +1,47 @@
@@ -820,7 +868,7 @@ index 0000000000000000000000000000000000000000..46d81772a28ef17dbbe3f85b543fad73
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..7c3a436d2110f941d38ba3f3f9b40f074fb287ef
+index 0000000..7c3a436
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
 @@ -0,0 +1,73 @@

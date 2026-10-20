@@ -1,5 +1,7 @@
 # kestra-overlay
 
+> 当前应用组目标以部署仓 `docs/application-group-target-model.md` 为准。本文后段“应用项目公开契约”描述已发布的旧契约，不能作为应用组新模型已经交付的证明。
+
 这是面向第三方独立扩展项目的 Kestra 增强镜像。
 本文说明如何部署镜像、接入 OIDC、接入 MCP，以及挂载扩展。
 
