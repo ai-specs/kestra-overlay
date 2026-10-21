@@ -212,7 +212,7 @@ index 0000000..da442e4
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 new file mode 100644
-index 0000000..76ba8b3
+index 0000000..33a2068
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 @@ -0,0 +1,761 @@
@@ -638,7 +638,7 @@ index 0000000..76ba8b3
 +                if (state.project().active()) for (var assignment : state.assignments()) {
 +                    if (!isActiveSubject(connection, assignment.subject())) continue;
 +                    for (var member : state.memberships()) {
-+                        if (!member.approved() || !canLogin(connection, member, assignment.subject())) continue;
++                        if (!member.firstPartyUi() || !member.approved() || !canLogin(connection, member, assignment.subject())) continue;
 +                        var available = availableScopes(state, assignment, member);
 +                        for (String scope : available) if (canReach(state, assignment, member, Set.of(scope))) reachable.add(scope);
 +                    }
@@ -727,7 +727,7 @@ index 0000000..76ba8b3
 +            for (var assignment : state.assignments()) {
 +                if (assignment.subject().equals(excludedSubject) || !isActiveSubject(connection, assignment.subject())) continue;
 +                for (var member : state.memberships()) {
-+                    if (!member.approved() || !canLogin(connection, member, assignment.subject())) continue;
++                    if (!member.firstPartyUi() || !member.approved() || !canLogin(connection, member, assignment.subject())) continue;
 +                    var available = availableScopes(state, assignment, member);
 +                    if (!available.isEmpty() && canReach(state, assignment, member, available)) return true;
 +                }
@@ -1080,10 +1080,10 @@ index 0000000..9e9f2c8
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
 new file mode 100644
-index 0000000..9b90740
+index 0000000..15f9345
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,289 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1264,6 +1264,20 @@ index 0000000..9b90740
 +            .isInstanceOf(DirectoryException.class).satisfies(error ->
 +                assertThat(((DirectoryException)error).failure()).isEqualTo(Failure.LAST_ADMIN));
 +        assertThat(context.directory.assignment("project",ISSUER,"admin")).isPresent();
++    }
++    @Test void ordinaryClientCannotReplaceReachableFirstPartyAdministrator() throws Exception {
++        var context=context();context.apply();
++        context.directory.approveClient("project",1,new MembershipInput("other",true,
++            Set.of("ui-aud"),Set.of("admin-scope"),false));
++        context.login();
++        var ui=context.directory.clients("project",1,100).items().stream()
++            .filter(member->member.clientId().equals("ui")).findFirst().orElseThrow();
++        var before=context.directory.snapshot("project");
++        assertThatThrownBy(()->context.directory.updateClient("project","ui",ui.revision(),
++            new MembershipInput("ui",true,Set.of("ui-aud"),Set.of(),true)))
++            .isInstanceOf(DirectoryException.class).satisfies(error ->
++                assertThat(((DirectoryException)error).failure()).isEqualTo(Failure.LAST_ADMIN));
++        assertThat(context.directory.snapshot("project")).isEqualTo(before);
 +    }
 +    @Test void shouldRejectUnknownAndExpandedIntentAndCorruptedSnapshot() throws Exception {
 +        var context=context();context.apply();context.directory.createScope("project",1,readScope());context.login();
