@@ -212,10 +212,10 @@ index 0000000..da442e4
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 new file mode 100644
-index 0000000..2be41e5
+index 0000000..76ba8b3
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
-@@ -0,0 +1,736 @@
+@@ -0,0 +1,761 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -338,7 +338,7 @@ index 0000000..2be41e5
 +        }
 +        Set<String> knownProjects = Set.copyOf(projectIds);
 +        for (var state : plan.projects()) validateTargets(state, knownProjects);
-+        require(firstParty && hasAdministrator(connection, plan.projects(), null));
++        require(firstParty && hasBootstrapOwner(connection, plan.projects()));
 +    }
 +
 +    public void applyBootstrap(ApplicationDirectoryBootstrap.Plan plan, String approvedHash,
@@ -377,7 +377,7 @@ index 0000000..2be41e5
 +            Set<String> knownProjects = new HashSet<>();
 +            for (var state : plan.projects()) knownProjects.add(state.project().id());
 +            for (var state : plan.projects()) validateTargets(state, knownProjects);
-+            require(hasUi && hasAdministrator(connection, plan.projects(), null));
++            require(hasUi && hasBootstrapOwner(connection, plan.projects()));
 +            try (var statement = connection.createStatement()) { statement.executeUpdate("DELETE FROM oidc_project_state"); }
 +            for (var state : plan.projects()) save(connection, state);
 +            try (var statement = connection.prepareStatement("INSERT INTO oidc_project_bootstrap(singleton,approval_hash,receipt_hash,source_revision,ui_client_id,consumed) VALUES(1,?,?,?,?,TRUE)")) {
@@ -635,13 +635,12 @@ index 0000000..2be41e5
 +                for (var member : state.memberships()) {
 +                    if (member.approved() && isActiveClient(connection, member.clientId())) audiences.addAll(member.audiences());
 +                }
-+                if (state.project().active()) for (var scope : state.scopes()) {
-+                    if (!scope.active() || scope.managementIntents().isEmpty()) continue;
-+                    for (var assignment : state.assignments()) {
-+                        if (!assignment.projectScopes().contains(scope.scope()) || !isActiveSubject(connection, assignment.subject())) continue;
-+                        for (var member : state.memberships()) {
-+                            if (member.approved() && member.allowedProjectScopes().contains(scope.scope()) && canLogin(connection, member, assignment.subject())) reachable.add(scope.scope());
-+                        }
++                if (state.project().active()) for (var assignment : state.assignments()) {
++                    if (!isActiveSubject(connection, assignment.subject())) continue;
++                    for (var member : state.memberships()) {
++                        if (!member.approved() || !canLogin(connection, member, assignment.subject())) continue;
++                        var available = availableScopes(state, assignment, member);
++                        for (String scope : available) if (canReach(state, assignment, member, Set.of(scope))) reachable.add(scope);
 +                    }
 +                }
 +                projections.add(new PolicyBoundary(state.project(), state.scopes(), audiences, reachable, protocolScopes()));
@@ -707,34 +706,60 @@ index 0000000..2be41e5
 +            if (!assignment.projectScopes().contains(name) || !member.allowedProjectScopes().contains(name)) throw failure(Failure.FORBIDDEN);
 +        }
 +        if (!management.isUnique()) throw failure(Failure.UNAVAILABLE);
-+        if (!management.get().authorize(identity, targetApplicationGroupId, action)) throw failure(Failure.FORBIDDEN);
++        final boolean allowed;
++        try { allowed = management.get().authorize(identity, targetApplicationGroupId, action); }
++        catch (RuntimeException error) { throw failure(Failure.UNAVAILABLE); }
++        if (!allowed) throw failure(Failure.FORBIDDEN);
 +    }
 +
 +    public void guardSubjectDeactivation(Connection connection, String issuer, String subject) throws SQLException {
 +        lock(connection);
 +        if (!configuration.getIssuer().equals(issuer)) throw failure(Failure.INVALID);
++        if (!activated(connection)) return;
 +        var states = all(connection);
 +        if (hasAdministrator(connection, states, null) && !hasAdministrator(connection, states, subject)) throw failure(Failure.LAST_ADMIN);
 +    }
 +
 +    private boolean hasAdministrator(Connection connection, List<Snapshot> states, String excludedSubject) throws SQLException {
++        if (!management.isUnique()) throw failure(Failure.UNAVAILABLE);
 +        for (Snapshot state : states) {
 +            if (!state.project().active()) continue;
 +            for (var assignment : state.assignments()) {
 +                if (assignment.subject().equals(excludedSubject) || !isActiveSubject(connection, assignment.subject())) continue;
-+                for (String name : assignment.projectScopes()) {
-+                    boolean manage = state.scopes().stream().anyMatch(scope -> scope.active() && scope.scope().equals(name)
-+                        && scope.managementIntents().stream().anyMatch(intent -> intent.domain() == ManagementDomain.IDENTITY && intent.actions().contains("MANAGE")));
-+                    boolean client = false;
-+                    for (var member : state.memberships()) {
-+                        if (member.approved() && !member.audiences().isEmpty() && member.allowedProjectScopes().contains(name)
-+                            && canLogin(connection, member, assignment.subject())) client = true;
-+                    }
-+                    if (manage && client) return true;
++                for (var member : state.memberships()) {
++                    if (!member.approved() || !canLogin(connection, member, assignment.subject())) continue;
++                    var available = availableScopes(state, assignment, member);
++                    if (!available.isEmpty() && canReach(state, assignment, member, available)) return true;
 +                }
 +            }
 +        }
 +        return false;
++    }
++
++    private boolean hasBootstrapOwner(Connection connection, List<Snapshot> states) throws SQLException {
++        for (var state : states) if (state.project().active()) {
++            for (var assignment : state.assignments()) if (isActiveSubject(connection, assignment.subject())) {
++                for (var member : state.memberships()) if (member.firstPartyUi() && member.approved()
++                    && canLogin(connection, member, assignment.subject())
++                    && !availableScopes(state, assignment, member).isEmpty()) return true;
++            }
++        }
++        return false;
++    }
++
++    private Set<String> availableScopes(Snapshot state, SubjectAssignment assignment, ClientMembership member) {
++        var available = new HashSet<>(assignment.projectScopes());
++        available.retainAll(member.allowedProjectScopes());
++        available.retainAll(state.scopes().stream().filter(ScopeDefinition::active).map(ScopeDefinition::scope).toList());
++        return Set.copyOf(available);
++    }
++
++    private boolean canReach(Snapshot state, SubjectAssignment assignment, ClientMembership member, Set<String> scopes) {
++        if (!management.isUnique()) throw failure(Failure.UNAVAILABLE);
++        var candidate = new ApplicationGroupManagementV1.Candidate(state.project().id(), state.project().issuer(),
++            assignment.subject(), member.clientId(), member.audiences(), scopes);
++        try { return management.get().reachable(candidate, state.project().id(), ApplicationGroupManagementV1.Action.MANAGE); }
++        catch (RuntimeException error) { throw failure(Failure.UNAVAILABLE); }
 +    }
 +
 +    private void validateUniqueClients(Connection connection, Snapshot candidate) throws SQLException {
@@ -1055,10 +1080,10 @@ index 0000000..9e9f2c8
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
 new file mode 100644
-index 0000000..c7fb90d
+index 0000000..9b90740
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,275 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1221,6 +1246,24 @@ index 0000000..c7fb90d
 +        context.directory.assign("project",1,new AssignmentInput(ISSUER,"second",Set.of("admin-scope")));context.login();
 +        context.directory.revokeAssignment("project",ISSUER,"admin",1);
 +        assertThat(context.directory.assignment("project",ISSUER,"admin")).isEmpty();
++    }
++    @Test void lastAdministratorUsesProviderInsteadOfSharedManagementIntent() throws Exception {
++        var context=context();
++        var original=context.plan.projects().getFirst();
++        var resource=new ResourceIntent("kestra-resources-v1","FLOW",
++            new NamespaceDomain(DomainKind.RESTRICTED,Set.of("a"),Set.of()),
++            new ResourceIdDomain(DomainKind.ALL,Set.of()),Set.of("READ"));
++        var scope=new ScopeDefinition("project","admin-scope","Administrator","",true,List.of(resource),List.of(),1);
++        var snapshot=new ProjectDirectoryState.Snapshot(original.project(),List.of(scope),
++            original.memberships(),original.assignments(),original.directoryRevision());
++        var plan=new ApplicationDirectoryBootstrap.Plan(1,context.plan.installationId(),"ui",
++            context.plan.sourceRevision(),context.plan.sourceHash(),List.of(snapshot));
++        context.directory.applyBootstrap(plan,ApplicationDirectoryBootstrap.approvalHash(plan),context.receipt,"ui");
++        context.login();
++        assertThatThrownBy(()->context.directory.revokeAssignment("project",ISSUER,"admin",1))
++            .isInstanceOf(DirectoryException.class).satisfies(error ->
++                assertThat(((DirectoryException)error).failure()).isEqualTo(Failure.LAST_ADMIN));
++        assertThat(context.directory.assignment("project",ISSUER,"admin")).isPresent();
 +    }
 +    @Test void shouldRejectUnknownAndExpandedIntentAndCorruptedSnapshot() throws Exception {
 +        var context=context();context.apply();context.directory.createScope("project",1,readScope());context.login();

@@ -445,7 +445,7 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 
 主控裁决：接收移除共享意图及完整恢复的最小机制需求。新公开接口在宿主事务中接收已经验证的当前身份、目标应用组、动作和当前目录快照，只返回允许或拒绝；用于最后管理员检查的候选快照必须另设只读方法，不能把候选主体伪装成已登录身份。插件只从自己的已提交 Kestra 实际策略读取管理 grant；声明元数据 `key/name` 不参与决策。宿主先核对 issuer、client、audience、用户状态、scope 授予和应用支持，再调用唯一 provider；provider 不能读取宿主表或调用宿主写 API。跨连接一致性必须用真实 PostgreSQL 并发探针验证，当前没有跨仓共享事务承诺。内置应用组首次激活由安装凭据和批准计划控制，不能调用普通管理授权接口；其后写入缺 provider 时失败关闭。此裁决未冻结 Java 方法签名，须以独立探针确认事务访问路径后再实施。
 
-候选实现进度：验证树已新增 `ApplicationGroupManagementV1` 和目录写入激活点；普通管理写入先由宿主核对可信身份、应用组成员、用户授予和 scope 状态，再要求唯一 provider 返回允许。缺 provider 或拒绝均不写库，独立 PostgreSQL 探针已复现。候选 `reachable` 方法尚未接入最后管理员检查，旧 `resourceIntents/managementIntents`、目录上界和完整恢复仍在公开模型中，因此该候选不得发布为完整目标契约。下一步先完成候选 reachability、移除共享意图并更新插件独立策略，再执行宿主全链构建。
+候选实现进度：验证树已新增 `ApplicationGroupManagementV1` 和目录写入激活点；普通管理写入先由宿主核对可信身份、应用组成员、用户授予和 scope 状态，再要求唯一 provider 返回允许。缺 provider 或拒绝均不写库，独立 PostgreSQL 探针已复现。最后管理员检查已将候选用户、成员和有效 scope 交集交给同一 provider，专门测试证明即使共享 scope 没有 `managementIntents`，最后管理员撤权也被阻止；首次安装仍只按安装凭据与结构性首方 owner 判定，不把候选主体当成真实登录。旧 `resourceIntents/managementIntents`、目录上界和完整恢复仍在公开模型中，因此该候选不得发布为完整目标契约。下一步移除共享意图并更新插件独立策略，再执行双方完整构建与组合验收。
 
 ### 已接收的 UI 项目 scope 选择器（REQ-0360）
 
