@@ -212,7 +212,7 @@ index 0000000..da442e4
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 new file mode 100644
-index 0000000..33a2068
+index 0000000..528f5fb
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1.java
 @@ -0,0 +1,761 @@
@@ -640,7 +640,7 @@ index 0000000..33a2068
 +                    for (var member : state.memberships()) {
 +                        if (!member.firstPartyUi() || !member.approved() || !canLogin(connection, member, assignment.subject())) continue;
 +                        var available = availableScopes(state, assignment, member);
-+                        for (String scope : available) if (canReach(state, assignment, member, Set.of(scope))) reachable.add(scope);
++                        reachable.addAll(available);
 +                    }
 +                }
 +                projections.add(new PolicyBoundary(state.project(), state.scopes(), audiences, reachable, protocolScopes()));
@@ -1080,10 +1080,10 @@ index 0000000..9e9f2c8
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
 new file mode 100644
-index 0000000..15f9345
+index 0000000..831e084
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/projects/JdbcApplicationDirectoryV1PostgresTest.java
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,304 @@
 +package io.kestra.webserver.oidc.projects;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1278,6 +1278,21 @@ index 0000000..15f9345
 +            .isInstanceOf(DirectoryException.class).satisfies(error ->
 +                assertThat(((DirectoryException)error).failure()).isEqualTo(Failure.LAST_ADMIN));
 +        assertThat(context.directory.snapshot("project")).isEqualTo(before);
++    }
++    @Test void policyProjectionIncludesReachableNonIdentityScope() throws Exception {
++        var context=context();context.apply();
++        context.directory.createScope("project",1,new ScopeInput("policy","Policy manager","",true,List.of(),
++            List.of(new ManagementIntent(ManagementDomain.LOCAL_POLICY,Set.of("MANAGE")))));
++        context.login();
++        context.directory.updateClient("project","ui",1,new MembershipInput("ui",true,
++            Set.of("ui-aud"),Set.of("admin-scope","policy"),true));
++        context.login();
++        context.directory.replaceAssignment("project",ISSUER,"admin",1,
++            new AssignmentInput(ISSUER,"admin",Set.of("admin-scope","policy")));
++        var boundary=context.directory.policyBoundaries().getFirst();
++        assertThat(boundary.reachableManagementScopes()).contains("admin-scope","policy");
++        assertThat(management().reachable(new ApplicationGroupManagementV1.Candidate("project",ISSUER,
++            "admin","ui",Set.of("ui-aud"),Set.of("policy")),"project",ApplicationGroupManagementV1.Action.MANAGE)).isFalse();
 +    }
 +    @Test void shouldRejectUnknownAndExpandedIntentAndCorruptedSnapshot() throws Exception {
 +        var context=context();context.apply();context.directory.createScope("project",1,readScope());context.login();

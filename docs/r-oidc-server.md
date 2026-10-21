@@ -447,6 +447,8 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 
 候选实现进度：验证树已新增 `ApplicationGroupManagementV1` 和目录写入激活点；普通管理写入先由宿主核对可信身份、应用组成员、用户授予和 scope 状态，再要求唯一 provider 返回允许。缺 provider 或拒绝均不写库，独立 PostgreSQL 探针已复现。最后管理员检查已将候选用户、首方 UI 成员和有效 scope 交集交给同一 provider，专门测试证明即使共享 scope 没有 `managementIntents`，最后管理员撤权也被阻止；普通 client 即使登记相同管理 scope，也不能替代首方 UI 管理员。首次安装仍只按安装凭据与结构性首方 owner 判定，不把候选主体当成真实登录。旧 `resourceIntents/managementIntents`、目录上界和完整恢复仍在公开模型中，因此该候选不得发布为完整目标契约。下一步移除共享意图并更新插件独立策略，再执行双方完整构建与组合验收。
 
+组合反馈：正式 `3ee3f8e` 镜像与插件 `e90c590` 通过各自 CI，但根仓空库组合在首个测试账号创建后的完整策略保存返回 409。宿主 `PolicyBoundary.reachableManagementScopes` 曾误调用仅判断 `IDENTITY.MANAGE` 的新 provider，漏报只持 `LOCAL_POLICY.MANAGE` 的策略 scope；插件于是拒绝策略管理员可达性。裁决把该投影恢复为宿主可实际登录、获授且受首方 UI 成员支持的 scope 集合，不在宿主推断该 scope 的管理动作。`IDENTITY.MANAGE` 的正常写入与最后管理员保护继续由新 provider 决策。独立 PostgreSQL 测试验证“可达但非身份管理”的策略 scope 会进入投影；该修正仍须镜像 CI、插件正式输入和根仓组合复测。
+
 ### 已接收的 UI 项目 scope 选择器（REQ-0360）
 
 UI 不需要因新增项目 scope 修改 Compose。内置 issuer 只允许目录显式登记的第一方 UI client 申请协议 scope `kestra:project-scopes`。签发事务将该选择器展开为该 client 获批的项目 scope 集合，再与当前 subject assignment、项目 active 状态和用户 consent 求交；选择器本身永远不写入 `projectScopes`，不授予本地权限。UI 第一方可以显式免重复 consent，但不能免 subject 授权。普通 client 与 DCR client 必须逐名申请实际项目 scope，不自动展开。未授予请求返回 `invalid_scope`；没有 assignment 的 UI 用户仍可完成协议登录，但业务 projectScopes 为空。access token 的可信上下文只保存实际 project scopes；ID token 不假定标准 `scope` claim，若服务端 cookie 需要恢复上下文，必须使用同一签发事务产生的版本化私有 claim 并在线检查 project epoch。不得从 `roles` 改名为 scope。
