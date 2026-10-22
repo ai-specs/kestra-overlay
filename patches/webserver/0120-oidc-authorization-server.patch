@@ -9,7 +9,7 @@
 # 来源：参考 fork Provider/Discovery/Token/AuthCode/Session 五文件逻辑重写（跨基，
 #   漂移核对完成）；依据：RFC 6749/7636/7662/7009、OIDC Core、nimbus 11.38.2。
 #   剥离了：browserBase host-aware 拓扑、PENDING_AUTHORIZE WebView 补丁、client
-#   roles/projectId 列、CORS 注入、HS256 会话 JWT。安全修正：discovery 只广播 S256
+#   roles/applicationGroupId 列、CORS 注入、HS256 会话 JWT。安全修正：discovery 只广播 S256
 #   （fork 广播 S256+PLAIN）；token/code 表 FK ON DELETE CASCADE。
 # 触达上游文件（8+3 测试）：migration bean+SQL（2.0.92）、OidcConfiguration、
 #   services×4（Token/AuthCode/Session/NimbusHttpAdapter）、controllers×2；测试三份。
@@ -387,7 +387,7 @@ index 0000000000000000000000000000000000000000..30730afa5ef8bcaf83fdd6b0177f870a
 +
 +        final AuthorizationSuccessResponse success = new AuthorizationSuccessResponse(
 +            redirectUri,
-+new AuthorizationCode(tokenService.bindProjectCode(
++new AuthorizationCode(tokenService.bindApplicationGroupCode(
 + code
 +.getValue(), client.clientId(), subject.get(), requestedScopes))
 +, null, state, ResponseMode.QUERY

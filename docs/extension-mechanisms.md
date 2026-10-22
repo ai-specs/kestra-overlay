@@ -1,5 +1,21 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+> **职责纠正优先（2026-10-21）**：前序把应用组目录、CRUD、内置/退役和组表放在宿主的候选被替代；这些业务迁回插件。本仓只保留标准 OIDC、版本化只读投影与必要激活点，不保留旧写目录转发。下方各候选重放/编译/探针数字只描述原版本，不证明最新职责落实。接收方向、最小机制缺口和测试顺序见 `docs/r-oidc-server.md` 的职责纠正提案。
+
+2026-10-22 当前：账号/client生命周期已通过同连接guard接线，旧宿主组API、业务实现、组CLI与组表迁移已移除。pending登记查询与consent只读预览已经补齐，绑定、签发和refresh保持严格有效client检查。40补丁重放、57份相关主源码、源码职责门及58项进程内检查通过；20项PostgreSQL仅源码编译。构建增加实际executable边界门，旧缓存产物实际被拒绝；完整数据库、网络HTTP/浏览器与发布未通过。具体阶段边界和证据以职责纠正提案当前状态为准，后文旧记录不得作为交付证明。
+
+`0370` 已加入只读投影、事务内标准协议状态查询与生命周期 guard 候选。标准查询通过调用方连接读取本仓 OIDC 状态，统一安全锁不建立组业务表。42补丁重放、65份相关主源码编译及新增11项进程内探针通过；旧业务目录移除和调用点激活未完成。正式构建已接入职责边界门，当前候选明确被拒绝，不能用于插件编译或部署。具体 API、锁顺序、探针限制与证据见同一职责纠正提案。
+
+2026-10-22：签发、refresh 和可信身份读取已改为目标化只读投影及同连接标准身份检查，不再调用宿主组业务目录或首方成员标志。权限元数据仅用于 consent 展示，不能另作授权上限。授权码/refresh 绑定防止旧凭据跨组/epoch使用或在 provider 恢复后自动提权。相关25项进程内探针通过，PostgreSQL12项已适配并完成源码编译、未执行。账号/client生命周期与旧组类/表仍使发布职责门失败；详见 `docs/r-oidc-server.md` 的只读接线记录。
+
+> **签发公开方法与运行探针（2026-10-21，候选未发布）**：授权码绑定及 claim/audience 辅助方法统一应用组命名；旧方法无别名。最新 token-contract-replay 重放 41 补丁、编译 60 份主源码及纯契约 16 项通过，另可信身份/V2/MCP 异步撤权进程内探针 13 项通过。数据库及真实 HTTP 未执行；完整 Gradle 仍受本机 socket 权限阻断。发布检查器已同步新类名；静态计数不作为执行证据。详见 `docs/r-oidc-server.md` 的签发契约清理后续。
+
+> **组 ID 生命周期（2026-10-21，候选未发布）**：为防止删除后同 ID 新组版本重置而重新匹配旧凭据，组删除在同一目录写锁和事务中登记退役 ID；创建同时检查现存及退役 ID，均不得复用。内置组及被拒删除不写退役记录。候选重放、60 份源码编译与 16 项纯契约检查通过；真实 PostgreSQL/并发测试仅源码编译，尚未运行。正式发布门仍未通过，详见 `docs/r-oidc-server.md` 的删除安全补充裁决。
+
+> **应用组命名候选（2026-10-21，未发布）**：目录 `ApplicationGroup`、可信 `applicationGroupId/applicationGroupScopes`、scope `key/name/description`、快照和安装计划的应用组字段及 `oidc_application_group_*` 表已统一进入候选补丁；旧字段不加别名。固定 BASE 的 41 补丁重放、60 份主源码编译及 16 项纯契约测试通过；数据库及完整 CI 未运行。具体破坏性边界、源码树与证据见 `docs/r-oidc-server.md` 的宿主命名候选更新，不能供插件正式编译。
+
+> **内置应用组约束（REQ-0360/0363，候选未发布，2026-10-21）**：安装计划显式提供不可推断的内置组 ID，审批 hash 绑定该值，激活事务保存非空外键；内置 ID 只读且删除拒绝。非内置组只允许按精确修订删除无引用空组。41 个补丁从固定 BASE 顺序重放、结构检查、相关源码编译与计划测试 4 项通过；PostgreSQL 持久化/删除探针、并发与正式 CI 尚未运行。最小契约及证据见 `docs/r-oidc-server.md` 的内置约束补充裁决，不作为当前插件编译输入。
+
 > **系统主题监听（REQ-0369，已接收、未发布）**：全局主题生命周期监听系统媒体变化，
 > 只在 syncWithSystem 偏好下调用既有 switchTheme，并在卸载时清理。扩展继续消费
 > 宿主解析主题，不维护第二套偏好。真实失败与验证见 [R-EE-RBAC](r-ee-rbac.md)。
@@ -391,6 +407,7 @@ REQ-0330 已接收最小生命周期激活点；provider 只提供不透明句�
 > 新应用组目标已替代本节旧 project 契约。`0361458` 已发布 scope 名称、声明只读 SPI 与新签名 claim 的部分机制，但 `ApplicationDirectoryV1` 和 `TrustedIdentityV1` 仍保留旧项目字段、应用组级意图与恢复联锁。完整目标与拒绝规则见 `docs/r-oidc-server.md`“应用组签发与目录契约重构提案”。本节保留旧源码事实供差异调查，不作为新模型的实现规范。
 > 旧 `resourceIntents/managementIntents` 与全组目录修订恢复仍须移除。事务内的应用组管理授权缺口见 `docs/r-oidc-server.md`“应用组管理授权边界提案”；主控已接收最小机制需求，但接口尚未实施或发布，不能作为当前插件编译输入。
 > 缺声明组件时的首方标准 OIDC 登录失败已由部署仓组合证据复现；收窄后的零应用组 scope 签发机制见 `docs/r-oidc-server.md`“缺声明组件的首方协议登录”。该修复仍须正式发布和缺插件组合复测。
+> 移除组级资源/管理意图的下一项候选仅在独立验证树通过宿主定向测试；插件尚未从旧上界切换，不能把候选 patch 当成已发布应用组语义。消费顺序和测试门见 `docs/r-oidc-server.md`“应用组管理授权边界提案”。
 
 `ApplicationDirectoryV1`、`TrustedIdentityV1` 和 `AuthorizationEvaluationProviderV2` 是版本化 classpath 公开契约。`ApplicationDirectoryV1` 只提供项目、scope、成员 client、subject assignment、revision/epoch 和显式三域管理意图；不提供插件 grants、业务页面或名称推断。`TrustedIdentityV1` 只返回宿主验证后的 issuer、subject、client、精确 audiences、tenant、project、protocolScopes、projectScopes、authenticationVersion、authorizationVersion 和 directoryRevision。
 

@@ -6,10 +6,9 @@
 # 移除条件: 上游提供等价MCP异步授权来源与撤权探针
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java b/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java
 new file mode 100644
-index 0000000..b852a5f
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,191 @@
 +package io.kestra.mcp;
 +
 +import java.util.List;
@@ -96,24 +95,22 @@ index 0000000..b852a5f
 +            });
 +        };
 +        var configuration = new RbacConfiguration(true, false);
-+        var directory = mock(io.kestra.webserver.oidc.projects.ProjectDirectoryState.class);
-+        var lifecycle = mock(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.class);
-+        when(lifecycle.matches("alice", 3L)).thenAnswer(call -> active.get());
-+        when(directory.snapshot("project")).thenAnswer(call -> {
-+            var project = new io.kestra.webserver.oidc.ApplicationDirectoryV1.Project("project", "main", "https://issuer.invalid", "Project", true, 19, epoch.get());
-+              var definition = new io.kestra.webserver.oidc.ApplicationDirectoryV1.ScopeDefinition("project", "read", "Reader", "", true, List.of(), List.of(), 1);
-+            var member = new io.kestra.webserver.oidc.ApplicationDirectoryV1.ClientMembership("project", "client", true, java.util.Set.of("resource"), java.util.Set.of("read"), false, 1);
-+            var assignment = new io.kestra.webserver.oidc.ApplicationDirectoryV1.SubjectAssignment("project", "https://issuer.invalid", "alice", java.util.Set.of("read"), 1, 1);
-+            return new io.kestra.webserver.oidc.projects.ProjectDirectoryState.Snapshot(project, List.of(definition), List.of(member), List.of(assignment), 19);
-+        });
-+        when(directory.protocolScopes()).thenReturn(List.of());
++        var projection = mock(io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.class);
++        var protocol = mock(io.kestra.webserver.oidc.OidcProtocolStateV1.class);
++        var source = mock(javax.sql.DataSource.class);
++        var connection = mock(java.sql.Connection.class);
++        when(source.getConnection()).thenReturn(connection);
++        when(protocol.account(connection,"https://issuer.invalid","alice")).thenAnswer(call -> Optional.of(
++            new io.kestra.webserver.oidc.OidcProtocolStateV1.Account("https://issuer.invalid","alice",active.get(),active.get(),3)));
++        when(protocol.client(connection,"https://issuer.invalid","client")).thenReturn(Optional.of(
++            new io.kestra.webserver.oidc.OidcProtocolStateV1.Client("https://issuer.invalid","client",true,java.util.Set.of("openid"),false)));
++        when(projection.current(eq(connection),any())).thenAnswer(call -> new io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(
++            new io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.Projection("applicationGroup","main","https://issuer.invalid","client","alice",
++                true,true,19,epoch.get(),java.util.Set.of("resource"),List.of(new io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.Scope("read","Reader","")),
++                java.util.Set.of("read"),java.util.Set.of("read")))));
 +        var oidc = new io.kestra.webserver.oidc.OidcConfiguration();
 +        oidc.setIssuer("https://issuer.invalid");
-+        io.kestra.webserver.oidc.ApplicationScopeDeclarationsV1 declarations = (groupId, clientId) ->
-+            new io.kestra.webserver.oidc.ApplicationScopeDeclarationsV1.Projection(groupId, clientId,
-+                List.of(new io.kestra.webserver.oidc.ApplicationScopeDeclarationsV1.Scope("read",
-+                    List.of(new io.kestra.webserver.oidc.ApplicationScopeDeclarationsV1.Permission("view", "View")))));
-+        var identity = new io.kestra.webserver.oidc.services.OidcTrustedIdentity(bean(directory), bean(declarations), oidc, lifecycle);
++        var identity = new io.kestra.webserver.oidc.services.OidcTrustedIdentity(bean(projection),protocol,oidc,source);
 +        var typed = new TypedAuthorizationGate(bean(null), new AuthorizationEvaluations(true, configuration, true, bean(null), bean(provider), bean(identity), true));
 +        var gate = new McpCapabilityGate(true, true, false, bean(null), configuration, new RbacGate(bean(null), typed, true));
 +        var resolver = McpCapabilityGate.class.getDeclaredField("mcpResolvers");
@@ -165,7 +162,7 @@ index 0000000..b852a5f
 +            .sessionId("session").userId("alice").roles(List.of("reader")).clientId("client").resource("resource")
 +            .scopes(List.of(McpCapabilityGate.FLOW_READ, McpCapabilityGate.EXECUTION_WRITE)).build());
 +        var request = io.micronaut.http.HttpRequest.POST("/mcp", "");
-+        var claim = Map.of("application_group_id", "project", "client_id", "client", "authorization_version", 7L,
++        var claim = Map.of("application_group_id", "applicationGroup", "client_id", "client", "authorization_version", 7L,
 +            "application_group_scopes", java.util.Set.of("read"), "protocol_scopes", java.util.Set.of("openid"));
 +        request.setAttribute("io.kestra.mcp.authentication", io.micronaut.security.authentication.Authentication.build(originSubject == null ? "alice" : originSubject, List.of(),
 +            Map.of("iss", "https://issuer.invalid", "aud", List.of("resource"), "resource", "resource",

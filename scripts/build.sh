@@ -50,6 +50,7 @@ if [ "${1:-}" = "--apply-only" ]; then
   exit 0
 fi
 
+python3 "$PWD/scripts/check-application-group-boundary.py" "$WORK"
 python3 -m unittest discover -s "$PWD/scripts/tests" -v
 
 echo "== scoped OIDC acceptance tests =="
@@ -78,6 +79,7 @@ mkdir -p "$WORK/docker/app"
 cp "$EXE" "$WORK/docker/app/kestra"
 chmod +x "$WORK/docker/app/kestra"
 python3 "$PWD/scripts/merge-classpath.py" "$WORK/docker/app/kestra" "$PWD/extensions.tsv"
+python3 "$PWD/scripts/check-application-group-boundary.py" "$WORK" "$WORK/docker/app/kestra"
 # Pre-create the storage dir with kestra ownership: the upstream image has no /app/storage,
 # so a named volume mounted there initializes root-owned and the uid-1000 process crashes
 # with AccessDenied on first boot (third-party test 2026-10-09). COPY docker / carries the

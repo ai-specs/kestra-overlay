@@ -146,9 +146,9 @@ index 0000000..ad236d9
 +    private static final Duration TIMEOUT = Duration.ofSeconds(5);
 +    private final boolean enabled;
 +    private final BeanProvider<AuthorizationEvaluationProviderV1> providers;
-+private BeanProvider<AuthorizationEvaluationProviderV2> projectProviders;
++private BeanProvider<AuthorizationEvaluationProviderV2> applicationGroupProviders;
 +    private BeanProvider<io.kestra.webserver.oidc.TrustedIdentityV1> identities;
-+    private boolean applicationProjects;
++    private boolean applicationGroups;
 +
 +    @jakarta.inject.Inject
 +    public AuthorizationEvaluations(
@@ -156,16 +156,16 @@ index 0000000..ad236d9
 +        RbacConfiguration configuration,
 +        @Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled,
 +        BeanProvider<AuthorizationEvaluationProviderV1> providers,
-+        BeanProvider<AuthorizationEvaluationProviderV2> projectProviders,
++        BeanProvider<AuthorizationEvaluationProviderV2> applicationGroupProviders,
 +        BeanProvider<io.kestra.webserver.oidc.TrustedIdentityV1> identities,
-+        @Value("${kestra.rbac.application-groups.enabled:false}") boolean applicationProjects) {
++        @Value("${kestra.rbac.application-groups.enabled:false}") boolean applicationGroups) {
 +        this(enabled, configuration, typedEnabled, providers);
-+        if (applicationProjects && (!enabled || !typedEnabled || !configuration.enabled())) {
-+            throw new IllegalArgumentException("Application projects require unified typed evaluation");
++        if (applicationGroups && (!enabled || !typedEnabled || !configuration.enabled())) {
++            throw new IllegalArgumentException("Application groups require unified typed evaluation");
 +        }
-+        this.projectProviders = projectProviders;
++        this.applicationGroupProviders = applicationGroupProviders;
 +        this.identities = identities;
-+        this.applicationProjects = applicationProjects;
++        this.applicationGroups = applicationGroups;
 +    }
 +
 +
@@ -186,7 +186,7 @@ index 0000000..ad236d9
 +        if (!enabled) return Flux.defer(action);
 +        return Flux.defer(() -> {
 +            if (
-+(applicationProjects ? !projectProviders.isUnique() || !identities.isUnique() :
++(applicationGroups ? !applicationGroupProviders.isUnique() || !identities.isUnique() :
 +!providers.isUnique(
 +)
 +) || principal == null || principal.subject() == null || principal.subject().isBlank()
@@ -194,10 +194,10 @@ index 0000000..ad236d9
 +            var identity = new RbacAuthorizer.Principal(principal.subject(), List.copyOf(principal.roles()),
 +                principal.clientId(), principal.audience(), List.copyOf(principal.scopes()));
 +final AuthorizationEvaluationProviderV1 provider;
-+            if (applicationProjects) {
++            if (applicationGroups) {
 +                var trusted = identities.get().current();
 +                if (!trusted.subject().equals(principal.subject()) || !trusted.tenant().equals(tenant)) return Flux.error(denied());
-+                provider = (ignoredPrincipal, ignoredTenant) -> projectProviders.get().begin(trusted, tenant);
++                provider = (ignoredPrincipal, ignoredTenant) -> applicationGroupProviders.get().begin(trusted, tenant);
 +            } else {
 +                provider = providers.get();
 +            }

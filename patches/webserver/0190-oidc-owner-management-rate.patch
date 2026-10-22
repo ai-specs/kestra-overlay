@@ -6,15 +6,15 @@
 # 移除条件: 上游OSS提供等价能力或本需求弃用
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java
 new file mode 100644
-index 0000000..e7b4a0f
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,84 @@
 +package io.kestra.webserver.oidc.controllers;
 +
 +import java.net.URI;
 +import java.util.Map;
 +import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.IdentityLifecycleGuardV1;
 +import io.kestra.webserver.oidc.services.OidcOwnershipService;
 +import io.kestra.webserver.oidc.services.OidcSessionService;
 +import io.micronaut.context.annotation.Requires;
@@ -55,6 +55,18 @@ index 0000000..e7b4a0f
 +        try {
 +            ownership.revoke(clientId, subject.get(), "delete".equals(form.get("action")), form.get("interaction"), sessions.sessionIdFrom(request).orElseThrow());
 +            return HttpResponse.noContent();
++        } catch(IdentityLifecycleGuardV1.Rejected exception) {
++            HttpStatus status=switch(exception.failure()) {
++                case FORBIDDEN->HttpStatus.FORBIDDEN;
++                case LAST_ADMIN->HttpStatus.CONFLICT;
++                case UNAVAILABLE->HttpStatus.SERVICE_UNAVAILABLE;
++            };
++            String error=switch(exception.failure()) {
++                case FORBIDDEN->"access_denied";
++                case LAST_ADMIN->"last_administrator";
++                case UNAVAILABLE->"identity_unavailable";
++            };
++            return HttpResponse.status(status).body(Map.of("error",error)).header("Cache-Control","no-store");
 +        } catch (SecurityException exception) { return HttpResponse.status(HttpStatus.FORBIDDEN); }
 +        catch (IllegalArgumentException exception) { return HttpResponse.notFound(); }
 +    }
@@ -132,13 +144,71 @@ index 0000000..9d857a1
 +    @Override public List<String> sqlResources() { return List.of("/migrations/2.0.97-oidc-server-rate-postgres.sql"); }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-index deec90f..7b0aee2 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-@@ -76,6 +76,130 @@ public class OidcOwnershipService {
-         consentPolicy.validate(List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +")));
+@@ -9,6 +9,9 @@
+ import javax.sql.DataSource;
+ import com.fasterxml.jackson.core.type.TypeReference;
+ import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.IdentityLifecycleGuardV1;
++import io.kestra.webserver.oidc.OidcProtocolStateV1;
++import io.micronaut.context.BeanProvider;
+ import io.micronaut.context.annotation.Requires;
+ import io.micronaut.context.annotation.Value;
+ import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
+@@ -22,9 +25,19 @@
+     private final int ownerMaximum;
+     private final io.kestra.webserver.oidc.OidcConfiguration configuration;
+     private final OidcConsentPolicy consentPolicy;
++    private final BeanProvider<IdentityLifecycleGuardV1> guards;
++    private final OidcProtocolStateV1 protocol;
++    private final boolean applicationGroups;
+ 
+     public record ClientState(String kind, String owner, Instant expiresAt, String name, boolean active) {}
+     public record ConsentResult(Map<String, List<String>> parameters, String code) {}
++
++    public ConsentResult completeForSession(long version, String interaction, String subject, String sessionId,
++        boolean approve, List<String> selectedScopes) {
++        ConsentResult result = complete(interaction, subject, sessionId, approve, selectedScopes);
++        if (result.code() != null) new OidcIdentityLifecycle(source).bindAuthorizationCode(result.code(), subject, version);
++        return result;
++    }
+ 
+     public OidcOwnershipService(final DataSource source, final ObjectMapper mapper,
+         final int ownerMaximum) {
+@@ -37,16 +50,25 @@
+         this(source, mapper, ownerMaximum, configuration, new OidcConsentPolicy());
      }
  
+-    @jakarta.inject.Inject
+     public OidcOwnershipService(final DataSource source, final ObjectMapper mapper,
+         @Value("${kestra.oidc.registration.max-clients-per-user:20}") final int ownerMaximum,
+         final io.kestra.webserver.oidc.OidcConfiguration configuration, final OidcConsentPolicy consentPolicy) {
++        this(source,mapper,ownerMaximum,configuration,consentPolicy,null,null,false);
++    }
++
++    @jakarta.inject.Inject
++    public OidcOwnershipService(final DataSource source,final ObjectMapper mapper,
++        @Value("${kestra.oidc.registration.max-clients-per-user:20}") final int ownerMaximum,
++        final io.kestra.webserver.oidc.OidcConfiguration configuration,final OidcConsentPolicy consentPolicy,
++        BeanProvider<IdentityLifecycleGuardV1> guards,OidcProtocolStateV1 protocol,
++        @Value("${kestra.rbac.application-groups.enabled:false}") boolean applicationGroups) {
+         this.source = DelegatingDataSource.unwrapDataSource(source);
+         this.mapper = mapper;
+         if (ownerMaximum < 1 || ownerMaximum > 1000) throw new IllegalArgumentException("Invalid owner client limit");
+         this.ownerMaximum = ownerMaximum;
+         this.configuration = configuration;
+         this.consentPolicy = consentPolicy;
++        this.guards=guards;this.protocol=protocol;this.applicationGroups=applicationGroups;
+     }
+ 
+     public ClientState state(final String clientId) {
+@@ -74,6 +96,144 @@
+ 
+     public void validateConsentPolicy(final Map<String, List<String>> parameters) {
+         consentPolicy.validate(List.of(parameters.getOrDefault("scope", List.of("")).getFirst().split(" +")));
++    }
++
 +    public void revoke(final String clientId, final String subject, final boolean delete) {
 +        revoke(clientId, subject, delete, null, null);
 +    }
@@ -146,8 +216,18 @@ index deec90f..7b0aee2 100644
 +    public void revoke(final String clientId, final String subject, final boolean delete, final String interaction, final String session) {
 +        if (subject == null || subject.isBlank()) throw new IllegalArgumentException("Invalid client ownership");
 +        try (var connection = source.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
 +            connection.setAutoCommit(false);
 +            try {
++                securityLock(connection);
++                if(applicationGroups) {
++                    var owner=state(connection,clientId,false);
++                    if(!"owned".equals(owner.kind()) || !subject.equals(owner.owner()))throw new IllegalArgumentException("Invalid client ownership");
++                    var account=protocol.account(connection,configuration.getIssuer(),subject).orElseThrow(()->new IllegalArgumentException("Invalid client ownership"));
++                    if(!account.active() || !subject.equals(account.subject()) || !configuration.getIssuer().equals(account.issuer()))
++                        throw new IllegalArgumentException("Invalid client ownership");
++                    lifecycleGuard(connection,clientId,delete);
++                }
 +                try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
 +                final var state = state(connection, clientId, true);
 +                if (!"owned".equals(state.kind()) || !subject.equals(state.owner())) throw new IllegalArgumentException("Invalid client ownership");
@@ -177,7 +257,7 @@ index deec90f..7b0aee2 100644
 +                }
 +                connection.commit();
 +            } catch (RuntimeException | SQLException exception) {
-+                connection.rollback();
++                try{connection.rollback();}catch(SQLException rollback){exception.addSuppressed(rollback);}
 +                throw exception;
 +            }
 +        } catch (SQLException exception) { throw new IllegalStateException("Cannot revoke client"); }
@@ -186,7 +266,9 @@ index deec90f..7b0aee2 100644
 +    public String managementInteraction(final String clientId, final String subject, final String session) {
 +        final String interaction = UUID.randomUUID().toString();
 +        try (var connection = source.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
 +            connection.setAutoCommit(false);
++            securityLock(connection);
 +            try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
 +            final var state = state(connection, clientId, true);
 +            if (!"owned".equals(state.kind()) || !java.util.Objects.equals(subject, state.owner()) || subject == null) throw new IllegalArgumentException("Invalid owner");
@@ -252,7 +334,9 @@ index deec90f..7b0aee2 100644
 +    @io.micronaut.scheduling.annotation.Scheduled(fixedDelay = "1m")
 +    public void cleanup() {
 +        try (var connection = source.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
 +            connection.setAutoCommit(false);
++            securityLock(connection);
 +            try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
 +            try (var statement = connection.createStatement()) {
 +                statement.executeUpdate("DELETE FROM oidc_client WHERE client_id IN (SELECT client_id FROM oidc_client WHERE client_kind='pending' AND pending_expires_at<=now() ORDER BY pending_expires_at LIMIT 100)");
@@ -261,11 +345,44 @@ index deec90f..7b0aee2 100644
 +            }
 +            connection.commit();
 +        } catch (SQLException exception) { throw new IllegalStateException("Cannot clean expired authorization records"); }
+     }
+ 
+     public String begin(final String clientId, final String subject, final String sessionId,
+@@ -108,8 +268,10 @@
+     public ConsentResult complete(final String interaction, final String subject,
+         final String sessionId, final boolean approve, final List<String> selectedScopes) {
+         try (var connection = source.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+             connection.setAutoCommit(false);
+             try {
++                securityLock(connection);
+                 try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) { lock.execute(); }
+                 final String clientId;
+                 final Map<String, List<String>> parameters;
+@@ -196,6 +358,23 @@
+         }
+     }
+ 
++    private void securityLock(Connection connection)throws SQLException {
++        if(applicationGroups) {
++            if(protocol==null || configuration==null)throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE);
++            protocol.lockSecurityState(connection);
++        }
 +    }
 +
-     public String begin(final String clientId, final String subject, final String sessionId,
-         final Map<String, List<String>> parameters) {
-         try (var connection = source.getConnection()) {
++    private void lifecycleGuard(Connection connection,String clientId,boolean delete)throws SQLException {
++        try {
++            if(guards==null || !guards.isUnique() || configuration==null)
++                throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE);
++            guards.get().beforeChange(connection,new IdentityLifecycleGuardV1.Change(delete?IdentityLifecycleGuardV1.Kind.CLIENT_DELETE:
++                IdentityLifecycleGuardV1.Kind.CLIENT_REVOKE,configuration.getIssuer(),null,clientId));
++        }catch(IdentityLifecycleGuardV1.Rejected failure){throw failure;}
++        catch(SQLException|RuntimeException failure){throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE);}
++    }
++
+     private ClientState state(final Connection connection, final String clientId, final boolean lock) throws SQLException {
+         try (var statement = connection.prepareStatement(
+             "SELECT client_kind,owner_subject,pending_expires_at,client_name,active FROM oidc_client WHERE client_id=?" + (lock ? " FOR UPDATE" : ""))) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationRate.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationRate.java
 new file mode 100644
 index 0000000..d1a982e

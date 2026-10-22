@@ -1,4 +1,4 @@
-"""Release gate: every host application-project probe must execute without skips."""
+"""Release gate: every host application-group probe must execute without skips."""
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
@@ -9,15 +9,20 @@ REQUIRED = {
     "io.kestra.webserver.oidc.OauthAuthorizationErrorRoutingTest": 6,
     "io.kestra.mcp.McpCallDiagnosticTest": 1,
     "io.kestra.mcp.McpAsyncIdentityContextTest": 5,
-    "io.kestra.webserver.oidc.ApplicationDirectoryV1Test": 7,
     "io.kestra.webserver.oidc.TrustedIdentityV1Test": 1,
     "io.kestra.webserver.oidc.ApplicationGroupScopeIssuanceTest": 4,
-    "io.kestra.webserver.oidc.OidcTrustedIdentityTest": 6,
-    "io.kestra.webserver.oidc.OidcProjectTokenIssuanceTest": 4,
-    "io.kestra.webserver.oidc.OidcApplicationProjectIntegrationTest": 8,
-    "io.kestra.webserver.oidc.projects.DirectoryContextTest": 1,
-    "io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1PostgresTest": 16,
-    "io.kestra.webserver.rbac.AuthorizationEvaluationProjectTest": 2,
+    "io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1Test": 5,
+    "io.kestra.webserver.oidc.OidcProtocolStateTest": 8,
+    "io.kestra.webserver.oidc.OidcAccountLifecycleGuardTest": 6,
+    "io.kestra.webserver.oidc.OidcAccountLifecycleGuardPostgresTest": 4,
+    "io.kestra.webserver.oidc.OidcClientLifecycleGuardTest": 7,
+    "io.kestra.webserver.oidc.OidcClientLifecycleGuardPostgresTest": 3,
+    "io.kestra.webserver.oidc.OidcTrustedIdentityTest": 10,
+    "io.kestra.webserver.oidc.OidcProtocolProjectionAuthorizationTest": 12,
+    "io.kestra.webserver.oidc.OidcPendingClientConsentTest": 5,
+    "io.kestra.webserver.oidc.OidcApplicationGroupTokenIssuanceTest": 4,
+    "io.kestra.webserver.oidc.OidcApplicationGroupIntegrationTest": 9,
+    "io.kestra.webserver.rbac.AuthorizationEvaluationApplicationGroupTest": 2,
     "io.kestra.webserver.rbac.ExtensionResourceAdapterTest": 2,
     "io.kestra.webserver.rbac.TypedResourceDomainBoundaryTest": 3,
     "io.kestra.webserver.rbac.QueryDomainFailClosedTest": 4,

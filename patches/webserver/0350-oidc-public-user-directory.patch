@@ -1,8 +1,8 @@
 # 需求: REQ-0350，公开最小账号目录、原子创建与认证生命周期失效，不承载授权业务。
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；本地定向测试通过，正式 CI 与发布待验收。
+# 状态: core；账号/client的13项guard单元探针通过；PostgreSQL与完整CI未通过，未发布。
 # 来源: 新写；依据 R-OIDC-SERVER 目录反馈与发布宿主组件探针；无客户角色或路径特例。
-# 触达上游文件: 新增公开 SPI、目录适配及版本迁移，修改登录/session/code激活点及测试，共11文件；发行与token验证演进归0150/0160。
+# 触达上游文件: 新增公开 SPI、目录适配及版本迁移，修改登录/session/code激活点及测试，共14文件；client生命周期机制归0190，发行与token验证归0150/0160。
 # 移除条件: 上游 OSS 提供等价公开账号目录与完整认证生命周期失效机制。
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/UserDirectoryV1.java
 new file mode 100644
@@ -66,7 +66,7 @@ index 0000000000000000000000000000000000000000..ef9af326245b7e6805d58275ab5a4021
 +    private final OidcIdentityLifecycle lifecycle
 +;
 +    @jakarta.inject.Inject
-+    private io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.services.OidcTrustedIdentity> projectIdentities
++    private io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.services.OidcTrustedIdentity> applicationGroupIdentities
 +;
 +    public OidcIdentityLifecycleFilter(OidcConfiguration configuration, OidcIdentityLifecycle lifecycle) {
 +        this.configuration = configuration; this.lifecycle = lifecycle;
@@ -84,9 +84,9 @@ index 0000000000000000000000000000000000000000..ef9af326245b7e6805d58275ab5a4021
 +        if (!configuration.getIssuer().equals(String.valueOf(attributes.get("iss")))) return chain.proceed(request);
 +        return Mono.fromCallable(() ->
 +{
-+                if (projectIdentities != null && projectIdentities.isPresent()) {
-+                    if (!projectIdentities.isUnique()) return false;
-+                    projectIdentities.get().validate(authentication);
++                if (applicationGroupIdentities != null && applicationGroupIdentities.isPresent()) {
++                    if (!applicationGroupIdentities.isUnique()) return false;
++                    applicationGroupIdentities.get().validate(authentication);
 +                }
 +                return
 + authentication.getName().equals(attributes.get("client_id")) && lifecycle.machineSubject(authentication.getName())
@@ -251,24 +251,6 @@ index 0000000000000000000000000000000000000000..768b75f3e768122333d6c4ccda7db182
 +        } catch (SQLException failure) { throw new IllegalStateException("Cannot authenticate identity lifecycle"); }
 +    }
 +}
-diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-index 7b0aee2f79b5b797dddcc2ff8e957a8f09738478..39b077a69021ec318629fdba6db91dec96c92ef5 100644
---- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-+++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcOwnershipService.java
-@@ -26,6 +26,13 @@ public class OidcOwnershipService {
-     public record ClientState(String kind, String owner, Instant expiresAt, String name, boolean active) {}
-     public record ConsentResult(Map<String, List<String>> parameters, String code) {}
-
-+    public ConsentResult completeForSession(long version, String interaction, String subject, String sessionId,
-+        boolean approve, List<String> selectedScopes) {
-+        ConsentResult result = complete(interaction, subject, sessionId, approve, selectedScopes);
-+        if (result.code() != null) new OidcIdentityLifecycle(source).bindAuthorizationCode(result.code(), subject, version);
-+        return result;
-+    }
-+
-     public OidcOwnershipService(final DataSource source, final ObjectMapper mapper,
-         final int ownerMaximum) {
-         this(source, mapper, ownerMaximum, new io.kestra.webserver.oidc.OidcConfiguration());
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 index 8e2e2a6e6a30d149225e992a7c0347eeb474ac4c..03461d721ffebc9e5b67a0ad4d203b7fc669be18 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
@@ -353,10 +335,9 @@ index 8e2e2a6e6a30d149225e992a7c0347eeb474ac4c..03461d721ffebc9e5b67a0ad4d203b7f
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..12ec21378894b24ba27b542b0f501f1fb0278108
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,178 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.nio.charset.StandardCharsets;
@@ -367,6 +348,10 @@ index 0000000000000000000000000000000000000000..12ec21378894b24ba27b542b0f501f1f
 +import java.util.Optional;
 +import javax.sql.DataSource;
 +import io.kestra.webserver.oidc.UserDirectoryV1;
++import io.kestra.webserver.oidc.IdentityLifecycleGuardV1;
++import io.kestra.webserver.oidc.OidcProtocolStateV1;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.micronaut.context.BeanProvider;
 +import io.micronaut.context.annotation.Requires;
 +import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
 +import jakarta.inject.Singleton;
@@ -376,33 +361,38 @@ index 0000000000000000000000000000000000000000..12ec21378894b24ba27b542b0f501f1f
 +@Requires(property = "kestra.oidc.enabled", value = "true")
 +public final class OidcUserDirectory implements UserDirectoryV1 {
 +    private final DataSource source;
-+private io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1> projects;
-+    private io.kestra.webserver.oidc.OidcConfiguration configuration;
++    private final BeanProvider<IdentityLifecycleGuardV1> guards;
++    private final OidcProtocolStateV1 protocol;
++    private final OidcConfiguration configuration;
++    private final boolean applicationGroups;
 +
 +    @jakarta.inject.Inject
 +    public OidcUserDirectory(DataSource source,
-+        io.micronaut.context.BeanProvider<io.kestra.webserver.oidc.projects.JdbcApplicationDirectoryV1> projects,
-+        io.kestra.webserver.oidc.OidcConfiguration configuration) {
-+        this(source);
-+        this.projects = projects;
-+        this.configuration = configuration;
++        BeanProvider<IdentityLifecycleGuardV1> guards,OidcProtocolStateV1 protocol,OidcConfiguration configuration,
++        @io.micronaut.context.annotation.Value("${kestra.rbac.application-groups.enabled:false}") boolean applicationGroups) {
++        this.source=DelegatingDataSource.unwrapDataSource(source);this.guards=guards;this.protocol=protocol;
++        this.configuration=configuration;this.applicationGroups=applicationGroups;
 +    }
 +
 +    public OidcUserDirectory(DataSource source) {
-+        this.source = DelegatingDataSource.unwrapDataSource(source);
++        this(source,null,null,null,false);
 +    }
 +    private interface Work<Result> { Result run(Connection connection) throws SQLException; }
 +    private <Result> Result transaction(Work<Result> work) {
++        return transaction(false,work);
++    }
++    private <Result> Result transaction(boolean authenticationChange,Work<Result> work) {
 +        try (Connection connection = source.getConnection()) {
-+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
++            connection.setTransactionIsolation(authenticationChange?Connection.TRANSACTION_READ_COMMITTED:Connection.TRANSACTION_REPEATABLE_READ);
 +            connection.setAutoCommit(false);
 +            try {
 +                Result result = work.run(connection);
 +                connection.commit();
 +                return result;
 +            } catch (RuntimeException | SQLException failure) {
-+                connection.rollback();
++                try{connection.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}
 +                if (failure instanceof DirectoryException directory) throw directory;
++                if (failure instanceof IdentityLifecycleGuardV1.Rejected rejected) throw rejected;
 +                if (failure instanceof SQLException sql && ("23505".equals(sql.getSQLState()) || "40001".equals(sql.getSQLState())))
 +                    throw new DirectoryException(Failure.CONFLICT);
 +                throw new DirectoryException(Failure.UNAVAILABLE);
@@ -496,10 +486,16 @@ index 0000000000000000000000000000000000000000..12ec21378894b24ba27b542b0f501f1f
 +    private User authenticationChange(String subject, long revision, Boolean active, String credential) {
 +        text(subject);
 +        if (revision < 0) throw new DirectoryException(Failure.INVALID);
-+        return transaction(connection -> {
-+if (Boolean.FALSE.equals(active) && projects != null) {
-+                if (!projects.isUnique()) throw new DirectoryException(Failure.UNAVAILABLE);
-+                projects.get().guardSubjectDeactivation(connection, configuration.getIssuer(), subject);
++        return transaction(true,connection -> {
++            if(applicationGroups) {
++                if(protocol==null || guards==null || !guards.isUnique() || configuration==null)
++                    throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE);
++                protocol.lockSecurityState(connection);
++                var current=find(connection,subject).orElseThrow(()->new DirectoryException(Failure.NOT_FOUND));
++                if(current.revision()!=revision)throw new DirectoryException(Failure.CONFLICT);
++                var kind=active==null?IdentityLifecycleGuardV1.Kind.PASSWORD_RESET:
++                    active?IdentityLifecycleGuardV1.Kind.ACCOUNT_ACTIVATE:IdentityLifecycleGuardV1.Kind.ACCOUNT_DEACTIVATE;
++                guards.get().beforeChange(connection,new IdentityLifecycleGuardV1.Change(kind,configuration.getIssuer(),subject,null));
 +            }
 +
 +            try (var statement = connection.prepareStatement("UPDATE oidc_user SET user_state=COALESCE(?,user_state),"
@@ -747,5 +743,506 @@ index 0000000000000000000000000000000000000000..66e85d60f0a9465e6bcd349fb13c6d9b
 +            Map.of("iss", configuration.getIssuer(), "client_id", subject, OidcIdentityLifecycle.CLAIM, 0L)));
 +        directory.resetPassword(subject, initial.revision(), "ChangedPassword123!");
 +        assertEquals(401, Mono.from(filter.doFilter(request, ignored -> {throw new AssertionError("colliding identity bypassed lifecycle");})).block().code());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountLifecycleGuardTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountLifecycleGuardTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountLifecycleGuardTest.java
+@@ -0,0 +1,99 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.oidc.services.OidcUserDirectory;
++import io.micronaut.context.BeanProvider;
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import javax.sql.DataSource;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class OidcAccountLifecycleGuardTest {
++    private static final String ISSUER="https://issuer.example";
++    private static final String FIND="SELECT username,name,email,user_state,directory_revision FROM oidc_user WHERE username=?";
++    private static final String UPDATE="UPDATE oidc_user SET user_state=COALESCE(?,user_state),directory_revision=directory_revision+1,authentication_version=authentication_version+1,updated_at=now() WHERE username=? AND directory_revision=?";
++    private static final String PASSWORD="INSERT INTO oidc_user_auth_method(user_id,type,credential) VALUES (?,'PASSWORD',?) ON CONFLICT(user_id,type) DO UPDATE SET credential=EXCLUDED.credential,state='ACTIVE',updated_at=now()";
++    private final DataSource source=mock(DataSource.class);
++    private final Connection connection=mock(Connection.class);
++    private final BeanProvider<IdentityLifecycleGuardV1> guards=mock(BeanProvider.class);
++    private final IdentityLifecycleGuardV1 guard=mock(IdentityLifecycleGuardV1.class);
++    private final OidcProtocolStateV1 protocol=mock(OidcProtocolStateV1.class);
++
++    private OidcUserDirectory directory(boolean enabled)throws Exception {
++        when(source.getConnection()).thenReturn(connection);when(guards.isUnique()).thenReturn(true);when(guards.get()).thenReturn(guard);
++        var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
++        return new OidcUserDirectory(source,guards,protocol,configuration,enabled);
++    }
++
++    private ResultSet user()throws Exception {
++        var statement=mock(PreparedStatement.class);var result=mock(ResultSet.class);
++        when(connection.prepareStatement(FIND)).thenReturn(statement);when(statement.executeQuery()).thenReturn(result);when(result.next()).thenReturn(true);
++        when(result.getString("username")).thenReturn("alice");when(result.getString("name")).thenReturn("Alice");
++        when(result.getString("email")).thenReturn("alice@example.invalid");when(result.getString("user_state")).thenReturn("ACTIVE");
++        when(result.getLong("directory_revision")).thenReturn(4L,5L);return result;
++    }
++
++    private PreparedStatement mutation(String sql)throws Exception {
++        var statement=mock(PreparedStatement.class);when(connection.prepareStatement(sql)).thenReturn(statement);when(statement.executeUpdate()).thenReturn(1);return statement;
++    }
++
++    private void noMutation()throws Exception {
++        verify(connection,never()).prepareStatement(argThat(sql->sql.startsWith("UPDATE ") || sql.startsWith("INSERT ") || sql.startsWith("DELETE ")));
++        verify(connection,never()).commit();
++    }
++
++    @Test void accountDeactivationLocksAndGuardsBeforeAllStandardMutations()throws Exception {
++        var directory=directory(true);user();var update=mutation(UPDATE);
++        var tokens=mutation("UPDATE oidc_token SET revoked=true WHERE subject=?");var codes=mutation("UPDATE oidc_authorization_code SET used=true WHERE subject=?");
++        assertEquals(5,directory.setActive("alice",4,false).revision());
++        var order=inOrder(connection,protocol,guard,update,tokens,codes);
++        order.verify(connection).setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);order.verify(connection).setAutoCommit(false);
++        order.verify(protocol).lockSecurityState(connection);order.verify(connection).prepareStatement(FIND);
++        order.verify(guard).beforeChange(connection,new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.ACCOUNT_DEACTIVATE,ISSUER,"alice",null));
++        order.verify(update).executeUpdate();order.verify(tokens).executeUpdate();order.verify(codes).executeUpdate();order.verify(connection).commit();order.verify(connection).close();
++        verify(source).getConnection();
++    }
++
++    @Test void rejectedGuardPreservesItsReasonAndCannotTouchCredentialsTokensOrCodes()throws Exception {
++        var directory=directory(true);user();
++        var rejection=new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.LAST_ADMIN);
++        doThrow(rejection).when(guard).beforeChange(eq(connection),any());
++        assertSame(rejection,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->directory.setActive("alice",4,false)));
++        verify(connection).rollback();verify(connection).close();noMutation();
++    }
++
++    @Test void missingOrDuplicateGuardFailsClosedWithoutAnyIdentityMutation()throws Exception {
++        var directory=directory(true);when(guards.isUnique()).thenReturn(false);
++        assertEquals(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,
++            assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->directory.setActive("alice",4,false)).failure());
++        verifyNoInteractions(protocol,guard);noMutation();verify(connection).rollback();
++    }
++
++    @Test void staleRevisionIsCheckedUnderTheSecurityLockBeforeCallingTheGuard()throws Exception {
++        var directory=directory(true);user();
++        assertEquals(UserDirectoryV1.Failure.CONFLICT,assertThrows(UserDirectoryV1.DirectoryException.class,()->directory.setActive("alice",3,false)).failure());
++        verify(protocol).lockSecurityState(connection);verifyNoInteractions(guard);noMutation();
++    }
++
++    @Test void passwordResetUsesTheSameGuardAndConnectionBeforeChangingAuthenticationState()throws Exception {
++        var directory=directory(true);user();var update=mutation(UPDATE);var password=mutation(PASSWORD);
++        mutation("UPDATE oidc_token SET revoked=true WHERE subject=?");mutation("UPDATE oidc_authorization_code SET used=true WHERE subject=?");
++        assertEquals(5,directory.resetPassword("alice",4,"TestPassword123!").revision());
++        var order=inOrder(guard,update,password,connection);
++        order.verify(guard).beforeChange(connection,new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.PASSWORD_RESET,ISSUER,"alice",null));
++        order.verify(update).executeUpdate();order.verify(password).executeUpdate();order.verify(connection).commit();verify(source).getConnection();
++    }
++
++    @Test void unexpectedGuardFailureRollsBackAndFeatureOffKeepsStandardAccountLifecycle()throws Exception {
++        var directory=directory(true);user();doThrow(new SQLException("guard unavailable")).when(guard).beforeChange(eq(connection),any());
++        assertEquals(UserDirectoryV1.Failure.UNAVAILABLE,assertThrows(UserDirectoryV1.DirectoryException.class,()->directory.setActive("alice",4,true)).failure());
++        noMutation();verify(connection).rollback();
++        clearInvocations(connection,guard,protocol);var disabled=directory(false);var row=user();when(row.getLong("directory_revision")).thenReturn(5L);mutation(UPDATE);
++        mutation("UPDATE oidc_token SET revoked=true WHERE subject=?");mutation("UPDATE oidc_authorization_code SET used=true WHERE subject=?");
++        assertEquals(5,disabled.setActive("alice",4,true).revision());
++        verifyNoInteractions(protocol,guard);verify(connection).commit();
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountLifecycleGuardPostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountLifecycleGuardPostgresTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountLifecycleGuardPostgresTest.java
+@@ -0,0 +1,161 @@
++package io.kestra.webserver.oidc;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcInstallationReceipt;
++import io.kestra.webserver.oidc.services.OidcUserDirectory;
++import io.micronaut.context.BeanProvider;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Path;
++import java.sql.Connection;
++import java.util.List;
++import java.util.UUID;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.Test;
++import org.postgresql.ds.PGSimpleDataSource;
++import static org.junit.jupiter.api.Assertions.*;
++
++class OidcAccountLifecycleGuardPostgresTest extends OidcPostgresTestBase {
++    private static final String ISSUER="https://issuer.example";
++
++    static final class Fixture implements AutoCloseable {
++        final PGSimpleDataSource source=new PGSimpleDataSource();
++        final String schema="account_guard_"+UUID.randomUUID().toString().replace("-","");
++        final OidcConfiguration configuration=new OidcConfiguration();
++        final OidcProtocolStateV1 protocol=new OidcProtocolState(ISSUER,"ui",new OidcInstallationReceipt(Path.of("unused-test-receipt")),new ObjectMapper());
++
++        Fixture()throws Exception {
++            source.setURL(POSTGRES.getJdbcUrl());source.setUser(POSTGRES.getUsername());source.setPassword(POSTGRES.getPassword());
++            try(var connection=source.getConnection();var statement=connection.createStatement()){statement.execute("CREATE SCHEMA "+schema);}
++            source.setCurrentSchema(schema);configuration.setIssuer(ISSUER);
++            try(var connection=source.getConnection();var statement=connection.createStatement()) {
++                for(String resource:migrationResources())try(var input=getClass().getResourceAsStream(resource)) {
++                    if(input==null)throw new IllegalStateException("Missing production migration "+resource);
++                    for(String sql:splitStatements(new String(input.readAllBytes(),StandardCharsets.UTF_8)))statement.execute(sql);
++                }
++                statement.execute("CREATE TABLE guard_test_event(target_id TEXT NOT NULL,event_kind TEXT NOT NULL)");
++                statement.execute("INSERT INTO oidc_client(client_id,client_secret,client_kind,active,scopes) VALUES('ui','test-only','system',true,'[\"openid\"]')");
++            }
++            user("first");
++        }
++
++        void user(String subject)throws Exception {
++            new OidcUserDirectory(source).create(subject,subject,subject+"@example.invalid","OriginalTest123!");
++            try(var connection=source.getConnection()) {
++                try(var statement=connection.prepareStatement("INSERT INTO oidc_token(client_id,subject,token_type,value) VALUES('ui',?,'access',?),('ui',?,'refresh',?)")) {
++                    statement.setString(1,subject);statement.setString(2,subject+"-access");statement.setString(3,subject);statement.setString(4,subject+"-refresh");statement.executeUpdate();
++                }
++                try(var statement=connection.prepareStatement("INSERT INTO oidc_authorization_code(code,client_id,subject,redirect_uri,expires_at) VALUES(?,'ui',?,'https://issuer.example/callback',now()+interval '5 minutes')")) {
++                    statement.setString(1,subject+"-code");statement.setString(2,subject);statement.executeUpdate();
++                }
++            }
++        }
++
++        OidcUserDirectory directory(IdentityLifecycleGuardV1 guard) {
++            BeanProvider<IdentityLifecycleGuardV1> provider=new BeanProvider<>() {
++                public IdentityLifecycleGuardV1 get(){return guard;}
++                public boolean isUnique(){return true;}
++                public boolean isPresent(){return true;}
++            };
++            return new OidcUserDirectory(source,provider,protocol,configuration,true);
++        }
++
++        void event(Connection connection,IdentityLifecycleGuardV1.Change change)throws java.sql.SQLException {
++            assertFalse(connection.getAutoCommit());assertEquals(Connection.TRANSACTION_READ_COMMITTED,connection.getTransactionIsolation());
++            assertEquals(ISSUER,change.issuer());
++            try(var statement=connection.prepareStatement("INSERT INTO guard_test_event(target_id,event_kind) VALUES(?,?)")) {
++                statement.setString(1,change.subject()==null?change.clientId():change.subject());statement.setString(2,change.kind().name());statement.executeUpdate();
++            }
++        }
++
++        String state(String subject)throws Exception {
++            String sql="SELECT md5(jsonb_build_object('account',(SELECT to_jsonb(account) FROM oidc_user account WHERE username=?),"
++                +"'methods',(SELECT jsonb_agg(to_jsonb(method) ORDER BY type) FROM oidc_user_auth_method method WHERE user_id=?),"
++                +"'tokens',(SELECT jsonb_agg(to_jsonb(token) ORDER BY value) FROM oidc_token token WHERE subject=?),"
++                +"'codes',(SELECT jsonb_agg(to_jsonb(code) ORDER BY code) FROM oidc_authorization_code code WHERE subject=?))::text)";
++            try(var connection=source.getConnection();var statement=connection.prepareStatement(sql)) {
++                for(int index=1;index<=4;index++)statement.setString(index,subject);
++                try(var result=statement.executeQuery()){assertTrue(result.next());return result.getString(1);}
++            }
++        }
++
++        long count(String sql)throws Exception {
++            try(var connection=source.getConnection();var statement=connection.createStatement();var result=statement.executeQuery(sql)) {
++                assertTrue(result.next());return result.getLong(1);
++            }
++        }
++
++        public void close()throws Exception {
++            try(var connection=source.getConnection();var statement=connection.createStatement()){statement.execute("DROP SCHEMA "+schema+" CASCADE");}
++        }
++    }
++
++    @Test void rejectedGuardRollsBackItsOwnWriteAndAllStandardIdentityState()throws Exception {
++        try(var fixture=new Fixture()) {
++            String before=fixture.state("first");
++            var directory=fixture.directory((connection,change)->{
++                fixture.event(connection,change);
++                throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.LAST_ADMIN);
++            });
++            assertEquals(IdentityLifecycleGuardV1.Failure.LAST_ADMIN,
++                assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->directory.setActive("first",0,false)).failure());
++            assertEquals(before,fixture.state("first"));assertEquals(0,fixture.count("SELECT count(*) FROM guard_test_event"));
++        }
++    }
++
++    @Test void acceptedGuardAndAuthenticationRevocationCommitTogether()throws Exception {
++        try(var fixture=new Fixture()) {
++            var directory=fixture.directory((connection,change)->{
++                fixture.event(connection,change);
++                assertTrue(fixture.protocol.account(connection,ISSUER,change.subject()).orElseThrow().canLogin());
++            });
++            var changed=directory.setActive("first",0,false);assertFalse(changed.active());assertEquals(1,changed.revision());
++            assertEquals(1,fixture.count("SELECT authentication_version FROM oidc_user WHERE username='first'"));
++            assertEquals(0,fixture.count("SELECT count(*) FROM oidc_token WHERE subject='first' AND NOT revoked"));
++            assertEquals(0,fixture.count("SELECT count(*) FROM oidc_authorization_code WHERE subject='first' AND NOT used"));
++            assertEquals(1,fixture.count("SELECT count(*) FROM guard_test_event WHERE target_id='first' AND event_kind='ACCOUNT_DEACTIVATE'"));
++        }
++    }
++
++    @Test void failureAfterPasswordMutationRollsBackPasswordVersionAndGuardWrite()throws Exception {
++        try(var fixture=new Fixture()) {
++            try(var connection=fixture.source.getConnection();var statement=connection.createStatement()) {
++                statement.execute("ALTER TABLE oidc_token ADD CONSTRAINT guard_test_deny_revoke CHECK(NOT revoked)");
++            }
++            String before=fixture.state("first");
++            var directory=fixture.directory((connection,change)->{
++                fixture.event(connection,change);
++                assertEquals(IdentityLifecycleGuardV1.Kind.PASSWORD_RESET,change.kind());
++            });
++            assertEquals(UserDirectoryV1.Failure.UNAVAILABLE,
++                assertThrows(UserDirectoryV1.DirectoryException.class,()->directory.resetPassword("first",0,"ChangedTest123!")).failure());
++            assertEquals(before,fixture.state("first"));assertEquals(0,fixture.count("SELECT count(*) FROM guard_test_event"));
++        }
++    }
++
++    @Test void concurrentChangesRecheckCommittedProtocolStateAfterWaitingForTheSecurityLock()throws Exception {
++        try(var fixture=new Fixture();var executor=Executors.newFixedThreadPool(2)) {
++            fixture.user("second");var start=new CountDownLatch(1);
++            IdentityLifecycleGuardV1 guard=(connection,change)->{
++                boolean alternative=false;
++                for(String candidate:List.of("first","second"))if(!candidate.equals(change.subject())) {
++                    var account=fixture.protocol.account(connection,ISSUER,candidate).orElseThrow();
++                    alternative|=account.active() && account.canLogin();
++                }
++                if(!alternative)throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.LAST_ADMIN);
++            };
++            var first=executor.submit(()->deactivate(fixture.directory(guard),"first",start));
++            var second=executor.submit(()->deactivate(fixture.directory(guard),"second",start));start.countDown();
++            assertNotEquals(first.get(10,TimeUnit.SECONDS),second.get(10,TimeUnit.SECONDS));
++            assertEquals(1,fixture.count("SELECT count(*) FROM oidc_user WHERE user_state='ACTIVE'"));
++            assertEquals(1,fixture.count("SELECT sum(authentication_version) FROM oidc_user"));
++        }
++    }
++
++    private static boolean deactivate(OidcUserDirectory directory,String subject,CountDownLatch start)throws Exception {
++        assertTrue(start.await(5,TimeUnit.SECONDS));
++        try{directory.setActive(subject,0,false);return true;}
++        catch(IdentityLifecycleGuardV1.Rejected failure){assertEquals(IdentityLifecycleGuardV1.Failure.LAST_ADMIN,failure.failure());return false;}
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientLifecycleGuardTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientLifecycleGuardTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientLifecycleGuardTest.java
+@@ -0,0 +1,124 @@
++package io.kestra.webserver.oidc;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.controllers.OidcOwnedClientController;
++import io.kestra.webserver.oidc.services.*;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.sql.SQLException;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import javax.sql.DataSource;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class OidcClientLifecycleGuardTest {
++    private static final String ISSUER="https://issuer.example";
++    private static final String STATE="SELECT client_kind,owner_subject,pending_expires_at,client_name,active FROM oidc_client WHERE client_id=?";
++    private static final String INTERACTION="DELETE FROM oidc_client_management WHERE interaction=? AND client_id=? AND subject=? AND session_id=? AND expires_at>now()";
++    private final DataSource source=mock(DataSource.class);
++    private final Connection connection=mock(Connection.class);
++    private final OidcProtocolStateV1 protocol=mock(OidcProtocolStateV1.class);
++    private final BeanProvider<IdentityLifecycleGuardV1> guards=mock(BeanProvider.class);
++    private final IdentityLifecycleGuardV1 guard=mock(IdentityLifecycleGuardV1.class);
++    private final OidcConfiguration configuration=new OidcConfiguration();
++
++    private PreparedStatement statement(String sql)throws Exception {
++        var statement=mock(PreparedStatement.class);when(connection.prepareStatement(sql)).thenReturn(statement);when(statement.executeUpdate()).thenReturn(1);return statement;
++    }
++
++    private void state(String sql)throws Exception {
++        var statement=statement(sql);var row=mock(ResultSet.class);when(statement.executeQuery()).thenReturn(row);when(row.next()).thenReturn(true);
++        when(row.getString(1)).thenReturn("owned");when(row.getString(2)).thenReturn("alice");when(row.getString(4)).thenReturn("Application");when(row.getBoolean(5)).thenReturn(true);
++    }
++
++    private OidcOwnershipService service(boolean enabled)throws Exception {
++        configuration.setIssuer(ISSUER);when(source.getConnection()).thenReturn(connection);
++        when(guards.isUnique()).thenReturn(true);when(guards.get()).thenReturn(guard);
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,0)));
++        state(STATE);state(STATE+" FOR UPDATE");statement("SELECT pg_advisory_xact_lock(1500150)");
++        var active=statement("SELECT user_state FROM oidc_user WHERE username=? FOR SHARE");var row=mock(ResultSet.class);
++        when(active.executeQuery()).thenReturn(row);when(row.next()).thenReturn(true);when(row.getString(1)).thenReturn("ACTIVE");
++        return new OidcOwnershipService(source,new ObjectMapper(),20,configuration,new OidcConsentPolicy(),guards,protocol,enabled);
++    }
++
++    private void mutations()throws Exception {
++        statement(INTERACTION);
++        for(String sql:List.of("UPDATE oidc_client SET active=FALSE WHERE client_id=?","UPDATE oidc_token SET revoked=TRUE WHERE client_id=?",
++            "UPDATE oidc_authorization_code SET used=TRUE WHERE client_id=?","DELETE FROM oidc_consent WHERE client_id=?","DELETE FROM oidc_client WHERE client_id=?"))statement(sql);
++    }
++
++    private void noMutation()throws Exception {
++        verify(connection,never()).prepareStatement(argThat(sql->sql.startsWith("UPDATE ") || sql.startsWith("INSERT ") || sql.startsWith("DELETE ")));
++        verify(connection,never()).commit();
++    }
++
++    @Test void revocationGuardsTheAuthorizedOwnerBeforePrivateLocksAndManagementConsumption()throws Exception {
++        var service=service(true);mutations();service.revoke("client","alice",false,"interaction","session");
++        var order=inOrder(connection,protocol,guard);
++        order.verify(connection).setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);order.verify(connection).setAutoCommit(false);
++        order.verify(protocol).lockSecurityState(connection);order.verify(connection).prepareStatement(STATE);order.verify(protocol).account(connection,ISSUER,"alice");
++        order.verify(guard).beforeChange(connection,new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.CLIENT_REVOKE,ISSUER,null,"client"));
++        order.verify(connection).prepareStatement("SELECT pg_advisory_xact_lock(1500150)");order.verify(connection).prepareStatement(STATE+" FOR UPDATE");
++        order.verify(connection).prepareStatement(INTERACTION);order.verify(connection).prepareStatement("UPDATE oidc_client SET active=FALSE WHERE client_id=?");
++        order.verify(connection).commit();verify(source).getConnection();
++    }
++
++    @Test void deletionUsesAnExplicitClientDeleteGuardBeforeRemovingTheClient()throws Exception {
++        var service=service(true);mutations();service.revoke("client","alice",true);
++        var order=inOrder(guard,connection);
++        order.verify(guard).beforeChange(connection,new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.CLIENT_DELETE,ISSUER,null,"client"));
++        order.verify(connection).prepareStatement("DELETE FROM oidc_client WHERE client_id=?");order.verify(connection).commit();
++    }
++
++    @Test void guardRejectionCannotConsumeManagementInteractionOrChangeAnyCredential()throws Exception {
++        var service=service(true);var rejection=new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.LAST_ADMIN);
++        doThrow(rejection).when(guard).beforeChange(eq(connection),any());
++        assertSame(rejection,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->service.revoke("client","alice",false,"interaction","session")));
++        noMutation();verify(connection).rollback();verify(connection).close();verify(connection,never()).prepareStatement(STATE+" FOR UPDATE");
++    }
++
++    @Test void missingDuplicateAndFailedGuardCannotFallBackToStandardRevocation()throws Exception {
++        var service=service(true);when(guards.isUnique()).thenReturn(false);
++        assertEquals(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->service.revoke("client","alice",false)).failure());
++        when(guards.isUnique()).thenReturn(true);doThrow(new SQLException("unavailable")).when(guard).beforeChange(eq(connection),any());
++        assertEquals(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->service.revoke("client","alice",false)).failure());
++        noMutation();verify(connection,times(2)).rollback();
++    }
++
++    @Test void foreignOwnerAndInactiveSubjectCannotReachTheLifecycleGuard()throws Exception {
++        var service=service(true);
++        assertThrows(IllegalArgumentException.class,()->service.revoke("client","other",false));
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",false,false,0)));
++        assertThrows(IllegalArgumentException.class,()->service.revoke("client","alice",false));
++        verifyNoInteractions(guard);noMutation();
++    }
++
++    @Test void featureOffKeepsExistingStandardOwnerRevocation()throws Exception {
++        var service=service(false);mutations();service.revoke("client","alice",false,"interaction","session");
++        verifyNoInteractions(protocol,guard);verify(connection).commit();verify(connection,never()).prepareStatement(STATE);
++    }
++
++    @Test void controllerReturnsSanitizedNonCachingGuardErrors()throws Exception {
++        configuration.setIssuer(ISSUER);var service=mock(OidcOwnershipService.class);var sessions=mock(OidcSessionService.class);var users=mock(OidcUserService.class);
++        when(sessions.sessionIdFrom(any())).thenReturn(Optional.of("session"));when(sessions.subject("session")).thenReturn(Optional.of("alice"));
++        when(users.bySubject("alice")).thenReturn(Optional.of(new OidcUserService.OidcUser("alice","Alice","alice@example.invalid",false,List.of())));
++        var controller=new OidcOwnedClientController(service,sessions,configuration,users);
++        var request=HttpRequest.POST("/oidc/clients/client/revoke","").header("Origin",ISSUER);
++        for(var failure:IdentityLifecycleGuardV1.Failure.values()) {
++            doThrow(new IdentityLifecycleGuardV1.Rejected(failure)).when(service).revoke("client","alice",false,"interaction","session");
++            var response=controller.revoke("client",request,Map.of("action","revoke","interaction","interaction"));
++            assertEquals(switch(failure){case FORBIDDEN->HttpStatus.FORBIDDEN;case LAST_ADMIN->HttpStatus.CONFLICT;case UNAVAILABLE->HttpStatus.SERVICE_UNAVAILABLE;},response.getStatus());
++            assertEquals("no-store",response.getHeaders().get("Cache-Control"));
++            assertEquals(java.util.Set.of("error"),((Map<?,?>)response.getBody().orElseThrow()).keySet());
++            assertEquals(switch(failure){case FORBIDDEN->"access_denied";case LAST_ADMIN->"last_administrator";case UNAVAILABLE->"identity_unavailable";},
++                ((Map<?,?>)response.getBody().orElseThrow()).get("error"));
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientLifecycleGuardPostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientLifecycleGuardPostgresTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcClientLifecycleGuardPostgresTest.java
+@@ -0,0 +1,97 @@
++package io.kestra.webserver.oidc;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcConsentPolicy;
++import io.kestra.webserver.oidc.services.OidcOwnershipService;
++import io.kestra.webserver.oidc.services.OidcRegistrationService;
++import io.micronaut.context.BeanProvider;
++import java.util.List;
++import java.util.Map;
++import javax.sql.DataSource;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class OidcClientLifecycleGuardPostgresTest extends OidcPostgresTestBase {
++    private static final String ISSUER="https://issuer.example";
++    private static final String CALLBACK=ISSUER+"/callback";
++
++    private static OidcOwnershipService service(OidcAccountLifecycleGuardPostgresTest.Fixture fixture,IdentityLifecycleGuardV1 guard) {
++        BeanProvider<IdentityLifecycleGuardV1> provider=new BeanProvider<>() {
++            public IdentityLifecycleGuardV1 get(){return guard;}
++            public boolean isUnique(){return true;}
++            public boolean isPresent(){return true;}
++        };
++        return new OidcOwnershipService(fixture.source,new ObjectMapper(),20,fixture.configuration,new OidcConsentPolicy(),provider,fixture.protocol,true);
++    }
++
++    private static String client(OidcAccountLifecycleGuardPostgresTest.Fixture fixture)throws Exception {
++        var mapper=new ObjectMapper();
++        String client=(String)new OidcRegistrationService(fixture.source,mapper,20).register(Map.of("redirect_uris",List.of(CALLBACK),
++            "token_endpoint_auth_method","none","grant_types",List.of("authorization_code","refresh_token"),"scope","openid")).get("client_id");
++        var registration=new OidcOwnershipService(fixture.source,mapper,20,fixture.configuration);
++        var parameters=Map.of("scope",List.of("openid"),"redirect_uri",List.of(CALLBACK),"code_challenge",List.of("a".repeat(43)),"code_challenge_method",List.of("S256"));
++        registration.complete(registration.begin(client,"first","session",parameters),"first","session",true);
++        try(var connection=fixture.source.getConnection();var statement=connection.prepareStatement("INSERT INTO oidc_token(client_id,subject,token_type,value) VALUES(?,'first','access',?),(?,'first','refresh',?)")) {
++            statement.setString(1,client);statement.setString(2,client+"-access");statement.setString(3,client);statement.setString(4,client+"-refresh");statement.executeUpdate();
++        }
++        return client;
++    }
++
++    private static String state(DataSource source,String client)throws Exception {
++        String sql="SELECT md5(jsonb_build_object('client',(SELECT to_jsonb(client) FROM oidc_client client WHERE client_id=?),"
++            +"'tokens',(SELECT jsonb_agg(to_jsonb(token) ORDER BY value) FROM oidc_token token WHERE client_id=?),"
++            +"'codes',(SELECT jsonb_agg(to_jsonb(code) ORDER BY code) FROM oidc_authorization_code code WHERE client_id=?),"
++            +"'consents',(SELECT jsonb_agg(to_jsonb(consent) ORDER BY interaction_id) FROM oidc_consent consent WHERE client_id=?),"
++            +"'management',(SELECT jsonb_agg(to_jsonb(management) ORDER BY interaction) FROM oidc_client_management management WHERE client_id=?))::text)";
++        try(var connection=source.getConnection();var statement=connection.prepareStatement(sql)) {
++            for(int index=1;index<=5;index++)statement.setString(index,client);
++            try(var result=statement.executeQuery()){assertTrue(result.next());return result.getString(1);}
++        }
++    }
++
++    private static long count(DataSource source,String sql,String client)throws Exception {
++        try(var connection=source.getConnection();var statement=connection.prepareStatement(sql)) {
++            statement.setString(1,client);try(var result=statement.executeQuery()){assertTrue(result.next());return result.getLong(1);}
++        }
++    }
++
++    @Test void guardRejectionLeavesClientTokensCodesConsentAndManagementInteractionUnchanged()throws Exception {
++        try(var fixture=new OidcAccountLifecycleGuardPostgresTest.Fixture()) {
++            String client=client(fixture);
++            var service=service(fixture,(connection,change)->{
++                fixture.event(connection,change);throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.LAST_ADMIN);
++            });
++            String interaction=service.managementInteraction(client,"first","session");String before=state(fixture.source,client);
++            assertEquals(IdentityLifecycleGuardV1.Failure.LAST_ADMIN,assertThrows(IdentityLifecycleGuardV1.Rejected.class,
++                ()->service.revoke(client,"first",false,interaction,"session")).failure());
++            assertEquals(before,state(fixture.source,client));assertEquals(0,fixture.count("SELECT count(*) FROM guard_test_event"));
++        }
++    }
++
++    @Test void acceptedClientDeletionCommitsGuardWriteAndCascadesAllClientCredentials()throws Exception {
++        try(var fixture=new OidcAccountLifecycleGuardPostgresTest.Fixture()) {
++            String client=client(fixture);
++            var service=service(fixture,(connection,change)->{
++                assertEquals(IdentityLifecycleGuardV1.Kind.CLIENT_DELETE,change.kind());
++                assertTrue(fixture.protocol.client(connection,ISSUER,change.clientId()).orElseThrow().active());fixture.event(connection,change);
++            });
++            String interaction=service.managementInteraction(client,"first","session");service.revoke(client,"first",true,interaction,"session");
++            for(String table:List.of("oidc_client","oidc_token","oidc_authorization_code","oidc_consent","oidc_client_management"))
++                assertEquals(0,count(fixture.source,"SELECT count(*) FROM "+table+" WHERE client_id=?",client));
++            assertEquals(1,count(fixture.source,"SELECT count(*) FROM guard_test_event WHERE target_id=? AND event_kind='CLIENT_DELETE'",client));
++        }
++    }
++
++    @Test void standardStorageFailureRollsBackGuardWriteClientStateAndInteractionConsumption()throws Exception {
++        try(var fixture=new OidcAccountLifecycleGuardPostgresTest.Fixture()) {
++            String client=client(fixture);var service=service(fixture,fixture::event);
++            String interaction=service.managementInteraction(client,"first","session");
++            try(var connection=fixture.source.getConnection();var statement=connection.createStatement()) {
++                statement.execute("ALTER TABLE oidc_token ADD CONSTRAINT guard_test_client_deny_revoke CHECK(NOT revoked)");
++            }
++            String before=state(fixture.source,client);
++            assertThrows(IllegalStateException.class,()->service.revoke(client,"first",false,interaction,"session"));
++            assertEquals(before,state(fixture.source,client));assertEquals(0,fixture.count("SELECT count(*) FROM guard_test_event"));
++        }
 +    }
 +}

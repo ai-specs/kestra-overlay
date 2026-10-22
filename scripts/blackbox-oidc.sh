@@ -37,8 +37,8 @@ assert_contains() { # desc needle haystack-file
 
 cleanup() {
   rm -rf "$T"
-  docker rm -f "$K1" "$K2" "$PG" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
+  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$NET")
+  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$NET")
 }
 trap cleanup EXIT
 
@@ -126,12 +126,12 @@ wait_ready() { # container-name
 }
 
 echo "== Phase A: 默认关（vanilla 等价 + UI 保留）=="
-docker network create "$NET" >/dev/null
-docker run -d --name "$PG" --network "$NET" \
+docker network create --label "owner=$NET" "$NET" >/dev/null
+docker run -d --label "owner=$NET" --name "$PG" --network "$NET" \
   -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=k3str4 postgres:18 >/dev/null
 for i in $(seq 1 30); do docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1 && break; sleep 2; done
 
-docker run -d --name "$K1" --network "$NET" -p "$PORT:8080" \
+docker run -d --label "owner=$NET" --name "$K1" --network "$NET" -p "$PORT:8080" \
   -e KESTRA_CONFIGURATION="$(conf)" "$IMAGE" server standalone >/dev/null
 wait_ready "$K1"
 
@@ -145,7 +145,7 @@ assert_contains "UI HTML 包含应用挂载点" 'id="app"' "$T/ui.html"
 docker rm -f "$K1" >/dev/null
 
 echo "== Phase B: kestra.oidc.enabled=true 全链 =="
-docker run -d --name "$K2" --network "$NET" -p "$PORT:8080" \
+docker run -d --label "owner=$NET" --name "$K2" --network "$NET" -p "$PORT:8080" \
   -e KESTRA_OIDC_BOOTSTRAP_USERNAME="$OIDC_USER" -e KESTRA_OIDC_BOOTSTRAP_PASSWORD="$OIDC_PASS" \
   -e KESTRA_OIDC_BOOTSTRAP_EMAIL=tester@local.test -e KESTRA_OIDC_BOOTSTRAP_NAME=Tester \
   -e KESTRA_OIDC_SETUP_ALLOWED=false \

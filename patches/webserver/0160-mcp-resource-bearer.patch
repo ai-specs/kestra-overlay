@@ -212,8 +212,8 @@ index 0000000..bf759ec
 +            identity.put("resource", resource);
 +            identity.put("scopes", stored.scopes());
 +            identity.put("roles", roles);
-+            Object projectClaim = claims.getClaim(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM);
-+            if (projectClaim != null) identity.put(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, projectClaim);
++            Object applicationGroupClaim = claims.getClaim(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM);
++            if (applicationGroupClaim != null) identity.put(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, applicationGroupClaim);
 +
 +            request.setAttribute("io.kestra.mcp.identity", Map.
 +copyOf
@@ -243,7 +243,7 @@ index 0000000..bf759ec
 +);
 +            Object version = claims.getClaim(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.CLAIM);
 +            if (version != null) attributes.put(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.CLAIM, version);
-+            if (projectClaim != null) attributes.put(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, projectClaim
++            if (applicationGroupClaim != null) attributes.put(io.kestra.webserver.oidc.services.OidcTrustedIdentity.CLAIM, applicationGroupClaim
 +);
 +            request.setAttribute("io.kestra.mcp.authentication", Authentication.build(claims.getSubject(), roles, Map.
 +copyOf
@@ -502,10 +502,9 @@ index cd3f6e2..deec90f 100644
                      }
                  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-index 9885dcd..9330a3c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-@@ -8,7 +8,12 @@ import java.sql.Timestamp;
+@@ -8,7 +8,12 @@
  import java.time.Instant;
  import java.util.Date;
  import java.util.List;
@@ -519,7 +518,7 @@ index 9885dcd..9330a3c 100644
  
  import javax.sql.DataSource;
  
-@@ -34,9 +39,15 @@ import com.nimbusds.oauth2.sdk.token.RefreshToken;
+@@ -34,9 +39,16 @@
  import com.nimbusds.openid.connect.sdk.claims.IDTokenClaimsSet;
  
  import io.kestra.webserver.oidc.OidcConfiguration;
@@ -529,35 +528,38 @@ index 9885dcd..9330a3c 100644
 -import io.micronaut.context.annotation.Requires;
 +import io.
 +kestra.webserver.oidc.ApplicationGroupScopeIssuance;
-+import io.kestra.webserver.oidc.projects.ProjectDirectoryState;
++import io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1;
++import io.kestra.webserver.oidc.OidcProtocolStateV1;
 +
 +import io.
 +micronaut.context.annotation.Requires;
  import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
  import jakarta.inject.Inject;
  import jakarta.inject.Singleton;
-@@ -60,6 +71,15 @@ public class OidcTokenService {
+@@ -60,6 +72,16 @@
      private final ObjectMapper objectMapper;
      private final OidcConfiguration configuration;
      private final OidcJwkService jwkService;
-+private final io.micronaut.context.BeanProvider<ProjectDirectoryState> projectDirectory;
++private final io.micronaut.context.BeanProvider<ApplicationGroupProtocolProjectionV1> applicationGroupProjection;
 +private final io.micronaut.context.BeanProvider<ApplicationScopeDeclarationsV1> declarations;
++    private final OidcProtocolStateV1 protocol;
 +    @io.micronaut.context.annotation.Value("${kestra.rbac.application-groups.enabled:false}")
-+    private boolean applicationProjects;
++    private boolean applicationGroups;
 +
 +    public OidcTokenService(DataSource source, ObjectMapper mapper, OidcConfiguration configuration, OidcJwkService keys) {
-+        this(source, mapper, configuration, keys, null, null);
++        this(source, mapper, configuration, keys, null, null, null);
 +    }
 +
  
      @Inject
      public OidcTokenService(
-@@ -67,19 +87,73 @@ public class OidcTokenService {
+@@ -67,18 +89,73 @@
          final ObjectMapper objectMapper,
          final OidcConfiguration configuration,
          final OidcJwkService jwkService
-+, io.micronaut.context.BeanProvider<ProjectDirectoryState> projectDirectory,
-+        io.micronaut.context.BeanProvider<ApplicationScopeDeclarationsV1> declarations
++, io.micronaut.context.BeanProvider<ApplicationGroupProtocolProjectionV1> applicationGroupProjection,
++        io.micronaut.context.BeanProvider<ApplicationScopeDeclarationsV1> declarations,
++        OidcProtocolStateV1 protocol
 +
      ) {
          this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
@@ -566,9 +568,10 @@ index 9885dcd..9330a3c 100644
 -        this.jwkService = jwkService;
 +        this.jwkService = jwkService
 +;
-+        this.projectDirectory = projectDirectory
++        this.applicationGroupProjection = applicationGroupProjection
 +;
 +        this.declarations = declarations;
++        this.protocol = protocol;
      }
  
      /** A stored token record (mirror of the table row). */
@@ -577,16 +580,15 @@ index 9885dcd..9330a3c 100644
 -        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked
 +        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked, String resource
      ) {}
- 
++
 +    public com.nimbusds.openid.connect.sdk.token.OIDCTokens issueAuthorizationTokens(String clientId,
 +        OidcUserService.OidcUser user, Scope scope, String resource, String nonce, String code) {
 +        try (var connection = dataSource.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
 +            connection.setAutoCommit(false);
 +            try {
-+if (applicationProjects && projectDirectory != null) {
-+                    try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) { lock.execute(); }
-+                }
-+                var authorization = projectAuthorization(connection, clientId, user.sub(), scope.toStringList());
++                if(applicationGroups) protocolLock(connection);
++                var authorization = applicationGroupAuthorization(connection, clientId, user.sub(), scope.toStringList());
 +                scope = authorization.scope();
 +
 +                long version;
@@ -604,31 +606,30 @@ index 9885dcd..9330a3c 100644
 +                    }
 +                }
 +                var
-+projectClaim = authorization.claim();
-+                if (applicationProjects && (projectClaim == null || !code.startsWith("application-group-v1." + projectClaim.get("application_group_id") + "." + projectClaim.get("authorization_version") + "."))) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+                validateProjectAudience(connection, projectClaim, clientId, resource);
++applicationGroupClaim = authorization.claim();
++                if(applicationGroups) requireGroupBinding(code,applicationGroupClaim);
++                validateApplicationGroupAudience(connection, applicationGroupClaim, clientId, user.sub(), resource);
 +                var
 + access = issueAccessToken(connection, clientId, user.sub(), user.name(), user.email(), user.roles(), scope, resource
-+, projectClaim
++, applicationGroupClaim
 +);
 +                var refresh = issueRefreshToken(connection, clientId, user.sub(), scope, resource);
 +                var identity = scope.contains("openid") ?
-+issueIdTokenWithProjectClaim
++issueIdTokenWithApplicationGroupClaim
 +(
 +connection,
 +clientId, user.sub(), user.name(), user.email(), user.roles(), nonce
-+, projectClaim
++, applicationGroupClaim
 +) : null;
 +                connection.commit();
 +                return new com.nimbusds.openid.connect.sdk.token.OIDCTokens(identity, access, refresh);
 +            } catch (RuntimeException | SQLException failure) { connection.rollback(); throw failure; }
 +        } catch (SQLException failure) { throw new IllegalStateException("Cannot issue authorization tokens"); }
 +    }
-+
+ 
      /** Issues an access token (RS256 JWT), signs it with the newest active key and persists it. */
      public BearerAccessToken issueAccessToken(
-         final String clientId,
-@@ -89,12 +163,30 @@ public class OidcTokenService {
+@@ -89,12 +166,30 @@
          final List<String> roles,
          final Scope scope
      ) {
@@ -647,7 +648,7 @@ index 9885dcd..9330a3c 100644
 +
 +    private BearerAccessToken issueAccessToken(final Connection connection, final String clientId, final String subject,
 +        final String name, final String email, final List<String> roles, final Scope scope, final String resource,
-+        final Map<String, Object> projectClaim) {
++        final Map<String, Object> applicationGroupClaim) {
 +
          final Instant now = Instant.now();
          final Instant exp = now.plus(configuration.getAccessTokenTtl());
@@ -660,13 +661,13 @@ index 9885dcd..9330a3c 100644
              .expirationTime(Date.from(exp))
              .issueTime(Date.from(now))
              .jwtID(java.util.UUID.randomUUID().toString())
-@@ -109,19 +201,245 @@ public class OidcTokenService {
+@@ -109,18 +204,276 @@
          if (roles != null && !roles.isEmpty()) {
              claims.claim("roles", roles);
          }
 -        final String jwt = sign(claims.build()).serialize();
 -        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
-+if (projectDirectory != null && projectClaim != null) claims.claim("kestra_application_group_v1", projectClaim);
++if (applicationGroupClaim != null) claims.claim("kestra_application_group_v1", applicationGroupClaim);
 +
 +        try {
 +            if (connection != null) {
@@ -698,8 +699,8 @@ index 9885dcd..9330a3c 100644
 +        final Scope scope, final String resource) {
 +
 + RefreshToken refreshToken = new RefreshToken();
-+if (applicationProjects && connection != null) {
-+            var authorization = projectAuthorization(connection, clientId, subject, scope.toStringList());
++if (applicationGroups && connection != null) {
++            var authorization = applicationGroupAuthorization(connection, clientId, subject, scope.toStringList());
 +            if (authorization.claim() != null) refreshToken = new RefreshToken("application-group-v1." + authorization.claim().get("application_group_id") + "."
 +                + authorization.claim().get("authorization_version") + "." + refreshToken.getValue());
 +        }
@@ -709,15 +710,14 @@ index 9885dcd..9330a3c 100644
 +        persist(connection, "refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
          return refreshToken;
      }
- 
++
 +    public com.nimbusds.oauth2.sdk.token.Tokens rotateRefreshToken(final StoredToken stored,
 +        final OidcUserService.OidcUser user, final Scope scope) {
 +        try (Connection connection = dataSource.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
 +            connection.setAutoCommit(false);
 +            try {
-+if (applicationProjects) {
-+                    try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) { lock.execute(); }
-+                }
++                if(applicationGroups) protocolLock(connection);
 +
 +                try (PreparedStatement lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1500150)")) {
 +                    lock.execute();
@@ -745,7 +745,7 @@ index 9885dcd..9330a3c 100644
 +                    try (ResultSet result = statement.executeQuery()) {
 +                        if (!result.next()) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +                        if (!
-+applicationProjects && !
++applicationGroups && !
 +fromJson(result.getString(1)).containsAll(scope.toStringList())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +                    }
 +                }
@@ -756,10 +756,10 @@ index 9885dcd..9330a3c 100644
 +                }
 +var refreshScopes = new java.util.ArrayList<>(scope.toStringList());
 +                refreshScopes.remove(ApplicationGroupScopeIssuance.UI_SELECTOR);
-+                final var authorization = projectAuthorization(connection, stored.clientId(), user.sub(), refreshScopes);
-+                final var projectClaim = authorization.claim();
-+                if (applicationProjects && (projectClaim == null || !stored.value().startsWith("application-group-v1." + projectClaim.get("application_group_id") + "." + projectClaim.get("authorization_version") + "."))) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+                validateProjectAudience(connection, projectClaim, stored.clientId(), stored.resource());
++                final var authorization = applicationGroupAuthorization(connection, stored.clientId(), user.sub(), refreshScopes);
++                final var applicationGroupClaim = authorization.claim();
++                if(applicationGroups) requireGroupBinding(stored.value(),applicationGroupClaim);
++                validateApplicationGroupAudience(connection, applicationGroupClaim, stored.clientId(), user.sub(), stored.resource());
 +
 +                final var access = issueAccessToken(connection, stored.clientId(), user.sub(), user.name(), user.email(),
 +                    user.roles(),
@@ -767,7 +767,7 @@ index 9885dcd..9330a3c 100644
 + scope
 +()
 +, stored.resource()
-+, projectClaim
++, applicationGroupClaim
 +);
 +                final var refresh = issueRefreshToken(connection, stored.clientId(), user.sub(),
 +authorization.
@@ -793,42 +793,49 @@ index 9885dcd..9330a3c 100644
 +            || !java.util.Objects.equals(claims.getSubject(), stored.subject())) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +        return claims;
 +    }
-+private SignedJWT issueIdTokenWithProjectClaim(Connection connection, String clientId, String subject, String name, String email, List<String> roles, String nonce, Map<String,Object> claim) {
++private SignedJWT issueIdTokenWithApplicationGroupClaim(Connection connection, String clientId, String subject, String name, String email, List<String> roles, String nonce, Map<String,Object> claim) {
 +        var token = issueIdToken(connection, clientId, subject, name, email, roles, nonce);
++        if(claim==null)return token;
 +        try { return sign(connection, new com.nimbusds.jwt.JWTClaimsSet.Builder(token.getJWTClaimsSet()).claim("kestra_application_group_v1", claim).build()); }
-+        catch (java.text.ParseException failure) { throw new IllegalStateException("Cannot add project identity claim", failure); }
++        catch (java.text.ParseException failure) { throw new IllegalStateException("Cannot add applicationGroup identity claim", failure); }
 +    }
 +
-+    public record ProjectAuthorization(Scope scope, Map<String, Object> claim) {}
++    public record ApplicationGroupAuthorization(Scope scope, Map<String, Object> claim) {}
 +
-+    public String bindProjectCode(String code, String clientId, String subject, List<String> scopes) {
-+        if (!applicationProjects) return code;
-+        try (var connection = dataSource.getConnection()) {
-+            connection.setAutoCommit(false);
-+            var authorization = projectAuthorization(connection, clientId, subject, scopes);
++    public String bindApplicationGroupCode(String code, String clientId, String subject, List<String> scopes) {
++        if (!applicationGroups) return code;
++        return protocolTransaction(connection -> {
++            var authorization = applicationGroupAuthorization(connection, clientId, subject, scopes);
++            if(authorization.claim()==null) {
++                requireGroupBinding(code,null);
++                return code;
++            }
++            if(code==null || code.isBlank() || code.startsWith("application-group-v1."))throw new OidcException(OAuth2Error.INVALID_GRANT);
 +            String bound = "application-group-v1." + authorization.claim().get("application_group_id") + "."
 +                + authorization.claim().get("authorization_version") + "." + code;
 +            try (var update = connection.prepareStatement("UPDATE oidc_authorization_code SET code=? WHERE code=? AND client_id=? AND subject=? AND NOT used")) {
 +                update.setString(1, bound); update.setString(2, code); update.setString(3, clientId); update.setString(4, subject);
 +                if (update.executeUpdate() != 1) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +            }
-+            connection.commit();
 +            return bound;
-+        } catch (SQLException failure) { throw new IllegalStateException("Cannot bind project authorization code", failure); }
++        });
 +    }
 +
 +
 +    public Scope authorizeScopes(String clientId, String subject, List<String> requested) {
-+        try (var connection = dataSource.getConnection()) {
-+            connection.setAutoCommit(false);
-+            var result = projectAuthorization(connection, clientId, subject, requested);
-+            connection.commit();
-+            return result.scope();
-+        } catch (SQLException failure) { throw new IllegalStateException("Cannot authorize project scopes", failure); }
++        return protocolTransaction(connection->applicationGroupAuthorization(connection,clientId,subject,requested).scope());
 +    }
 +
-+    private ProjectAuthorization projectAuthorization(Connection connection, String clientId, String subject, List<String> requested) {
-+        if (!applicationProjects) {
++    public Scope previewConsentScopes(String clientId,String subject,List<String> requested) {
++        return protocolTransaction(connection->applicationGroupAuthorization(connection,clientId,subject,requested,true).scope());
++    }
++
++    private ApplicationGroupAuthorization applicationGroupAuthorization(Connection connection, String clientId, String subject, List<String> requested) {
++        return applicationGroupAuthorization(connection,clientId,subject,requested,false);
++    }
++
++    private ApplicationGroupAuthorization applicationGroupAuthorization(Connection connection,String clientId,String subject,List<String> requested,boolean consentPreview) {
++        if (!applicationGroups) {
 +            try (var statement = connection.prepareStatement("SELECT scopes,client_kind,client_secret FROM oidc_client WHERE client_id=? AND active")) {
 +                statement.setString(1, clientId);
 +                try (var rows = statement.executeQuery()) {
@@ -837,80 +844,105 @@ index 9885dcd..9330a3c 100644
 +                    var ordinary = requested.stream().filter(value -> !ApplicationGroupScopeIssuance.UI_SELECTOR.equals(value)).toList();
 +                    if (!approved.containsAll(ordinary)) throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +                    if (requested.contains(ApplicationGroupScopeIssuance.UI_SELECTOR) && (!"system".equals(rows.getString(2)) || rows.getString(3).isBlank())) throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+                    return new ProjectAuthorization(new Scope(ordinary.toArray(new String[0])), null);
++                    return new ApplicationGroupAuthorization(new Scope(ordinary.toArray(new String[0])), null);
 +                }
 +            } catch (SQLException failure) { throw new IllegalStateException("Cannot validate client scopes", failure); }
 +        }
-+        if (projectDirectory == null) throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +        try {
-+            if (!projectDirectory.get().activated(connection)) {
-+                throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            protocolLock(connection);
++            var account=protocol.account(connection,configuration.getIssuer(),subject).orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++            if(!account.active() || !account.issuer().equals(configuration.getIssuer()) || !account.subject().equals(subject))throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            var client=protocol.client(connection,configuration.getIssuer(),clientId).orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++            if(!client.issuer().equals(configuration.getIssuer()) || !client.clientId().equals(clientId))throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            if(!client.active()) {
++                if(!consentPreview)throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                var pending=protocol.pendingClient(connection,configuration.getIssuer(),clientId).orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++                if(!clientId.equals(pending.clientId()) || !configuration.getIssuer().equals(pending.issuer())
++                    || !client.registeredScopes().equals(pending.registeredScopes()) || client.configuredLoginClient())throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +            }
-+            try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")) { lock.execute(); }
-+            var snapshot = projectDirectory.get().forClient(connection, clientId).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+            var member = snapshot.memberships().stream().filter(value -> value.clientId().equals(clientId) && value.approved())
-+                .findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+            var assignment = snapshot.assignments().stream().filter(value -> value.subject().equals(subject)
-+                && value.issuer().equals(configuration.getIssuer())).findFirst();
-+            var active = snapshot.scopes().stream().filter(value -> value.active()).map(value -> value.scope())
-+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
-+            var assigned = assignment.map(value -> value.projectScopes()).orElse(Set.of());
-+            Set<String> declaredScopes = Set.of();
-+            if (declarations != null && declarations.isUnique()) {
-+                var declared = declarations.get().current(connection, snapshot.project().id(), clientId);
-+                if (!snapshot.project().id().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId()))
-+                    throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+                declaredScopes = declared.supportedScopeKeys();
++            if(applicationGroupProjection==null || !applicationGroupProjection.isPresent())return zeroScopeLogin(client,requested);
++            if(!applicationGroupProjection.isUnique())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,subject,null);
++            var result=applicationGroupProjection.get().current(connection,target);
++            if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION)throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            if(!result.activated()) {
++                if(result.projection().isPresent())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                return zeroScopeLogin(client,requested);
 +            }
-+            var protocols = new HashSet<>(configuration.getMcpScopes());
-+            protocols.addAll(projectDirectory.get().protocolScopes(connection).stream().map(value -> value.scope()).toList());
-+            protocols.addAll(Set.of("openid", "profile", "email", ApplicationGroupScopeIssuance.UI_SELECTOR));
-+            // Classification vocabulary and the current client's protocol upper bound are distinct.
-+            Set<String> registeredProtocols;
-+            String registeredKind;
-+            try (var statement = connection.prepareStatement("SELECT scopes,client_kind FROM oidc_client WHERE client_id=? AND active FOR SHARE")) {
-+                statement.setString(1,clientId);
-+                try (var rows = statement.executeQuery()) {
-+                    if (!rows.next()) throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+                    registeredProtocols = Set.copyOf(fromJson(rows.getString(1)));
-+                    registeredKind = rows.getString(2);
-+                }
-+            }
++            var view=result.projection().orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++            view.eligibleScopeKeys(target);
++            if(!view.active() || !view.approved())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            var active=view.scopes().stream().map(value->value.key()).collect(java.util.stream.Collectors.toUnmodifiableSet());
++            var protocols=protocolVocabulary();
++            if(active.stream().anyMatch(protocols::contains))throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +            for (String requestedScope : requested) {
-+                if (protocols.contains(requestedScope) && !registeredProtocols.contains(requestedScope))
++                if (protocols.contains(requestedScope) && !client.registeredScopes().contains(requestedScope))
 +                    throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +            }
 +            if (requested.contains(ApplicationGroupScopeIssuance.UI_SELECTOR)) {
-+                if (!member.firstPartyUi() || !"system".equals(registeredKind)) throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+                try (var receipt = connection.prepareStatement("SELECT ui_client_id FROM oidc_project_bootstrap WHERE singleton=1 AND consumed=TRUE")) {
-+                    try (var row = receipt.executeQuery()) {
-+                        if (!row.next() || !clientId.equals(row.getString(1))) throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+                    }
-+                }
++                if(!client.configuredLoginClient())throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +            }
 +            var consent = new HashSet<>(requested);
 +            if (requested.contains(ApplicationGroupScopeIssuance.UI_SELECTOR)) consent.addAll(active);
 +            final ApplicationGroupScopeIssuance.Result issued;
 +            try {
 +                issued = ApplicationGroupScopeIssuance.resolve(Set.copyOf(requested), protocols, active,
-+                    intersection(member.allowedProjectScopes(), declaredScopes), assigned, consent,
-+                    member.firstPartyUi(), snapshot.project().active());
++                    view.supportedScopeKeys(), view.grantedScopeKeys(), consent,
++                    client.configuredLoginClient(), view.active());
 +            } catch (ApplicationGroupScopeIssuance.InvalidScopeException invalid) { throw new OidcException(OAuth2Error.INVALID_SCOPE); }
 +            var actual = new HashSet<>(issued.protocolScopes());
 +            actual.remove(ApplicationGroupScopeIssuance.UI_SELECTOR);
-+            actual.addAll(issued.projectScopes());
-+            var claim = Map.<String, Object>of("application_group_id", snapshot.project().id(), "client_id", clientId,
-+                "application_group_scopes", issued.projectScopes(), "protocol_scopes", issued.protocolScopes().stream().filter(value -> !ApplicationGroupScopeIssuance.UI_SELECTOR.equals(value)).collect(java.util.stream.Collectors.toUnmodifiableSet()),
-+                "authorization_version", snapshot.project().authorizationVersion());
-+            return new ProjectAuthorization(new Scope(actual.toArray(new String[0])), claim);
-+        } catch (SQLException failure) { throw new IllegalStateException("Cannot read project authorization", failure); }
++            actual.addAll(issued.applicationGroupScopes());
++            var claim = Map.<String, Object>of("application_group_id", view.applicationGroupId(), "client_id", clientId,
++                "application_group_scopes", issued.applicationGroupScopes(), "protocol_scopes", issued.protocolScopes().stream().filter(value -> !ApplicationGroupScopeIssuance.UI_SELECTOR.equals(value)).collect(java.util.stream.Collectors.toUnmodifiableSet()),
++                "authorization_version", view.authorizationVersion());
++            return new ApplicationGroupAuthorization(new Scope(actual.toArray(new String[0])), claim);
++        } catch (SQLException failure) { throw new IllegalStateException("Cannot read application group authorization", failure); }
 +    }
 +
++    private Set<String> protocolVocabulary() {
++        var scopes=new HashSet<>(configuration.getMcpScopes());
++        scopes.addAll(Set.of("openid","profile","email","offline_access",ApplicationGroupScopeIssuance.UI_SELECTOR));
++        return Set.copyOf(scopes);
++    }
 +
++    private ApplicationGroupAuthorization zeroScopeLogin(OidcProtocolStateV1.Client client,List<String> requested) {
++        if(!client.configuredLoginClient() || !client.active() || !client.registeredScopes().containsAll(requested)
++            || !Set.of("openid","profile","email","offline_access",ApplicationGroupScopeIssuance.UI_SELECTOR).containsAll(requested))
++            throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        return new ApplicationGroupAuthorization(new Scope(requested.stream().filter(value->!ApplicationGroupScopeIssuance.UI_SELECTOR.equals(value)).toArray(String[]::new)),null);
++    }
++
++    private void protocolLock(Connection connection)throws SQLException {
++        if(protocol==null)throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        protocol.lockSecurityState(connection);
++    }
++
++    private static void requireGroupBinding(String credential,Map<String,Object> claim) {
++        if(credential==null || claim==null && credential.startsWith("application-group-v1.")
++            || claim!=null && !credential.startsWith("application-group-v1."+claim.get("application_group_id")+"."+claim.get("authorization_version")+"."))
++            throw new OidcException(OAuth2Error.INVALID_GRANT);
++    }
++
++    private interface ProtocolWork<Value> { Value run(Connection connection)throws SQLException; }
++
++    private <Value>Value protocolTransaction(ProtocolWork<Value> work) {
++        try(var connection=dataSource.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
++            try {
++                if(applicationGroups)protocolLock(connection);
++                var result=work.run(connection);connection.commit();return result;
++            }catch(SQLException|RuntimeException failure) {
++                try{connection.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}
++                throw failure;
++            }
++        }catch(SQLException failure){throw new IllegalStateException("OIDC authorization state unavailable",failure);}
++    }
++
+ 
      /** Issues an OIDC ID token (RS256 JWT) for the given client (audience). */
      public SignedJWT issueIdToken(
-         final String clientId,
-@@ -129,7 +447,15 @@ public class OidcTokenService {
+@@ -129,7 +482,15 @@
          final String name,
          final String email,
          final List<String> roles,
@@ -927,7 +959,7 @@ index 9885dcd..9330a3c 100644
      ) {
          final Instant now = Instant.now();
          final Instant exp = now.plus(configuration.getAccessTokenTtl());
-@@ -154,9 +480,18 @@ public class OidcTokenService {
+@@ -154,9 +515,18 @@
              final JWTClaimsSet base = idTokenClaims.toJWTClaimsSet();
              final JWTClaimsSet jwtClaims = new JWTClaimsSet.Builder(base)
                  .jwtID(java.util.UUID.randomUUID().toString())
@@ -948,7 +980,7 @@ index 9885dcd..9330a3c 100644
              throw new IllegalStateException("Failed to build ID token claims", e);
          }
      }
-@@ -175,6 +510,9 @@ public class OidcTokenService {
+@@ -175,6 +545,9 @@
          if (exp == null || exp.before(new Date())) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": token expired"));
          }
@@ -958,7 +990,7 @@ index 9885dcd..9330a3c 100644
          final StoredToken stored = findByValue(value)
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown token")));
          if (stored.revoked()) {
-@@ -184,7 +522,60 @@ public class OidcTokenService {
+@@ -184,7 +557,112 @@
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
          }
          validateClientAndSubject(stored);
@@ -966,61 +998,113 @@ index 9885dcd..9330a3c 100644
 +        var lifecycle = new OidcIdentityLifecycle(dataSource);
 +        if (!(stored.clientId().equals(stored.subject()) && lifecycle.machineSubject(stored.subject())) && !lifecycle.matches(
 +            stored.subject(), claims.getClaim(OidcIdentityLifecycle.CLAIM))) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+if (applicationProjects) validateProjectClaims(claims);
++if (applicationGroups) {
++            if(claims.getClaim("kestra_application_group_v1")==null && stored.resource()!=null)throw new OidcException(OAuth2Error.INVALID_GRANT);
++            validateApplicationGroupClaims(claims);
++        }
 +
 +        return claims
 +;
 +    }
 +
-+    public void validateProjectClaims(JWTClaimsSet claims) {
-+        if (!applicationProjects) return;
-+        Object raw = claims.getClaim("kestra_application_group_v1");
-+        if (!(raw instanceof Map<?, ?> claim) || projectDirectory == null || declarations == null
-+            || !declarations.isUnique()) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        var snapshot = projectDirectory.get().forClient(String.valueOf(claim.get("client_id"))).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT));
-+        if (!snapshot.project().active() || !snapshot.project().id().equals(claim.get("application_group_id"))
-+            || !(claim.get("authorization_version") instanceof Number epoch) || epoch.longValue() != snapshot.project().authorizationVersion()) throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        var membership = snapshot.memberships().stream().filter(member -> member.approved() && member.clientId().equals(claim.get("client_id"))).findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT));
-+        var declared = declarations.get().current(snapshot.project().id(), membership.clientId());
-+        if (!snapshot.project().id().equals(declared.applicationGroupId()) || !membership.clientId().equals(declared.clientId()))
-+            throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        if (!(claim.get("application_group_scopes") instanceof java.util.Collection<?> scopes)
-+            || !intersection(membership.allowedProjectScopes(), declared.supportedScopeKeys()).containsAll(scopes))
-+            throw new OidcException(OAuth2Error.INVALID_GRANT);
-+        if (claims.getAudience().isEmpty() || !membership.audiences().containsAll(claims.getAudience())) throw new OidcException(OAuth2Error.INVALID_GRANT);
++    public void validateApplicationGroupClaims(JWTClaimsSet claims) {
++        if (!applicationGroups) return;
++        if(!configuration.getIssuer().equals(claims.getIssuer()))throw new OidcException(OAuth2Error.INVALID_GRANT);
++        String clientId=claimText(claims.getClaim("client_id"));
++        String subject=claimText(claims.getSubject());
++        Object rawScope=claims.getClaim("scope");
++        if(!(rawScope instanceof String scopeText))throw new OidcException(OAuth2Error.INVALID_GRANT);
++        var requested=scopeText.isEmpty()?List.<String>of():List.of(scopeText.split(" +"));
++        protocolTransaction(connection->{
++            var account=protocol.account(connection,configuration.getIssuer(),subject).orElseThrow(()->new OidcException(OAuth2Error.INVALID_GRANT));
++            if(!account.active() || !account.subject().equals(subject) || !account.issuer().equals(configuration.getIssuer())
++                || account.authenticationVersion()!=claimNumber(claims.getClaim(OidcIdentityLifecycle.CLAIM)))throw new OidcException(OAuth2Error.INVALID_GRANT);
++            Object raw=claims.getClaim("kestra_application_group_v1");
++            if(raw==null) {
++                var client=protocol.client(connection,configuration.getIssuer(),clientId).orElseThrow(()->new OidcException(OAuth2Error.INVALID_GRANT));
++                if(!clientId.equals(client.clientId()) || !configuration.getIssuer().equals(client.issuer())
++                    || !claims.getAudience().equals(List.of(clientId)) || !Set.copyOf(zeroScopeLogin(client,requested).scope().toStringList()).equals(Set.copyOf(requested)))
++                    throw new OidcException(OAuth2Error.INVALID_GRANT);
++                return null;
++            }
++            if(!(raw instanceof Map<?,?> claim) || !clientId.equals(claimText(claim.get("client_id"))))throw new OidcException(OAuth2Error.INVALID_GRANT);
++            var scopeKeys=claimStrings(claim.get("application_group_scopes"));
++            var protocolKeys=claimStrings(claim.get("protocol_scopes"));
++            var union=new HashSet<>(scopeKeys);union.addAll(protocolKeys);
++            if(protocolKeys.contains(ApplicationGroupScopeIssuance.UI_SELECTOR) || !union.equals(Set.copyOf(requested)))throw new OidcException(OAuth2Error.INVALID_GRANT);
++            var current=applicationGroupAuthorization(connection,clientId,subject,requested);
++            if(current.claim()==null || !claimText(claim.get("application_group_id")).equals(current.claim().get("application_group_id"))
++                || claimNumber(claim.get("authorization_version"))!=claimNumber(current.claim().get("authorization_version"))
++                || !scopeKeys.equals(current.claim().get("application_group_scopes")) || !protocolKeys.equals(current.claim().get("protocol_scopes")))
++                throw new OidcException(OAuth2Error.INVALID_GRANT);
++            var view=currentProjection(connection,clientId,subject,claimText(claim.get("application_group_id")));
++            if(claims.getAudience().isEmpty() || !view.audiences().containsAll(claims.getAudience()))throw new OidcException(OAuth2Error.INVALID_GRANT);
++            return null;
++        });
 +    }
 +
-+    public String applicationScopeDescription(String clientId, String scopeKey) {
-+        if (!applicationProjects || projectDirectory == null || declarations == null || !declarations.isUnique()) return "";
-+        var snapshot = projectDirectory.get().forClient(clientId).orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+        var member = snapshot.memberships().stream().filter(value -> value.approved() && value.clientId().equals(clientId))
-+            .findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+        if (!member.allowedProjectScopes().contains(scopeKey)) return "";
-+        var definition = snapshot.scopes().stream().filter(value -> value.active() && value.scope().equals(scopeKey))
-+            .findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+        var projection = declarations.get().current(snapshot.project().id(), clientId);
-+        if (!snapshot.project().id().equals(projection.applicationGroupId()) || !clientId.equals(projection.clientId()))
-+            throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+        var declaration = projection.scopes().stream().filter(value -> value.key().equals(scopeKey))
-+            .findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+        return " — " + definition.name() + ": " + declaration.permissions().stream()
-+            .map(ApplicationScopeDeclarationsV1.Permission::name).collect(java.util.stream.Collectors.joining(", "));
++    public String applicationScopeDescription(String clientId,String subject,String scopeKey) {
++        if(!applicationGroups || protocolVocabulary().contains(scopeKey))return "";
++        return protocolTransaction(connection->{
++            applicationGroupAuthorization(connection,clientId,subject,List.of(scopeKey),true);
++            var view=currentProjection(connection,clientId,subject,null);
++            var definition=view.scopes().stream().filter(value->value.key().equals(scopeKey)).findFirst().orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++            String description=" — "+definition.name();
++            if(declarations==null || !declarations.isPresent())return description;
++            if(!declarations.isUnique())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            var declared=declarations.get().current(connection,view.applicationGroupId(),clientId);
++            if(!view.applicationGroupId().equals(declared.applicationGroupId()) || !clientId.equals(declared.clientId()))throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            var metadata=declared.scopes().stream().filter(value->value.key().equals(scopeKey)).findFirst();
++            return metadata.isEmpty()?description:description+": "+metadata.get().permissions().stream()
++                .map(ApplicationScopeDeclarationsV1.Permission::name).collect(java.util.stream.Collectors.joining(", "));
++        });
 +    }
 +
-+    private void validateProjectAudience(Connection connection, Map<String, Object> claim, String clientId, String resource) {
-+        if (!applicationProjects) return;
-+        if (claim == null) throw new OidcException(OAuth2Error.INVALID_SCOPE);
-+        final java.util.Optional<ProjectDirectoryState.Snapshot> snapshot;
-+        try { snapshot = projectDirectory.get().forClient(connection, clientId); }
-+        catch (SQLException failure) { throw new IllegalStateException("Cannot validate project audience", failure); }
-+        var membership = snapshot.orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE))
-+            .memberships().stream().filter(member -> member.approved() && member.clientId().equals(clientId)).findFirst().orElseThrow(() -> new OidcException(OAuth2Error.INVALID_SCOPE));
-+        if (!membership.audiences().contains(resource == null ? clientId : resource)) throw new OidcException(OAuth2Error.INVALID_SCOPE)
-+;
++    private void validateApplicationGroupAudience(Connection connection,Map<String,Object> claim,String clientId,String subject,String resource) {
++        if (!applicationGroups) return;
++        try {
++            if(claim==null) {
++                var client=protocol.client(connection,configuration.getIssuer(),clientId).orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++                if(resource!=null || !client.active() || !client.configuredLoginClient() || !clientId.equals(client.clientId())
++                    || !configuration.getIssuer().equals(client.issuer()))throw new OidcException(OAuth2Error.INVALID_SCOPE);
++                return;
++            }
++            var view=currentProjection(connection,clientId,subject,claimText(claim.get("application_group_id")));
++            if(!view.audiences().contains(resource==null?clientId:resource))throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        }catch(SQLException failure){throw new IllegalStateException("Cannot validate application group audience",failure);}
++    }
++
++    private ApplicationGroupProtocolProjectionV1.Projection currentProjection(Connection connection,String clientId,String subject,String expectedGroup)throws SQLException {
++        if(applicationGroupProjection==null || !applicationGroupProjection.isUnique())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        var request=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,subject,expectedGroup);
++        var result=applicationGroupProjection.get().current(connection,request);
++        if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION || !result.activated())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        var view=result.projection().orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
++        view.eligibleScopeKeys(request);
++        if(!view.active() || !view.approved())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        return view;
++    }
++
++    private static String claimText(Object value) {
++        if(!(value instanceof String text) || text.isBlank() || !text.equals(text.trim()) || text.codePoints().anyMatch(Character::isISOControl))throw new OidcException(OAuth2Error.INVALID_GRANT);
++        return text;
++    }
++
++    private static long claimNumber(Object value) {
++        if(!(value instanceof Number))throw new OidcException(OAuth2Error.INVALID_GRANT);
++        try{return new java.math.BigDecimal(value.toString()).longValueExact();}
++        catch(ArithmeticException|NumberFormatException failure){throw new OidcException(OAuth2Error.INVALID_GRANT);}
++    }
++
++    private static Set<String> claimStrings(Object value) {
++        if(!(value instanceof java.util.Collection<?> values))throw new OidcException(OAuth2Error.INVALID_GRANT);
++        var result=new HashSet<String>();
++        for(var item:values)if(!result.add(claimText(item)))throw new OidcException(OAuth2Error.INVALID_GRANT);
++        return Set.copyOf(result);
      }
  
      /** Validates a refresh token for exchange, returning its stored record. */
-@@ -235,9 +626,15 @@ public class OidcTokenService {
+@@ -235,9 +713,15 @@
          }
      }
  
@@ -1037,7 +1121,7 @@ index 9885dcd..9330a3c 100644
              FROM oidc_token WHERE value = ?""";
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
-@@ -263,7 +660,13 @@ public class OidcTokenService {
+@@ -263,7 +747,13 @@
      }
  
      private SignedJWT sign(final JWTClaimsSet claims) {
@@ -1052,7 +1136,7 @@ index 9885dcd..9330a3c 100644
          try {
              final JWSSigner signer = new RSASSASigner(key);
              final SignedJWT jwt = new SignedJWT(
-@@ -317,13 +720,25 @@ public class OidcTokenService {
+@@ -317,13 +807,25 @@
  
      private void persist(
          final String type, final String clientId, final String subject,
@@ -1083,7 +1167,7 @@ index 9885dcd..9330a3c 100644
              ps.setString(1, clientId);
              ps.setString(2, subject);
              ps.setString(3, type);
-@@ -331,6 +746,7 @@ public class OidcTokenService {
+@@ -331,6 +833,7 @@
              ps.setString(5, toJson(scopes));
              ps.setTimestamp(6, Timestamp.from(issuedAt));
              ps.setTimestamp(7, Timestamp.from(expiresAt));
@@ -1091,7 +1175,7 @@ index 9885dcd..9330a3c 100644
              ps.executeUpdate();
          } catch (SQLException e) {
              throw new IllegalStateException("Failed to persist OIDC token", e);
-@@ -349,7 +765,7 @@ public class OidcTokenService {
+@@ -349,7 +852,7 @@
              fromJson(rs.getString("scopes")),
              issuedAt == null ? null : issuedAt.toInstant(),
              expiresAt == null ? null : expiresAt.toInstant(),
@@ -1100,16 +1184,11 @@ index 9885dcd..9330a3c 100644
          );
      }
  
-@@ -368,4 +784,10 @@ public class OidcTokenService {
+@@ -368,4 +871,5 @@
              throw new IllegalStateException("Failed to parse scopes", e);
          }
      }
 +
-+    private static Set<String> intersection(Set<String> registered, Set<String> declared) {
-+        var supported = new HashSet<>(registered);
-+        supported.retainAll(declared);
-+        return Set.copyOf(supported);
-+    }
  }
 diff --git a/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql b/webserver/src/main/resources/migrations/2.0.96-oidc-server-resource-postgres.sql
 new file mode 100644

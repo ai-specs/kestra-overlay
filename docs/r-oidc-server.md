@@ -1,5 +1,157 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 应用组职责纠正提案（2026-10-21，源代码归属已纠正，功能验收与发布未通过）
+
+### 2026-10-22 当前状态
+
+权限恢复后，在新的 `.work/application-group-unrestricted-ci` 验证树完整运行
+`scripts/local-ci.sh` 通过。40 个补丁顺序重放，Micronaut 编译与索引生成、定向测试、
+UI 构建、UI 单元测试 64 项及 executable 打包均通过；实际 executable 通过职责边界门。
+后端最终报告共 322 项，其中 320 项通过、2 项因镜像专项前置条件未设置而中止，失败为零。
+两项分别为 `OidcSecondUserFixtureTest` 与 `McpSdkInstanceTest`，必须由后续镜像验收
+实际执行，不能计为通过。全部必需协议及授权报告数量门通过，含真实 PostgreSQL
+签发 4 项、集成 9 项、账号 guard 4 项和 client guard 3 项，无失败或跳过。
+日志为 `.work/application-group-unrestricted-ci.log`。后续镜像验收实际运行了上述两项
+专项测试：真实 SDK 成功、scope 拒绝和撤权后无新增执行通过。OIDC 镜像黑盒 35 项通过，
+classpath 探针实际装载通过，表单首装与环境变量首装的 UI 镜像验收均通过。
+本地 ego-browser 使用与 CI 共享的断言，扩展页面 7 项、认证主题 26 项和语言 52 项通过。
+原始日志为同目录 `application-group-unrestricted-{oidc,classpath,mcp,ui-form,ui-env}.log`；
+保留的 XML 与浏览器报告在 `.work/application-group-unrestricted-evidence/`。
+正式 CI 尚待验证，本地候选不是插件正式编译输入。下文源码阶段未执行记录保留为历史证据。
+
+标准账号与 client 生命周期均已接入 `IdentityLifecycleGuardV1` 和统一协议安全锁。账号状态
+与密码变更使用 `READ_COMMITTED`，先核对修订，再在同一连接调用 guard，最后更新账号、
+认证版本、token 与授权码。client 撤销/删除先核对标准所有者与账号，再调用 guard，随后
+取得私有锁、再次核对所有者并消费管理交互；拒绝不消费交互。缺失、重复或异常 provider
+失败关闭。guard 的明确拒绝原因保留；owner HTTP 入口返回无缓存的 403/409/503，响应不含
+用户、凭据或内部异常内容。关闭功能时保留标准 OIDC 生命周期行为。
+
+宿主已移除旧 `ApplicationDirectoryV1`、`ApplicationGroupManagementV1`、全部组业务实现、
+组初始化 CLI、组表迁移及 `0363/0364` 补丁，不提供旧目录代理或旧 API 转发。公开 README
+也已移除旧宿主组初始化命令。组、scope、支持登记、用户授予、内置/退役和初始化计划归插件。
+
+固定 BASE 的40补丁重放、57份相关主源码编译、源码职责门和补丁结构门通过。可信身份、
+授权投影、账号/client guard 与异步检查共38项进程内探针通过，协议契约/查询11项通过；
+24份源码与测试逐字节核对为重放结果。PostgreSQL 签发/集成12项及 guard7项只完成源码
+编译，未执行，不证明真实数据库回滚、并发或插件最后管理员判断已通过。
+
+构建与本地 CI 还在实际 executable 装载前核对新公开类型、旧业务类型/表及字节码依赖。
+本轮用本仓保留的旧 executable 实际验证拒绝；没有新 executable 的通过证据。旧宿主业务
+契约7项、业务数据库20项、业务引导4项和目录迁移上下文1项随错误归属实现退役，不记通过。
+新业务用例的落实归插件；根仓完整 new-install 门保持不变。旧共享意图、首方成员和旧迁移
+行为不得作为新目标恢复。只有真实 PostgreSQL、完整构建、HTTP/浏览器与正式 CI 通过后
+才能发布新镜像。
+
+普通 client 接入的前置顺序冲突已在源码修复，见下节。真实 HTTP、浏览器、数据库与发布门
+尚未通过，不能把控制器方法探针称为生产登录或完整授权流程验收。
+
+证据树为 `.work/application-group-host-boundary-final-replay`。原始日志保留重放、主源码、
+测试源码和进程内结果；部署仓 `.work/application-group-ownership-review/host-lifecycle-*`
+保存本轮审查副本。下方带日期的旧候选调查与失败门属于此前阶段，不代表当前源码状态。
+
+### Pending consent 与最终签发的阶段边界（2026-10-22，候选未发布）
+
+新增只读 `OidcProtocolStateV1.pendingClient(Connection, issuer, clientId)`，仅返回仍启用、
+未过期且状态确为 pending 的注册信息。它不返回可用于签发的 active client，也不包含
+client secret、组业务数据或资源权限。正常 `client` 查询仍将 pending 视为不可用于当前授权。
+
+生产 authorize 控制器改用 `OidcTokenService.previewConsentScopes`。预览允许有效 pending
+client 展示已经在应用组登记、获批且该用户可获得的 scope；仍检查精确 issuer、client、
+协议注册、应用支持和用户授予。不允许未登记应用、未知 scope、越界范围或 UI selector。
+应用权限说明使用同一预览规则，避免在渲染 consent 时误调用严格签发检查。
+
+接入顺序为：标准 DCR 建立 pending client → 插件为该 client 登记应用支持 → 生产
+authorize/owner consent → 标准所有权确认 → 重新核对当前状态并绑定授权码 → token 签发。
+插件登记 pending 元数据时必须通过上述公开查询核对目标与有效期；登记不代表 client
+已经可以取得 token。标准所有权确认仍由宿主执行，组业务登记仍由插件执行。
+
+授权码绑定、token、refresh、现有 token 复查不调用预览分支，仍要求当前有效 client。
+预览只返回 scope，不创建 token、授权码或绑定。批准后如果支持或用户授予已经变化，
+绑定重新校验并拒绝失效请求；控制器向原注册回调返回标准 `invalid_scope` 与 state，不
+返回授权码。该变化不扩大缺 provider 的零授权登录例外，也不自动给旧凭据增加组身份。
+
+检查结果：40补丁重放、57份相关主源码及源码职责门通过；授权/当前身份/生命周期与
+控制器方法探针45项，协议契约/标准查询13项通过。新增5项控制器探针使用生产控制器与
+真实 token-scope 逻辑，但 JDBC、session、ownership 为模拟协作者，未启动 HTTP server，
+不作为网络或浏览器证据。PostgreSQL 集成增加过期 pending 检查，并把已有 client 接入
+用例改为先登记、先预览、确认后签发；签发/集成/guard 共20项仅源码编译，尚未执行。
+
+原始树为 `.work/application-group-pending-consent-replay`；部署仓审查副本为
+`.work/application-group-ownership-review/pending-consent-*`。新 executable 尚未生成并
+通过产物门，完整构建、真实 PostgreSQL、HTTP/浏览器、正式 CI 与镜像发布仍未通过。
+
+### 扩大源码编译范围与构建阻塞（2026-10-22）
+
+在同一固定 BASE 重放树上，另从40份补丁提取全部受影响 Java 文件，编译通过140份主源码
+和82份测试源码。主源码覆盖 core24、jdbc7、queue1、webserver108，不再只检查协议子集。
+此诊断使用宿主自己既有 executable、测试工具类和已缓存公开依赖，启用 Lombok；没有
+生成 Micronaut bean/index，也没有执行 JUnit、PostgreSQL 或 HTTP，不是完整构建证明。
+
+再次使用项目指定的 Gradle9.7.1、仓内可写 Gradle home 和只读依赖缓存尝试
+`:webserver:compileTestJava`，构建在创建 `FileLockContentionHandler` 时被
+`java.net.SocketException: Operation not permitted` 阻断，尚未进入任务执行。未通过禁用
+安全限制或替换未验证产物绕过。诊断日志为重放树同名前缀的 `.all-main-compile.log` 和
+`.all-test-compile.log`；完整构建失败报告保留在部署仓审查目录。正式发布门保持未通过。
+
+消费项目为 `kestra-plugin-rbac`。维护者最新边界要求应用组、scope、支持登记、用户授予和业务存储归插件；本仓仅提供公开宿主机制和激活点。当前 `0363` 候选的 `JdbcApplicationDirectoryV1` 仍实现组 CRUD、scope 删除约束、内置/退役 ID、审批和 `oidc_application_group_*` 表；`ApplicationDirectoryCommand` 也属于组业务初始化。每次组业务变更都迫使宿主改 patch 和发布镜像，插件还需跨两套存储分步登记支持关系。这些源码和使用路径证明当前归属沿用了旧项目目录，不符合最新边界；不是标准 OIDC 基础设施例外。
+
+裁决：停止扩展和发布上述宿主业务目录候选。组业务迁回插件，本仓只保留签发和校验需要的版本化只读状态投影及标准身份生命周期激活。现有 OSS 没有此输入契约，已有资源授权 V2 只能评估资源操作，不能作为 OIDC token/refresh 签发的当前组、client 支持和用户授予输入；已有声明副本只描述应用权限 key/name，也不能替代组成员与授予。
+
+最小契约方向：宿主在已验证的 issuer、client、subject 和标准协议上下文中请求唯一投影 provider，取得明确组 ID、tenant、启用/撤权版本、scope 元数据、应用支持和用户授予。host 保持单一 issuer、共享端点、签名 claim 和严格 issuer/audience 校验；不提供业务 CRUD 或建组表。缺组件、重复组件、版本不符、错误目标、异常或数据不可用时，应用组签发与业务身份必须失败关闭。缺插件的配置 UI client 可以按已有裁决走标准协议零授权登录，但不得合成应用组授权；恢复组件后也不得把旧零授权会话自动提权。
+
+插件需要的账号/client/安装前置从本仓最小公开协议服务取得，只暴露存在、有效状态、可登录性和安装审批前置，不暴露凭据或要求读取私有表。账号停用和密码重置需要通用安全 guard，组内最后管理员由插件业务判断。连接复用、锁顺序、并发一致性和异常回滚必须先冻结契约并由本仓最小假 provider 与插件独立测试分别证明，不读取相邻源码或编译真实插件验证宿主。
+
+兼容和发布：不保留旧可写目录、组表、组 CLI 或转发 API；当前60份源码编译、16项纯契约和13项进程内探针是原候选的指定证据，不能证明职责迁移已完成。先宿主只读契约独立测试和正式发布，再插件使用正式 digest，最后 root 选择正式组合。此前本文件关于“宿主保存组目录、生命周期与 CLI”的候选段落均被本提案替代，保留作为调查记录，禁止据此交付。
+
+### 最小接口与事务裁决（2026-10-21，设计已接收，候选部分激活、未发布）
+
+2026-10-21 的职责纠正调查确认以下旧调用点，不能只删除 `0363` 业务存储后发布。2026-10-22 已替换签发和可信身份读取；账号与 client 生命周期的替换仍未完成，进度见本节后续记录：
+
+- `OidcUserDirectory.authenticationChange` 直接注入 `JdbcApplicationDirectoryV1` 并调用 `guardSubjectDeactivation`。这使标准账号生命周期依赖具体组业务类；当前事务隔离为 `REPEATABLE_READ`。
+- `OidcTokenService.applicationGroupAuthorization` 使用 `ApplicationGroupDirectoryState.forClient(Connection, clientId)`，又查询 `oidc_application_group_bootstrap.ui_client_id` 并读取成员 `firstPartyUi`。标准 UI client 的确认仍依赖组业务表和额外成员类别。
+- `OidcTrustedIdentity.validate` 读取完整组快照、所有成员和用户授予，再在宿主内部寻找当前 client/subject。宿主所需信息只对应当前已验证的协议身份，不需要接收其他用户的授予或管理目录分页。
+- `OidcOwnershipService.revoke` 在持有私有 ownership 锁后修改标准 client 状态。新生命周期机制必须覆盖此路径，并在取得 client 行锁及其他私有锁之前建立统一安全锁顺序。
+
+裁决的公开面收窄为以下三个接口。名称和方法清单为本轮设计基线；它们还不是可供插件编译的正式 Java 产物：
+
+| 接口 | 必需行为 | 明确边界 |
+| --- | --- | --- |
+| `ApplicationGroupProtocolProjectionV1` | 在宿主传入的事务 `Connection` 中，按精确 issuer、tenant、client、subject 和可选的 token 组 ID 返回当前组启用状态、组修订/撤权版本、该应用的 audience 与支持 scope 元数据、该用户获授 scope key | 只返回请求目标，不能提供组、scope、应用或授予的写入方法；不返回其他用户清单、`firstPartyUi` 或应用实际资源权限 |
+| `OidcProtocolStateV1` | 提供事务内标准账号是否存在、启用和可登录，标准 client 是否有效及其协议注册，当前安装凭据与配置登录 client 的精确核对，以及统一安全锁入口 | 本仓读取自己的标准 OIDC 表和安装凭据；不暴露密码、secret、凭据哈希或组业务数据；插件不得自行查询这些私有表 |
+| `IdentityLifecycleGuardV1` | 在标准账号停用、密码重置及 client 撤销/删除提交前，调用唯一启用 provider，并传递同一事务连接与明确变更目标 | host 执行标准变更和认证版本失效；plugin 在自己的目录和实际策略中判断最后管理员与业务约束；guard 拒绝或异常使整个标准变更回滚 |
+
+`UserDirectoryV1` 继续负责已有账号 CRUD。新增 `OidcProtocolStateV1` 的理由不是重复该目录，而是它当前的 `find/list` 会另开连接，不能证明检查和生命周期变更使用同一事务。配置登录 client 由宿主标准配置和注册核对；它在应用组中仍是普通应用成员，不在插件成员模型中新增首方标志。UI selector 只控制标准登录请求中的 scope 选择，不授予任何资源权限。
+
+统一安全锁入口使用事务级锁，不建立宿主组表。所有影响授权的宿主签发/refresh、账号认证状态变更、client 撤销，以及插件目录、实际策略和声明写入，必须先经同一已发布入口取得锁。执行顺序固定为：安全锁 → 插件目录锁 → 实际策略/声明锁 → 标准账号/client 行锁。不得在已经持有标准身份行锁后回调组 provider；不得在 provider/guard 内提交、回滚或关闭宿主传入连接，也不得打开另一个连接替代事务内标准身份检查。
+
+变更事务使用 `READ_COMMITTED`。不能把当前账号变更的 `REPEATABLE_READ` 直接用于新 guard：第二个并发停用可能在等待目录锁前固定旧快照，从而再次看到刚被另一个事务停用的管理员仍然有效。实际读取和判断必须在取得安全锁后发生。已有纯只读账号分页可以保留自身快照策略。安全锁异常、超时、provider 缺失/重复、投影版本或目标不符，均不得继续签发或提交组相关变更；不通过重试未验证快照或读取旧缓存维持允许。
+
+缺插件标准零授权 UI 登录仍按前述裁决单独处理。它不得产生应用组 claim，也不得接受带旧应用组 claim 的会话。组 provider 恢复后必须重新执行生产登录，不能自动给零授权会话补入 scope。协议投影对 scope 的上限仍为应用主动支持与该用户授予的交集；应用资源授权始终由应用自己的策略决定。
+
+实施和验收门：先替换宿主上述调用点并删除旧组 DTO/可写目录/CLI/迁移表；使用本仓最小假 provider 验证签发、refresh、组 ID/epoch、scope 交集和 UI client 精确识别。再用真实 PostgreSQL 并发验证两个管理员停用、目录撤权与 refresh、client 撤销与 token 签发、guard 失败无副作用以及锁等待后的最新状态。插件独立验证自己的业务目录和最后管理员，不进入宿主 CI。接口与锁机制正式发布后才允许插件接线和编译，不能将本段设计或当前候选源码当作发布证明。
+
+### 0370 候选源码与明确未通过门
+
+`0370-oidc-protocol-projection.patch` 新增上述三个接口、协议值校验、`OidcProtocolState` 标准查询与事务锁实现，以及独立测试。投影只允许当前请求身份，精确核对 issuer/tenant/client/subject/组 ID，并返回支持与授予交集；集合不可变，未激活结果不能携带组身份。标准协议查询只返回账号状态/认证版本/可登录性和 client 的协议注册，不返回凭据；安装核对同时要求本地安装凭据、标准数据库安装 ID 和有效的配置登录 client。所有查询复用调用方连接，不提交、回滚或关闭该连接。
+
+从固定 BASE 顺序重放42个补丁并编译65份相关宿主主源码通过。新投影5项纯契约测试、标准查询与连接所有权6项探针在最终重放树通过；7份新增源码与测试均逐字节核对为补丁重放结果。标准查询探针使用模拟 JDBC 和真实临时安装凭据文件，未运行真实 PostgreSQL，也未证明生命周期 guard 已经被调用。旧纯契约16项仍通过，只证明该重放树的指定既有断言。
+
+`scripts/check-application-group-boundary.py` 已接入正式构建和本地 CI 的编译前阶段。它拒绝旧宿主业务目录、组表及缺少新协议机制的调用点，结构检查不替代授权行为测试。当前重放树实际被此门拒绝，旧 `0360/0363/0364` 业务目录和标准服务调用点尚未迁移。此候选不能发布，不能作为插件编译输入。证据树为 `.work/application-group-protocol-state-replay`，原始日志为同名前缀的 `.replay.log`、`.compile.log` 及树内 `protocol-tests.log`。
+
+### 只读签发与可信身份接线（2026-10-22，候选未发布）
+
+`OidcTokenService` 与 `OidcTrustedIdentity` 已改为消费 `ApplicationGroupProtocolProjectionV1` 和 `OidcProtocolStateV1`。这两个运行路径不再读取宿主组表、完整目录快照或成员 `firstPartyUi`。宿主从配置登录 client 的标准注册识别 UI selector；该应用在组中仍是普通成员。scope 上限只使用当前应用支持与当前用户授予的交集，并检查标准 client 的协议 scope 注册。混入未知或不可获得的 scope 必须整单拒绝。
+
+应用权限声明副本只用于授权页展示。`applicationScopeDescription` 现在还接收已登录 subject，只展示该请求允许的 scope 元数据；权限 key/name 的副本、缺少副本或编辑副本不另行授予资源权限，也不成为独立的 scope 撤销开关。OAuth 流程的支持撤销以插件返回的当前应用支持登记为准。scope key、人类角色名和应用权限 key/name 保持不同概念。
+
+签发、授权码绑定、refresh 和当前身份复查在明确的 `READ_COMMITTED` 事务中通过统一安全锁入口读取当前账号、client 和投影。旧授权码或 refresh 的组 ID/epoch 必须匹配；已经绑定的授权码不得重新绑定。缺投影 provider 或目录未激活时，只有经过标准注册核对的配置 UI client 可以取得标准协议 scope，且不产生组 claim。重复 provider、查询失败或错误投影不进入此分支。无组绑定的旧凭据在 provider 恢复后不能自动换取带组 claim 的凭据；已绑定组的凭据也不能在 provider 缺失时降格继续使用。
+
+标准协议查询现在把 `legacy/pending/未知 kind` 的 client 视为不可用于当前授权。未配置 UI client 不影响标准账号/client 查询，但不能确认 UI 登录资格或安装资格，避免给不使用 UI 的标准 OIDC 场景增加启动配置前置。
+
+检查结果：固定 BASE 的42补丁重放与65份相关主源码编译通过；可信身份10项、只读授权10项、MCP异步5项进程内探针通过，接口/标准查询11项探针也通过。MCP保留允许输出、等待时账号/epoch撤权、缺 HTTP 来源及主体错配检查。PostgreSQL签发4项和协议集成8项已改用本仓最小测试投影，保留真实签名、授权码消费、refresh撤权、无新增 token 行、单连接与标准注册上限断言；只完成源码编译，尚未运行。最小测试投影不证明插件业务存储或最后管理员已通过。
+
+选择器辅助函数的布尔输入也已明确为标准配置登录 client，不再命名为首方应用；scope 输入明确区分已定义、应用支持与用户获授的 key。最终重放树为 `.work/application-group-protocol-activation-final-contract-replay`；原始日志为同名前缀的 `.replay.log`、`.compile.log`、`.test-compile.log` 及树内 `trusted-tests.log`、`protocol-tests.log`。17份激活/契约源码和测试均核对为重放结果。职责边界门仍明确拒绝旧组业务类/表，以及 `OidcUserDirectory`、`OidcOwnershipService` 未接入新生命周期机制的路径。完整 Gradle、PostgreSQL、HTTP/浏览器、正式 CI 和镜像发布均未通过，不得用本轮定向检查替代。
+
 ## 0. 当前认证裁定与实施门（2026-10-09，优先于旧记录）
 
 ### OAuth 错误回调安全处理（REQ-0367，已接收、未发布）
@@ -437,6 +589,28 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 
 ### 应用组管理授权边界提案（已接收、未实施、未发布）
 
+宿主命名候选更新（2026-10-21，未发布）：公开目录值类型改为 `ApplicationDirectoryV1.ApplicationGroup` 和 `ApplicationGroupInput`；目录访问使用 `applicationGroups/applicationGroup`。可信身份字段使用 `applicationGroupId/applicationGroupScopes`，成员支持范围为 `supportedScopeKeys`，scope 定义与输入使用 `key/name/description`。目录快照及安装计划使用 `applicationGroup/applicationGroups`，内部目录包为 `io.kestra.webserver.oidc.applicationgroups`，状态接口为 `ApplicationGroupDirectoryState`。持久化表统一为 `oidc_application_group_state/bootstrap/invalidation`。不保留旧 project 类型、字段、包、表名或旧 JSON 重试；协议标准 `iss`、`scope` 和共享端点保持原义。
+
+删除安全补充裁决（2026-10-21，候选未发布）：当前组创建从 revision/authorizationVersion=1 开始；若允许删除后复用同一 ID，新组版本可能在后续操作中再次等于旧组凭据的版本，不能仅以“删除时无现存成员”证明旧凭据永不恢复。组 ID 在同一安装内按生命周期唯一。删除事务在授权、内置保护、修订及空引用校验之后，先向 `oidc_application_group_retired` 写入退役 ID，再删除目录记录；两步使用同一目录写锁与数据库事务。创建事务在同一写锁中检查现存和退役 ID，任一存在均返回冲突，不提供复用或恢复接口。被拒绝的删除不得留下退役记录；内置组仍不进入删除或退役路径。
+
+创建和更新方法已补齐为 `createApplicationGroup/updateApplicationGroup`，删除方法为 `deleteApplicationGroup`，没有旧方法别名。数据库测试新增退役持久化、缺管理 provider 拒绝且不写退役记录、错误修订回滚、删除与重建并发串行化探针；目录 PostgreSQL 套件目标计数现为 20。这 20 项尚未在本候选执行，不能计为通过。
+
+本次验证树为 `.work/application-group-retirement-replay`，从固定 BASE 重放 41 个补丁通过；60 份相关主源码编译通过，纯目录/身份/scope/安装计划 `16/16` 通过，PostgreSQL 与登录集成测试源码编译通过。证据为 `.work/application-group-retirement-replay.log`、`application-group-retirement-compile.log`、`application-group-retirement-test-compile.log`、`application-group-retirement-tests.log`、`application-group-retirement-structure.log`。此前 naming-replay-3 不含本次退役机制与方法补正，不作为最终候选验证树。Docker socket 访问仍被执行环境拒绝，数据库、完整 CI、镜像和真实组合没有新增通过证据。
+
+签发契约清理后续（2026-10-21，候选未发布）：签发代码中公开的 `bindProjectCode` 及相关 claim、audience 和 token 辅助方法已改为应用组名称，不保留旧方法别名；授权评估的应用组探针类同步改名，两个发布检查器均要求新测试类。最新验证树为 `.work/application-group-token-contract-replay`：41 补丁重放、60 份主源码编译、纯契约 `16/16`、结构门通过。另实际运行无需数据库的可信身份 6 项、V2 授权边界 2 项、MCP 异步身份与撤权 5 项，共 `13/13`，覆盖正常输出、等待期间 epoch/账号撤权、缺来源、主体错配、声明撤销、缺声明组件的零 scope 身份与业务 scope 拒绝。该组探针使用模拟目录和进程内执行链，不替代 PostgreSQL、真实 OAuth、HTTP 或 Compose。
+
+证据为 `.work/application-group-token-contract-replay.*.log`、`application-group-token-runtime-compile.log`、`application-group-token-runtime-tests.log`。首次额外探针运行的临时执行器误用固定 16 项计数，原始日志保留为 `application-group-token-runtime-runner-mismatch.log`；修正为明确期望 13 项后全部重跑通过，没有删除断言或将未运行项计为通过。发布门的 18 个必需类名及源码测试注解计数已静态核对，记录为 `application-group-token-release-gate-source-audit.log`；此计数核对不证明数据库套件或全部测试已经执行。
+
+完整 Gradle 编译仍未启动：wrapper 写用户目录锁失败，改用工作区缓存及已安装 Gradle 后，本机 FileLockContentionHandler socket 创建仍被沙箱拒绝。失败日志分别为 `.work/application-group-retirement-gradle-compile.log` 和 `application-group-retirement-workspace-gradle-compile.log`。未修改全局 Gradle 配置或重试绕过 socket 权限，不把 javac 定向编译写成 Gradle 全量构建通过。
+
+此候选在 `.work/application-group-naming-replay-3` 从固定 BASE 顺序重放 41 个补丁通过；60 份相关宿主主源码编译通过；目录 DTO、可信身份 DTO、scope 交集和内置计划共 `16/16` 定向测试通过。PostgreSQL 和登录集成测试源码编译通过，但数据库、完整宿主 CI、镜像和真实组合未运行。证据分别为 `.work/application-group-naming-replay-3.log`、`application-group-naming-compile.log`、`application-group-naming-test-compile.log`、`application-group-naming-tests.log`、`application-group-naming-structure.log`。先前 `.work/application-group-model-dev` 使用旧命名，不得覆盖或当作本次最终验证树。插件仍固定旧正式宿主输入，必须等待本候选正式发布后再适配并完整编译，不能使用本地候选 jar。
+
+内置应用组约束补充裁决（2026-10-21，已接收、未发布）：消费项目为 `kestra-plugin-rbac`。当前安装记录只保存 UI client，目录没有不可变的内置组标识和受限组删除机制；缺少删除方法不能证明内置组保护已实现。安装计划新增必填 `builtInApplicationGroupId`，必须精确指向计划中的唯一组，且当前 UI 应用为该组已批准的普通成员。此标识进入审批 hash，并在目录首次激活的同一事务写入安装记录；不得从数组顺序、显示名称或现存首方成员记录推断。旧缺字段计划拒绝，不加默认或兼容重试。
+
+宿主新增只读内置 ID 查询和受限应用组删除公开操作。删除沿用现有可信身份、管理 SPI、目录写锁和对象修订；内置 ID 始终拒绝删除，其他组仅在 scope、应用成员和用户授予均为空时可删除。数据库保存内置 ID 对目录主键的引用，避免记录与组脱离。标识不提供修改入口；组 ID 更新接口仍不存在。宿主独立测试必须验证审批 hash 绑定标识、计划顺序无关、UI 成员归属、数据库持久化后重新装载、内置删除和错误修订无副作用、非空组拒绝、空组删除、并发和缺组件拒绝。插件随后只消费正式 SPI 并展示内置状态；根仓使用正式镜像/jar 验证安装、删除拒绝、其他组操作和资源清理。当前未实现项不得由旧 CI 或 UI 隐藏按钮代替。
+
+候选实施证据：`0360/0363` 已加入 `builtInApplicationGroupId()`、`deleteApplicationGroup(id,revision)` 和安装记录的非空外键；计划中的同名字段必填并参与审批 hash，不能由 UI 成员或数组顺序推断。计划选中的组必须含已批准的当前应用，首方标志仍由原宿主登录安全规则独立检查。`0362/0363` 的安装测试配置已同步新必填字段。纯计划测试 `4/4` 通过，相关主代码及 PostgreSQL/组合测试源码编译通过，固定 BASE 的 41 个补丁逐项检查及顺序重放通过，结构门 `PASS=15 FAIL=0`。证据位于 `.work/application-group-builtin-tests.log`、`application-group-builtin-postgres-compile.log`、`application-group-builtin-replay.log` 和 `application-group-builtin-structure.log`。其中 PostgreSQL 的新持久化、外键与删除探针仅完成源码和编译，数据库、并发、镜像及正式 CI 均未在本候选运行。上一 scope 候选的本地 CI 结果不能替代本次候选验收。
+
 消费项目仍为 `kestra-plugin-rbac`。目标要求应用组 scope 仅有 `key/name/description`；当前 `ApplicationDirectoryV1.ScopeDefinition` 保存 `resourceIntents/managementIntents`，`JdbcApplicationDirectoryV1.authorize` 和 `hasAdministrator` 依赖这些字段，插件 `ProjectPolicyBoundary` 将其作为 Kestra 实际权限上界。管理员更改 scope 名称或成员登记会推进全组目录修订，插件随后要求“完整项目恢复”。这些是目标模型的实际失败路径；代码入口见 `patches/webserver/0360-application-project.patch`、`0363-application-project.patch` 与插件当前组合失败的待补探针。OSS 没有独立应用组管理授权入口；已发布的 typed 资源授权只接收宿主已解析的资源操作，不能直接替代目录事务内的管理决策。
 
 候选最小契约：宿主目录 CRUD 在原事务内向唯一版本化管理决策 SPI 提交已验证的主体、应用组、client、scope key、目标与动作；插件只返回允许或拒绝，不能改写宿主目录。首次安装由安装凭据和显式批准计划完成，不使用普通 HTTP 决策旁路。最后管理员保护由宿主枚举实际可登录的主体、成员和 scope，交由同一 SPI 判断候选操作后仍有管理员；插件从自身 Kestra 运行时策略读取管理 grant。宿主不保存 Kestra 资源意图、管理意图或插件策略。缺 provider、多实例、版本不符、数据库错误、异常、超时和未解析目标均拒绝，事务回滚且不改变目录或会话。显示名称和说明变化不要求全组人工恢复；撤权仍逐请求检查。候选需要评估共享事务连接的公开边界，避免目录持锁时插件再借连接导致单连接池死锁。
@@ -448,6 +622,10 @@ UI、IdP、access token、refresh token 和 MCP session 拒绝，新增密码登
 候选实现进度：验证树已新增 `ApplicationGroupManagementV1` 和目录写入激活点；普通管理写入先由宿主核对可信身份、应用组成员、用户授予和 scope 状态，再要求唯一 provider 返回允许。缺 provider 或拒绝均不写库，独立 PostgreSQL 探针已复现。最后管理员检查已将候选用户、首方 UI 成员和有效 scope 交集交给同一 provider，专门测试证明即使共享 scope 没有 `managementIntents`，最后管理员撤权也被阻止；普通 client 即使登记相同管理 scope，也不能替代首方 UI 管理员。首次安装仍只按安装凭据与结构性首方 owner 判定，不把候选主体当成真实登录。旧 `resourceIntents/managementIntents`、目录上界和完整恢复仍在公开模型中，因此该候选不得发布为完整目标契约。下一步移除共享意图并更新插件独立策略，再执行双方完整构建与组合验收。
 
 组合反馈：正式 `3ee3f8e` 镜像与插件 `e90c590` 通过各自 CI，但根仓空库组合在首个测试账号创建后的完整策略保存返回 409。宿主 `PolicyBoundary.reachableManagementScopes` 曾误调用仅判断 `IDENTITY.MANAGE` 的新 provider，漏报只持 `LOCAL_POLICY.MANAGE` 的策略 scope；插件于是拒绝策略管理员可达性。裁决把该投影恢复为宿主可实际登录、获授且受首方 UI 成员支持的 scope 集合，不在宿主推断该 scope 的管理动作。`IDENTITY.MANAGE` 的正常写入与最后管理员保护继续由新 provider 决策。独立 PostgreSQL 测试验证“可达但非身份管理”的策略 scope 会进入投影；该修正仍须镜像 CI、插件正式输入和根仓组合复测。
+
+目标模型的下一项候选：`ApplicationDirectoryV1.ScopeDefinition` 与 `ScopeInput` 已收窄到 `projectId/scope/name/description/revision` 和 `scope/name/description`，不再保存 `active/resourceIntents/managementIntents`。`scope` 暂为稳定 key 的 Java 字段名，名称及说明可以独立更新；撤权由应用成员支持范围或用户授予撤销并推进 epoch，不再通过停用全组 scope。宿主不再比较应用资源意图，也不替其他应用定义 namespace/动作。候选从干净 BASE 重放成功，宿主定向测试 `47/47` 与完整 `scripts/local-ci.sh` 通过；正式 CI 和镜像发布仍待执行。
+
+插件适配设计：目录投影只提供 scope 标识、名称和说明；Kestra 资源授权从插件自己的已提交策略读取，管理决策由 `ApplicationGroupManagementV1` 提供。插件须使用本次正式发布的宿主镜像重新编译并独立测试，不得使用宿主开发树或候选 jar。原消费方不能直接装载到变更后的宿主；部署方必须等待匹配插件正式发布。此次宿主发布只证明收窄后的公开机制；旧 `project` 类型与字段命名、`reconciliation` 用户流程和全组版本联锁仍须后续移除，不代表完整目标模型已交付。
 
 ### 已接收的 UI 项目 scope 选择器（REQ-0360）
 

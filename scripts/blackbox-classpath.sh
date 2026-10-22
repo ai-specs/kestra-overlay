@@ -8,7 +8,7 @@ EXE="${2:?real executable jar required}"
 IMAGE="${3:?local overlay image required}"
 TASK_WORK="$(mktemp -d)"
 CONTAINER="kestra-classpath-probe-$$"
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; rm -rf "$TASK_WORK"; }
+cleanup() { while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$CONTAINER"); rm -rf "$TASK_WORK"; }
 trap cleanup EXIT
 if [ -z "${JAVA_HOME:-}" ]; then
     JAVA_BINARY="$(command -v java)"
@@ -76,7 +76,7 @@ micronaut:
         access: [isAnonymous()]
       - pattern: /**
         access: [isAuthenticated()]'
-docker run --detach --name "$CONTAINER" --publish 127.0.0.1::8080 \
+docker run --detach --label "owner=$CONTAINER" --name "$CONTAINER" --publish 127.0.0.1::8080 \
     --volume "$TASK_WORK/libs:/app/libs:ro" --env "KESTRA_CONFIGURATION=$CONFIG" "$IMAGE" server standalone >/dev/null
 PORT="$(docker port "$CONTAINER" 8080/tcp | sed 's/.*://')"
 for attempt in $(seq 1 60); do

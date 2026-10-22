@@ -12,9 +12,9 @@ SETUP_MODE="${BB_SETUP_MODE:-form}"
 TEMP_DIR=$(mktemp -d)
 
 cleanup() {
-  docker rm -f "$SERVER" "$PG" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
-  docker volume rm "$STORAGE" >/dev/null 2>&1 || true
+  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$NET")
+  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$NET")
+  while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$NET")
   rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT
@@ -36,9 +36,9 @@ request() {
     -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "$@"
 }
 
-docker network create "$NET" >/dev/null
-docker volume create "$STORAGE" >/dev/null
-docker run -d --name "$PG" --network "$NET" \
+docker network create --label "owner=$NET" "$NET" >/dev/null
+docker volume create --label "owner=$NET" "$STORAGE" >/dev/null
+docker run -d --label "owner=$NET" --name "$PG" --network "$NET" \
   -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
 for attempt in $(seq 1 30); do
   if docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1; then break; fi
@@ -127,7 +127,7 @@ EXTENSION_MOUNT=()
 if [ -n "${BB_UI_EXTENSION_JAR:-}" ]; then
   EXTENSION_MOUNT=(-v "$BB_UI_EXTENSION_JAR:/app/libs/kestra-rbac-authorizer.jar:ro")
 fi
-docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" \
+docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" \
   -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
@@ -282,7 +282,7 @@ assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{htt
 HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
 docker rm -f "$SERVER" >/dev/null
-docker run -d --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" -v "$STORAGE:/app/storage" \
+docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_OIDC_BOOTSTRAP_USERNAME=attacker -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=InjectedPass123!' \
   -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 for attempt in $(seq 1 60); do

@@ -41,14 +41,13 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0320	0320-oidc-upstream-i18n-entry.patch	core	ai-specs/kestra-plugin-rbac	独立登录页复用上游vue-i18n语言目录与现有翻译键	4	新写;用户国际化要求	上游OSS提供同等独立认证页面国际化入口
 0330	0330-authorization-evaluation-lifecycle.patch	core	ai-specs/kestra-plugin-rbac	版本化授权评估生命周期接口与唯一所有者和查询缓存及定向探针	13	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价完整评估生命周期与安全上下文传播
 0340	0340-independent-management-pages.patch	core	ai-specs/kestra-plugin-rbac	独立ESM管理页面描述和资源及菜单根与偏好生命周期桥接并发布UI消费SDK	36	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约
-0350	0350-oidc-public-user-directory.patch	core	ai-specs/kestra-plugin-rbac	公开账号目录SPI与原子生命周期及登录session和授权码及token认证版本失效	11	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价公开账号目录与完整认证生命周期失效机制
-0360	0360-application-project.patch	core	ai-specs/kestra-plugin-rbac	应用组scope名称、声明投影与管理决策SPI；独立授权评估契约	7	已发布部分机制；管理SPI为候选未发布	上游提供等价公开应用组身份与管理契约
-0361	0361-application-project.patch	core	ai-specs/kestra-plugin-rbac	应用组UI selector签发交集；不授Kestra资源权限	2	旧机制在4b017f6已发布；本轮候选本地CI通过	上游提供等价应用组scope选择机制
-0362	0362-application-project.patch	core	ai-specs/kestra-plugin-rbac	应用组可信身份、声明复查与独立安全探针	12	旧机制在4b017f6已发布；本轮候选本地CI通过	上游提供等价应用组可信身份机制
-0363	0363-application-project.patch	core	ai-specs/kestra-plugin-rbac	应用组目录、显式引导、受限scope删除和管理SPI激活	9	旧机制已发布；管理SPI为候选未发布	上游提供等价应用组目录与管理授权激活
-0364	0364-directory-migration-datasource.patch	core	ai-specs/kestra-plugin-rbac	解包contextual数据源并实际执行无请求上下文目录迁移	2	目录迁移在4b017f6通过CI39087229293镜像验收并发布	上游提供等价目录迁移数据源处理
+0350	0350-oidc-public-user-directory.patch	core	ai-specs/kestra-plugin-rbac	公开账号目录及账号/client同连接生命周期guard测试、认证版本失效；client机制归0190	14	历史标准机制已发布；新guard接线13项单元探针通过；PostgreSQL7项及完整CI未运行	上游OSS提供等价公开账号目录与完整认证生命周期失效机制
+0360	0360-application-project.patch	core	ai-specs/kestra-plugin-rbac	只保留声明展示、可信身份及独立授权评估契约；删除宿主可写组目录与业务管理SPI	4	破坏性契约候选；旧组业务已退役；正式CI与发布未通过	上游提供等价公开应用组身份与授权评估契约
+0361	0361-application-project.patch	core	ai-specs/kestra-plugin-rbac	应用组UI selector签发交集；不授Kestra资源权限	2	旧机制曾发布；当前配置登录client选择器候选纯契约4项通过；完整CI未通过	上游提供等价应用组scope选择机制
+0362	0362-application-project.patch	core	ai-specs/kestra-plugin-rbac	应用组只读可信身份、pending consent预览与严格签发分离及独立探针	14	可信身份10项、投影授权12项、consent控制器5项及MCP异步5项通过；真实HTTP与完整CI未通过	上游提供等价应用组可信身份机制
 0365	0365-mcp-call-safe-diagnostic.patch	core	ai-specs/kestra-plugin-rbac	新增MCP安全异常诊断helper与真实Logback格式化探针	2	主控接收;本地候选未发布	上游提供等价MCP调用安全异常诊断
 0366	0366-mcp-async-identity-context.patch	core	ai-specs/kestra-plugin-rbac	独立V2和OidcTrustedIdentity跨线程输出允许、epoch及账号撤权、缺来源与主体错配探针	1	本地5项通过;与V1及身份回归共12项通过;未发布	上游提供等价MCP异步授权来源与撤权探针
 0367	0367-oauth-error-callback.patch	core	内置OIDC认证链及独立消费扩展	OAuth错误回调校验state与callback并清除临时cookie;固定同源失败重定向	2	主控接收;独立HTTP测试6项;最终重放和正式发布待验证	上游提供等价OAuth错误回调state校验和安全重定向
 0368	0368-extension-entry.patch	core	ai-specs/kestra-plugin-rbac及独立管理页面	认证descriptor和capability准入;业务配置403时通用扩展安全壳层;拒绝页发现入口;精确manifest逐项授权委派	16	主控接收;候选测试通过;未发布	上游提供等价已认证扩展独立初始化及条件安全壳层
 0369	0369-system-theme-lifecycle.patch	core	ai-specs/kestra-plugin-rbac及宿主页面	通用主题生命周期跟随系统配色变化并卸载监听;显式主题不受影响	2	主控接收;前端64项通过;未发布	上游全局主题生命周期提供等价系统配色监听及清理
+0370	0370-oidc-protocol-projection.patch	core	ai-specs/kestra-plugin-rbac	只读应用组投影、标准协议及pending登记查询、事务锁与生命周期guard契约	7	5项纯契约及8项标准查询探针通过；职责迁移源码通过；真实数据库、HTTP及发布未通过	上游提供等价只读协议输入与标准身份生命周期公开机制

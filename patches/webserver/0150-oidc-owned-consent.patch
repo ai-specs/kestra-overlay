@@ -5,10 +5,9 @@
 # 触达上游文件: 16 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-index 30730af..c372c58 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
-@@ -56,6 +56,7 @@ import io.kestra.webserver.oidc.services.OidcAuthorizationCodeService;
+@@ -56,6 +56,7 @@
  import io.kestra.webserver.oidc.services.OidcClientService;
  import io.kestra.webserver.oidc.services.OidcJwkService;
  import io.kestra.webserver.oidc.services.OidcSessionService;
@@ -16,7 +15,7 @@ index 30730af..c372c58 100644
  import io.kestra.webserver.oidc.services.OidcTokenService;
  import io.kestra.webserver.oidc.services.OidcUserService;
  
-@@ -94,24 +95,42 @@ public class OidcProviderController {
+@@ -94,24 +95,42 @@
      private final OidcJwkService jwkService;
      private final OidcUserService userService;
      private final OidcSessionService sessionService;
@@ -60,7 +59,7 @@ index 30730af..c372c58 100644
      }
  
      @Get("/jwks")
-@@ -123,6 +142,13 @@ public class OidcProviderController {
+@@ -123,6 +142,13 @@
      @Get("/authorize")
      public HttpResponse<?> authorize(final HttpRequest<?> request) {
          final var parameters = queryParams(request);
@@ -74,24 +73,24 @@ index 30730af..c372c58 100644
          if (parameters.containsKey("code_challenge") && parameters.get("code_challenge").stream().anyMatch(String::isBlank)) {
              return HttpResponse.badRequest(Map.of("error", "invalid_request"));
          }
-@@ -147,6 +173,9 @@ public class OidcProviderController {
+@@ -146,6 +172,9 @@
+         final OidcClientService.OidcClient client = clientOpt.get();
          if (!client.active()) {
              return HttpResponse.badRequest("Unknown client_id");
-         }
++        }
 +        if (parameters.containsKey("resource") && "system".equals(ownership.state(client.clientId()).kind())) {
 +            return HttpResponse.badRequest(Map.of("error", "invalid_client"));
-+        }
+         }
  
          if (redirectUri == null || !clientService.isRedirectUriRegistered(client, redirectUri.toString())) {
-             // E1: never redirect with an unregistered URI — 400, no redirect leakage.
-@@ -180,8 +209,39 @@ public class OidcProviderController {
+@@ -180,8 +209,39 @@
              final String returnTo = URLEncoder.encode(request.getUri().toString(), StandardCharsets.UTF_8);
              return HttpResponse.temporaryRedirect(URI.create("/oidc/login?from=" + returnTo));
          }
 -
 -        final AuthorizationCode code = authCodeService.create(
 +try {
-+            requestedScopes = tokenService.authorizeScopes(client.clientId(), subject.get(), requestedScopes).toStringList();
++            requestedScopes = tokenService.previewConsentScopes(client.clientId(), subject.get(), requestedScopes).toStringList();
 +        } catch (OidcException invalid) {
 +            return authorizeError(redirectUri, state, OAuth2Error.INVALID_SCOPE);
 +        }
@@ -111,7 +110,7 @@ index 30730af..c372c58 100644
 +consentScopes
 +.stream().map(scope -> "<label><input type=\"checkbox\" name=\"scope-" + escape(scope)
 +                        + "\" value=\"yes\" checked>" + escape(scope) + consentPolicy.description(scope)
-+                        + escape(tokenService.applicationScopeDescription(client.clientId(), scope)) + "</label>").collect(java.util.stream.Collectors.joining())
++                        + escape(tokenService.applicationScopeDescription(client.clientId(), subject.get(), scope)) + "</label>").collect(java.util.stream.Collectors.joining())
 +                    + "<button name=\"decision\" value=\"approve\">Approve selected permissions</button><button name=\"decision\" value=\"deny\">Deny</button></form></body></html>")
 +                    .contentType(MediaType.TEXT_HTML_TYPE).header("Cache-Control", "no-store")
 +                    .header("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'");
@@ -126,7 +125,7 @@ index 30730af..c372c58 100644
              client.clientId(),
              subject.get(),
              redirectUri.toString(),
-@@ -218,6 +278,7 @@ new AuthorizationCode(tokenService.bindProjectCode(
+@@ -218,6 +278,7 @@
              final OidcClientService.OidcClient client = clientService.require(clientId.getValue());
  
              final AuthorizationGrant grant = tokenRequest.getAuthorizationGrant();
@@ -134,10 +133,12 @@ index 30730af..c372c58 100644
              final String grantType = grant.getType().getValue();
              if (!clientService.isGrantTypeAllowed(client, grantType)) {
                  throw new OidcException(OAuth2Error.UNAUTHORIZED_CLIENT.appendDescription(": grant type not enabled for this client"));
-@@ -245,6 +306,39 @@ new AuthorizationCode(tokenService.bindProjectCode(
+@@ -243,6 +304,39 @@
+         } catch (OidcException e) {
+             return tokenErrorResponse(e.error());
          }
-     }
- 
++    }
++
 +    @Post("/consent")
 +    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
 +    public HttpResponse<?> consent(final HttpRequest<?> request, @Body final Map<String, String> form) {
@@ -154,12 +155,12 @@ index 30730af..c372c58 100644
 +            final var result = ownership.completeForSession(sessionService.authenticationVersion(session), form.get("interaction"), subject, session, approve, selected);
 +            final var authorization = AuthenticationRequest.parse(result.parameters());
 +            if (!approve) return authorizeError(authorization.getRedirectionURI(), authorization.getState(), OAuth2Error.ACCESS_DENIED);
-+            final AuthorizationCode code = new AuthorizationCode(
-+tokenService.bindProjectCode(
-+result.code(
-+),
-+                authorization.getClientID().getValue(), subject, selected
-+));
++            final AuthorizationCode code;
++            try {
++                code=new AuthorizationCode(tokenService.bindApplicationGroupCode(result.code(),authorization.getClientID().getValue(),subject,selected));
++            }catch(OidcException invalid) {
++                return authorizeError(authorization.getRedirectionURI(),authorization.getState(),OAuth2Error.INVALID_SCOPE);
++            }
 +            return HttpResponse.seeOther(new AuthorizationSuccessResponse(authorization.getRedirectionURI(), code, null,
 +                authorization.getState(), ResponseMode.QUERY).toURI());
 +        } catch (Exception exception) {
@@ -169,12 +170,10 @@ index 30730af..c372c58 100644
 +
 +    private static String escape(final String value) {
 +        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
-+    }
-+
+     }
+ 
      @Get("/userinfo")
-     @Produces(MediaType.APPLICATION_JSON)
-     public HttpResponse<?> userInfoGet(final HttpRequest<?> request) {
-@@ -301,9 +395,15 @@ new AuthorizationCode(tokenService.bindProjectCode(
+@@ -301,9 +395,15 @@
  
          final String value = introspectionRequest.getToken().getValue();
          final Optional<OidcTokenService.StoredToken> stored = tokenService.findByValue(value);
@@ -191,7 +190,7 @@ index 30730af..c372c58 100644
  
          final TokenIntrospectionSuccessResponse.Builder builder = new TokenIntrospectionSuccessResponse.Builder(active);
          if (active) {
-@@ -385,33 +485,28 @@ new AuthorizationCode(tokenService.bindProjectCode(
+@@ -385,33 +485,28 @@
              grant.getAuthorizationCode().getValue(),
              client.clientId(),
              redirectUri != null ? redirectUri.toString() : null,
@@ -210,9 +209,9 @@ index 30730af..c372c58 100644
              scopes = requested;
          }
          final Scope scope = new Scope(scopes.toArray(new String[0]));
- 
-+        if (ownership != null && !"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
 +
++        if (ownership != null && !"system".equals(ownership.state(client.clientId()).kind())) ownership.requireOwner(client.clientId(), stored.subject());
+ 
          final OidcUserService.OidcUser user = userService.bySubject(stored.subject())
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown subject")));
 -        final BearerAccessToken accessToken = tokenService.issueAccessToken(
@@ -233,7 +232,7 @@ index 30730af..c372c58 100644
          return tokenOk(response.toJSONObject());
      }
  
-@@ -438,27 +533,24 @@ new AuthorizationCode(tokenService.bindProjectCode(
+@@ -438,27 +533,24 @@
          final TokenRequest tokenRequest,
          final RefreshTokenGrant grant
      ) {
@@ -732,8 +731,8 @@ index 8fa17d0..acc63d6 100644
              throw new IllegalArgumentException("Configure the OIDC UI client ID, secret and public issuer before initialization");
          }
          final String callback = configuration.getIssuer().replaceAll("/+$", "") + "/oauth/callback/" + clientName;
-+final boolean applicationProjects = "true".equalsIgnoreCase(property("kestra.rbac.application-groups.enabled"));
-+        final String uiScopes = applicationProjects ? "[\"openid\",\"profile\",\"email\",\"kestra:application-group-scopes\"]" : "[\"openid\",\"profile\",\"email\"]";
++final boolean applicationGroups = "true".equalsIgnoreCase(property("kestra.rbac.application-groups.enabled"));
++        final String uiScopes = applicationGroups ? "[\"openid\",\"profile\",\"email\",\"kestra:application-group-scopes\"]" : "[\"openid\",\"profile\",\"email\"]";
 +
          try (var statement = connection.prepareStatement(
 -            "SELECT client_secret,redirect_uris @> jsonb_build_array(?::text),active FROM oidc_client WHERE client_id=?")) {
@@ -751,7 +750,7 @@ index 8fa17d0..acc63d6 100644
 +) || !result.getBoolean(2) || !result.getBoolean(3)) {
                          throw new IllegalArgumentException("Existing OIDC UI client conflicts with configuration");
                      }
-+if (applicationProjects && !result.getString(4).contains("kestra:application-group-scopes")) {
++if (applicationGroups && !result.getString(4).contains("kestra:application-group-scopes")) {
 +                        try (var update = connection.prepareStatement("UPDATE oidc_client SET scopes=?::jsonb WHERE client_id=?")) {
 +                            update.setString(1, uiScopes); update.setString(2, clientId); update.executeUpdate();
 +                        }

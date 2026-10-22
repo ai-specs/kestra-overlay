@@ -17,7 +17,7 @@ for suite, expected in {
     "AuthorizationEvaluationTest": 16,
     "AuthorizationEvaluationRestTest": 2,
     "AuthorizationEvaluationHttpTest": 2,
-    "AuthorizationEvaluationProjectTest": 2,
+    "AuthorizationEvaluationApplicationGroupTest": 2,
     "ExtensionResourceAdapterTest": 2,
     "TypedResourceDomainBoundaryTest": 3,
     "QueryDomainFailClosedTest": 4,

@@ -15,14 +15,14 @@ cleanup() {
     docker inspect -f 'MCP acceptance container: status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$APP" 2>/dev/null || true
     docker logs --tail 600 "$APP" 2>&1 | python3 -c 'import re,sys; [print("[redacted credential-bearing line]" if re.search(r"token|password|secret|cookie|authorization|Bearer|state=|code=|eyJ[A-Za-z0-9_-]+\.", line, re.I) else line, end="" if line.endswith("\n") else "\n") for line in sys.stdin]' || true
   fi
-  docker rm -f "$APP" "$PG" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
+  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$NET")
+  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$NET")
   rm -rf "$TEMP_DIR"
   return "$code"
 }
 trap cleanup EXIT
-docker network create "$NET" >/dev/null
-docker run -d --name "$PG" --network "$NET" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
+docker network create --label "owner=$NET" "$NET" >/dev/null
+docker run -d --label "owner=$NET" --name "$PG" --network "$NET" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
 cat > "$TEMP_DIR/config.yml" <<EOF
 datasources:
   postgres:
@@ -83,7 +83,7 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 [ "$PG_READY" = 1 ] || { echo 'FAIL PostgreSQL readiness timeout'; exit 1; }
-docker run -d --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+docker run -d --label "owner=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
   -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd!' \
   "$IMAGE" server standalone >/dev/null
 READY=0
@@ -139,7 +139,7 @@ COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions W
 [ "$COUNT" = 1 ] || { echo 'FAIL revoked session created execution'; exit 1; }
 docker rm -f "$APP" >/dev/null
 printf '\nkestra.mcp.rbac.enabled: true\n' >> "$TEMP_DIR/config.yml"
-docker run -d --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+docker run -d --label "owner=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
   "$IMAGE" server standalone >/dev/null
 READY=0
 for attempt in $(seq 1 60); do

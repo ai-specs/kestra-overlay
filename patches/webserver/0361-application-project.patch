@@ -1,12 +1,11 @@
 # 需求: REQ-0361 应用组 scope 选择器
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；应用组候选部分实现，本地 CI 通过，未发布
-# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0 与主控已接收契约；从审定源码树生成，不含插件本地grants
+# 状态: core；选择器定向测试通过，完整CI未通过，未发布
+# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0；宿主独立验证树；不承载应用资源策略
 # 触达上游文件: 最小公共契约、宿主激活点与独立测试
 # 移除条件: 上游提供等价公开应用组 scope 选择机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuance.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuance.java
 new file mode 100644
-index 0000000..3401379
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuance.java
 @@ -0,0 +1,66 @@
@@ -20,54 +19,54 @@ index 0000000..3401379
 +
 +    private ApplicationGroupScopeIssuance() {}
 +
-+    public record Result(Set<String> protocolScopes, Set<String> projectScopes) {
++    public record Result(Set<String> protocolScopes, Set<String> applicationGroupScopes) {
 +        public Result {
 +            protocolScopes = Set.copyOf(protocolScopes);
-+            projectScopes = Set.copyOf(projectScopes);
++            applicationGroupScopes = Set.copyOf(applicationGroupScopes);
 +        }
 +    }
 +
 +    public static Result resolve(
 +            Set<String> requested,
 +            Set<String> registeredProtocolScopes,
-+            Set<String> activeProjectScopes,
-+            Set<String> clientAllowedScopes,
-+            Set<String> subjectAssignments,
++            Set<String> definedScopeKeys,
++            Set<String> supportedScopeKeys,
++            Set<String> grantedScopeKeys,
 +            Set<String> consentedScopes,
-+            boolean approvedFirstPartyUi,
-+            boolean projectActive) {
++            boolean configuredLoginClient,
++            boolean applicationGroupActive) {
 +        requested = Set.copyOf(requested);
 +        registeredProtocolScopes = Set.copyOf(registeredProtocolScopes);
-+        activeProjectScopes = Set.copyOf(activeProjectScopes);
-+        clientAllowedScopes = Set.copyOf(clientAllowedScopes);
-+        subjectAssignments = Set.copyOf(subjectAssignments);
++        definedScopeKeys = Set.copyOf(definedScopeKeys);
++        supportedScopeKeys = Set.copyOf(supportedScopeKeys);
++        grantedScopeKeys = Set.copyOf(grantedScopeKeys);
 +        consentedScopes = Set.copyOf(consentedScopes);
 +        var protocols = new HashSet<String>();
-+        var projects = new HashSet<String>();
-+        var eligible = new HashSet<>(activeProjectScopes);
-+        eligible.retainAll(clientAllowedScopes);
-+        eligible.retainAll(subjectAssignments);
-+        if (!projectActive) eligible.clear();
++        var applicationGroups = new HashSet<String>();
++        var eligible = new HashSet<>(definedScopeKeys);
++        eligible.retainAll(supportedScopeKeys);
++        eligible.retainAll(grantedScopeKeys);
++        if (!applicationGroupActive) eligible.clear();
 +        for (String scope : requested) {
 +            if (UI_SELECTOR.equals(scope)) {
-+                if (!approvedFirstPartyUi || !registeredProtocolScopes.contains(UI_SELECTOR)) {
++                if (!configuredLoginClient || !registeredProtocolScopes.contains(UI_SELECTOR)) {
 +                    throw new InvalidScopeException();
 +                }
 +                protocols.add(scope);
-+                projects.addAll(eligible);
++                applicationGroups.addAll(eligible);
 +            } else if (registeredProtocolScopes.contains(scope)) {
 +                protocols.add(scope);
 +            } else if (eligible.contains(scope)) {
-+                projects.add(scope);
++                applicationGroups.add(scope);
 +            } else {
 +                throw new InvalidScopeException();
 +            }
 +        }
-+        projects.retainAll(consentedScopes);
++        applicationGroups.retainAll(consentedScopes);
 +        var retainedProtocols = new HashSet<>(consentedScopes);
 +        if (requested.contains(UI_SELECTOR)) retainedProtocols.add(UI_SELECTOR);
 +        protocols.retainAll(retainedProtocols);
-+        return new Result(protocols, projects);
++        return new Result(protocols, applicationGroups);
 +    }
 +
 +    public static final class InvalidScopeException extends RuntimeException {
@@ -78,7 +77,6 @@ index 0000000..3401379
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuanceTest.java
 new file mode 100644
-index 0000000..3cb0cea
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuanceTest.java
 @@ -0,0 +1,117 @@
@@ -100,7 +98,7 @@ index 0000000..3cb0cea
 +                    ApplicationGroupScopeIssuance.UI_SELECTOR);
 +
 +    @Test
-+    void shouldExpandOnlyApprovedUiIntersectionWithoutGrantingSelector() {
++    void shouldExpandOnlyConfiguredLoginClientIntersectionWithoutGrantingSelector() {
 +        var result =
 +                ApplicationGroupScopeIssuance.resolve(
 +                        Set.of("openid", ApplicationGroupScopeIssuance.UI_SELECTOR),
@@ -111,7 +109,7 @@ index 0000000..3cb0cea
 +                        Set.of("openid", "A"),
 +                        true,
 +                        true);
-+        assertThat(result.projectScopes()).containsExactly("A");
++        assertThat(result.applicationGroupScopes()).containsExactly("A");
 +        assertThat(result.protocolScopes())
 +                .containsExactlyInAnyOrder("openid", ApplicationGroupScopeIssuance.UI_SELECTOR);
 +    }
@@ -128,7 +126,7 @@ index 0000000..3cb0cea
 +                        Set.of("openid"),
 +                        true,
 +                        true);
-+        assertThat(result.projectScopes()).isEmpty();
++        assertThat(result.applicationGroupScopes()).isEmpty();
 +        assertThat(result.protocolScopes()).contains("openid");
 +    }
 +
@@ -184,7 +182,7 @@ index 0000000..3cb0cea
 +                        Set.of("A"),
 +                        false,
 +                        true);
-+        assertThat(result.projectScopes()).containsExactly("A");
++        assertThat(result.applicationGroupScopes()).containsExactly("A");
 +        assertThatThrownBy(
 +                        () ->
 +                                ApplicationGroupScopeIssuance.resolve(

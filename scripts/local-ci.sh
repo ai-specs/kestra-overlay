@@ -50,6 +50,7 @@ if [ "$APPLY_ONLY" = "1" ]; then
   exit 0
 fi
 
+python3 "$REPO/scripts/check-application-group-boundary.py" "$WORK"
 python3 -m unittest discover -s "$REPO/scripts/tests" -v
 
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
@@ -82,6 +83,7 @@ mkdir -p "$WORK/docker/app/storage"
 cp "$EXE" "$WORK/docker/app/kestra"
 chmod +x "$WORK/docker/app/kestra"
 python3 "$REPO/scripts/merge-classpath.py" "$WORK/docker/app/kestra" "$REPO/extensions.tsv"
+python3 "$REPO/scripts/check-application-group-boundary.py" "$WORK" "$WORK/docker/app/kestra"
 touch "$WORK/docker/app/storage/.gitkeep"
 bash "$REPO/scripts/build-extensions.sh" "$WORK"
 

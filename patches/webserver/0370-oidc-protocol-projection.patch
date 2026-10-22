@@ -1,0 +1,565 @@
+# 需求: REQ-0370 应用组只读协议投影与标准身份生命周期边界
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；只读契约候选，旧宿主目录移除和激活尚未完成，未发布
+# 来源: 新写；docs/r-oidc-server.md 职责纠正与最小事务接口裁决
+# 触达上游文件: 三个公开契约、协议值校验、标准协议查询实现与独立测试
+# 移除条件: 上游提供等价只读协议输入、事务内身份检查和生命周期guard
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV1.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV1.java
+@@ -0,0 +1,71 @@
++package io.kestra.webserver.oidc;
++
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Objects;
++import java.util.Optional;
++import java.util.Set;
++import static io.kestra.webserver.oidc.OidcProtocolValues.*;
++
++public interface ApplicationGroupProtocolProjectionV1 {
++    int CONTRACT_VERSION=1;
++
++    Result current(Connection connection,Request request)throws SQLException;
++
++    record Request(String issuer,String tenant,String clientId,String subject,String expectedApplicationGroupId) {
++        public Request {
++            OidcProtocolValues.issuer(issuer);opaque(tenant);opaque(clientId);opaque(subject);
++            if(expectedApplicationGroupId!=null)groupId(expectedApplicationGroupId);
++        }
++    }
++
++    record Scope(String key,String name,String description) {
++        public Scope {
++            if(key==null || !key.matches("[a-z][a-z0-9-]{0,63}") || name==null || name.isBlank() || description==null)
++                throw new IllegalArgumentException("Invalid scope metadata");
++        }
++    }
++
++    record Projection(String applicationGroupId,String tenant,String issuer,String clientId,String subject,
++        boolean active,boolean approved,long revision,long authorizationVersion,Set<String> audiences,
++        List<Scope> scopes,Set<String> supportedScopeKeys,Set<String> grantedScopeKeys) {
++        public Projection {
++            groupId(applicationGroupId);opaque(tenant);OidcProtocolValues.issuer(issuer);opaque(clientId);opaque(subject);
++            if(revision<=0 || authorizationVersion<=0)throw new IllegalArgumentException("Invalid group versions");
++            audiences=Set.copyOf(audiences);scopes=List.copyOf(scopes);
++            supportedScopeKeys=Set.copyOf(supportedScopeKeys);grantedScopeKeys=Set.copyOf(grantedScopeKeys);
++            audiences.forEach(OidcProtocolValues::opaque);
++            if(audiences.stream().anyMatch(value->value.contains("*")) || approved && audiences.isEmpty())
++                throw new IllegalArgumentException("Exact application audiences required");
++            var keys=new HashSet<String>();var names=new HashSet<String>();
++            for(var scope:scopes)if(!keys.add(scope.key()) || !names.add(scope.name()))
++                throw new IllegalArgumentException("Duplicate scope key or name");
++            if(!keys.containsAll(supportedScopeKeys) || !keys.containsAll(grantedScopeKeys))
++                throw new IllegalArgumentException("Undefined scope reference");
++        }
++
++        public Set<String> eligibleScopeKeys(Request request) {
++            if(!issuer.equals(request.issuer()) || !tenant.equals(request.tenant()) || !clientId.equals(request.clientId()) || !subject.equals(request.subject())
++                || request.expectedApplicationGroupId()!=null && !applicationGroupId.equals(request.expectedApplicationGroupId()))
++                throw new IllegalArgumentException("Protocol projection target mismatch");
++            if(!active || !approved)return Set.of();
++            var eligible=new HashSet<>(supportedScopeKeys);eligible.retainAll(grantedScopeKeys);
++            return Set.copyOf(eligible);
++        }
++    }
++
++    record Result(int contractVersion,boolean activated,Optional<Projection> projection) {
++        public Result {
++            Objects.requireNonNull(projection);
++            if(contractVersion!=CONTRACT_VERSION || !activated && projection.isPresent())
++                throw new IllegalArgumentException("Invalid protocol projection state");
++        }
++    }
++
++    private static void groupId(String value) {
++        if(value==null || !value.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))throw new IllegalArgumentException("Invalid group id");
++    }
++
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleGuardV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleGuardV1.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleGuardV1.java
+@@ -0,0 +1,35 @@
++package io.kestra.webserver.oidc;
++
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.Objects;
++
++public interface IdentityLifecycleGuardV1 {
++    int CONTRACT_VERSION=1;
++
++    void beforeChange(Connection connection,Change change)throws SQLException;
++
++    enum Kind { ACCOUNT_DEACTIVATE,ACCOUNT_ACTIVATE,PASSWORD_RESET,CLIENT_REVOKE,CLIENT_DELETE }
++    enum Failure { FORBIDDEN,LAST_ADMIN,UNAVAILABLE }
++
++    final class Rejected extends RuntimeException {
++        private final Failure failure;
++        public Rejected(Failure failure) { super("Identity lifecycle guard: "+Objects.requireNonNull(failure));this.failure=failure; }
++        public Failure failure() {return failure;}
++    }
++
++    record Change(Kind kind,String issuer,String subject,String clientId) {
++        public Change {
++            Objects.requireNonNull(kind);
++            OidcProtocolValues.issuer(issuer);
++            boolean clientChange=kind==Kind.CLIENT_REVOKE || kind==Kind.CLIENT_DELETE;
++            if(clientChange) {
++                if(subject!=null)throw new IllegalArgumentException("Client change requires a client target only");
++                OidcProtocolValues.opaque(clientId);
++            }else {
++                if(clientId!=null)throw new IllegalArgumentException("Account change requires an account target only");
++                OidcProtocolValues.opaque(subject);
++            }
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolState.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolState.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolState.java
+@@ -0,0 +1,127 @@
++package io.kestra.webserver.oidc;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcInstallationReceipt;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.context.env.Environment;
++import jakarta.inject.Singleton;
++import java.nio.file.Path;
++import java.sql.Connection;
++import java.sql.PreparedStatement;
++import java.sql.SQLException;
++import java.util.HashSet;
++import java.util.Objects;
++import java.util.Optional;
++
++@Singleton
++@Requires(property="kestra.oidc.enabled",value="true")
++public final class OidcProtocolState implements OidcProtocolStateV1 {
++    private final String issuer;
++    private final String configuredLoginClientId;
++    private final OidcInstallationReceipt receipt;
++    private final ObjectMapper mapper;
++
++    @jakarta.inject.Inject
++    public OidcProtocolState(OidcConfiguration configuration,Environment environment,ObjectMapper mapper) {
++        this(configuration.getIssuer(),loginClient(environment),new OidcInstallationReceipt(receiptPath(environment)),mapper);
++    }
++
++    public OidcProtocolState(String issuer,String configuredLoginClientId,OidcInstallationReceipt receipt,ObjectMapper mapper) {
++        OidcProtocolValues.issuer(issuer);
++        if(configuredLoginClientId!=null)OidcProtocolValues.opaque(configuredLoginClientId);
++        this.issuer=issuer;this.configuredLoginClientId=configuredLoginClientId;
++        this.receipt=Objects.requireNonNull(receipt);this.mapper=Objects.requireNonNull(mapper);
++    }
++
++    private static String loginClient(Environment environment) {
++        var name=environment.getProperty("kestra.oidc.bootstrap.client-name",String.class).orElse("kestra");
++        return environment.getProperty("micronaut.security.oauth2.clients."+name+".client-id",String.class).orElse(null);
++    }
++
++    private static Path receiptPath(Environment environment) {
++        var storage=environment.getProperty("kestra.storage.local.base-path",String.class).orElse("/app/storage");
++        return Path.of(environment.getProperty("kestra.oidc.bootstrap.receipt-path",String.class).orElse(storage+"/.oidc-installation"));
++    }
++
++    @Override public void lockSecurityState(Connection connection)throws SQLException {
++        transaction(connection);
++        if(!"PostgreSQL".equals(connection.getMetaData().getDatabaseProductName()))
++            throw new IllegalStateException("Protocol security transactions require PostgreSQL");
++        try(var statement=prepare(connection,"SELECT pg_advisory_xact_lock(1380073797)")){statement.execute();}
++    }
++
++    @Override public Optional<Account> account(Connection connection,String issuer,String subject)throws SQLException {
++        target(connection,issuer,subject);
++        try(var statement=prepare(connection,"SELECT user_state,authentication_version,EXISTS(SELECT 1 FROM oidc_user_auth_method method WHERE method.user_id=account.username AND method.type='PASSWORD' AND method.state='ACTIVE' AND method.credential IS NOT NULL AND method.credential<>'') FROM oidc_user account WHERE username=?")) {
++            statement.setString(1,subject);
++            try(var result=statement.executeQuery()) {
++                if(!result.next())return Optional.empty();
++                boolean active="ACTIVE".equals(result.getString(1));
++                return Optional.of(new Account(issuer,subject,active,active && result.getBoolean(3),result.getLong(2)));
++            }
++        }
++    }
++
++    @Override public Optional<Client> client(Connection connection,String issuer,String clientId)throws SQLException {
++        target(connection,issuer,clientId);
++        try(var statement=prepare(connection,"SELECT active,scopes,client_kind,client_secret IS NOT NULL AND client_secret<>'' FROM oidc_client WHERE client_id=?")) {
++            statement.setString(1,clientId);
++            try(var result=statement.executeQuery()) {
++                if(!result.next())return Optional.empty();
++                var scopes=scopes(result.getString(2));
++                String kind=result.getString(3);
++                return Optional.of(new Client(issuer,clientId,result.getBoolean(1) && java.util.Set.of("system","owned").contains(kind),scopes,
++                    clientId.equals(configuredLoginClientId) && "system".equals(kind) && result.getBoolean(4)));
++            }
++        }
++    }
++
++    @Override public Optional<PendingClient> pendingClient(Connection connection,String issuer,String clientId)throws SQLException {
++        target(connection,issuer,clientId);
++        try(var statement=prepare(connection,"SELECT scopes FROM oidc_client WHERE client_id=? AND active AND client_kind='pending' AND pending_expires_at>now()")) {
++            statement.setString(1,clientId);
++            try(var result=statement.executeQuery()) {
++                return result.next()?Optional.of(new PendingClient(issuer,clientId,scopes(result.getString(1)))):Optional.empty();
++            }
++        }
++    }
++
++    private java.util.Set<String> scopes(String json) {
++        var scopes=new HashSet<String>();
++        try(var parser=mapper.createParser(json)) {
++            com.fasterxml.jackson.databind.JsonNode document=mapper.readTree(parser);
++            if(document==null || !document.isArray() || parser.nextToken()!=null)throw new IllegalStateException("Invalid protocol client scopes");
++            for(var scope:document)if(!scope.isTextual() || !scopes.add(scope.textValue()))throw new IllegalStateException("Invalid protocol client scopes");
++            return OidcProtocolValues.scopes(scopes);
++        }catch(java.io.IOException failure){throw new IllegalStateException("Invalid protocol client scopes",failure);}
++    }
++
++    @Override public Installation verifyInstallation(Connection connection,String issuer,String suppliedInstallationId)throws SQLException {
++        target(connection,issuer,suppliedInstallationId);
++        if(configuredLoginClientId==null)throw new IllegalStateException("Configured login client unavailable");
++        var installationId=receipt.read().orElseThrow(()->new IllegalStateException("Installation receipt unavailable"));
++        if(!installationId.equals(suppliedInstallationId))throw new IllegalArgumentException("Installation identity mismatch");
++        try(var statement=prepare(connection,"SELECT installation_id FROM oidc_setup WHERE singleton=true FOR SHARE");var result=statement.executeQuery()) {
++            if(!result.next() || !installationId.equals(result.getString(1)))throw new IllegalStateException("Installation identity mismatch");
++        }
++        var client=client(connection,issuer,configuredLoginClientId).orElseThrow(()->new IllegalStateException("Configured login client unavailable"));
++        if(!client.active() || !client.configuredLoginClient() || !client.registeredScopes().contains("openid"))
++            throw new IllegalStateException("Configured login client unavailable");
++        return new Installation(issuer,installationId,configuredLoginClientId);
++    }
++
++    private void target(Connection connection,String requestedIssuer,String id)throws SQLException {
++        if(!issuer.equals(requestedIssuer))throw new IllegalArgumentException("Issuer mismatch");
++        OidcProtocolValues.opaque(id);transaction(connection);
++    }
++
++    private static void transaction(Connection connection)throws SQLException {
++        Objects.requireNonNull(connection);
++        if(connection.getAutoCommit() || connection.isReadOnly() || connection.getTransactionIsolation()!=Connection.TRANSACTION_READ_COMMITTED)
++            throw new IllegalStateException("An explicit READ_COMMITTED protocol transaction is required");
++    }
++
++    private static PreparedStatement prepare(Connection connection,String sql)throws SQLException {
++        var statement=connection.prepareStatement(sql);statement.setQueryTimeout(5);return statement;
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolStateV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolStateV1.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolStateV1.java
+@@ -0,0 +1,47 @@
++package io.kestra.webserver.oidc;
++
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.Optional;
++import java.util.Set;
++
++public interface OidcProtocolStateV1 {
++    int CONTRACT_VERSION=1;
++
++    void lockSecurityState(Connection connection)throws SQLException;
++
++    Optional<Account> account(Connection connection,String issuer,String subject)throws SQLException;
++
++    Optional<Client> client(Connection connection,String issuer,String clientId)throws SQLException;
++
++    Optional<PendingClient> pendingClient(Connection connection,String issuer,String clientId)throws SQLException;
++
++    Installation verifyInstallation(Connection connection,String issuer,String suppliedInstallationId)throws SQLException;
++
++    record Account(String issuer,String subject,boolean active,boolean canLogin,long authenticationVersion) {
++        public Account {
++            OidcProtocolValues.issuer(issuer);OidcProtocolValues.opaque(subject);
++            if(authenticationVersion<0 || canLogin && !active)throw new IllegalArgumentException("Invalid account state");
++        }
++    }
++
++    record Client(String issuer,String clientId,boolean active,Set<String> registeredScopes,boolean configuredLoginClient) {
++        public Client {
++            OidcProtocolValues.issuer(issuer);OidcProtocolValues.opaque(clientId);
++            registeredScopes=OidcProtocolValues.scopes(registeredScopes);
++        }
++    }
++
++    record PendingClient(String issuer,String clientId,Set<String> registeredScopes) {
++        public PendingClient {
++            OidcProtocolValues.issuer(issuer);OidcProtocolValues.opaque(clientId);
++            registeredScopes=OidcProtocolValues.scopes(registeredScopes);
++        }
++    }
++
++    record Installation(String issuer,String installationId,String configuredLoginClientId) {
++        public Installation {
++            OidcProtocolValues.issuer(issuer);OidcProtocolValues.opaque(configuredLoginClientId);OidcProtocolValues.opaque(installationId);
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolValues.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolValues.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcProtocolValues.java
+@@ -0,0 +1,27 @@
++package io.kestra.webserver.oidc;
++
++import java.net.URI;
++import java.util.Set;
++
++final class OidcProtocolValues {
++    private OidcProtocolValues() {}
++
++    static void issuer(String value) {
++        if(value==null)throw new IllegalArgumentException("Issuer required");
++        var uri=URI.create(value);
++        if(!Set.of("https","http").contains(uri.getScheme()) || uri.getHost()==null || uri.getUserInfo()!=null
++            || uri.getQuery()!=null || uri.getFragment()!=null)throw new IllegalArgumentException("Invalid issuer");
++    }
++
++    static void opaque(String value) {
++        if(value==null || value.isBlank() || !value.equals(value.trim()) || value.codePoints().anyMatch(Character::isISOControl))
++            throw new IllegalArgumentException("Invalid protocol identifier");
++    }
++
++    static Set<String> scopes(Set<String> values) {
++        var scopes=Set.copyOf(values);
++        for(var scope:scopes)if(scope.isBlank() || scope.chars().anyMatch(value->value<0x21 || value>0x7e || value=='"' || value=='\\'))
++            throw new IllegalArgumentException("Invalid registered scope");
++        return scopes;
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV1Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV1Test.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV1Test.java
+@@ -0,0 +1,77 @@
++package io.kestra.webserver.oidc;
++
++import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Optional;
++import java.util.Set;
++import org.junit.jupiter.api.Test;
++import static io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.*;
++import static org.junit.jupiter.api.Assertions.*;
++
++class ApplicationGroupProtocolProjectionV1Test {
++    private static final String ISSUER="https://issuer.example";
++    private static List<Scope> scopes() { return List.of(new Scope("read","Reader","Read access"),new Scope("write","Writer","Write access")); }
++    private static Projection projection(boolean active,boolean approved,Set<String> supported,Set<String> granted) {
++        return new Projection("group","main",ISSUER,"client","subject",active,approved,1,1,Set.of("resource"),scopes(),supported,granted);
++    }
++    private static Request request() { return new Request(ISSUER,"main","client","subject","group"); }
++
++    @Test void scopeEligibilityUsesExactSupportAndUserGrantIntersection() {
++        var projection=projection(true,true,Set.of("read"),Set.of("read","write"));
++        assertEquals(Set.of("read"),projection.eligibleScopeKeys(request()));
++        assertEquals(Set.of(),projection(false,true,Set.of("read"),Set.of("read")).eligibleScopeKeys(request()));
++        assertEquals(Set.of(),projection(true,false,Set.of("read"),Set.of("read")).eligibleScopeKeys(request()));
++        assertEquals(Set.of(),projection(true,true,Set.of("read"),Set.of()).eligibleScopeKeys(request()));
++        assertThrows(IllegalArgumentException.class,()->projection(true,true,Set.of("Reader"),Set.of("read")));
++    }
++
++    @Test void everyProtocolTargetMustMatchBeforeScopesCanBeUsed() {
++        var projection=projection(true,true,Set.of("read"),Set.of("read"));
++        for(var wrong:List.of(new Request(ISSUER+"/","main","client","subject","group"),
++            new Request(ISSUER,"other-tenant","client","subject","group"),
++            new Request(ISSUER,"main","other","subject","group"),new Request(ISSUER,"main","client","other","group"),
++            new Request(ISSUER,"main","client","subject","other")))
++            assertThrows(IllegalArgumentException.class,()->projection.eligibleScopeKeys(wrong));
++        assertEquals(Set.of("read"),projection.eligibleScopeKeys(new Request(ISSUER,"main","client","subject",null)));
++    }
++
++    @Test void duplicateScopeMetadataUndefinedReferencesAndInvalidAudienceFailClosed() {
++        assertThrows(IllegalArgumentException.class,()->new Projection("group","main",ISSUER,"client","subject",true,true,1,1,Set.of("resource"),
++            List.of(new Scope("read","Reader",""),new Scope("read","Other","")),Set.of("read"),Set.of()));
++        assertThrows(IllegalArgumentException.class,()->new Projection("group","main",ISSUER,"client","subject",true,true,1,1,Set.of("resource"),
++            List.of(new Scope("read","Reader",""),new Scope("other","Reader","")),Set.of("read"),Set.of()));
++        assertThrows(IllegalArgumentException.class,()->projection(true,true,Set.of("undefined"),Set.of()));
++        assertThrows(IllegalArgumentException.class,()->projection(true,true,Set.of(),Set.of("undefined")));
++        assertThrows(IllegalArgumentException.class,()->new Projection("group","main",ISSUER,"client","subject",true,true,1,1,Set.of("*"),scopes(),Set.of(),Set.of()));
++        assertThrows(IllegalArgumentException.class,()->new Projection("group","main",ISSUER,"client","subject",true,true,1,0,Set.of("resource"),scopes(),Set.of(),Set.of()));
++    }
++
++    @Test void projectionOwnsCollectionsAndUninitializedResultCannotContainGroupIdentity() {
++        var metadata=new ArrayList<>(scopes());var supported=new HashSet<>(Set.of("read"));
++        var projection=new Projection("group","main",ISSUER,"client","subject",true,true,1,1,Set.of("resource"),metadata,supported,Set.of("read"));
++        metadata.clear();supported.clear();assertEquals(2,projection.scopes().size());
++        assertEquals(Set.of("read"),projection.eligibleScopeKeys(request()));
++        assertThrows(UnsupportedOperationException.class,()->projection.scopes().clear());
++        assertThrows(IllegalArgumentException.class,()->new Result(1,false,Optional.of(projection)));
++        assertThrows(IllegalArgumentException.class,()->new Result(2,true,Optional.of(projection)));
++        assertEquals(Optional.empty(),new Result(1,false,Optional.empty()).projection());
++        assertEquals(Optional.empty(),new Result(1,true,Optional.empty()).projection());
++    }
++
++    @Test void protocolInspectionAndLifecycleContractsHaveNoCredentialsOrGroupMutations() {
++        assertEquals(List.of("current"),java.util.Arrays.stream(ApplicationGroupProtocolProjectionV1.class.getDeclaredMethods())
++            .filter(method->java.lang.reflect.Modifier.isPublic(method.getModifiers())).map(java.lang.reflect.Method::getName).toList());
++        var account=new OidcProtocolStateV1.Account(ISSUER,"subject",true,true,0);
++        assertTrue(account.canLogin());
++        assertThrows(IllegalArgumentException.class,()->new OidcProtocolStateV1.Account(ISSUER,"subject",false,true,0));
++        assertThrows(IllegalArgumentException.class,()->new OidcProtocolStateV1.Client(ISSUER,"client",true,Set.of("two scopes"),false));
++        assertThrows(IllegalArgumentException.class,()->new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.CLIENT_DELETE,ISSUER,"subject","client"));
++        assertThrows(IllegalArgumentException.class,()->new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.ACCOUNT_DEACTIVATE,ISSUER,null,"client"));
++        assertEquals("subject",new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.PASSWORD_RESET,ISSUER,"subject",null).subject());
++        assertEquals("client",new IdentityLifecycleGuardV1.Change(IdentityLifecycleGuardV1.Kind.CLIENT_REVOKE,ISSUER,null,"client").clientId());
++        for(var type:List.of(Projection.class,OidcProtocolStateV1.Account.class,OidcProtocolStateV1.Client.class))
++            assertTrue(java.util.Arrays.stream(type.getRecordComponents()).noneMatch(component->
++                Set.of("password","credential","secret","firstPartyUi","permissions","runtimeGrants").contains(component.getName())));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcProtocolStateTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProtocolStateTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProtocolStateTest.java
+@@ -0,0 +1,140 @@
++package io.kestra.webserver.oidc;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.webserver.oidc.services.OidcInstallationReceipt;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.sql.Connection;
++import java.sql.DatabaseMetaData;
++import java.sql.PreparedStatement;
++import java.sql.ResultSet;
++import java.util.Set;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class OidcProtocolStateTest {
++    private static final String ISSUER="https://issuer.example";
++    private static final String INSTALLATION="12345678-1234-1234-1234-123456789abc";
++
++    private static OidcProtocolState service(Path receipt) {
++        return new OidcProtocolState(ISSUER,"login-client",new OidcInstallationReceipt(receipt),new ObjectMapper());
++    }
++
++    private static Connection connection()throws Exception {
++        var connection=mock(Connection.class);when(connection.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_READ_COMMITTED);
++        return connection;
++    }
++
++    private static ResultSet row(Connection connection,String sql)throws Exception {
++        var statement=mock(PreparedStatement.class);var result=mock(ResultSet.class);
++        when(connection.prepareStatement(sql)).thenReturn(statement);when(statement.executeQuery()).thenReturn(result);
++        when(result.next()).thenReturn(true,false);return result;
++    }
++
++    private static ResultSet clientRow(Connection connection)throws Exception {
++        var result=row(connection,"SELECT active,scopes,client_kind,client_secret IS NOT NULL AND client_secret<>'' FROM oidc_client WHERE client_id=?");
++        when(result.getBoolean(1)).thenReturn(true);when(result.getString(2)).thenReturn("[\"openid\",\"profile\"]");
++        when(result.getString(3)).thenReturn("system");when(result.getBoolean(4)).thenReturn(true);return result;
++    }
++
++    @Test void securityLockRequiresManualReadCommittedTransactionAndPostgres()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();
++        when(connection.getAutoCommit()).thenReturn(true);
++        assertThrows(IllegalStateException.class,()->service.lockSecurityState(connection));
++        when(connection.getAutoCommit()).thenReturn(false);when(connection.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_REPEATABLE_READ);
++        assertThrows(IllegalStateException.class,()->service.lockSecurityState(connection));
++        when(connection.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_READ_COMMITTED);when(connection.isReadOnly()).thenReturn(true);
++        assertThrows(IllegalStateException.class,()->service.lockSecurityState(connection));
++        when(connection.isReadOnly()).thenReturn(false);var metadata=mock(DatabaseMetaData.class);when(connection.getMetaData()).thenReturn(metadata);
++        when(metadata.getDatabaseProductName()).thenReturn("H2");assertThrows(IllegalStateException.class,()->service.lockSecurityState(connection));
++        when(metadata.getDatabaseProductName()).thenReturn("PostgreSQL");var lock=mock(PreparedStatement.class);
++        when(connection.prepareStatement("SELECT pg_advisory_xact_lock(1380073797)")).thenReturn(lock);
++        service.lockSecurityState(connection);verify(lock).setQueryTimeout(5);verify(lock).execute();verify(lock).close();
++        verify(connection,never()).commit();verify(connection,never()).rollback();verify(connection,never()).close();
++    }
++
++    @Test void wrongIssuerCannotReadStandardIdentityState()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();
++        assertThrows(IllegalArgumentException.class,()->service.account(connection,ISSUER+"/","subject"));
++        assertThrows(IllegalArgumentException.class,()->service.client(connection,"https://other.example","client"));
++        assertThrows(IllegalArgumentException.class,()->service.verifyInstallation(connection,"https://other.example",INSTALLATION));
++        verify(connection,never()).prepareStatement(anyString());
++    }
++
++    @Test void accountInspectionReturnsOnlyLifecycleAndLoginEligibility()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();
++        var result=row(connection,"SELECT user_state,authentication_version,EXISTS(SELECT 1 FROM oidc_user_auth_method method WHERE method.user_id=account.username AND method.type='PASSWORD' AND method.state='ACTIVE' AND method.credential IS NOT NULL AND method.credential<>'') FROM oidc_user account WHERE username=?");
++        when(result.getString(1)).thenReturn("ACTIVE");when(result.getLong(2)).thenReturn(7L);when(result.getBoolean(3)).thenReturn(true);
++        var account=service.account(connection,ISSUER,"subject").orElseThrow();assertTrue(account.canLogin());assertEquals(7,account.authenticationVersion());
++        when(result.next()).thenReturn(true,false);when(result.getString(1)).thenReturn("INACTIVE");
++        assertFalse(service.account(connection,ISSUER,"subject").orElseThrow().canLogin());
++        when(result.next()).thenReturn(false);assertTrue(service.account(connection,ISSUER,"missing").isEmpty());
++        verify(connection,never()).commit();verify(connection,never()).close();
++    }
++
++    @Test void configuredLoginClientRequiresExactRegistrationAndHasNoGroupMemberFlag()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();var result=clientRow(connection);
++        var login=service.client(connection,ISSUER,"login-client").orElseThrow();assertTrue(login.configuredLoginClient());
++        assertEquals(Set.of("openid","profile"),login.registeredScopes());
++        when(result.next()).thenReturn(true,false);assertFalse(service.client(connection,ISSUER,"ordinary").orElseThrow().configuredLoginClient());
++        when(result.next()).thenReturn(true,false);when(result.getBoolean(4)).thenReturn(false);
++        assertFalse(service.client(connection,ISSUER,"login-client").orElseThrow().configuredLoginClient());
++        for(String kind:Set.of("legacy","pending","unknown")) {
++            when(result.next()).thenReturn(true,false);when(result.getString(3)).thenReturn(kind);
++            assertFalse(service.client(connection,ISSUER,"login-client").orElseThrow().active());
++        }
++        when(result.next()).thenReturn(true,false);when(result.getString(3)).thenReturn("system");when(result.getBoolean(4)).thenReturn(true);
++        var withoutUi=new OidcProtocolState(ISSUER,null,new OidcInstallationReceipt(Path.of("unused")),new ObjectMapper());
++        var ordinary=withoutUi.client(connection,ISSUER,"login-client").orElseThrow();
++        assertTrue(ordinary.active());assertFalse(ordinary.configuredLoginClient());
++        assertThrows(IllegalStateException.class,()->withoutUi.verifyInstallation(connection,ISSUER,INSTALLATION));
++    }
++
++    @Test void malformedStoredClientScopesFailClosed()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();var result=clientRow(connection);
++        for(var malformed:Set.of("[\"openid\",\"openid\"]","[\"openid\"] []","[1]","null","{}","[\"two scopes\"]")) {
++            when(result.next()).thenReturn(true,false);when(result.getString(2)).thenReturn(malformed);
++            assertThrows(RuntimeException.class,()->service.client(connection,ISSUER,"login-client"));
++        }
++    }
++
++    @Test void installationRequiresLocalReceiptDatabaseIdentityAndActiveConfiguredLoginClient()throws Exception {
++        var area=Files.createTempDirectory("oidc-protocol-state-");var path=area.resolve("receipt");
++        try {
++            new OidcInstallationReceipt(path).create(INSTALLATION);
++            var service=service(path);var connection=connection();
++            var installation=row(connection,"SELECT installation_id FROM oidc_setup WHERE singleton=true FOR SHARE");
++            when(installation.getString(1)).thenReturn(INSTALLATION);var client=clientRow(connection);
++            assertEquals(INSTALLATION,service.verifyInstallation(connection,ISSUER,INSTALLATION).installationId());
++            assertThrows(IllegalArgumentException.class,()->service.verifyInstallation(connection,ISSUER,"other-installation"));
++            when(installation.next()).thenReturn(true,false);when(client.next()).thenReturn(true,false);when(client.getBoolean(1)).thenReturn(false);
++            assertThrows(IllegalStateException.class,()->service.verifyInstallation(connection,ISSUER,INSTALLATION));
++            when(installation.next()).thenReturn(true,false);when(installation.getString(1)).thenReturn("other-installation");
++            assertThrows(IllegalStateException.class,()->service.verifyInstallation(connection,ISSUER,INSTALLATION));
++            Files.delete(path);assertThrows(IllegalStateException.class,()->service.verifyInstallation(connection,ISSUER,INSTALLATION));
++            verify(connection,never()).commit();verify(connection,never()).rollback();verify(connection,never()).close();
++        }finally {
++            Files.deleteIfExists(path);Files.deleteIfExists(area);
++        }
++    }
++
++    @Test void pendingClientQueryRequiresAnActiveUnexpiredPendingRegistration()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();
++        String sql="SELECT scopes FROM oidc_client WHERE client_id=? AND active AND client_kind='pending' AND pending_expires_at>now()";
++        var result=row(connection,sql);when(result.getString(1)).thenReturn("[\"openid\",\"profile\"]");
++        var pending=service.pendingClient(connection,ISSUER,"client").orElseThrow();
++        assertEquals("client",pending.clientId());assertEquals(ISSUER,pending.issuer());assertEquals(Set.of("openid","profile"),pending.registeredScopes());
++        when(result.next()).thenReturn(false);assertTrue(service.pendingClient(connection,ISSUER,"expired").isEmpty());
++        verify(connection,never()).commit();verify(connection,never()).close();
++    }
++
++    @Test void pendingClientInspectionRejectsWrongIssuerAndMalformedProtocolScopes()throws Exception {
++        var service=service(Path.of("unused"));var connection=connection();
++        assertThrows(IllegalArgumentException.class,()->service.pendingClient(connection,ISSUER+"/","client"));
++        verify(connection,never()).prepareStatement(anyString());
++        var result=row(connection,"SELECT scopes FROM oidc_client WHERE client_id=? AND active AND client_kind='pending' AND pending_expires_at>now()");
++        when(result.getString(1)).thenReturn("[\"openid\",\"openid\"]");
++        assertThrows(IllegalStateException.class,()->service.pendingClient(connection,ISSUER,"client"));
++    }
++}
