@@ -38,7 +38,6 @@ index 0000000000000000000000000000000000000000..67f8e0867ceb30fb4805623b68b0b7fe
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef9af326245b7e6805d58275ab5a402101966fb8
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
 @@ -0,0 +1,59 @@
@@ -86,7 +85,7 @@ index 0000000000000000000000000000000000000000..ef9af326245b7e6805d58275ab5a4021
 +{
 +                if (applicationGroupIdentities != null && applicationGroupIdentities.isPresent()) {
 +                    if (!applicationGroupIdentities.isUnique()) return false;
-+                    applicationGroupIdentities.get().validate(authentication);
++                    applicationGroupIdentities.get().validateSession(authentication);
 +                }
 +                return
 + authentication.getName().equals(attributes.get("client_id")) && lifecycle.machineSubject(authentication.getName())

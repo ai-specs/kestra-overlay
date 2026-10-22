@@ -127,7 +127,7 @@ EXTENSION_MOUNT=()
 if [ -n "${BB_UI_EXTENSION_JAR:-}" ]; then
   EXTENSION_MOUNT=(-v "$BB_UI_EXTENSION_JAR:/app/libs/kestra-rbac-authorizer.jar:ro")
 fi
-docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" \
+docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} \
   -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
@@ -282,9 +282,13 @@ assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{htt
 HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
 docker rm -f "$SERVER" >/dev/null
-docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" "${EXTENSION_MOUNT[@]}" -v "$STORAGE:/app/storage" \
+docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_OIDC_BOOTSTRAP_USERNAME=attacker -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=InjectedPass123!' \
-  -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
+  -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")
+kestra.rbac.application-groups.enabled: true
+kestra.rbac.enabled: true
+kestra.rbac.typed.enabled: true
+kestra.rbac.evaluation.enabled: true" "$IMAGE" server standalone >/dev/null
 for attempt in $(seq 1 60); do
   status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/.well-known/openid-configuration" || true)
   [ "$status" = 200 ] && break
@@ -293,6 +297,9 @@ done
 assert_status "recreated container ignores injected bootstrap account" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 ATTACKER_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*) FROM oidc_user WHERE username='attacker'")
 assert_status "bootstrap cannot add another initial account" 0 "$ATTACKER_COUNT"
+node "$(dirname "$0")/protocol-session-probe.mjs" "$BASE"
+UNBOUND_CODES=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*) FROM oidc_authorization_code WHERE client_id<>'kestra-ui' AND created_at>now()-interval '1 minute' AND NOT used")
+assert_status "missing projection creates no ordinary authorization code" 0 "$UNBOUND_CODES"
 INSTALLATION_ID=$(docker exec "$PG" psql -U kestra -d kestra -Atc 'SELECT installation_id FROM oidc_setup')
 docker exec "$PG" psql -U kestra -d kestra -q -v ON_ERROR_STOP=1 -c 'DELETE FROM oidc_setup'
 assert_status "deleted database marker fails closed" 500 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"

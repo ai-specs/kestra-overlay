@@ -17,7 +17,7 @@ REQUIRED = {
     "io.kestra.webserver.oidc.OidcAccountLifecycleGuardPostgresTest": 4,
     "io.kestra.webserver.oidc.OidcClientLifecycleGuardTest": 7,
     "io.kestra.webserver.oidc.OidcClientLifecycleGuardPostgresTest": 3,
-    "io.kestra.webserver.oidc.OidcTrustedIdentityTest": 10,
+    "io.kestra.webserver.oidc.OidcTrustedIdentityTest": 13,
     "io.kestra.webserver.oidc.OidcProtocolProjectionAuthorizationTest": 12,
     "io.kestra.webserver.oidc.OidcPendingClientConsentTest": 5,
     "io.kestra.webserver.oidc.OidcApplicationGroupTokenIssuanceTest": 4,

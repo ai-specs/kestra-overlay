@@ -4,6 +4,15 @@
 
 ### 2026-10-22 当前状态
 
+组合验收发现的新机制缺口：`OidcIdentityLifecycleFilter` 对没有组 claim 的标准 UI 会话
+也调用严格组身份读取，缺插件时使生产回调后的文档返回 401。候选修复将会话有效性
+与组授权身份分开：无组 claim 时只允许精确配置登录 client、当前账号认证版本，以及
+缺失或未激活的投影；重复 provider、激活后未重新登录及已有组 claim 仍严格拒绝。
+不会制造组身份或给予业务权限。新增三项定向检查全部执行，可信身份 suite 由 10 项
+增至 13 项；完整本地 CI 再次通过。镜像专项还检查完整功能开关开启且无组 provider 时
+标准登录与匿名静态资源可用、业务 API 拒绝、普通 client 授权返回 invalid_scope 且无 code。
+这属于宿主认证机制，插件业务模型不进入宿主。新正式 CI 与镜像发布仍须取得。
+
 权限恢复后，在新的 `.work/application-group-unrestricted-ci` 验证树完整运行
 `scripts/local-ci.sh` 通过。40 个补丁顺序重放，Micronaut 编译与索引生成、定向测试、
 UI 构建、UI 单元测试 64 项及 executable 打包均通过；实际 executable 通过职责边界门。
