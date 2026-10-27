@@ -1,9 +1,25 @@
 # kestra-overlay
 
+0384当前公开契约输入为2f2984a：contract.json的overlayCompatibility与内置SDK README
+一致，仅支持KsDrawer/KsDialog/KsSelect/KsFilter经公开helper和owned renderer使用。
+原始未适配弹层、popover、未列出的复杂下拉和KsPagination仍不支持。新13文件输入
+包含公开说明与一致性测试；必须核对对应提交构建、完整矩阵和镜像发布，不复用旧输入。
+
+0384提供公开原生组件的最小ShadowRoot portal、焦点、ESC及导航适配，不包含业务模型
+或业务UI。消费方必须使用对应正式镜像中的SDK与其精确依赖，并经helper使用已声明
+组件；不得将未适配的全局弹层或其他版本推断为支持。规范fullPath/query与可选异步
+beforeNavigate只有明确true允许离开，异常/abort失败关闭；安全登录/拒绝路由不受草稿
+阻止。具体支持边界见docs/r-ee-rbac.md。实际发布以对应提交CI及镜像推广成功为条件。
+
+2026-10-28历史本地验证：11文件补丁69e11808、build02d12978的完整local-ci、普通
+镜像门及Ego/Playwright同949均通过。公开元数据与SDK说明的后续修订产生新输入时，
+必须重新验证，不继承该旧hash结果；本地通过不能代替对应提交CI和正式镜像发布。
+
 > 当前应用组协议候选与发布边界见本仓 `docs/r-oidc-server.md`。应用组业务归消费插件；未经正式发布的候选不能作为独立插件的交付编译输入。
 
-2026-10-27 协议发布候选只包含0380–0383（44补丁），不包含后续UI SDK兼容扩容。
-该44版本完整本地CI与独立镜像门已通过；正式CI与镜像推广仍须对应提交实际成功。
+协议0380–0383已在64c4498通过正式CI40523539018并推广镜像
+`sha256:bebf7a7c06a6205c151ffd35882c54965918357f4e1c71bc0cd2879c3177a22e`。
+该正式44补丁版本不包含后续UI SDK兼容扩容；后续SDK须选择另行通过发布门的对应镜像。
 本地通过或源码中的公开类型不是插件正式编译输入，不代表插件或部署组合已交付。
 
 这是面向第三方独立扩展项目的 Kestra 增强镜像。
@@ -532,8 +548,9 @@ tenant时按宿主SYSTEM管理门处理，插件仍须检查自身管理权限�
 mount(container,context)，返回update／unmount。context提供tenant、根内路径、语言、
 解析后主题、styles、assetBase、AbortSignal及导航／同源request函数，不提供Vue、router、
 store、i18n实例或token。扩展自有ShadowRoot，只在根内装载styles，不向document注入
-全局CSS；卸载与abort释放监听和副作用。初期支持公开基础按钮、输入和表格，复杂弹出
-层及KsPagination不在兼容清单内，详情使用路由、确认使用页内区域。
+全局CSS；卸载与abort释放监听和副作用。基础按钮、输入和表格继续支持。0384的
+overlayCompatibility仅支持KsDrawer/KsDialog/KsSelect/KsFilter经公开helper及owned
+renderer使用；原始未适配弹层、popover、未列出的复杂下拉及KsPagination仍不支持。
 
 已发布executable中的 `META-INF/kestra/ui-sdk/v1/` 是独立前端消费入口，含协议类型、
 组件包精确版本／integrity、13种语言ID／回退与翻译完整性检查工具。插件从兼容正式
@@ -591,9 +608,9 @@ Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
 
 ## 更多
 
-### 账号与 client 凭据 V2 候选（REQ-0380–0382，未发布）
+### 账号与 client 凭据（REQ-0380–0382）
 
-本节冻结候选使用入口，不能以源码或开发树替代正式镜像。只有选择包含本契约且通过
+本节公开契约已在64c4498发布，不能以源码或开发树替代正式镜像。只有选择包含本契约且通过
 全部发布门的镜像，才可用于独立插件正式编译和部署。当前 V1 目录说明继续描述旧公开
 输入；组功能开启时新宿主的生产账号变更要求唯一新参与者，旧 guard-only 插件不能
 直接作为兼容组合。账号/组业务权限仍由独立扩展实现，宿主不增加业务管理 HTTP API。
@@ -695,20 +712,19 @@ R25 维护流程为主控裁决，维护者可以复核；未经完整维护回�
 - [OIDC 服务与首次安装契约](docs/r-oidc-server.md)
 - [R-EE-RBAC 扩展边界](docs/r-ee-rbac.md)
 
-## 应用组协议契约（候选未发布）
+## 应用组协议契约
 
 应用组、scope、应用支持登记、用户授予、权限元数据、业务初始化和管理 UI/API 归独立插件。
 本仓不提供可写组目录、组业务表、组初始化 CLI 或最后管理员业务判断。旧宿主目录及其
-CLI 已从候选源码移除，不提供兼容转发。当前候选已有定向 PostgreSQL/HTTP 检查，尚未
-通过本轮完整本地门、正式 CI 和镜像发布；不得用相邻源码、候选 executable 或旧正式
-镜像编译并交付匹配插件。
+CLI 已从正式64c4498移除，不提供兼容转发。该版本的协议契约已通过正式CI与镜像
+推广；不得用相邻源码、候选executable或不含所需契约的旧镜像编译并交付匹配插件。
 
 公开 Java 契约位于 `io.kestra.webserver.oidc`：
 
 | 契约 | 职责 |
 | --- | --- |
 | `ApplicationGroupProtocolProjectionV1` | 扩展在宿主提供的同一事务连接中，为精确 issuer、tenant、client、subject 和可选 token 组 ID 返回只读协议投影 |
-| `ApplicationGroupProtocolProjectionV2` | REQ-0383 未发布候选：同连接返回可为空的精确资源 `resourceAudiences`，不自动补入登录 clientId；V1 语义不变 |
+| `ApplicationGroupProtocolProjectionV2` | REQ-0383：同连接返回可为空的精确资源 `resourceAudiences`，不自动补入登录 clientId；V1 语义不变 |
 | `OidcProtocolStateV1` | 标准账号/client 状态、有效 pending 登记查询、可登录性、安装前置核对和统一安全锁；不返回凭据或组业务数据 |
 | `IdentityLifecycleGuardV1` | 宿主提交账号状态、密码和 client 撤销/删除前调用扩展；扩展判断业务约束，拒绝或异常回滚 |
 | `TrustedIdentityV1` | 读取当前已经验证的身份；构造 DTO 不代表认证成功 |

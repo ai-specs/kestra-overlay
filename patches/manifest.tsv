@@ -3,11 +3,12 @@
 # 0200/0211：生产审计修复，client secret哈希与pending quota错误语义；交付以对应提交CI为准。
 # 外部 RBAC jar/REST适配/具体资源隔离未交付；本地通过不等于真CI交付。
 # 列：id | patch文件 | status(core|transition|reserved) | 消费扩展仓 | 摘要 | 触达上游文件数 | 来源 | 移除条件
-0380	0380-oidc-account-lifecycle-v2.patch	core	ai-specs/kestra-plugin-rbac	同连接可信身份与账号删除事务参与者，候选未发布	13	2026-10-27主控授权；R24维护者可复核设计	上游提供等价标准身份生命周期和借用连接公开机制
-0381	0381-oidc-initial-password-change.patch	core	ai-specs/kestra-plugin-rbac	宿主生成临时密码与生产首次受限改密，候选未发布	14	2026-10-27主控授权F3	上游提供等价临时凭据及首次改密完整流程
-0382	0382-oidc-client-credentials.patch	core	ai-specs/kestra-plugin-rbac	公开client凭据状态与轮换、受限confidential登记与维护CLI，候选未发布	10	2026-10-27主控授权；R20头3尾4；R25维护者可复核设计	上游提供等价凭据修订、脱敏提示及维护轮换
-0383	0383-oidc-resource-audience-v2.patch	core	ai-specs/kestra-plugin-rbac	V2资源audience允许空且不补clientId；精确登录与资源受众分离；旧凭据不扩权	7	2026-10-27主控接收R19；协议钩子归0150/0160/0190；候选定向PG/HTTP，完整门及发布未通过	上游提供等价版本化资源投影及签发与在线受众分离机制
+0380	0380-oidc-account-lifecycle-v2.patch	core	ai-specs/kestra-plugin-rbac	同连接可信身份与账号删除事务参与者	13	64c4498正式CI40523539018及推广通过；R24主控裁决，维护者可复核设计	上游提供等价标准身份生命周期和借用连接公开机制
+0381	0381-oidc-initial-password-change.patch	core	ai-specs/kestra-plugin-rbac	宿主生成临时密码与生产首次受限改密	14	64c4498正式CI40523539018及两种首装镜像门通过	上游提供等价临时凭据及首次改密完整流程
+0382	0382-oidc-client-credentials.patch	core	ai-specs/kestra-plugin-rbac	公开client凭据状态与轮换、受限confidential登记与维护CLI	10	64c4498正式CI40523539018及推广通过；R20头3尾4；R25主控裁决，维护者可复核设计	上游提供等价凭据修订、脱敏提示及维护轮换
+0383	0383-oidc-resource-audience-v2.patch	core	ai-specs/kestra-plugin-rbac	V2资源audience允许空且不补clientId；精确登录与资源受众分离；旧凭据不扩权	7	64c4498正式CI40523539018及推广通过；协议钩子归0150/0160/0190	上游提供等价版本化资源投影及签发与在线受众分离机制
 # reserved 行：patch文件列必须为 `-`，对应 docs/oss-ee-gap.md §4 登记簿。
+0384	0384-ui-sdk-shadow-navigation.patch	core	ai-specs/kestra-plugin-rbac	独立扩展四原生组件经公开helper的ShadowRoot隔离与规范query及异步导航守卫；不含业务UI	13	2f2984a公开元数据/README及一致性测试；对应提交完整CI和推广为正式消费门；新输入独立复验	上游提供等价ShadowRoot弹层与原生popper隔离及可拒绝异步导航契约
 # 归因基线：2026-10-07 审计（fork merge-base f6dbbb49 定制 diff 为唯一事实源；见 AGENTS.md §5.2）。
 # 移除条件/触发条件一律形态绑定（禁止只写客户阶段号——AGENTS.md §3-6）；零 overlay 动作可补足的
 # 缝隙不入 reserved（登记收回规则见 docs/oss-ee-gap.md §4）。

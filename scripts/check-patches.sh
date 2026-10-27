@@ -109,12 +109,12 @@ while IFS= read -r p; do
     /^diff --git a\// { flushgroup(); path=$0; sub(/^diff --git a\/[^ ]+ b\//, "", path)
                         cur=path; files[cur]=1; isnew=0; curplus=0; curminus=0 }
     /^new file mode/ { isnew=1; buf=buf "N\n" }
-    /^@@ / { split($2, o, ","); os=o[1]; sub(/^-/, "", os); old=os+0; inhunk=1; lastplus=0; buf=buf "H\t" old "\t" (o[2]=="" ? 1 : o[2]) "\n" }
+    /^@@ / { split($2, o, ","); os=o[1]; sub(/^-/, "", os); old=os+0; oldend=old+(o[2]=="" ? 1 : o[2]); inhunk=1; lastplus=0; buf=buf "H\t" old "\t" (o[2]=="" ? 1 : o[2]) "\n" }
     inhunk && /^diff --git / { inhunk=0 }
     inhunk && /^-/ { buf = buf "D\t" old "\n"; old++; curminus++; lastplus=0 }
     inhunk && /^\+/ { buf = buf "I\t" old "\n"
                       curplus++; lastplus=1 }
-    inhunk && /^ / { buf=buf "K\t" old "\n"; old++; lastplus=0 }
+    inhunk && (/^ / || /^$/ && old<oldend) { buf=buf "K\t" old "\n"; old++; lastplus=0 }
     END { flushgroup(); cnt=0; for (f in files) cnt++; print patch "\t" cnt > "'"$TMP_FCNT"'" }
   ' "$p" >> "$TMP_HUNKS"
 done < "$TMP_PATCHES"

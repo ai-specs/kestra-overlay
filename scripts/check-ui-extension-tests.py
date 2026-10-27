@@ -1,4 +1,4 @@
-"""Require the protocol-release host UI lifecycle matrix in the Vitest JSON report."""
+"""Require the complete host UI lifecycle and SDK matrix in the Vitest JSON report."""
 import json
 from pathlib import Path
 import sys
@@ -9,8 +9,10 @@ REQUIRED = {
     "src/extensions/entry.spec.ts": 36,
     "src/extensions/fallback-layout.spec.ts": 1,
     "src/extensions/main-entry.spec.ts": 7,
+    "src/extensions/navigation.spec.ts": 6,
     "src/extensions/runtime.spec.ts": 8,
-    "src/extensions/sdk.spec.ts": 3,
+    "src/extensions/sdk.spec.ts": 7,
+    "src/extensions/shadow-overlays.spec.ts": 13,
     "src/extensions/system-theme.spec.ts": 4,
     "src/utils/authentication.spec.ts": 2,
 }

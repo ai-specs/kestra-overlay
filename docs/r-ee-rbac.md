@@ -512,6 +512,145 @@ Execution ACL；MCP listTools 分类为完整 Flow 查询。MCP server READ/LIST
 
 ## 管理页面公开扩展契约（2026-10-15）
 
+### 2026-10-27 抽屉/对话框/select 兼容补足（最小方向已接收，候选未发布）
+
+消费项目 `kestra-plugin-rbac` 的新管理页面需要四个通用抽屉、居中确认对话框和 select。
+主控已核对正式 `c2390ff` executable 的 `META-INF/kestra/ui-sdk/v1/contract.json`，其中
+`unsupportedComponents` 明确列出 dialog/popover/complex dropdown/KsPagination；README
+只承诺基础按钮/输入/表格、路由详情及页内确认。当前正式输入不能支持将候选新组件称为
+已兼容；这是公开契约与目标行为之间的缺口，不以 npm 导出存在替代真实失败/通过证据。
+生产装载/交互证据仍须补齐。本次主控接收最小通用扩容方向，不等于兼容清单已经通过；
+候选可以调查插件报告，但不得读取或复制插件业务源码作为构建输入。
+
+已独立核对本仓缓存公开 npm `@kestra-io/design-system@0.5.0`，lockfile integrity 与已发布
+SDK 声明相同。真实 exports 包含 `components/Feedback/KsDrawer`、`KsDialog` 和
+`components/Form/KsSelect/KsSelect`。其 dist wrappers 使用 Element Plus，并把 `$attrs`
+转发给 ElDrawer/ElDialog/ElSelect；Drawer 默认 appendToBody=true，但显式 attrs 在默认
+值之后合并。公开依赖缓存的 Element Plus 为 2.14.7，drawer/dialog 的 Teleport 消费
+appendTo，select 同样传递 append-to。以上仅为指定 npm 版本的源码机制，不证明
+ShadowRoot 焦点、滚动锁、遮罩、主题、语言或宿主卸载已经通过，也不承诺其宽泛依赖范围。
+
+最小候选先验证扩展自己拥有的 ShadowRoot 内 HTMLElement portal：显式 appendTo、
+appendToBody=false，不向 document.body 注入弹层/全局样式；select 弹层也使用同一
+目标。只消费已发布 context 的主题、语言、styles、AbortSignal 和 mount/update/unmount，
+不传 Vue/router/store/i18n 实例，不改 vendor 源码。若公开属性已足够，应仅扩充经验证
+的 SDK 精确组件/依赖版本、兼容说明与独立探针；只有实际探针证明宿主根生命周期或
+焦点协调缺机制时，才另外提出最小版本化激活点，不提前增加全局 portal 服务。
+
+必须冻结的兼容边界：portal 属于当前扩展且随卸载销毁；Esc/遮罩/关闭按钮的关闭顺序，
+最上层焦点圈定和关闭后深层触发元素焦点恢复；嵌套对话框/select、四抽屉互斥、保存中
+禁闭、丢弃确认取消不丢草稿、最大化/还原；宿主主题和全部 SDK 语言下的真实计算样式/
+按钮文案，390/768/1280 宽度；路由切换和 abort 后无残留节点、监听、滚动锁或焦点陷阱。
+未知目标、资源装载失败、版本不符或卸载异常必须报失败，不能把空白/无法操作算支持。
+
+早期单文件组件调查候选只作为开发期历史证据保留，不是当前发布输入或默认消费入口。
+当前独立探针入口为 `bash scripts/rbac-ui-probe/sdk-run.sh`，使用下节的公共SDK、精确
+公开npm依赖与通用测试数据，不含账号/组/scope/策略业务。共享矩阵为
+`scripts/rbac-ui-probe/sdk-browser-matrix.mjs`，包含 `sdk-theme.mjs` 的实际主题终态检查。
+探针须验证根外样式不变、portal范围、实际DOM和键盘焦点、主题/语言update及unmount；
+组件构建通过只是编译证据，浏览器错误必须保留。未消费的早期调查文件不进入发布清单，
+正式CI/产物发布后插件才可依赖经接收的新兼容声明。
+
+#### 0384 最小实施与验证入口
+
+新增补丁承接通用 SDK 兼容补足，不改写 0340。消费项目为 `kestra-plugin-rbac`，
+宿主只拥有页面生命周期、导航与通用组件适配，不引入该项目的账号、组或策略模型。
+已有公开 npm 属性解决 HTMLElement portal 目标，但不能独立解决深层焦点与全局 ESC。
+已复现 document.activeElement 返回 shadow host、原始 Drawer openAutoFocus 不传 DOM
+事件参数。主控浏览器最初记录：多选 Second 后第一次 ESC 进入抽屉丢弃确认，动画快照
+仍有列表。随后事件轨迹校正：该次 ESC 之前 select 已逻辑关闭，不证明同一键重复
+处理；显式重开并等到 popupOpen=true 后，ESC 只关闭 select、保留抽屉及草稿。保留
+两次原始现象与校正，不把旧推断写成已确认的重复处理。单元不替代完整浏览器矩阵。
+
+候选 SDK 的 `shadow-overlays.mjs` 只接收消费方自己的 Vue 运行时与公开 npm 组件。
+它将 appendTo 固定为当前扩展 ShadowRoot 内的 portal，禁止 document.body；关闭
+Element Plus 的 document 滚动锁与重复 ESC 处理。适配层根据 modal/popup 激活顺序
+选择最上层处理者，在 window 捕获原始 ESC。转发给 select 的键事件不跨 ShadowRoot，
+避免再次进入 document 全局处理器。深层焦点读取、Tab 圈定、嵌套恢复、触发元素缺失时
+的 fallback、content inert/overflow 恢复与 abort 清理均属于该通用适配面。
+触发器通过原生 pointer/key 的 composedPath 记录，不假定 macOS 的原生按钮 pointer
+点击会先取得 activeElement。包装后的 modal 可以显式提供 triggerElement（本扩展根内
+HTMLElement），类型为 ShadowModalTriggerOptions；该字段不转发为 vendor DOM 属性。
+未显式提供时，scope.captureTrigger 先取原生交互目标，再以根内活动元素补充。外部根
+的显式触发器拒绝。嵌套层分别保留本层触发器与初始外层触发器；仅内层关闭时返回本层
+触发器，全部层退出且 inert 解除后返回初始外层触发器，不能返回即将销毁的内层 input。
+移除、隐藏或禁用的触发器使用调用方 fallback，不用固定 sleep 猜测动画结束。
+Element Plus 原生可取消的 focus-trap 事件名称由 SDK 隔离；这是对精确版本的适配，
+不得声称所有 Element Plus 版本兼容。不得使用其无 ShadowRoot 兼容的全局 MessageBox；
+草稿丢弃与保存禁闭通过消费方 beforeClose 和根内 KsDialog 实现。
+
+进一步公开 npm 调查确认两处根因。Element Plus 多选分支本身不关闭 expanded；其
+document clickoutside 使用 event.target，ShadowRoot 事件重定向后可能误判根内选项为
+外部点击。SDK 只在逻辑 popup/触发控件内截断 mousedown/mouseup 的根外冒泡，使用
+真实 composedPath 做本根的 outside 关闭；不阻断普通根外事件。单元发送选项的
+mousedown、mouseup、click 全序列，不只发送 click 或给 input 派发键事件。
+
+design-system 0.5.0 的 FilterEditPopover 与 AdvancedFilterBuilder 直接使用字符串
+Teleport to=body，未公开 appendTo；只包装 KsSelect/KsPopover 不足以兼容 KsFilter。
+createShadowRenderer 使用消费方 Vue 公开的 createRenderer/nodeOps/patchProp，在扩展
+专有 renderer 的 querySelector 阶段将 body 定位为 portal，不先插入 document.body
+再搬移。显式外部 HTMLElement 插入拒绝。原生 filter overlay 在同一根内加入焦点/ESC
+生命周期并随移除释放；不改 npm vendor 源码，也不复制其组件实现。消费方必须用该
+renderer.createApp 创建使用原生 KsFilter 的应用；普通 V1 mount 不要求更换。
+
+matrix3 已实证公开 Filter footer 的重置按钮内嵌原生 Tooltip，会解析默认
+`#kel-popper-container-*`，不能只适配字符串 body。使用原生 Tooltip 的最小程序已复现
+同一个 Unknown extension Teleport target，失败日志保留。候选 renderer 的第三参数
+接收消费方公开 npm 的 ID_INJECTION_KEY（idInjectionKey）与 ElConfigProvider 的
+namespace，类型为 ShadowRendererOptions。renderer.createApp 为本 scope 提供唯一
+数字前缀，只把该精确默认 selector 定位到本根 portal；其他未知 selector 仍拒绝。
+原生钩子可能建立自己的空 document 容器，但弹层字节从未插入其中。scope 只清理该
+专有 ID 的空元数据容器；已有宿主容器保留，异常非空容器报错、不删除用户节点。
+没有更改 KsFilter、KsButton、Tooltip 的源码或样式，也不对任意 generated selector
+开放 document 回退。消费入口为 createShadowRenderer(Vue,scope,
+{idInjectionKey:ID_INJECTION_KEY,namespace:"kel"})。
+
+首轮完整矩阵另确认原生窄屏分支使用 MobileFilter，而不是桌面 chip。候选 renderer
+保留原生 mobile-scrim/mobile-sheet 的 DOM、表单、按钮和主题 CSS，只将两个弹层节点
+在首次插入时放入本根 portal，以原生 mobile-bar 为锚点定位并在滚动/resize 后更新。
+关闭仍调用原生 scrim 处理器；Tab、ESC、inert、回焦和卸载归同一通用 scope。
+不得为复用桌面定位而强制关闭上游响应式分支。
+
+独立探针通过原生 sm 类解除 Drawer 在 1200px 以上的 min-width:800px，再使用公开
+size 指定 min(760px,100vw)，不复制 Drawer 样式。原生 fullscreen 的 99% 宽度按所选
+npm CSS 精确核对，关闭复位仍独立断言。矩阵定位原生 input 自身的 data 属性、桌面
+同一元素上的 chip/filter-chip 类与真实移动筛选入口，不以放宽断言修复定位错误。
+
+V1 mount/update/unmount 保持有效。新增 context.fullPath 为扩展根内 path 与规范 query，
+不含宿主前缀或 fragment；context.query 是冻结的解码对象，重复值为冻结数组，保留
+null 与空字符串。navigate 接受该形式，路径仍拒绝绝对路径、编码歧义和穿越；query
+中的编码斜线只是值，不按路径拒绝。被拒绝的 navigate 返回 rejected Promise。
+mounted.beforeNavigate(target) 可选且可异步；target.fullPath 是宿主 router 的目标规范
+路径，target.extensionPath 在同扩展内为根内路径，离开扩展时为 null；target.query 同样
+冻结。只有显式 true 允许；false、异常、未完成 mount、并发确认或 abort 拒绝。
+宿主菜单、根内 query、扩展切换及 History popstate 共享 router 守卫；偏好 update 不触发
+离开确认。原 V1 不提供 hook 时保持导航行为。异步确认没有强制五秒超时；安全 abort
+直接取消等待，不询问扩展。宿主既有 anonymous 安全路由先 dispose，不允许草稿 guard
+阻止拒绝/登录流程。document 级刷新不支持异步应用确认，不冒充 SPA guard 已覆盖刷新。
+
+独立探针入口为 `bash scripts/rbac-ui-probe/sdk-run.sh`；仅构建公开 npm 包、自己的 SDK
+和宿主导航代码，不读取真实插件。默认开发树为 `.work/access-control-v3-sdk-dev`，
+输出其 `sdk-probe/dist`。启动命令由脚本打印；默认静态端口 5199，无 Docker、PG 或
+浏览器启动。`/sdk/items` 为候选，`?raw=1` 为未经适配的公开 npm 对照。build-evidence.json
+记录源码输入 hash 与 CSS hash；window.sdkProbe.inspect 提供版本、事件轨迹、根外
+sentinel 计算样式与清理状态。probe-matrix.mjs 为单元与浏览器共享断言，
+sdk-browser-matrix.mjs 的 runSdkBrowserMatrix(page,base,options,record) 只消费调用方现有
+Ego/CI 共用适配器，不创建浏览器。固定 156 个偏好配置及 949 条检查，逐项保留失败；
+未执行不得计为通过。探针偏好持久化只验证测试桥接，不证明生产宿主偏好实现；生产
+扩展仍消费宿主 context。13 语言、全部主题、三种宽度、原生 KsFilter 的真实操作
+与查询结果均为浏览器必需门，不由构建或 jsdom 证明。
+诊断必须按用例起始 event ID 取差集，并保留每个事件对应的 document 来源；不得在每个
+失败行复制整个累计 collector。console、HTTP 和异常均保留，不截断全局错误来缩小报告。
+
+公开 npm 调查版本：design-system 0.5.0（integrity 与正式 SDK 相同）、Element Plus
+2.14.7、Vue 3.5.39、vue-router 5.0.6。宿主锁文件的单元环境另为 Element Plus 2.14.2
+及 vue-router 5.1.0；两种证据必须区分。打包contract的overlayCompatibility以
+contractVersion=1/status=supported声明仅四个经公开helper/owned renderer使用的
+KsDrawer/KsDialog/KsSelect/KsFilter；原始未适配弹层、popover、未列出的复杂下拉及
+KsPagination仍不支持。内置SDK README给出精确版本、portal/focus/ESC/返回焦点及
+导航契约。该条件式能力声明不是当前工作树发布声明；消费必须从对应提交完整CI与
+镜像推广均通过的正式executable提取SDK，不使用源码或本地候选作插件正式编译输入。
+
 **状态：REQ-0340 的基础契约已正式发布（2026-10-15）。** 宿主 `8d46953` 的
 CI `38732224758` 全部通过并推广镜像
 `sha256:f2b2cb7fc3bb3286148dbdce8a5e6bc70c59e152e74a3d42079e26cd0c169253`。

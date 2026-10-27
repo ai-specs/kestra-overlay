@@ -1,0 +1,1284 @@
+# 需求: REQ-0384，独立管理页面通用ShadowRoot弹层、规范导航及精确公开SDK能力/消费契约。
+# 消费扩展仓: ai-specs/kestra-plugin-rbac；独立探针不消费真实扩展源码或产物。
+# 状态: core；能力契约overlayCompatibility V1 supported；源码不是发布声明；新元数据输入完整949及CI/推广仍须验证。
+# 来源: 新写；公开npm机制调查与真实949机制证据；补齐内置README/元数据一致性，不改变04dc980已验证helper/runtime。
+# 触达上游文件: UI扩展协议、runtime、ExtensionPage、SDK及一致性测试、内置SDK README/类型/元数据/适配/矩阵，共13文件。
+# 移除条件: 上游OSS提供等价独立扩展ShadowRoot弹层、焦点生命周期、默认popper隔离和可拒绝异步导航公开SDK。
+# 来源增量提交: 7cb9999、618a57a、86a0461、6969acf、04dc980、2f2984a；仅独占开发树提交，未发布。
+diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
+index 28025b9..b6f7f39 100644
+--- a/ui/src/components/extensions/ExtensionPage.vue
++++ b/ui/src/components/extensions/ExtensionPage.vue
+@@ -7,12 +7,12 @@
+
+ <script setup lang="ts">
+     import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
+-    import {useRoute, useRouter} from "vue-router";
++    import {isNavigationFailure, stringifyQuery, useRoute, useRouter} from "vue-router";
+     import {useI18n} from "vue-i18n";
+     import {useMiscStore} from "override/stores/misc";
+     import {SUPPORT_LOCALES} from "../../translations/languages";
+     import {requireExtension} from "../../extensions/access";
+-    import {createExtensionRequest, extensionPath, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
++    import {createExtensionRequest, extensionLocation, extensionRouteQuery, freezeExtensionQuery, guardExtensionNavigation, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
+     import type {UiExtensionContextV1, UiExtensionDescriptorV1, UiExtensionModuleV1} from "../../extensions/protocol";
+     import TopNavBar from "../layout/TopNavBar.vue";
+     import useRouteContext from "../../composables/useRouteContext";
+@@ -37,15 +37,19 @@
+         const assetBase = hostExtensionPath(`/ui-extensions/${encodeURIComponent(tenant)}/${encodeURIComponent(id)}/`);
+         const path = Array.isArray(route.params.pathMatch) ? route.params.pathMatch.join("/") : String(route.params.pathMatch ?? "");
+         const signal = lifecycle!.signal;
++        const query = freezeExtensionQuery(route.query);
++        const search = stringifyQuery(route.query);
+         return Object.freeze({
+-            contractVersion: 1, tenant, path, locale: locale.value, supportedLocales: Object.freeze([...SUPPORT_LOCALES]), fallbackLocale: "en",
++            contractVersion: 1, tenant, path, query, fullPath: path + (search ? "?" + search : ""), locale: locale.value, supportedLocales: Object.freeze([...SUPPORT_LOCALES]), fallbackLocale: "en",
+             theme: document.documentElement.classList.contains("dark-2") ? "dark-2" : document.documentElement.classList.contains("dark") ? "dark" : "light",
+             themePreference: misc.theme === "syncWithSystem" ? "system" : misc.theme,
+             apiBase: hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`), assetBase,
+             styles: Object.freeze(descriptor.value!.styles.map(style => assetBase + style)), signal,
+             navigate: async (next: string, options?: {replace?: boolean}) => {
+-                const safe = extensionPath(next);
+-                await router[options?.replace ? "replace" : "push"]({name: "extensions/page", params: {tenant, extensionId: id, pathMatch: safe.split("/")}});
++                if (signal.aborted) throw new Error("Extension is disposed");
++                const safe = extensionLocation(next);
++                const failure = await router[options?.replace ? "replace" : "push"]({name: "extensions/page", params: {tenant, extensionId: id, pathMatch: safe.path.split("/")}, query: extensionRouteQuery(safe.query)});
++                if (isNavigationFailure(failure)) throw new Error("Extension navigation rejected");
+             },
+             request: createExtensionRequest(signal, hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`)),
+         });
+@@ -79,5 +83,6 @@
+         observer.observe(document.documentElement, {attributes: true, attributeFilter: ["class"]});
+         void load();
+     });
+-    onBeforeUnmount(() => {generation++; observer?.disconnect(); void lifecycle?.dispose();});
++    const removeNavigationGuard = guardExtensionNavigation(router, () => lifecycle);
++    onBeforeUnmount(() => {removeNavigationGuard(); generation++; observer?.disconnect(); void lifecycle?.dispose();});
+ </script>
+diff --git a/ui/src/extensions/navigation.spec.ts b/ui/src/extensions/navigation.spec.ts
+new file mode 100644
+index 0000000..1adce2b
+--- /dev/null
++++ b/ui/src/extensions/navigation.spec.ts
+@@ -0,0 +1,114 @@
++import {describe, expect, it, vi} from "vitest";
++import {createMemoryHistory, createRouter, createWebHistory} from "vue-router";
++import {extensionLocation, ExtensionLifecycle, freezeExtensionQuery, guardExtensionNavigation} from "./runtime";
++import type {UiExtensionContextV1} from "./protocol";
++import {checkProbeCase} from "../../../webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.mjs";
++
++describe("extension navigation candidate", () => {
++    it("normalizes repeated values, null, empty, plus and encoded opaque values", () => {
++        const location = extensionLocation("items?key=a&key=b&flag&empty=&search=a+b&opaque=a%2Fb%23c");
++        expect(location.path).toBe("items");
++        expect(location.query).toEqual({key: ["a", "b"], flag: null, empty: "", search: "a b", opaque: "a/b#c"});
++        expect(extensionLocation(location.fullPath)).toEqual(location);
++        expect(Object.isFrozen(location.query)).toBe(true);
++        expect(Object.isFrozen(location.query.key)).toBe(true);
++        checkProbeCase("query", {...location, expectedFullPath: extensionLocation(location.fullPath).fullPath, expectedQuery: {key: ["a", "b"], flag: null, empty: "", search: "a b", opaque: "a/b#c"}});
++    });
++    it("retains the path security boundary without applying it to query values", () => {
++        for (const value of ["/items?x=1", "../items?x=1", "a%2Fb?x=1", "a\\b?x=1", "a//b", "a?x=1#fragment", "a?x=\n"]) {
++            expect(() => extensionLocation(value)).toThrow();
++        }
++        expect(extensionLocation("?destination=https%3A%2F%2Fexample.com").path).toBe("");
++        const input = {key: ["first"]};
++        const frozen = freezeExtensionQuery(input);
++        input.key.push("second");
++        expect(frozen.key).toEqual(["first"]);
++    });
++    it("accepts old V1 mount without a guard and blocks disposed or unready navigation", async () => {
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), vi.fn());
++        const target = {fullPath: "/next", extensionPath: null, query: {}};
++        expect(await lifecycle.beforeNavigate(target)).toBe(false);
++        await lifecycle.start(async () => ({contractVersion: 1, mount: () => ({update() {}, unmount() {}})}), {} as UiExtensionContextV1);
++        expect(await lifecycle.beforeNavigate(target)).toBe(true);
++        await lifecycle.dispose();
++        expect(await lifecycle.beforeNavigate(target)).toBe(false);
++    });
++    it("guards real router query changes, host leave, async cancellation, failures and disposal", async () => {
++        const error = vi.fn();
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), error);
++        const guard = vi.fn();
++        await lifecycle.start(async () => ({contractVersion: 1, mount: () => ({update() {}, unmount() {}, beforeNavigate: guard})}), {} as UiExtensionContextV1);
++        const router = createRouter({history: createMemoryHistory(), routes: [{path: "/:pathMatch(.*)*", component: {template: "<div />"}}]});
++        await router.push("/items?key=first");
++        guardExtensionNavigation(router, () => lifecycle);
++        guard.mockResolvedValue(false);
++        await router.push("/items?key=second");
++        expect(router.currentRoute.value.fullPath).toBe("/items?key=first");
++        let finish!: (allowed: boolean) => void;
++        guard.mockImplementationOnce(() => new Promise<boolean>(resolve => {finish = resolve;}));
++        const pending = router.push("/host");
++        await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
++        expect(await lifecycle.beforeNavigate({fullPath: "/concurrent", extensionPath: null, query: {}})).toBe(false);
++        finish(true);
++        await pending;
++        expect(router.currentRoute.value.path).toBe("/host");
++        guard.mockRejectedValueOnce(new Error("guard failure"));
++        await router.replace("/failure");
++        expect(router.currentRoute.value.path).toBe("/host");
++        expect(error).toHaveBeenCalledOnce();
++        guard.mockImplementationOnce(() => new Promise<boolean>(resolve => {finish = resolve;}));
++        const leaving = lifecycle.beforeNavigate({fullPath: "/late", extensionPath: null, query: {}});
++        await vi.waitFor(() => expect(guard).toHaveBeenCalledTimes(4));
++        await lifecycle.dispose();
++        expect(await leaving).toBe(false);
++        finish(true);
++    });
++    it("restores History URL after rejected popstate and allows an explicitly accepted return", async () => {
++        const original = window.location.pathname + window.location.search;
++        const originalState = window.history.state;
++        window.history.replaceState(null, "", "/first?value=one");
++        const history = createWebHistory();
++        const router = createRouter({history, routes: [{path: "/:pathMatch(.*)*", component: {render: () => null}}]});
++        const guard = vi.fn().mockResolvedValue(false);
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), vi.fn());
++        try {
++            await router.push("/first?value=one");
++            await router.push("/second?value=two");
++            await lifecycle.start(async () => ({contractVersion: 1, mount: () => ({update() {}, unmount() {}, beforeNavigate: guard})}), {} as UiExtensionContextV1);
++            const remove = guardExtensionNavigation(router, () => lifecycle);
++            window.history.back();
++            await vi.waitFor(() => expect(guard).toHaveBeenCalledOnce());
++            await vi.waitFor(() => expect(window.location.pathname + window.location.search).toBe("/second?value=two"));
++            expect(router.currentRoute.value.fullPath).toBe("/second?value=two");
++            guard.mockResolvedValue(true);
++            window.history.back();
++            await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe("/first?value=one"));
++            expect(window.location.pathname + window.location.search).toBe("/first?value=one");
++            remove();
++        } finally {
++            await lifecycle.dispose();
++            history.destroy();
++            window.history.replaceState(originalState, "", original);
++        }
++    });
++    it("does not let an unresolved extension guard veto host public safety navigation", async () => {
++        const lifecycle = new ExtensionLifecycle(document.createElement("div"), vi.fn());
++        const guard = vi.fn(() => new Promise<boolean>(() => {}));
++        await lifecycle.start(async () => ({contractVersion: 1, mount: () => ({update() {}, unmount() {}, beforeNavigate: guard})}), {} as UiExtensionContextV1);
++        const router = createRouter({history: createMemoryHistory(), routes: [
++            {path: "/editor", component: {render: () => null}},
++            {path: "/public-safety", component: {render: () => null}, meta: {anonymous: true}},
++        ]});
++        await router.push("/editor");
++        guardExtensionNavigation(router, () => lifecycle);
++        const pending = lifecycle.beforeNavigate({fullPath: "/pending", extensionPath: null, query: {}});
++        await vi.waitFor(() => expect(guard).toHaveBeenCalledOnce());
++        await router.push("/public-safety");
++        expect(router.currentRoute.value.path).toBe("/public-safety");
++        expect(lifecycle.signal.aborted).toBe(true);
++        const allowed = await pending;
++        expect(allowed).toBe(false);
++        checkProbeCase("safety-abort", {aborted: lifecycle.signal.aborted, allowed});
++        expect(guard).toHaveBeenCalledOnce();
++    });
++});
+diff --git a/ui/src/extensions/protocol.ts b/ui/src/extensions/protocol.ts
+index 30ca573..b76f182 100644
+--- a/ui/src/extensions/protocol.ts
++++ b/ui/src/extensions/protocol.ts
+@@ -11,6 +11,8 @@ export interface UiExtensionContextV1 {
+     readonly contractVersion: 1;
+     readonly tenant: string;
+     readonly path: string;
++    readonly fullPath?: string;
++    readonly query?: Readonly<Record<string, string | null | readonly (string | null)[]>>;
+     readonly locale: string;
+     readonly supportedLocales: readonly string[];
+     readonly fallbackLocale: "en";
+@@ -25,10 +27,17 @@ export interface UiExtensionContextV1 {
+ }
+
+ export interface MountedUiExtensionV1 {
++    beforeNavigate?(target: UiExtensionNavigationV1): Promise<boolean> | boolean;
+     update(context: UiExtensionContextV1): Promise<void> | void;
+     unmount(): Promise<void> | void;
+ }
+
++export interface UiExtensionNavigationV1 {
++    readonly fullPath: string;
++    readonly extensionPath: string | null;
++    readonly query: Readonly<Record<string, string | null | readonly (string | null)[]>>;
++}
++
+ export interface UiExtensionModuleV1 {
+     contractVersion: 1;
+     mount(container: HTMLElement, context: UiExtensionContextV1): Promise<MountedUiExtensionV1> | MountedUiExtensionV1;
+diff --git a/ui/src/extensions/runtime.ts b/ui/src/extensions/runtime.ts
+index 5b9f469..a3fddd7 100644
+--- a/ui/src/extensions/runtime.ts
++++ b/ui/src/extensions/runtime.ts
+@@ -1,4 +1,6 @@
+-import type {MountedUiExtensionV1, UiExtensionContextV1, UiExtensionModuleV1} from "./protocol";
++import type {MountedUiExtensionV1, UiExtensionContextV1, UiExtensionModuleV1, UiExtensionNavigationV1} from "./protocol";
++import {parseQuery, stringifyQuery} from "vue-router";
++import type {LocationQuery, Router} from "vue-router";
+ import {getCsrfToken} from "../utils/csrf";
+
+ export function hostExtensionPath(path: string): string {
+@@ -13,6 +15,37 @@ export function extensionPath(path: string): string {
+     return path;
+ }
+
++export function extensionLocation(value: string) {
++    const separator = value.indexOf("?");
++    const path = extensionPath(separator < 0 ? value : value.slice(0, separator));
++    if (value.includes("#") || /[\u0000-\u001f\u007f]/.test(value)) throw new Error("Invalid extension location");
++    const query = freezeExtensionQuery(parseQuery(separator < 0 ? "" : value.slice(separator + 1)));
++    const search = stringifyQuery(extensionRouteQuery(query));
++    return {path, query, fullPath: path + (search ? "?" + search : "")};
++}
++
++export function freezeExtensionQuery(query: UiExtensionNavigationV1["query"]): UiExtensionNavigationV1["query"] {
++    return Object.freeze(Object.fromEntries(Object.entries(query).map(([key, value]) => [key, Array.isArray(value) ? Object.freeze([...value]) : value])));
++}
++
++export function extensionRouteQuery(query: UiExtensionNavigationV1["query"]): LocationQuery {
++    return Object.fromEntries(Object.entries(query).map(([key, value]) => [key, typeof value === "object" && value !== null ? [...value] : value]));
++}
++
++export function guardExtensionNavigation(router: Router, current: () => ExtensionLifecycle | undefined) {
++    return router.beforeEach(async (to, from) => {
++        if (to.fullPath === from.fullPath) return true;
++        const lifecycle = current();
++        if (to.meta.anonymous === true) {
++            await lifecycle?.dispose();
++            return true;
++        }
++        const sameExtension = to.name === "extensions/page" && to.params.tenant === from.params.tenant && to.params.extensionId === from.params.extensionId;
++        const extensionPath = sameExtension ? (Array.isArray(to.params.pathMatch) ? to.params.pathMatch.join("/") : String(to.params.pathMatch ?? "")) : null;
++        return lifecycle ? lifecycle.beforeNavigate({fullPath: to.fullPath, extensionPath, query: to.query}) : false;
++    });
++}
++
+ export function createExtensionRequest(signal: AbortSignal, apiBase: string, fetcher: typeof fetch = fetch) {
+     return async (path: string, options: RequestInit = {}): Promise<Response> => {
+         const url = new URL(path, window.location.origin);
+@@ -41,6 +74,8 @@ export class ExtensionLifecycle {
+     private serial: Promise<void> = Promise.resolve();
+     private disposed = false;
+     private latest?: UiExtensionContextV1;
++    private navigating = false;
++    private ready = false;
+
+     constructor(private container: HTMLElement, private onError: (error: unknown) => void) {}
+
+@@ -59,11 +94,34 @@ export class ExtensionLifecycle {
+             if (this.disposed) return;
+             this.mounted = mounted;
+             await this.update(this.latest);
++            this.ready = !this.disposed;
+         } catch (error) {
+             if (!this.disposed) {this.onError(error); void this.dispose();}
+         }
+     }
+
++    async beforeNavigate(target: UiExtensionNavigationV1): Promise<boolean> {
++        if (this.disposed || !this.ready || this.navigating) return false;
++        if (!this.mounted?.beforeNavigate) return true;
++        this.navigating = true;
++        let cancel: (() => void) | undefined;
++        try {
++            const allowed = await new Promise<boolean>((resolve, reject) => {
++                cancel = () => resolve(false);
++                this.signal.addEventListener("abort", cancel, {once: true});
++                Promise.resolve().then(() => this.mounted!.beforeNavigate!(Object.freeze({...target, query: freezeExtensionQuery(target.query)})))
++                    .then(value => resolve(value === true), reject);
++            });
++            return allowed && !this.disposed;
++        } catch (error) {
++            this.onError(error);
++            return false;
++        } finally {
++            if (cancel) this.signal.removeEventListener("abort", cancel);
++            this.navigating = false;
++        }
++    }
++
+     update(context: UiExtensionContextV1) {
+         this.latest = context;
+         this.serial = this.serial.then(async () => {
+diff --git a/ui/src/extensions/sdk.spec.ts b/ui/src/extensions/sdk.spec.ts
+index 009d80f..5b82937 100644
+--- a/ui/src/extensions/sdk.spec.ts
++++ b/ui/src/extensions/sdk.spec.ts
+@@ -1,6 +1,45 @@
+ import {describe, expect, it} from "vitest"
+ import postcss from "postcss"
+ import {prepareShadowStyles} from "../../../webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-styles.mjs"
++import {readFileSync} from "node:fs"
++import {resolve} from "node:path"
++
++const sdkDirectory = resolve(process.cwd(), "../webserver/src/main/resources/META-INF/kestra/ui-sdk/v1")
++const contract = JSON.parse(readFileSync(resolve(sdkDirectory, "contract.json"), "utf8"))
++const sdkReadme = readFileSync(resolve(sdkDirectory, "README.md"), "utf8")
++
++describe("published SDK metadata consistency", () => {
++    it("declares only the verified four adapted overlay components without a candidate alias", () => {
++        expect(contract.candidateOverlayCompatibility).toBeUndefined()
++        expect(contract.overlayCompatibility).toMatchObject({contractVersion: 1, status: "supported", components: ["KsDrawer", "KsDialog", "KsSelect", "KsFilter"]})
++        for (const name of contract.overlayCompatibility.components) expect(sdkReadme).toContain(name)
++        expect(sdkReadme).toContain("`overlayCompatibility`")
++        expect(sdkReadme).not.toContain("Dialogs, popovers and complex dropdowns are unsupported")
++    })
++    it("pins public dependencies and retains unsupported raw overlays and release prerequisites", () => {
++        for (const [field, version] of Object.entries({designSystem: "0.5.0", elementPlus: "2.14.7", vue: "3.5.39", vueRouter: "5.0.6"})) {
++            expect(contract.overlayCompatibility[field]).toBe(version)
++            expect(sdkReadme).toContain("@" + version)
++        }
++        expect(contract.unsupportedComponents).toEqual(["raw overlays without SDK adaptation", "popover", "unlisted complex dropdowns", "KsPagination"])
++        expect(contract.overlayCompatibility.consumption).toContain("required CI and image promotion")
++        expect(sdkReadme).toContain("required CI and image\npromotion")
++        expect(sdkReadme).toContain("does not declare an image released")
++    })
++    it("documents public helpers, owned trigger identity and fallback without replacing native themes", () => {
++        for (const name of ["createShadowOverlayScope", "createShadowRenderer", "shadowOverlayComponents", "ID_INJECTION_KEY", "triggerElement", "ShadowModalTriggerOptions", "fallback", "stable Vue keys", "public native CSS tokens"]) expect(sdkReadme).toContain(name)
++        const declarations = readFileSync(resolve(sdkDirectory, "shadow-overlays.d.mts"), "utf8")
++        expect(declarations).toContain("readonly triggerElement?: HTMLElement")
++        expect(declarations).toContain("readonly idInjectionKey?")
++        expect(contract.overlayCompatibility.portal).toContain("extension-owned ShadowRoot")
++    })
++    it("keeps packaged V1 types aligned with navigation and safety documentation", () => {
++        const declarations = readFileSync(resolve(sdkDirectory, "index.d.ts"), "utf8")
++        expect(declarations).toBe(readFileSync(resolve(process.cwd(), "src/extensions/protocol.ts"), "utf8"))
++        for (const name of ["fullPath", "query", "beforeNavigate", "extensionPath"]) {expect(declarations).toContain(name); expect(sdkReadme).toContain(name)}
++        for (const phrase of ["repeated keys", "null and empty string", "Only explicit true allows", "abort/dispose", "back/forward", "without this hook"]) expect(sdkReadme).toContain(phrase)
++    })
++})
+
+ describe("published shadow stylesheet helper", () => {
+     it("isolates known root selectors and omits redundant font resources", () => {
+diff --git a/ui/src/extensions/shadow-overlays.spec.ts b/ui/src/extensions/shadow-overlays.spec.ts
+new file mode 100644
+index 0000000..c2106ca
+--- /dev/null
++++ b/ui/src/extensions/shadow-overlays.spec.ts
+@@ -0,0 +1,312 @@
++import {afterEach, describe, expect, it, vi} from "vitest";
++import {createApp, defineComponent, h, nextTick, onBeforeUnmount, ref, watch} from "vue";
++import * as Vue from "vue";
++import {ElConfigProvider, ElDialog, ElDrawer, ElSelect, ElOption, ElTooltip, ID_INJECTION_KEY} from "element-plus";
++import {createShadowOverlayScope, createShadowRenderer, deepActiveElement, shadowOverlayComponents} from "../../../webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs";
++import {checkProbeCase} from "../../../webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.mjs";
++
++const cleanups: (() => void)[] = [];
++afterEach(() => {while (cleanups.length) cleanups.pop()!(); vi.restoreAllMocks(); document.body.replaceChildren();});
++
++function fixture() {
++    const container = document.createElement("div");
++    document.body.append(container);
++    const root = container.attachShadow({mode: "open"});
++    const content = document.createElement("main");
++    const trigger = document.createElement("button");
++    const fallback = document.createElement("h1");
++    fallback.tabIndex = -1;
++    content.append(trigger, fallback);
++    const portal = document.createElement("div");
++    root.append(content, portal);
++    const controller = new AbortController();
++    const scope = createShadowOverlayScope({container, content, portal, signal: controller.signal, fallback: () => fallback});
++    cleanups.push(() => scope.dispose());
++    vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
++    return {container, content, portal, root, trigger, fallback, controller, scope};
++}
++
++describe("pinned overlay shadow compatibility", () => {
++    it("reproduces native document focus retargeting and restores a deep trigger instead", () => {
++        const current = fixture();
++        current.trigger.focus();
++        expect(document.activeElement).toBe(current.container);
++        expect(deepActiveElement()).toBe(current.trigger);
++        const modal = document.createElement("section");
++        const input = document.createElement("input");
++        modal.append(input);
++        current.portal.append(modal);
++        const release = current.scope.activate(modal, vi.fn());
++        expect(deepActiveElement()).toBe(input);
++        release();
++        expect(deepActiveElement()).toBe(current.trigger);
++        expect(current.content.inert).not.toBe(true);
++    });
++    it("traps the top layer, routes Escape through save/discard policy and restores nested focus", () => {
++        const current = fixture();
++        const drawer = document.createElement("section");
++        const first = document.createElement("button");
++        const last = document.createElement("input");
++        drawer.append(first, last);
++        current.portal.append(drawer);
++        current.trigger.focus();
++        const close = vi.fn();
++        const release = current.scope.activate(drawer, close);
++        last.focus();
++        last.dispatchEvent(new KeyboardEvent("keydown", {key: "Tab", bubbles: true, composed: true, cancelable: true}));
++        expect(deepActiveElement()).toBe(first);
++        first.dispatchEvent(new KeyboardEvent("keydown", {key: "Tab", shiftKey: true, bubbles: true, composed: true, cancelable: true}));
++        expect(deepActiveElement()).toBe(last);
++        const dialog = document.createElement("section");
++        const cancel = document.createElement("button");
++        dialog.append(cancel);
++        current.portal.append(dialog);
++        const releaseDialog = current.scope.activate(dialog, vi.fn());
++        expect(deepActiveElement()).toBe(cancel);
++        releaseDialog();
++        expect(deepActiveElement()).toBe(last);
++        last.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        expect(close).toHaveBeenCalledOnce();
++        expect(current.portal.contains(drawer)).toBe(true);
++        release();
++        expect(deepActiveElement()).toBe(current.trigger);
++    });
++    it("restores fallback, prior scroll/inert state and removes scope effects on abort", () => {
++        const current = fixture();
++        current.content.style.overflow = "auto";
++        const modal = document.createElement("section");
++        current.portal.append(modal);
++        current.trigger.focus();
++        const close = vi.fn();
++        current.scope.activate(modal, close);
++        current.trigger.remove();
++        current.controller.abort();
++        expect(current.content.style.overflow).toBe("auto");
++        expect(current.portal.childElementCount).toBe(0);
++        expect(deepActiveElement()).toBe(current.fallback);
++        document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}));
++        expect(close).not.toHaveBeenCalled();
++        expect(() => current.scope.activate(modal, close)).toThrow();
++        current.scope.dispose();
++    });
++    it("rejects a portal outside the owned shadow root", () => {
++        const current = fixture();
++        expect(() => createShadowOverlayScope({container: current.container, content: current.content, portal: document.body})).toThrow();
++        expect(() => current.scope.captureTrigger(document.body)).toThrow("Modal trigger must belong to the extension ShadowRoot");
++        expect(current.scope.captureTrigger(current.trigger)).toBe(current.trigger);
++    });
++    it("uses the real pinned Drawer focus events without assuming an emitted DOM event", async () => {
++        const current = fixture();
++        const nativeOpen = vi.fn();
++        const closed = ref(false);
++        const wrappers = shadowOverlayComponents({defineComponent, h, onBeforeUnmount, watch, ref}, {KsDrawer: ElDrawer}, current.scope);
++        const target = document.createElement("div");
++        current.content.append(target);
++        current.trigger.focus();
++        const app = createApp({render: () => h(wrappers.KsDrawer, {
++            modelValue: true, title: "Minimal drawer", onOpenAutoFocus: nativeOpen,
++            beforeClose: () => {closed.value = true;},
++        }, {default: () => h("input", {"data-test": "draft"})})});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        await nextTick();
++        await vi.waitFor(() => expect(nativeOpen).toHaveBeenCalled());
++        expect(nativeOpen.mock.calls[0]).toEqual([]);
++        expect(current.portal.querySelector('[role="dialog"]')).not.toBeNull();
++        expect(deepActiveElement()?.getRootNode()).toBe(current.root);
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++        checkProbeCase("portal", {documentDialogs: document.body.querySelectorAll('[role="dialog"]').length, portalDialogs: current.portal.querySelectorAll('[role="dialog"]').length});
++        current.root.activeElement?.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        expect(closed.value).toBe(true);
++    });
++    it("consumes Escape at the portal select even when focus/event target is a selected tag", async () => {
++        const current = fixture();
++        const drawer = document.createElement("section");
++        const mountPoint = document.createElement("div");
++        drawer.append(mountPoint);
++        current.portal.append(drawer);
++        const closeDrawer = vi.fn();
++        current.scope.activate(drawer, closeDrawer);
++        const selected = ref(["first"]);
++        const wrappers = shadowOverlayComponents({defineComponent, h, onBeforeUnmount, watch, ref}, {KsSelect: ElSelect}, current.scope);
++        const app = createApp({render: () => h(wrappers.KsSelect, {
++            modelValue: selected.value, multiple: true, "onUpdate:modelValue": (value: string[]) => {selected.value = value;},
++        }, {default: () => [h(ElOption, {label: "First", value: "first"}), h(ElOption, {label: "Second", value: "second"})]})});
++        cleanups.push(() => app.unmount());
++        app.mount(mountPoint);
++        await nextTick();
++        current.root.querySelector('.el-select__wrapper')!.dispatchEvent(new MouseEvent("click", {bubbles: true, composed: true}));
++        await vi.waitFor(() => expect(current.root.querySelector('[role="combobox"]')?.getAttribute("aria-expanded")).toBe("true"));
++        const second = [...current.portal.querySelectorAll('[role="option"]')].find(node => node.textContent?.includes("Second"))!;
++        second.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, composed: true}));
++        second.dispatchEvent(new MouseEvent("mouseup", {bubbles: true, composed: true}));
++        second.dispatchEvent(new MouseEvent("click", {bubbles: true, composed: true}));
++        await nextTick();
++        expect(selected.value).toEqual(["first", "second"]);
++        expect(current.root.querySelector('[role="combobox"]')?.getAttribute("aria-expanded")).toBe("true");
++        const tag = current.root.querySelector('.el-tag')!;
++        const globalEscape = vi.fn();
++        document.addEventListener("keydown", globalEscape, true);
++        cleanups.push(() => document.removeEventListener("keydown", globalEscape, true));
++        tag.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        await vi.waitFor(() => expect(current.root.querySelector('[role="combobox"]')?.getAttribute("aria-expanded")).toBe("false"));
++        expect(closeDrawer).not.toHaveBeenCalled();
++        expect(globalEscape).not.toHaveBeenCalled();
++        checkProbeCase("popup-escape", {popupOpen: current.root.querySelector('[role="combobox"]')?.getAttribute("aria-expanded") === "true", drawerCloseCalls: closeDrawer.mock.calls.length});
++        tag.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        expect(closeDrawer).toHaveBeenCalledOnce();
++    });
++    it("remounts modal-local state on each open without discarding the consumer draft", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const draft = ref("retained");
++        const modal = defineComponent({setup() {
++            const maximized = ref(false);
++            return () => h("button", {"data-test": "maximize", onClick: () => {maximized.value = !maximized.value;}}, String(maximized.value) + draft.value);
++        }});
++        const wrappers = shadowOverlayComponents({defineComponent, h, onBeforeUnmount, watch, ref}, {KsDrawer: modal}, current.scope);
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createApp({render: () => h(wrappers.KsDrawer, {modelValue: opened.value})});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        opened.value = true;
++        await nextTick();
++        const button = current.root.querySelector<HTMLButtonElement>('[data-test="maximize"]')!;
++        button.click();
++        await nextTick();
++        expect(button.textContent).toBe("trueretained");
++        opened.value = false;
++        await nextTick();
++        opened.value = true;
++        await nextTick();
++        expect(current.root.querySelector('[data-test="maximize"]')?.textContent).toBe("falseretained");
++    });
++    it("routes native string Teleports into the scoped portal before any DOM insertion", () => {
++        const current = fixture();
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h(Vue.Teleport, {to: "body"}, h("section", {role: "dialog"}, "Native filter probe"))});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        expect(current.portal.querySelector('[role="dialog"]')?.textContent).toBe("Native filter probe");
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++    });
++    it("fails closed when a Teleport passes document.body as an explicit HTMLElement", () => {
++        const current = fixture();
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h(Vue.Teleport, {to: document.body}, h("section", {role: "dialog"}))});
++        expect(() => app.mount(target)).toThrow("Teleport escaped extension ShadowRoot");
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++    });
++    it("keeps the native mobile filter sheet and scrim in the owned portal with Escape cleanup", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "mobile-filter"}, [
++            h("div", {class: "mobile-bar"}, h("button", {"data-test": "mobile-trigger", onClick: () => {opened.value = true;}}, "Native filter")),
++            opened.value ? h("div", {class: "mobile-scrim", onClick: () => {opened.value = false;}}) : null,
++            opened.value ? h("div", {class: "mobile-sheet", role: "dialog", "aria-label": "Native filter"}, h("button", "Native field")) : null,
++        ])});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        const trigger = current.root.querySelector<HTMLButtonElement>('[data-test="mobile-trigger"]')!;
++        trigger.focus();
++        trigger.click();
++        await nextTick();
++        expect(current.portal.querySelector('.mobile-sheet')).not.toBeNull();
++        expect(current.portal.querySelector('.mobile-scrim')).not.toBeNull();
++        expect(current.content.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).toBe(true);
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++        current.root.querySelector('.mobile-sheet button')!.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        await nextTick();
++        expect(opened.value).toBe(false);
++        expect(current.portal.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).not.toBe(true);
++        expect(deepActiveElement()).toBe(trigger);
++    });
++    it("returns to the pointer opener when nested layers release in either order", () => {
++        for (const outerFirst of [true, false]) {
++            const current = fixture();
++            expect([null, document.body]).toContain(document.activeElement);
++            for (const type of ["mousedown", "mouseup", "click"]) current.trigger.dispatchEvent(new MouseEvent(type, {bubbles: true, composed: true}));
++            expect([null, document.body]).toContain(document.activeElement);
++            expect(current.scope.captureTrigger()).toBe(current.trigger);
++            const drawer = document.createElement("section");
++            const input = document.createElement("input");
++            drawer.append(input);
++            const dialog = document.createElement("section");
++            dialog.append(document.createElement("button"));
++            current.portal.append(drawer, dialog);
++            const releaseDrawer = current.scope.activate(drawer, vi.fn(), current.scope.captureTrigger());
++            const releaseDialog = current.scope.activate(dialog, vi.fn(), input);
++            if (outerFirst) {releaseDrawer(); drawer.remove(); releaseDialog();}
++            else {releaseDialog(); releaseDrawer(); drawer.remove();}
++            expect(deepActiveElement()).toBe(current.trigger);
++            current.scope.dispose();
++            current.container.remove();
++        }
++    });
++    it("opens a real native drawer by pointer without pre-focusing and returns after same-tick dialog discard", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const confirmation = ref(false);
++        const draft = ref("");
++        let pendingClose: (() => void) | undefined;
++        const wrappers = shadowOverlayComponents({defineComponent, h, onBeforeUnmount, watch, ref}, {KsDrawer: ElDrawer, KsDialog: ElDialog}, current.scope);
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createApp({render: () => h("div", [
++            h(wrappers.KsDrawer, {modelValue: opened.value, "onUpdate:modelValue": (value: boolean) => {opened.value = value;}, title: "Native drawer", destroyOnClose: true,
++                beforeClose: (done: () => void) => {pendingClose = done; confirmation.value = true;}}, {default: () => h("input", {"data-test": "pointer-draft", value: draft.value, onInput: (event: Event) => {draft.value = (event.target as HTMLInputElement).value;}})}),
++            h(wrappers.KsDialog, {modelValue: confirmation.value, "onUpdate:modelValue": (value: boolean) => {confirmation.value = value;}, title: "Native confirmation"}, {default: () => h("button", {"data-test": "pointer-discard", onClick: () => {confirmation.value = false; draft.value = ""; pendingClose?.();}}, "Discard")}),
++        ])});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        current.trigger.onclick = () => {opened.value = true;};
++        expect([null, document.body]).toContain(document.activeElement);
++        for (const type of ["mousedown", "mouseup", "click"]) current.trigger.dispatchEvent(new MouseEvent(type, {bubbles: true, composed: true}));
++        expect([null, document.body]).toContain(document.activeElement);
++        await vi.waitFor(() => expect(current.root.querySelector('[data-test="pointer-draft"]')).not.toBeNull());
++        await vi.waitFor(() => expect(current.scope.inspect().modals).toHaveLength(1));
++        const input = current.root.querySelector<HTMLInputElement>('[data-test="pointer-draft"]')!;
++        input.value = "dirty";
++        input.dispatchEvent(new Event("input", {bubbles: true, composed: true}));
++        input.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        await vi.waitFor(() => expect(confirmation.value).toBe(true));
++        await nextTick();
++        const discard = current.root.querySelector<HTMLButtonElement>('[data-test="pointer-discard"]')!;
++        for (const type of ["mousedown", "mouseup", "click"]) discard.dispatchEvent(new MouseEvent(type, {bubbles: true, composed: true}));
++        await vi.waitFor(() => expect(opened.value).toBe(false));
++        await vi.waitFor(() => expect(deepActiveElement()).toBe(current.trigger));
++        expect(draft.value).toBe("");
++        expect(confirmation.value).toBe(false);
++        expect(current.scope.inspect().modals).toEqual([]);
++    });
++    it("keeps the nested native tooltip default target in the owned renderer", async () => {
++        const current = fixture();
++        const target = document.createElement("div");
++        current.content.append(target);
++        const errors: unknown[] = [];
++        const existing = document.createElement("div");
++        existing.id = "kel-popper-container-host-existing";
++        document.body.append(existing);
++        const app = createShadowRenderer(Vue, current.scope, {idInjectionKey: ID_INJECTION_KEY, namespace: "kel"}).createApp({render: () => h(ElConfigProvider, {namespace: "kel"}, {default: () => h(ElTooltip, {visible: true, persistent: true, content: "Native reset tooltip"}, {default: () => h("button", "Reset")})})});
++        app.config.errorHandler = (error: unknown) => {errors.push(error);};
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        await nextTick();
++        expect(errors).toEqual([]);
++        expect(current.portal.textContent).toContain("Native reset tooltip");
++        expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
++        const owned = [...document.body.children].filter(node => node.id.startsWith("kel-popper-container-") && node !== existing);
++        expect(owned).toHaveLength(1);
++        expect(owned[0].childNodes).toHaveLength(0);
++        current.scope.dispose();
++        expect(owned[0].isConnected).toBe(false);
++        expect(existing.isConnected).toBe(true);
++    });
++});
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
+index 927e127..faaf8af 100644
+--- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
+@@ -1,6 +1,9 @@
+ # Independent management page protocol V1
+
+-Extract this directory from the published executable. Compile Java providers against the same
++This document describes the source capability contract, not the release state of a checkout.
++Consume only the published executable after its exact commit has passed required CI and image
++promotion. A local candidate is not a published SDK; this document does not declare an image released.
++Extract this directory from that published executable. Compile Java providers against the same
+ published executable. The SDK and npm package are the only host inputs for independent extensions.
+ `contract.json` pins the supported component package and integrity, language IDs and fallback.
+ `index.d.ts` is the ESM protocol; `locales.mjs` resolves public locale aliases.
+@@ -14,9 +17,43 @@ Duplicate IDs, invalid metadata and missing or mismatched files reject registrat
+
+ The host route is `/ui/{tenant}/extensions/{id}/...`. The host owns navigation and lifetime;
+ the module owns its app and ShadowRoot. Never add extension styles to document. Load only
+-context.styles inside the root, inherit host fonts and consume resolved theme data. The initial
+-supported components are buttons, inputs and tables. Use routed details, inline confirmation,
+-and extension-owned vue-i18n pagination. Dialogs, popovers and complex dropdowns are unsupported.
++context.styles inside the root, inherit host fonts and consume resolved theme data. Basic buttons,
++inputs and tables remain supported. `overlayCompatibility` has `contractVersion=1`, `status=supported`
++and supports only `KsDrawer`, `KsDialog`, `KsSelect`, `KsFilter` through the public SDK adaptation.
++Raw overlays without SDK adaptation, popovers, unlisted complex dropdowns and `KsPagination` remain
++unsupported. This is not a claim that arbitrary exported npm components are compatible.
++
++The adapted set requires `@kestra-io/design-system@0.5.0` with the integrity in contract.json,
++`element-plus@2.14.7`, `vue@3.5.39`, `vue-router@5.0.6`. A version change requires compatibility
++validation. Do not replace native components, their DOM or their theme palette with copies.
++
++Create sibling `.extension-body` content and an HTMLElement portal inside the extension-owned
++ShadowRoot. Call `createShadowOverlayScope({container,content,portal,signal,fallback})` from
++`shadow-overlays.mjs`. `fallback` returns an owned focusable element, such as a heading with
++tabindex=-1. Create the app with `createShadowRenderer(Vue,scope,
++{idInjectionKey:ID_INJECTION_KEY,namespace:"kel"}).createApp(...)`, using your own public Vue runtime
++and Element Plus `ID_INJECTION_KEY`. Use ElConfigProvider with the same namespace and public locale.
++The renderer maps body and its exact private native popper selector to the owned portal before
++insertion; unknown external targets reject. Native empty popper metadata containers are not overlay
++content; only the scope's own empty container is removed on dispose, never another host container.
++
++Use `shadowOverlayComponents(Vue,components,scope)` for KsDrawer/KsDialog/KsSelect and the native
++filter's globally resolved supporting components. Register those wrappers in the consumer app before
++mounting KsFilter. The native filter still owns its responsive DOM, filtering and UI; the renderer
++only adapts its desktop/mobile overlay target, focus and lifetime. Raw popovers are not independently
++supported by this internal filter adaptation. Helpers never place overlay content or CSS in
++document.body and never lock document scrolling. Keep modal `beforeClose` responsible for dirty
++confirmation and saving confinement; use the adapted owned KsDialog, not global MessageBox.
++
++Keep stable Vue keys for lists of triggers. Store the actual trigger HTMLElement when its identity
++matters; wrapped modals accept optional `triggerElement` as described by ShadowModalTriggerOptions
++in `shadow-overlays.d.mts`. It must belong to this ShadowRoot and is not forwarded as a DOM attribute.
++Without an explicit trigger the scope records native pointer/key composedPath, not merely
++document.activeElement. Closing nested layers returns to the outer trigger; a removed, hidden or
++disabled trigger returns to the configured fallback. Reusing a DOM node for a different list item is
++not removal. Dispose the scope on unmount; abort must release portals, focus handlers, listeners and
++content inert/overflow effects. Use context locale/theme updates and the public native CSS tokens;
++system-theme transitions remain native and must settle before comparing computed colors.
+
+ At build time apply `prepareShadowStyles(css,postcss)` from `shadow-styles.mjs` to CSS generated
+ from the pinned public component package. Pass the consumer's PostCSS 8 parser; the helper has
+@@ -30,7 +67,28 @@ can be asynchronous. Unmount must be idempotent. The host aborts on navigation,
+ retains the latest pending context and cleans late mount results. Lifecycle timeout is 5 seconds;
+ trusted extension code must stop effects on abort because JavaScript is not a security sandbox.
+
+-`navigate` accepts only root-relative extension paths. `request` accepts same-origin
++`context.path` remains the extension-relative path without query. The optional additive V1 fields
++`context.fullPath` and `context.query` are supplied by this host; their optional TypeScript shape
++keeps old V1 context producers compatible. fullPath is the extension-relative path plus the host
++Vue Router canonical query, not a byte-preserving copy of the requested URL. query is frozen decoded
++string/null data; repeated keys are frozen arrays, null and empty string remain distinct. For example
++`items?key=a&key=b&flag&empty=&opaque=a%2Fb%23c` canonicalizes to
++`items?key=a&key=b&flag&empty=&opaque=a/b%23c`, preserving opaque value `a/b#c`.
++
++`navigate(path,{replace?})` accepts extension-relative paths with query, never an absolute host path
++or fragment. Encoded query values are data, not permission to bypass path traversal checks.
++A rejected host navigation rejects its Promise. The mounted V1 object can optionally implement
++`beforeNavigate(target): boolean | Promise<boolean>` from index.d.ts. target.fullPath is the host
++router's canonical destination, target.extensionPath is the relative path for the same extension or
++null when leaving it, and target.query is frozen decoded query data. Only explicit true allows;
++false, exceptions, concurrent confirmations, incomplete mount or abort reject navigation. The same
++guard covers host menu navigation, query changes and browser back/forward; preference updates do not
++request leave confirmation. A module without this hook keeps the original V1 navigation behavior.
++Async confirmation is not limited by the 5-second mount/update/unmount lifecycle timeout. Host safety
++abort/dispose always cancels pending guards without their permission; existing anonymous safety
++routes dispose before navigating. Document refresh cannot run an asynchronous SPA leave dialog.
++
++`request` accepts same-origin
+ `/api/v1/{tenant}/...` with query parameters, includes cookies and write CSRF, and returns standard
+ Response including 401/403. It rejects redirects, fragments, encoded path ambiguity and external
+ origins. The server continues to authorize every API request.
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
+index 93849a9..8a85d91 100644
+--- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
+@@ -15,6 +15,25 @@
+   "request": "Same-origin /api/v1/{tenant}/ path; query parameters allowed; encoded path separators and fragments forbidden; 401/403 returned unchanged",
+   "styles": "Load context.styles inside an extension-owned ShadowRoot; inherit host font; document stylesheet injection is unsupported",
+   "styleBuildTool": "shadow-styles.mjs prepareShadowStyles(css, postcss); consumer supplies PostCSS 8; use .extension-body content root",
+-  "unsupportedComponents": ["dialog", "popover", "complex dropdown", "KsPagination"],
++  "unsupportedComponents": ["raw overlays without SDK adaptation", "popover", "unlisted complex dropdowns", "KsPagination"],
++  "navigation": {"fullPath": "Extension-relative path plus canonical query; no fragment", "query": "Frozen decoded string/null values; repeated keys are frozen arrays", "beforeNavigate": "Optional mounted V1 async boolean hook; true allows; false, throw or abort denies; host anonymous safety routes dispose without consulting extension"},
++  "overlayCompatibility": {
++    "contractVersion": 1,
++    "status": "supported",
++    "consumption": "Consume only the published executable after its exact commit has passed required CI and image promotion; a source checkout or local candidate is not a published SDK",
++    "helper": "shadow-overlays.mjs",
++    "renderer": "createShadowRenderer uses the consumer Vue public DOM renderer; string body Teleports resolve to the owned portal; explicit external HTMLElement insertion fails closed",
++    "nativePopper": "Pass the consumer Element Plus public ID_INJECTION_KEY as idInjectionKey and the ConfigProvider namespace. The renderer provides a private numeric prefix, maps only its exact default popper selector to the owned portal, and removes only its empty native metadata container on dispose",
++    "matrix": "probe-matrix.mjs",
++    "designSystem": "0.5.0",
++    "elementPlus": "2.14.7",
++    "vue": "3.5.39",
++    "vueRouter": "5.0.6",
++    "components": ["KsDrawer", "KsDialog", "KsSelect", "KsFilter"],
++    "scope": "Only these four components through the public SDK helpers and owned renderer are supported; raw popovers, arbitrary overlays and KsPagination are not supported",
++    "portal": "extension-owned ShadowRoot HTMLElement only; never document.body",
++    "focusAdapter": "Pinned Element Plus native cancelable focus-trap events are adapted by the SDK; consumer owns beforeClose and its business drafts",
++    "returnFocus": "The scope records native pointer/key composed paths; wrapped modals may supply triggerElement as an owned HTMLElement. When nested layers close together, the empty stack restores the original outer trigger or the configured fallback, never a destroyed inner control"
++  },
+   "lifecycleTimeoutMs": 5000
+ }
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
+index 30ca573..b76f182 100644
+--- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/index.d.ts
+@@ -11,6 +11,8 @@ export interface UiExtensionContextV1 {
+     readonly contractVersion: 1;
+     readonly tenant: string;
+     readonly path: string;
++    readonly fullPath?: string;
++    readonly query?: Readonly<Record<string, string | null | readonly (string | null)[]>>;
+     readonly locale: string;
+     readonly supportedLocales: readonly string[];
+     readonly fallbackLocale: "en";
+@@ -25,10 +27,17 @@ export interface UiExtensionContextV1 {
+ }
+
+ export interface MountedUiExtensionV1 {
++    beforeNavigate?(target: UiExtensionNavigationV1): Promise<boolean> | boolean;
+     update(context: UiExtensionContextV1): Promise<void> | void;
+     unmount(): Promise<void> | void;
+ }
+
++export interface UiExtensionNavigationV1 {
++    readonly fullPath: string;
++    readonly extensionPath: string | null;
++    readonly query: Readonly<Record<string, string | null | readonly (string | null)[]>>;
++}
++
+ export interface UiExtensionModuleV1 {
+     contractVersion: 1;
+     mount(container: HTMLElement, context: UiExtensionContextV1): Promise<MountedUiExtensionV1> | MountedUiExtensionV1;
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.d.mts b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.d.mts
+new file mode 100644
+index 0000000..77a2d71
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.d.mts
+@@ -0,0 +1,2 @@
++export const probeMatrix: readonly {id: string; unit: string | null; actions: string; expected: string}[];
++export function checkProbeCase(id: string, actual: Record<string, unknown>): {id: string; passed: true};
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.mjs
+new file mode 100644
+index 0000000..90e8b2d
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/probe-matrix.mjs
+@@ -0,0 +1,31 @@
++export const probeMatrix = Object.freeze([
++    {id: "portal", unit: "shadow-overlays.spec.ts", actions: "Open each of four drawers; inspect owned portal and document", expected: "No document overlay; modal remains inside the extension root"},
++    {id: "popup-escape", unit: "shadow-overlays.spec.ts", actions: "Open multi-select, choose Second, press Escape from selected tag", expected: "Select closes; drawer and dirty draft remain; no confirmation"},
++    {id: "discard-cancel", unit: "shadow-overlays.spec.ts", actions: "Dirty draft; Escape; cancel discard", expected: "Confirmation closes; drawer, draft and trigger focus remain"},
++    {id: "save-lock", unit: "shadow-overlays.spec.ts", actions: "Change draft; save; attempt Escape and host navigation while saving", expected: "No close or navigation until save completes; changed value saved once"},
++    {id: "focus-return", unit: "shadow-overlays.spec.ts", actions: "Close top dialog then drawer; remove trigger and repeat", expected: "Deep trigger focus restored, or the configured fallback"},
++    {id: "query", unit: "navigation.spec.ts", actions: "Navigate with repeated, empty, null and encoded query values", expected: "Address and context agree; immutable query preserves values"},
++    {id: "leave-cancel", unit: "navigation.spec.ts", actions: "Dirty draft; click host menu; cancel discard", expected: "Host URL, extension route and draft remain unchanged"},
++    {id: "popstate-cancel", unit: "navigation.spec.ts", actions: "Push second route; dirty draft; browser Back; cancel; retry and accept", expected: "Canceled Back restores address and context; accepted Back reaches first route"},
++    {id: "safety-abort", unit: "navigation.spec.ts", actions: "Leave a guard pending; force host disposal or host public safety route", expected: "Signal aborts, pending navigation settles false, effects disappear"},
++    {id: "unmount", unit: "shadow-overlays.spec.ts", actions: "Unmount while select/dialog is open; press Escape; remount", expected: "No shadow content, document overlay, scroll lock or old focus listener"},
++    {id: "preferences", unit: null, actions: "13 locales; light/dark/dark-2/system; 390/768/1280 widths; system color changes", expected: "Real computed styles, translated shared labels and layout match the selected preferences"},
++    {id: "filter", unit: null, actions: "Use native KsFilter key/value/comparator controls; apply and remove chips; refresh; Back", expected: "All filter portals stay owned; real query and filtered generic rows agree"},
++]);
++
++export function checkProbeCase(id, actual) {
++    const require = (condition, message) => {if (!condition) throw new Error(`${id}: ${message}`);};
++    require(probeMatrix.some(row => row.id === id), "Unknown case");
++    if (id === "portal") {require(actual.documentDialogs === 0, "Document modal leaked"); require(actual.portalDialogs > 0, "Owned modal missing");}
++    else if (id === "popup-escape") {require(actual.popupOpen === false, "Popup did not close"); require(actual.drawerCloseCalls === 0, "Same Escape reached drawer");}
++    else if (id === "discard-cancel") {require(actual.draft === actual.expectedDraft && actual.confirmation === false && actual.opened !== null, "Draft or drawer lost on cancel");}
++    else if (id === "save-lock") {require(actual.saving === true && actual.opened !== null && actual.confirmation === false, "Save confinement failed");}
++    else if (id === "focus-return") require(actual.focus === actual.expectedFocus, "Deep focus was not restored");
++    else if (id === "query") require(actual.fullPath === actual.expectedFullPath && JSON.stringify(actual.query) === JSON.stringify(actual.expectedQuery), "Query or address mismatch");
++    else if (id === "leave-cancel" || id === "popstate-cancel") require(actual.fullPath === actual.expectedFullPath && actual.draft === actual.expectedDraft, "Canceled navigation changed route or draft");
++    else if (id === "safety-abort") require(actual.aborted === true && actual.allowed === false, "Safety abort was blocked");
++    else if (id === "unmount") require(actual.shadowNodes === 0 && actual.documentDialogs === 0 && actual.disposed === true, "Unmount left live nodes");
++    else if (id === "preferences") require(actual.computedStylesVerified === true && actual.translationsVerified === true && actual.viewportVerified === true, "Real preference evidence missing");
++    else if (id === "filter") require(actual.ownedPortalsVerified === true && actual.queryVerified === true && actual.rowsVerified === true, "Real filter evidence missing");
++    return {id, passed: true};
++}
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.d.mts b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.d.mts
+new file mode 100644
+index 0000000..74c3f65
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.d.mts
+@@ -0,0 +1,38 @@
++import type * as Vue from "vue";
++
++export interface ShadowModalTriggerOptions {
++    readonly triggerElement?: HTMLElement;
++}
++
++export interface ShadowRendererOptions {
++    readonly idInjectionKey?: Vue.InjectionKey<{prefix: number; current: number}>;
++    readonly namespace?: string;
++}
++
++export interface ShadowOverlayScope {
++    readonly portal: HTMLElement;
++    readonly root: ShadowRoot;
++    captureTrigger(explicit?: HTMLElement): HTMLElement | null;
++    onDispose(cleanup: () => void): () => void;
++    activate(element: HTMLElement, close: () => void, trigger?: HTMLElement | null): () => void;
++    register(close: () => void, trigger: () => HTMLElement | null | undefined): {id: string; dispose(): void};
++    popup(close: () => void): {id: string; show(): void; hide(): void; dispose(): void};
++    escapeSelect(id: string): void;
++    dispose(): void;
++    inspect(): Record<string, unknown>;
++}
++
++export function deepActiveElement(root?: Document | ShadowRoot): HTMLElement | null;
++export function createShadowRenderer(vue: Pick<typeof Vue, "createRenderer" | "nodeOps" | "patchProp" | "nextTick">, scope: ShadowOverlayScope, options?: ShadowRendererOptions): Vue.Renderer<HTMLElement>;
++export function createShadowOverlayScope(options: {
++    container: HTMLElement;
++    portal: HTMLElement;
++    content: HTMLElement;
++    signal?: AbortSignal;
++    fallback?: () => HTMLElement | null | undefined;
++}): ShadowOverlayScope;
++export function shadowOverlayComponents<Components extends Record<string, Vue.Component>>(
++    vue: Pick<typeof Vue, "defineComponent" | "h" | "ref" | "onBeforeUnmount" | "watch">,
++    components: Components,
++    scope: ShadowOverlayScope,
++): {[Name in keyof Components]: Vue.Component};
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
+new file mode 100644
+index 0000000..38703ee
+--- /dev/null
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
+@@ -0,0 +1,365 @@
++export function deepActiveElement(root = document) {
++    let active = root.activeElement;
++    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
++    return active;
++}
++
++export function createShadowOverlayScope({container, portal, content, signal, fallback}) {
++    const root = container.shadowRoot;
++    if (!root || portal.getRootNode() !== root || content.getRootNode() !== root || portal === content) {
++        throw new Error("Overlay nodes must belong to the extension ShadowRoot");
++    }
++    const owner = container.ownerDocument;
++    const view = owner.defaultView;
++    const layers = [];
++    const popups = [];
++    const routedKeys = new WeakSet();
++    const registrations = new Map();
++    const disposal = new Set();
++    let sequence = 0;
++    let activation = 0;
++    let disposed = false;
++    let overflow;
++    let inert;
++    let redirecting = false;
++    let lastTrigger;
++    const events = [];
++    const trace = (event, details = {}) => {events.push({event, ...details}); if (events.length > 32) events.shift();};
++    const focusable = element => [...element.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')]
++        .filter(node => !node.disabled && !node.closest('[inert],[hidden],[aria-hidden="true"]') && node.tabIndex >= 0
++            && getComputedStyle(node).visibility !== "hidden" && node.getClientRects().length > 0);
++    const focus = node => {node?.focus({preventScroll: true}); if (node && deepActiveElement(owner) === node) lastTrigger = node;};
++    const describe = node => node ? {tag: node.tagName, marker: node.getAttribute("data-probe") ?? node.getAttribute("data-test"), connected: node.isConnected} : null;
++    const available = node => node?.isConnected && node.getRootNode() === root && !node.disabled && !node.closest('[inert],[hidden],[aria-hidden="true"]')
++        && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== "hidden";
++    const rememberTrigger = event => {
++        const path = event.composedPath();
++        if (!path.includes(root)) return;
++        const target = path.find(node => node?.matches?.('button,input,select,textarea,a[href],[tabindex],[role="button"]'));
++        if (target?.getRootNode() === root) lastTrigger = target;
++    };
++    const first = layer => focusable(layer.element)[0] ?? layer.element;
++    const permitted = (layer, node) => node && (layer.element.contains(node)
++        || (portal.contains(node) && popups.some(popup => popup.activation > layer.activation && node.closest(`.sdk-popup-${popup.id}`))));
++    const restore = layer => {
++        const target = available(layer.trigger) ? layer.trigger : fallback?.();
++        if (available(target)) focus(target);
++        if (deepActiveElement(owner) !== target) {
++            const substitute = fallback?.();
++            if (available(substitute)) focus(substitute);
++        }
++        trace("restore", {target: describe(target), active: describe(deepActiveElement(owner))});
++    };
++    const release = layer => {
++        const index = layers.indexOf(layer);
++        if (index < 0) return;
++        const top = index === layers.length - 1;
++        layers.splice(index, 1);
++        if (!layers.length) {
++            content.inert = inert;
++            content.style.overflow = overflow;
++        }
++        if (top && !disposed) {
++            const previous = layers.at(-1);
++            if (!previous) restore({trigger: layer.rootTrigger});
++            else if (!permitted(previous, layer.trigger)) focus(first(previous));
++            else restore(layer);
++        }
++        trace("release", {top, remaining: layers.length, trigger: describe(layer.trigger), rootTrigger: describe(layer.rootTrigger)});
++    };
++    const keydown = event => {
++        rememberTrigger(event);
++        const layer = layers.at(-1);
++        const popup = popups.at(-1);
++        if (disposed || routedKeys.has(event) || !["Escape", "Tab"].includes(event.key)) return;
++        if (event.key === "Escape") {
++            if (!layer && !popup) return;
++            event.preventDefault();
++            event.stopImmediatePropagation();
++            const selected = popup && (!layer || popup.activation > layer.activation) ? "popup" : "modal";
++            trace("escape", {selected, trusted: event.isTrusted, target: event.composedPath()[0]?.tagName, modalActivation: layer?.activation, popupActivation: popup?.activation});
++            if (selected === "popup") popup.close();
++            else layer.close?.();
++            return;
++        }
++        if (!layer) return;
++        event.preventDefault();
++        event.stopImmediatePropagation();
++        const nodes = focusable(layer.element);
++        const index = nodes.indexOf(deepActiveElement(owner));
++        const next = event.shiftKey ? (index <= 0 ? nodes.length - 1 : index - 1) : (index + 1) % nodes.length;
++        focus(nodes[next] ?? layer.element);
++    };
++    const focusin = event => {
++        const layer = layers.at(-1);
++        if (!layer || disposed || redirecting || permitted(layer, event.composedPath()[0])) return;
++        redirecting = true;
++        focus(first(layer));
++        redirecting = false;
++    };
++    const insidePopup = (popup, node) => node?.closest?.(`.sdk-popup-${popup.id},[data-sdk-popup="${popup.id}"]`);
++    const pointerInside = event => {
++        if (popups.some(popup => insidePopup(popup, event.composedPath()[0]))) event.stopPropagation();
++    };
++    const pointerOutside = event => {
++        const node = event.composedPath()[0];
++        const remaining = [...popups].reverse();
++        for (const popup of remaining) {
++            if (insidePopup(popup, node)) break;
++            popup.close();
++        }
++    };
++    const trapped = event => {
++        const registration = registrations.get(event.target.dataset?.sdkOverlay);
++        if (!registration) return;
++        event.preventDefault();
++        registration.release?.();
++        registration.release = scope.activate(event.target, registration.close, registration.trigger());
++    };
++    const released = event => {
++        const registration = registrations.get(event.target.dataset?.sdkOverlay);
++        if (!registration) return;
++        event.preventDefault();
++        registration.release?.();
++        registration.release = undefined;
++    };
++    const focusout = event => {
++        if (layers.some(layer => layer.element === event.target)) event.preventDefault();
++    };
++    view.addEventListener("keydown", keydown, true);
++    owner.addEventListener("focusin", focusin, true);
++    root.addEventListener("mousedown", pointerInside);
++    root.addEventListener("mouseup", pointerInside);
++    view.addEventListener("mouseup", pointerOutside, true);
++    for (const name of ["pointerdown", "mousedown", "click", "input", "keydown"]) root.addEventListener(name, rememberTrigger, true);
++    portal.addEventListener("focus-trap.focus-after-trapped", trapped, true);
++    portal.addEventListener("focus-trap.focus-after-released", released, true);
++    portal.addEventListener("focus-trap.focusout-prevented", focusout, true);
++    const dispose = () => {
++        if (disposed) return;
++        disposed = true;
++        view.removeEventListener("keydown", keydown, true);
++        owner.removeEventListener("focusin", focusin, true);
++        root.removeEventListener("mousedown", pointerInside);
++        root.removeEventListener("mouseup", pointerInside);
++        view.removeEventListener("mouseup", pointerOutside, true);
++        for (const name of ["pointerdown", "mousedown", "click", "input", "keydown"]) root.removeEventListener(name, rememberTrigger, true);
++        portal.removeEventListener("focus-trap.focus-after-trapped", trapped, true);
++        portal.removeEventListener("focus-trap.focus-after-released", released, true);
++        portal.removeEventListener("focus-trap.focusout-prevented", focusout, true);
++        signal?.removeEventListener("abort", dispose);
++        const initial = layers[0];
++        while (layers.length) release(layers.at(-1));
++        for (const cleanup of disposal) cleanup();
++        disposal.clear();
++        registrations.clear();
++        popups.splice(0);
++        if (initial) restore({trigger: initial.rootTrigger});
++        portal.replaceChildren();
++    };
++    signal?.addEventListener("abort", dispose, {once: true});
++    const scope = Object.freeze({
++        portal,
++        root,
++        captureTrigger(explicit) {
++            if (explicit !== undefined && (!explicit || typeof explicit.getRootNode !== "function" || explicit.getRootNode() !== root || typeof explicit.focus !== "function")) throw new Error("Modal trigger must belong to the extension ShadowRoot");
++            if (explicit !== undefined) return explicit;
++            if (available(lastTrigger)) return lastTrigger;
++            const active = deepActiveElement(owner);
++            return available(active) ? active : null;
++        },
++        onDispose(cleanup) {
++            if (disposed) {cleanup(); return () => {};}
++            disposal.add(cleanup);
++            return () => {disposal.delete(cleanup);};
++        },
++        register(close, trigger) {
++            if (disposed) throw new Error("Overlay scope is disposed");
++            const id = String(++sequence);
++            const registration = {close, trigger};
++            registrations.set(id, registration);
++            return {id, dispose() {registration.release?.(); registrations.delete(id);}};
++        },
++        popup(close) {
++            if (disposed) throw new Error("Overlay scope is disposed");
++            const id = String(++sequence);
++            const popup = {id, close, activation: 0};
++            const hide = () => {
++                const index = popups.indexOf(popup);
++                if (index >= 0) popups.splice(index, 1);
++            };
++            return {id, show() {hide(); popup.activation = ++activation; popups.push(popup); trace("popup-open", {id, activation: popup.activation});}, hide() {hide(); trace("popup-close", {id});}, dispose: hide};
++        },
++        escapeSelect(id) {
++            const select = root.querySelector(`[data-sdk-popup="${id}"]`);
++            const target = select?.querySelector('input[role="combobox"]') ?? select?.querySelector('[role="combobox"]') ?? select;
++            if (!target) throw new Error("Select trigger is unavailable");
++            const event = new KeyboardEvent("keydown", {key: "Escape", code: "Escape", keyCode: 27, bubbles: true, composed: false, cancelable: true});
++            routedKeys.add(event);
++            trace("select-local-escape", {id, target: target.tagName});
++            target.dispatchEvent(event);
++        },
++        activate(element, close, trigger = scope.captureTrigger()) {
++            if (disposed || !portal.contains(element)) throw new Error("Invalid overlay layer");
++            if (!layers.length) {
++                overflow = content.style.overflow;
++                inert = content.inert;
++                content.style.overflow = "hidden";
++                content.inert = true;
++            }
++            const layer = {element, close, trigger, rootTrigger: layers.length ? layers[0].rootTrigger : trigger, activation: ++activation};
++            layers.push(layer);
++            trace("activate", {trigger: describe(trigger), rootTrigger: describe(layer.rootTrigger), activation: layer.activation});
++            if (!element.hasAttribute("tabindex")) element.tabIndex = -1;
++            focus(first(layer));
++            return () => release(layer);
++        },
++        dispose,
++        inspect: () => ({disposed, modals: layers.map(layer => ({activation: layer.activation})), popups: popups.map(popup => ({id: popup.id, activation: popup.activation})), events: events.map(event => ({...event}))}),
++    });
++    if (signal?.aborted) dispose();
++    return scope;
++}
++
++export function createShadowRenderer(vue, scope, options = {}) {
++    if (!vue.nodeOps || typeof vue.patchProp !== "function" || typeof vue.createRenderer !== "function") throw new Error("Pinned Vue DOM renderer is required");
++    const nativeFilters = new Map();
++    const mobileScrims = new WeakMap();
++    const view = scope.portal.ownerDocument.defaultView;
++    const owner = scope.portal.ownerDocument;
++    let idState;
++    let popperId;
++    if (options.idInjectionKey) {
++        const namespace = options.namespace ?? "kel";
++        if (!/^[a-z][a-z0-9-]*$/.test(namespace)) throw new Error("Invalid overlay component namespace");
++        const random = new Uint32Array(1);
++        do {
++            view.crypto.getRandomValues(random);
++            idState = {prefix: 1000000000 + random[0], current: 0};
++            popperId = `${namespace}-popper-container-${idState.prefix}`;
++        } while (owner.getElementById(popperId));
++        scope.onDispose(() => {
++            const container = owner.getElementById(popperId);
++            if (container?.parentNode !== owner.body) return;
++            if (container.childNodes.length) throw new Error("Native popper container unexpectedly contains document content");
++            container.remove();
++        });
++    }
++    scope.onDispose(() => {for (const cleanup of nativeFilters.values()) cleanup(); nativeFilters.clear();});
++    const renderer = vue.createRenderer({
++        ...vue.nodeOps,
++        patchProp: vue.patchProp,
++        querySelector(selector) {
++            if (selector === "body" || (popperId && selector === "#" + popperId)) return scope.portal;
++            const target = scope.root.querySelector(selector);
++            if (!target) throw new Error("Unknown extension Teleport target: " + selector);
++            return target;
++        },
++        insert(node, parent, anchor) {
++            if (parent.isConnected && parent.getRootNode() !== scope.root) throw new Error("Teleport escaped extension ShadowRoot");
++            const mobile = node.nodeType === 1 && node.matches(".mobile-scrim,.mobile-sheet");
++            const destination = mobile ? scope.portal : parent;
++            vue.nodeOps.insert(node, destination, mobile && anchor?.parentNode !== destination ? null : anchor);
++            if (mobile && node.matches(".mobile-scrim")) mobileScrims.set(parent, node);
++            if (node.nodeType === 1 && node.matches(".edit-overlay,.adv-overlay,.mobile-sheet") && !nativeFilters.has(node)) {
++                const element = mobile ? node : node.querySelector(".edit-popup,.adv-builder");
++                if (!element) throw new Error("Native filter focus target is missing");
++                if (!element.hasAttribute("role")) element.setAttribute("role", "dialog");
++                element.setAttribute("aria-modal", "true");
++                if (!element.hasAttribute("aria-label")) element.setAttribute("aria-label", element.querySelector(".filter-label")?.textContent ?? "Filter");
++                const dismiss = () => {
++                    const scrim = mobile ? mobileScrims.get(parent) : node;
++                    if (!scrim) throw new Error("Native filter dismiss target is missing");
++                    scrim.click();
++                };
++                const position = () => {
++                    if (!mobile) return;
++                    const bar = parent.querySelector(".mobile-bar");
++                    if (!bar) throw new Error("Native mobile filter anchor is missing");
++                    const bounds = bar.getBoundingClientRect();
++                    Object.assign(node.style, {position: "fixed", left: bounds.left + "px", right: "auto", top: `calc(${bounds.bottom}px + var(--ks-spacing-2))`, width: bounds.width + "px", maxHeight: `min(75vh, calc(100vh - ${bounds.bottom}px - var(--ks-spacing-2)))`});
++                };
++                position();
++                const release = scope.activate(element, dismiss);
++                const cleanup = () => {release(); view.removeEventListener("resize", position); view.removeEventListener("scroll", position, true);};
++                nativeFilters.set(node, cleanup);
++                if (mobile) {
++                    view.addEventListener("resize", position);
++                    view.addEventListener("scroll", position, true);
++                    void vue.nextTick(() => {if (nativeFilters.has(node)) position();});
++                }
++            }
++        },
++        remove(node) {
++            nativeFilters.get(node)?.();
++            nativeFilters.delete(node);
++            vue.nodeOps.remove(node);
++        },
++    });
++    return {...renderer, createApp(...args) {
++        const app = renderer.createApp(...args);
++        if (idState) app.provide(options.idInjectionKey, idState);
++        return app;
++    }};
++}
++
++export function shadowOverlayComponents(vue, components, scope) {
++    return Object.fromEntries(Object.entries(components).map(([name, component]) => [name, vue.defineComponent({
++        name: `Shadow${name}`,
++        inheritAttrs: false,
++        setup(_props, {attrs, slots}) {
++            let trigger;
++            const instance = vue.ref();
++            const visible = vue.ref();
++            const mountKey = vue.ref(0);
++            const modal = name === "KsDrawer" || name === "KsDialog";
++            const select = name === "KsSelect";
++            const dropdown = name === "KsDropdown";
++            const notify = (name, ...args) => {
++                const callbacks = attrs[name];
++                for (const callback of Array.isArray(callbacks) ? callbacks : [callbacks]) callback?.(...args);
++            };
++            const registration = modal ? scope.register(() => {
++                if (attrs.beforeClose) attrs.beforeClose(() => notify("onUpdate:modelValue", false));
++                else notify("onUpdate:modelValue", false);
++            }, () => trigger) : undefined;
++            const popup = !modal ? scope.popup(() => {
++                if (select) scope.escapeSelect(popup.id);
++                else if (dropdown) instance.value?.handleClose();
++                else {visible.value = false; notify("onUpdate:visible", false);}
++            }) : undefined;
++            vue.onBeforeUnmount(() => {registration?.dispose(); popup?.dispose();});
++            vue.watch(() => attrs.modelValue, value => {
++                if (modal && value) {trigger = scope.captureTrigger(attrs.triggerElement); mountKey.value++;}
++            }, {immediate: true, flush: "pre"});
++            vue.watch(() => attrs.visible, value => {visible.value = value;});
++            return () => {
++                const attributes = {...attrs};
++                delete attributes.triggerElement;
++                return vue.h(component, {
++                ...attributes,
++                appendTo: scope.portal,
++                appendToBody: false,
++                teleported: true,
++                ref: instance,
++                key: modal ? mountKey.value : undefined,
++                ...(modal ? {
++                    "data-sdk-overlay": registration.id,
++                    lockScroll: false,
++                    closeOnPressEscape: false,
++                } : {
++                    "data-sdk-popup": popup.id,
++                    popperClass: [attrs.popperClass, `sdk-popup-${popup.id}`].filter(Boolean).join(" "),
++                    onVisibleChange(value) {if (value) popup.show(); else popup.hide(); notify("onVisibleChange", value);},
++                    ...(!select && !dropdown ? {
++                        visible: visible.value ?? attrs.visible,
++                        "onUpdate:visible"(value) {visible.value = value; notify("onUpdate:visible", value);},
++                        onShow(...args) {popup.show(); notify("onShow", ...args);},
++                        onHide(...args) {popup.hide(); notify("onHide", ...args);},
++                    } : {}),
++                }),
++            }, slots);
++            };
++        },
++    })]));
++}

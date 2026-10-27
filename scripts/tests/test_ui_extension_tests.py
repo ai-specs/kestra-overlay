@@ -39,7 +39,7 @@ class UiExtensionReportTest(unittest.TestCase):
 
     def test_rejects_failed_pending_or_reduced_totals(self):
         for field, value in (("success", False), ("numFailedTests", 1), ("numPendingTests", 1),
-                             ("numTotalTests", 63), ("numPassedTests", 63)):
+                             ("numTotalTests", 86), ("numPassedTests", 86)):
             report = self.report()
             report[field] = value
             with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):

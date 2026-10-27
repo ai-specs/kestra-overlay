@@ -58,6 +58,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Shared SDK browser adapter regression tests
+        run: node --test scripts/tests/ui-sdk-browser-driver.test.cjs scripts/tests/sdk-browser-diagnostics.test.cjs scripts/rbac-ui-probe/sdk-canonical.test.mjs scripts/rbac-ui-probe/sdk-theme.test.mjs scripts/rbac-ui-probe/sdk-evidence.test.mjs
       - name: Apply patches, compile UI/webserver, build and push candidate
         id: candidate
         env:
@@ -68,6 +70,20 @@ jobs:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
           RBAC_PROBE_OUTPUT: ${{ github.workspace }}/.work/host-extension-probe.jar
         run: bash ./scripts/blackbox-classpath.sh "${{ github.workspace }}/.work/verify" "${{ github.workspace }}/.work/verify/docker/app/kestra" "$CANDIDATE_IMAGE"
+      - name: Preserve own-source inputs for the independent SDK browser job
+        run: |
+          mkdir -p .work/verify/sdk-ci-inputs
+          tar -C .work/verify -czf .work/verify/sdk-ci-inputs/host-ui-sdk-inputs.tar.gz \
+            webserver/src/main/resources/META-INF/kestra/ui-sdk/v1 ui/src/extensions ui/src/utils/csrf.ts
+          (cd .work/verify/sdk-ci-inputs && sha256sum host-ui-sdk-inputs.tar.gz > host-ui-sdk-inputs.sha256)
+      - name: Upload host-owned SDK browser inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-ui-sdk-probe-inputs
+          path: .work/verify/sdk-ci-inputs/
+          include-hidden-files: true
+          if-no-files-found: warn
       - name: Preserve scoped backend test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -84,12 +100,7 @@ jobs:
           path: .work/host-extension-probe.jar
           include-hidden-files: true
           if-no-files-found: error
-      - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
-        env:
-          CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
-          BB_REPORT_DIR: ${{ github.workspace }}/.work/mcp-image-tests
-        run: bash ./scripts/blackbox-mcp-oauth.sh "$CANDIDATE_IMAGE" "${{ github.workspace }}/.work/verify"
-      - name: Preserve UI unit matrix evidence
+      - name: Preserve complete UI unit matrix evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -97,6 +108,11 @@ jobs:
           path: .work/verify/ui/build/reports/ui-extension-tests.json
           include-hidden-files: true
           if-no-files-found: warn
+      - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
+        env:
+          CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
+          BB_REPORT_DIR: ${{ github.workspace }}/.work/mcp-image-tests
+        run: bash ./scripts/blackbox-mcp-oauth.sh "$CANDIDATE_IMAGE" "${{ github.workspace }}/.work/verify"
       - name: Preserve image-only fixture and SDK test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,8 +168,51 @@ jobs:
             .work/ui-extension-*.json
           include-hidden-files: true
           if-no-files-found: error
+  ui-sdk-blackbox:
+    needs: build-push
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-ui-sdk-probe-inputs
+          path: .work/host-ui-sdk-inputs
+      - name: Prepare exact own-source SDK probe inputs and failure report
+        run: |
+          (cd .work/host-ui-sdk-inputs && sha256sum -c host-ui-sdk-inputs.sha256)
+          mkdir -p .work/host-ui-sdk-tree
+          tar -xzf .work/host-ui-sdk-inputs/host-ui-sdk-inputs.tar.gz -C .work/host-ui-sdk-tree
+          node -e 'require("fs").writeFileSync(".work/ui-sdk-browser.json",JSON.stringify({completed:false,passedGate:false,expectedRows:949,rows:[],notRun:949,phase:"probe-build"}))'
+      - name: Build host-owned SDK probe without business plugins
+        env:
+          SDK_DEV_TREE: ${{ github.workspace }}/.work/host-ui-sdk-tree
+        run: bash ./scripts/rbac-ui-probe/sdk-run.sh
+      - name: Run the same complete949-row SDK matrix through Playwright
+        env:
+          UI_SDK_PROBE_DIR: ${{ github.workspace }}/.work/host-ui-sdk-tree/sdk-probe/dist
+          UI_SDK_BROWSER_REPORT: ${{ github.workspace }}/.work/ui-sdk-browser.json
+          UI_SDK_BROWSER_FAILURES: ${{ github.workspace }}/.work/ui-sdk-browser-failures
+          CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
+          NODE_PATH: ${{ runner.temp }}/sdk-browser/node_modules
+        run: |
+          npm install --prefix "$RUNNER_TEMP/sdk-browser" playwright@1.61.1
+          "$RUNNER_TEMP/sdk-browser/node_modules/.bin/playwright" install --with-deps chromium
+          node ./scripts/blackbox-ui-sdk.cjs
+      - name: Preserve SDK matrix including partial failures and document diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-sdk-browser
+          path: |
+            .work/ui-sdk-browser.json
+            .work/ui-sdk-browser-failures/
+          include-hidden-files: true
+          if-no-files-found: error
   promote:
-    needs: [build-push, oidc-blackbox]
+    needs: [build-push, oidc-blackbox, ui-sdk-blackbox]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

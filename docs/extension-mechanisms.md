@@ -1,10 +1,25 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
-2026-10-27 当前44补丁协议候选已通过独立完整local-ci与classpath/OIDC/MCP/两种首装
-及首次强改密码镜像门。该结果不含后续UI SDK扩容，不替代正式CI和镜像推广，也不
-证明插件业务或部署组合交付。以下候选机制须由消费方取得正式通过发布门的对应镜像。
+## 0384 原生组件隔离与导航接线
 
-## REQ-0383 资源 audience 版本门（2026-10-27，主控已接收，候选未发布）
+公开元数据与内置README在2f2984a同步，补丁13文件、b57b59a8，含四项既有sdk.spec
+新增一致性断言；helper/runtime与04dc980逐文件一致。overlayCompatibility声明仅四个
+经公开helper使用的原生组件，raw overlays/popover/未列复杂下拉/KsPagination仍拒绝。
+元数据/说明本身必须作为新构建与完整矩阵输入，不能沿用旧69e11808的executable/hash。
+
+正式64c4498保持44协议契约；0384另提供独立SDK原生组件隔离，helper来源04dc980。
+只适配公开原生组件的ShadowRoot portal/popover/focus/ESC，不复制业务，不改原主题或
+关闭动画。生命周期保留V1，增加冻结query/fullPath与可选异步导航确认，安全abort清理。
+独立probe与CI调用同一949模块，包含sdk-theme稳定终态等待与13behavior，不删矩阵。
+历史11文件输入69e11808/build02d12978的完整local-ci、真实镜像门及双工具同949已
+通过；后续公开元数据修订必须按新hash重验。公开支持边界由打包SDK声明，消费必须
+选择对应提交CI和推广均成功的正式镜像，不将历史本地成功写成新输入已发布。
+
+协议44补丁已随64c4498通过CI40523539018并推广bebf7a7c...177a22e镜像。该发布不含
+后续UI SDK扩容，不证明插件业务或部署组合交付。下方历史候选记录只描述其指定阶段，
+不得覆盖该正式协议状态；消费方仍须取得包含目标契约且通过发布门的对应镜像。
+
+## REQ-0383 资源 audience 版本门（64c4498已发布）
 
 `ApplicationGroupProtocolProjectionV2` 复用唯一 classpath provider 发现槽和同一事务连接，
 不新建组表。V2 的 `currentResources` 返回可为空的精确 resourceAudiences；V1 `current`
@@ -19,7 +34,7 @@ consent 提交在同一安全锁事务中、标准身份行锁前复查资源；
 写入全部回滚。版本化公开使用与安全矩阵见 `r-oidc-server.md` REQ-0383；定向门不替代
 完整 local-ci、正式 CI、镜像发布和部署仓浏览器组合门。
 
-## 2026-10-27 账号与凭据候选接线（未发布）
+## 账号与凭据接线（64c4498已发布）
 
 REQ-0380–0382 复用已有 PostgreSQL 事务级安全锁和 classpath 唯一 provider。宿主拥有
 事务，参与者借用连接，不 commit/rollback/close，不自开第二连接检查；READ_COMMITTED，

@@ -108,3 +108,30 @@ patch > "$fixture/patches/webserver/0020-second.patch" <<'EOF'
 +changed
 EOF
 run_case pass 'multiple hunks preserve untouched provenance between edits'
+patch > "$fixture/patches/webserver/0010-first.patch" <<'EOF'
+@@ -1,5 +1,5 @@
+ one
+
+ three
+ four
+-five
++first
+EOF
+patch > "$fixture/patches/webserver/0020-second.patch" <<'EOF'
+@@ -2,3 +2,3 @@
+
+-three
++middle
+ four
+EOF
+printf 'one\n\nthree\nfour\nfive\n' > "$fixture/fixture.txt"
+(cd "$fixture" && git apply --check patches/webserver/0010-first.patch && git apply patches/webserver/0010-first.patch && git apply --check patches/webserver/0020-second.patch)
+run_case pass 'bare empty context preserves untouched original line provenance'
+patch > "$fixture/patches/webserver/0020-second.patch" <<'EOF'
+@@ -4,2 +4,2 @@
+ four
+-first
++second
+EOF
+(cd "$fixture" && git apply --check patches/webserver/0020-second.patch)
+run_case fail 'bare empty context still rejects rewriting a preceding added line'
