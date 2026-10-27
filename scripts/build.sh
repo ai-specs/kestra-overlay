@@ -66,7 +66,8 @@ python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/webserver/build
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions --reporter=default --reporter=json --outputFile=build/reports/ui-extension-tests.json)
+python3 "$PWD/scripts/check-ui-extension-tests.py" "$WORK/ui/build/reports/ui-extension-tests.json"
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 
 echo "== compile webserver executable jar (thin-patched upstream) =="

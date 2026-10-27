@@ -1,6 +1,157 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 2026-10-27 协议44补丁发布候选验证
+
+本轮只接收0380–0383及必要协议钩子修复，不包含后续UI SDK扩容。固定BASE独立重放
+44补丁并执行完整local-ci通过：后端364项中362通过、2项因运行镜像前置中止，失败0；
+原UI8文件64项全部通过。随后独立构建44镜像，classpath发现、OIDC35项和真实MCP
+四次专项全部通过，镜像专项实际执行了前述两项，不把local-ci中止计为通过。
+两种生产首装分别完成目录HTTP22项、扩展入口7项、认证主题26项、语言52项及首次
+强改密码215项，全部通过；拒绝、刷新、导航、退出、重启与缺投影零授权回归均保留。
+以上只说明当前44候选本地证据，不是正式CI、镜像推广或独立插件组合验收结果。
+下方旧阶段“未运行”的文字保留其历史语境，本节优先；正式发布仍必须核对对应提交。
+
+## REQ-0380–0382 账号与 client 凭据生命周期（2026-10-27，授权实施、候选未发布）
+
+消费项目为 `kestra-plugin-rbac`。R24 同连接删除、R25 维护轮换为部署主控裁决，维护者
+可以复核设计。本节不表示接口、测试或镜像已经发布。宿主只处理标准身份和认证凭据；
+组、授予、最后管理员规则、管理权限和业务页面仍归扩展，不复制组业务。
+
+### 实际缺口与现有机制
+
+基线 `c2390ff22705135ba2773bce23aab27bb4e9472b` 的 `UserDirectoryV1` 无删除和临时
+密码创建；内部 delete 自开连接，不能和插件清理原子提交。`password_change_required`
+只有建表定义，登录未消费。内部 updateSecret 无公开修订、提示和维护阶段；owner API
+不是实例凭据管理。这些为源码缺失证据，不是已执行的新功能失败测试。
+
+复用 `OidcProtocolStateV1.lockSecurityState` 和同连接 guard，不另建组锁表。
+`TrustedIdentityV1.current()` 自开连接并取得同一锁，不能在已持锁参与者中调用以完成
+同连接重验。现有 guard 没有账号删除事件和明确可信操作者。
+
+### 版本化公开候选
+
+| 契约 | 方法/DTO | 最小职责 |
+|---|---|---|
+| `UserDirectoryV2` | 继承 V1；`createTemporary(username,name,email)` → `TemporaryUser(user,temporaryPassword)`；`delete(subject,revision)` | 宿主生成临时密码，仅本次返回；宿主拥有删除事务 |
+| `TrustedIdentityV2` | 继承 V1；`current(Connection)` → 既有 `Identity` | 当前已认证请求在借用连接重验账号/client/投影；任意 DTO 不能自证身份 |
+| `IdentityLifecycleParticipantV1` | `beforeChange(Connection,Change)`，含操作、目标、可信 actor | 唯一 provider；插件同连接重验业务授权和最后管理员，删除时清理所有组授予 |
+| `ClientCredentialsV1` | `status(clientId)` → `CredentialStatus(clientId,clientType,secretSet,maskedHint,credentialRevision,rotationMode)`；`rotate(clientId,revision)` → `IssuedCredential` | 无旧明文/哈希；public 和配置登录 client 在线轮换拒绝 |
+
+候选仅供插件设计，不能用于正式编译。V1 保留签名；组功能开启时生产账号变更要求新
+参与者，不退回只实现旧 guard 的插件。因此宿主与插件必须按发布顺序选择匹配组合。
+最终签名和稳定错误以实现、独立
+探针及 README 为准。类型、版本变化必须同步文档，不静默修改旧 create 的输入语义。
+
+### 安全与失败规则
+
+变更使用 READ_COMMITTED；公开安全锁→插件目录→插件策略→标准身份行锁。actor 在同
+连接重验。组功能开启时参与者缺失/重复/异常失败关闭；扩展写入与宿主清理一起提交或
+回滚，拒绝删除当前 actor。账号删除不删历史执行和审计；持久退役 subject 禁止同名
+重建复活旧凭据，不修改现有 subject 等于登录名的契约。
+
+临时密码只建立短期受限改密交互，不产生正常 IdP/UI 会话或 code/token。改密必须检查
+单次交互、同源 Origin、原认证版本和密码边界；成功原子清除强改标记、推进认证版本，
+销毁交互后重新生产登录。退出可用；重放、故障、旧版本和弱密码均不签发正常会话。
+
+R20 提示在生成/轮换时以头3字符和尾4字符与哈希同事务保存。历史缺提示为 null，显示
+“已设置，提示不可用”，不得从哈希猜测。轮换比较 credentialRevision，不自动重试；
+新值仅本次返回，响应丢失只能再轮换。普通轮换不改变已签发用户 token 的有效期。
+
+配置登录 client 仅走宿主维护 CLI：prepare 生成待激活版本且旧登录仍有效；cancel
+丢弃待激活材料；停止 JVM、同步消费配置后 activate 比较版本替换有效哈希；失败使用
+专用 rollback 恢复匹配旧配置；真实登录成功后 confirm 清除回退材料。不长期接受双值。
+CLI 不读取插件业务表，不经 HTTP 暴露维护材料；URL、日志、异常和报告不得泄密。
+
+### 必需测试与发布门
+
+#### T7 普通 confidential client 登记前置（2026-10-27，主控已接收，候选未发布）
+
+README 的“confidential client 需要由部署方预先注册”未给出通用公开入口。当前正式配置
+只注册首装登录 client；标准 DCR 只支持 public，现有公开/维护 CLI 无普通 confidential
+登记。因此仅通过内部 create 或测试 SQL 建行不能作为 new-install 的真实 T7 输入。
+
+最小候选是在通用维护 CLI 增加 `register-confidential`，输入 clientId、ownerSubject、
+精确 redirectUris、标准 grantTypes 和 protocol scopes，不接收组/角色/权限/应用声明。
+宿主核对安装凭据和 issuer、实际存在可登录 owner、当前配置登录 client 排除、输入长度
+和回调安全、允许协议 scope、数量限制及重复 client 冲突；生成高熵 secret，在同一公开
+安全锁事务中保存标准 owner 注册、哈希、头3尾4提示及 credentialRevision=1，只本次下发。
+不增加在线管理 UI，不把普通登记当 UI 配置客户端，不修改已有 client 或读取插件表。
+
+必须独立测试真实 CLI 登记→生产 authorize/PKCE/token→轮换新旧值、重复不覆盖、错误
+owner/安装/回调/协议项/配置登录client拒绝无副作用、并发冲突、public语义不变和脱敏。
+根仓只可在正式镜像发布后使用此入口准备 T7，不把候选类或内部方法当正式输入。
+主控已接收此窄范围标准机制补足，纳入 REQ-0382；不扩大为业务管理 UI。
+
+0380 必须验证同连接重验、参与者唯一性、写后抛错/宿主删除失败全部回滚、并发管理员
+互删/停用、当前主体拒删、退役 subject、认证数据清理和历史保留。0381 必须验证一次性
+临时密码、生产受限改密、Origin/CSRF/重放/旧版本/弱密码拒绝、改密后真实登录。
+0382 必须验证 public/登录 client 在线拒绝、哈希提示修订原子变化、并发冲突、新旧值、
+历史无提示、token 有效期不变、维护 prepare/cancel/activate/rollback/confirm 全链。
+全部包含真实 PostgreSQL/HTTP；拒绝必须比较副作用，不能只看状态码。
+
+宿主使用自己的最小参与者，不读取/构建真实插件。完整本地门→主控审查→独立 CI 与
+正式发布→插件从正式 digest 独立编译→根仓正式组合真实 UI/OAuth/MCP、缺组件与关闭
+回归。当前没有新增通过或发布证据，不能沿用旧 CI 证明此提案已交付。
+
 ## 应用组职责纠正提案（2026-10-21，源代码归属已纠正，功能验收与发布未通过）
+
+### REQ-0383：R19 资源 Audience 与登录受众分离（2026-10-27，主控已接收，候选未发布）
+
+消费项目为 `kestra-plugin-rbac`。主控原型实测已有 public client 的资源 audiences 为空
+可以登记，详情显示空态；当前正式协议投影却要求 approved 时 audiences 非空。插件
+业务输入与宿主协议语义需要分别纠正，不能为表单方便直接删掉宿主 aud 校验。本轮
+0380–0382 不承担 Audience 语义变更；独立 REQ-0383 已由主控接收实施，仍须独立发布。
+
+可核对源码：0370 的 `ApplicationGroupProtocolProjectionV1.Projection` 拒绝
+`approved && audiences.isEmpty()`；0362 的 `OidcTrustedIdentity.validateCurrent` 先要求
+投影 audiences 包含全部已验证 token aud，再对 UI 要求精确 `{clientId}`、对 MCP Bearer
+要求精确 `{resource}`。两种受众的集合语义混在同一字段。
+
+当前真实签发不是“未请求 resource 就没有 aud”：`OidcTokenService.issueAccessToken`
+明确 `.audience(List.of(resource == null ? clientId : resource))`；`issueIdToken` 的
+IDTokenClaimsSet 始终以 clientId 为 audience。`validateApplicationGroupAudience` 在
+resource 为空时仍要求投影包含 clientId，带 resource 时要求包含该 resource；现有 token
+在线复查同样用投影包含 JWT aud。以上都是指定源码事实，本轮未以新镜像复测。
+
+最小候选新增 `ApplicationGroupProtocolProjectionV2`，把 `resourceAudiences` 明确定义为
+“应用允许的资源 audience 集合”，允许空集，
+仍逐值拒绝空字符串/控制字符/通配符。不得把 clientId 自动填进资源列表，也不得把
+空资源列表解释为全域。V1 的 DTO、approved 非空 audience 及其包含登录 audience 的
+语义保持原样，不静改已发布 V1。V2 继承 V1 仅用于既有唯一 provider 发现槽，提供
+`currentResources(Connection, V1.Request)` → V2.Result；V1 的 `current` 在 V2 实现中
+默认明确拒绝，不把空资源集伪装成含 clientId 的 V1 投影。V2.Result 的 contractVersion=2，
+其 Projection 复用 V1 的请求字段及 scope 元数据，只将资源字段命名为 resourceAudiences。
+插件只实现一个版本的 provider，重复实例继续拒绝。不得将未发布类型作为插件编译输入。
+
+| 已验证凭据用途 | 最小候选校验（其余签名/issuer/账号/client/组/epoch/scope 检查保持） |
+|---|---|
+| ID token / 配置 UI 会话 | token aud 必须精确为当前已验证 clientId；UI 仍要求当前配置登录 client，不依赖资源列表是否包含 clientId |
+| 未带 resource 的标准 access token | 维持现有线上 aud={clientId}，逐项核对 token client_id、标准注册和请求目标；不制造资源授权，也不把 clientId 写入资源列表 |
+| 带 resource 的 access token | 请求 resource 必须精确属于资源列表，JWT aud 必须精确对应资源；空列表拒绝 |
+| MCP | 继续要求当前 Bearer、精确资源 URL/audience、当前标准 client 和业务授权；普通无 resource 的 access token 仍不可调用 MCP |
+
+所有签发、授权码绑定、refresh、已有 token 在线复查和 UI 当前身份读取使用同一版本门。
+V2 组 claim 追加签名字段 `audience_contract_version=2`，不改变 claim 的组 ID、epoch、
+issuer 或协议 scope。V2 code/refresh 使用 `application-group-v2.<组ID>.<epoch>.` 前缀；
+V1 的无标记 claim 和 v1 前缀仍只对应 V1。provider 在 V1/V2 间切换时旧组 code/refresh/
+access/UI 身份因版本不匹配而拒绝，用户必须重新生产登录，不自动转换。V2 带资源 access 另签名
+精确 `resource`，无资源 access 和 ID token 不附加该值；JWT aud 分别仍为精确资源或clientId。
+旧 code/refresh 不得凭新解释扩大资源范围；资源列表收窄后旧带资源
+凭据继续按当前投影拒绝。元数据空态不赋权，不改变 protocol scope 与应用 scope 分层。
+
+拟定独立正反探针：① approved 且资源空集的纯投影合法；② 标准登录和配置 UI 的精确
+clientId audience 成功，错误/额外 client audience 拒绝；③ 未请求 resource 的 access JWT
+仍是 clientId，普通非 UI client 不因字段为空成为 UI client；④ 空资源集合拒绝所有
+resource 签发和 MCP，不能产生 token/code 副作用；⑤ 单一已登记精确资源允许，错路径/
+尾斜线/额外 aud/资源外请求拒绝；⑥ refresh 与在线复查覆盖空→非空、非空→空及撤权，
+旧凭据不自动扩权；⑦ 错 issuer/client/组/epoch、缺失重复投影、存储异常和关闭功能
+回归。必须包含真实 PostgreSQL、生产签发/验签和 HTTP/MCP 拒绝无副作用。
+
+候选实现已覆盖生产预览、consent 提交前同连接复查、code 资源绑定、签发、refresh、
+在线复查与可信 UI/MCP 身份。预览拒绝不创建 consent/code/token；consent 期间资源
+撤销时不消费交互，不创建 code/token。code 签发还重新核对其持久资源，不能把无资源
+code 在资源登记扩张后换成资源 token。候选定向测试不替代完整 CI、正式镜像或部署仓
+浏览器/真实业务组合验收；先宿主正式发布，再插件消费，不绕过本轮 UI 正式输入缺口。
 
 ### 2026-10-22 当前状态
 

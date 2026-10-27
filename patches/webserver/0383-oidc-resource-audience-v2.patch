@@ -1,0 +1,667 @@
+# 需求: REQ-0383 R19版本化资源audience与登录audience分离，资源空集不补clientId
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；主控已接收，候选未发布
+# 来源: 新写；RFC6749、OIDC Core 1.0、RFC8707；保留已发布V1语义，新增V2及独立PG/HTTP探针
+# 触达上游文件: 7 个（公开资源投影、可信身份版本门、契约/PG/HTTP/MCP拒绝回归；协议钩子归0150/0160/0190）
+# 移除条件: 上游提供等价版本化资源投影及签发与在线受众分离机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2.java
+new file mode 100644
+index 0000000..8a359c0
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2.java
+@@ -0,0 +1,61 @@
++package io.kestra.webserver.oidc;
++
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Objects;
++import java.util.Optional;
++import java.util.Set;
++
++public interface ApplicationGroupProtocolProjectionV2 extends ApplicationGroupProtocolProjectionV1 {
++    int CONTRACT_VERSION = 2;
++
++    Result currentResources(Connection connection, Request request) throws SQLException;
++
++    @Override
++    default ApplicationGroupProtocolProjectionV1.Result current(Connection connection, Request request) throws SQLException {
++        throw new SQLException("Resource projection requires contract V2");
++    }
++
++    record Projection(String applicationGroupId, String tenant, String issuer, String clientId, String subject,
++                      boolean active, boolean approved, long revision, long authorizationVersion,
++                      Set<String> resourceAudiences, List<Scope> scopes, Set<String> supportedScopeKeys,
++                      Set<String> grantedScopeKeys) {
++        public Projection {
++            if (applicationGroupId == null || !applicationGroupId.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))
++                throw new IllegalArgumentException("Invalid group id");
++            OidcProtocolValues.opaque(tenant); OidcProtocolValues.issuer(issuer);
++            OidcProtocolValues.opaque(clientId); OidcProtocolValues.opaque(subject);
++            if (revision <= 0 || authorizationVersion <= 0) throw new IllegalArgumentException("Invalid group versions");
++            resourceAudiences = Set.copyOf(resourceAudiences); scopes = List.copyOf(scopes);
++            supportedScopeKeys = Set.copyOf(supportedScopeKeys); grantedScopeKeys = Set.copyOf(grantedScopeKeys);
++            resourceAudiences.forEach(OidcProtocolValues::opaque);
++            if (resourceAudiences.stream().anyMatch(value -> value.contains("*")))
++                throw new IllegalArgumentException("Exact resource audiences required");
++            var keys = new HashSet<String>(); var names = new HashSet<String>();
++            for (var scope : scopes) if (!keys.add(scope.key()) || !names.add(scope.name()))
++                throw new IllegalArgumentException("Duplicate scope key or name");
++            if (!keys.containsAll(supportedScopeKeys) || !keys.containsAll(grantedScopeKeys))
++                throw new IllegalArgumentException("Undefined scope reference");
++        }
++
++        public Set<String> eligibleScopeKeys(Request request) {
++            if (!issuer.equals(request.issuer()) || !tenant.equals(request.tenant()) || !clientId.equals(request.clientId())
++                || !subject.equals(request.subject()) || request.expectedApplicationGroupId() != null
++                && !applicationGroupId.equals(request.expectedApplicationGroupId()))
++                throw new IllegalArgumentException("Protocol projection target mismatch");
++            if (!active || !approved) return Set.of();
++            var eligible = new HashSet<>(supportedScopeKeys); eligible.retainAll(grantedScopeKeys);
++            return Set.copyOf(eligible);
++        }
++    }
++
++    record Result(int contractVersion, boolean activated, Optional<Projection> projection) {
++        public Result {
++            Objects.requireNonNull(projection);
++            if (contractVersion != CONTRACT_VERSION || !activated && projection.isPresent())
++                throw new IllegalArgumentException("Invalid resource projection state");
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcApplicationGroupProjection.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcApplicationGroupProjection.java
+new file mode 100644
+index 0000000..bf151cb
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcApplicationGroupProjection.java
+@@ -0,0 +1,45 @@
++package io.kestra.webserver.oidc.services;
++
++import io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1;
++import io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV2;
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.Map;
++import java.util.Optional;
++import java.util.Set;
++
++final class OidcApplicationGroupProjection {
++    static final String AUDIENCE_VERSION = "audience_contract_version";
++
++    private OidcApplicationGroupProjection() {}
++
++    record State(int contractVersion, boolean activated, Optional<ApplicationGroupProtocolProjectionV2.Projection> projection) {}
++
++    static State current(ApplicationGroupProtocolProjectionV1 provider, Connection connection,
++                         ApplicationGroupProtocolProjectionV1.Request request) throws SQLException {
++        if (provider instanceof ApplicationGroupProtocolProjectionV2 resources) {
++            var result = resources.currentResources(connection, request);
++            if (result == null || result.contractVersion() != 2) throw new SQLException("Invalid resource projection");
++            return new State(2, result.activated(), result.projection());
++        }
++        var result = provider.current(connection, request);
++        if (result == null || result.contractVersion() != 1) throw new SQLException("Invalid protocol projection");
++        return new State(1, result.activated(), result.projection().map(value -> new ApplicationGroupProtocolProjectionV2.Projection(
++            value.applicationGroupId(), value.tenant(), value.issuer(), value.clientId(), value.subject(), value.active(),
++            value.approved(), value.revision(), value.authorizationVersion(), value.audiences(), value.scopes(),
++            value.supportedScopeKeys(), value.grantedScopeKeys())));
++    }
++
++    static void requireVersion(Map<?, ?> claim, int version) {
++        Object marker = claim.get(AUDIENCE_VERSION);
++        if (version == 1 ? marker != null : !(marker instanceof Number) || !"2".equals(marker.toString()))
++            throw new IllegalStateException("Audience contract changed; authenticate again");
++    }
++
++    static boolean audienceAllowed(ApplicationGroupProtocolProjectionV2.Projection projection, int version,
++                                   String clientId, String resource, Set<String> audiences) {
++        if (version == 1) return !audiences.isEmpty() && projection.resourceAudiences().containsAll(audiences);
++        return audiences.equals(Set.of(resource == null ? clientId : resource))
++            && (resource == null || projection.resourceAudiences().contains(resource));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
+index da663d7..060cf0b 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
+@@ -78,8 +78,8 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+                 if(projections.isPresent()) {
+                     if(!projections.isUnique())throw denied();
+                     var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,authentication.getName(),null);
+-                    var result=projections.get().current(connection,target);
+-                    if(result==null || result.contractVersion()!=1 || result.activated() || result.projection().isPresent())throw denied();
++                    var result=OidcApplicationGroupProjection.current(projections.get(),connection,target);
++                    if(result.activated() || result.projection().isPresent())throw denied();
+                 }
+                 connection.commit();
+             }catch(SQLException|RuntimeException failure) {
+@@ -119,17 +119,20 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+                     || account.authenticationVersion()!=authenticationVersion)throw denied();
+                 var client=protocol.client(connection,target.issuer(),target.clientId()).orElseThrow(OidcTrustedIdentity::denied);
+                 if(!client.issuer().equals(target.issuer()) || !client.clientId().equals(target.clientId()) || !client.active())throw denied();
+-                var result=projections.get().current(connection,target);
+-                if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION || !result.activated())throw denied();
++                var result=OidcApplicationGroupProjection.current(projections.get(),connection,target);
++                if(!result.activated())throw denied();
++                OidcApplicationGroupProjection.requireVersion(claim,result.contractVersion());
+                 var projection=result.projection().orElseThrow(OidcTrustedIdentity::denied);
+                 var allowed=projection.eligibleScopeKeys(target);
+                 if(!projection.active() || !projection.approved() || projection.authorizationVersion()!=epoch
+-                    || audiences.isEmpty() || !projection.audiences().containsAll(audiences) || !allowed.containsAll(scopes))throw denied();
++                    || audiences.isEmpty() || !allowed.containsAll(scopes))throw denied();
+                 var request=AuthorizationInvocationContext.currentRequest().orElse(null);
+                 var bearer=request==null?null:request.getAttribute("io.kestra.mcp.authentication",Authentication.class).orElse(null);
+                 if(bearer!=null) {
+                     if(bearer!=authentication || !audiences.equals(Set.of(text(authentication.getAttributes().get("resource")))))throw denied();
+                 }else if(!client.configuredLoginClient() || !audiences.equals(Set.of(target.clientId())))throw denied();
++                String resource=bearer==null?null:text(authentication.getAttributes().get("resource"));
++                if(!OidcApplicationGroupProjection.audienceAllowed(projection,result.contractVersion(),target.clientId(),resource,audiences))throw denied();
+                 var vocabulary=new HashSet<>(Set.of("openid","profile","email","offline_access"));
+                 vocabulary.addAll(configuration.getMcpScopes());
+                 if(!vocabulary.containsAll(protocols) || !client.registeredScopes().containsAll(protocols)
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2Test.java
+new file mode 100644
+index 0000000..214172c
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2Test.java
+@@ -0,0 +1,62 @@
++package io.kestra.webserver.oidc;
++
++import java.util.List;
++import java.util.Optional;
++import java.util.Set;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class ApplicationGroupProtocolProjectionV2Test {
++    @Test void micronautDiscoversOneV2ProviderThroughTheExistingV1Slot() {
++        try(var context=io.micronaut.context.ApplicationContext.run(java.util.Map.of("oidc.resource.projection.discovery.test",true))) {
++            var providers=context.getBean(Consumer.class).providers();
++            assertTrue(providers.isPresent());assertTrue(providers.isUnique());
++            assertInstanceOf(ApplicationGroupProtocolProjectionV2.class,providers.get());
++            assertSame(context.getBean(ApplicationGroupProtocolProjectionV2.class),providers.get());
++        }
++    }
++
++    private static ApplicationGroupProtocolProjectionV2.Projection projection(Set<String> resources) {
++        return new ApplicationGroupProtocolProjectionV2.Projection("group","main","https://issuer.example","client","subject",true,true,
++            1,1,resources,List.of(new ApplicationGroupProtocolProjectionV1.Scope("read","Reader","")),Set.of("read"),Set.of("read"));
++    }
++
++    @Test void approvedV2AllowsEmptyResourcesWithoutInventingClientAudience() {
++        var projection=projection(Set.of());assertEquals(Set.of(),projection.resourceAudiences());
++        assertEquals(Set.of("read"),projection.eligibleScopeKeys(new ApplicationGroupProtocolProjectionV1.Request("https://issuer.example","main","client","subject",null)));
++        assertThrows(UnsupportedOperationException.class,()->projection.resourceAudiences().add("client"));
++    }
++
++    @Test void v1StillRejectsEmptyApprovedAudienceAndV2CannotBeReadAsV1() {
++        assertThrows(IllegalArgumentException.class,()->new ApplicationGroupProtocolProjectionV1.Projection("group","main","https://issuer.example","client","subject",true,true,
++            1,1,Set.of(),List.of(),Set.of(),Set.of()));
++        ApplicationGroupProtocolProjectionV2 provider=(connection,request)->new ApplicationGroupProtocolProjectionV2.Result(2,true,Optional.of(projection(Set.of())));
++        assertThrows(java.sql.SQLException.class,()->provider.current(null,new ApplicationGroupProtocolProjectionV1.Request("https://issuer.example","main","client","subject",null)));
++    }
++
++    @Test void resourceValuesRemainExactAndRejectBlankControlAndWildcard() {
++        for(String invalid:List.of(""," "," resource","resource ","resource\n","https://example/*"))
++            assertThrows(IllegalArgumentException.class,()->projection(Set.of(invalid)));
++        assertEquals(Set.of("https://example/resource"),projection(Set.of("https://example/resource")).resourceAudiences());
++    }
++
++    @Test void wrongVersionTargetAndInactiveResultCannotSupplyIdentity() {
++        assertThrows(IllegalArgumentException.class,()->new ApplicationGroupProtocolProjectionV2.Result(1,true,Optional.of(projection(Set.of()))));
++        assertThrows(IllegalArgumentException.class,()->new ApplicationGroupProtocolProjectionV2.Result(2,false,Optional.of(projection(Set.of()))));
++        assertThrows(IllegalArgumentException.class,()->projection(Set.of()).eligibleScopeKeys(
++            new ApplicationGroupProtocolProjectionV1.Request("https://issuer.example","main","other","subject",null)));
++    }
++
++    @io.micronaut.context.annotation.Factory
++    @io.micronaut.context.annotation.Requires(property="oidc.resource.projection.discovery.test",value="true")
++    static class Beans {
++        @jakarta.inject.Singleton Consumer consumer(io.micronaut.context.BeanProvider<ApplicationGroupProtocolProjectionV1> providers) {
++            return new Consumer(providers);
++        }
++        @jakarta.inject.Singleton ApplicationGroupProtocolProjectionV2 projection() {
++            return (connection,request)->new ApplicationGroupProtocolProjectionV2.Result(2,false,Optional.empty());
++        }
++    }
++
++    record Consumer(io.micronaut.context.BeanProvider<ApplicationGroupProtocolProjectionV1> providers) {}
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudienceFixture.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudienceFixture.java
+new file mode 100644
+index 0000000..16ca168
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudienceFixture.java
+@@ -0,0 +1,71 @@
++package io.kestra.webserver.oidc;
++
++import com.nimbusds.oauth2.sdk.Scope;
++import io.kestra.webserver.oidc.services.*;
++import io.micronaut.context.BeanProvider;
++import java.sql.Connection;
++import java.util.List;
++import java.util.Optional;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicReference;
++
++final class OidcResourceAudienceFixture implements AutoCloseable {
++    static final String RESOURCE="http://localhost/api/v1/main/mcp/default";
++    final OidcCredentialsFixture credentials=new OidcCredentialsFixture();
++    final AtomicReference<Set<String>> audiences=new AtomicReference<>(Set.of());
++    final AtomicReference<ApplicationGroupProtocolProjectionV1> projection=new AtomicReference<>();
++    long epoch=1;
++    String group="group";
++    String issuer="http://localhost";
++    boolean active=true;
++    boolean unique=true;
++    boolean present=true;
++    boolean broken=false;
++    final BeanProvider<ApplicationGroupProtocolProjectionV1> providers=new BeanProvider<>() {
++        public ApplicationGroupProtocolProjectionV1 get(){return projection.get();}
++        public boolean isUnique(){return unique;}
++        public boolean isPresent(){return present;}
++    };
++    final OidcTokenService tokens;
++    final OidcAuthorizationCodeService codes;
++
++    OidcResourceAudienceFixture() throws Exception {
++        projection.set(new ApplicationGroupProtocolProjectionV2() {
++            public Result currentResources(Connection connection,Request request) throws java.sql.SQLException {
++                if(broken)throw new java.sql.SQLException("Test projection unavailable");
++                org.junit.jupiter.api.Assertions.assertFalse(connection.getAutoCommit());
++                return new Result(2,true,Optional.of(new Projection(group,"main",issuer,request.clientId(),request.subject(),
++                    active,true,1,epoch,audiences.get(),List.of(new Scope("read","Reader","")),Set.of("read"),Set.of("read"))));
++            }
++        });
++        tokens=new OidcTokenService(credentials.source,credentials.mapper,credentials.configuration,
++            new OidcJwkService(credentials.source),providers,null,credentials.protocol);
++        var enabled=OidcTokenService.class.getDeclaredField("applicationGroups");enabled.setAccessible(true);enabled.set(tokens,true);
++        codes=new OidcAuthorizationCodeService(credentials.source,credentials.mapper,credentials.configuration);
++    }
++
++    String code(String clientId,String resource) throws Exception {
++        var raw=codes.createForSession(0,clientId,"owner","https://client.example/callback",List.of("openid","read"),null,null,"nonce");
++        try(var connection=credentials.source.getConnection();var statement=connection.prepareStatement("UPDATE oidc_authorization_code SET resource=? WHERE code=?")) {
++            statement.setString(1,resource);statement.setString(2,raw.getValue());statement.executeUpdate();
++        }
++        return tokens.bindApplicationGroupCode(raw.getValue(),clientId,"owner",List.of("openid","read"));
++    }
++
++    com.nimbusds.openid.connect.sdk.token.OIDCTokens issue(String clientId,String resource) throws Exception {
++        String code=code(clientId,resource);
++        codes.consume(code,clientId,"https://client.example/callback",null,resource);
++        return tokens.issueAuthorizationTokens(clientId,user(),new Scope("openid","read"),resource,"nonce",code);
++    }
++
++    OidcUserService.OidcUser user() {return new OidcUserService(credentials.source,credentials.mapper).bySubject("owner").orElseThrow();}
++
++    long count(String table) throws Exception {
++        if(!Set.of("oidc_token","oidc_authorization_code","oidc_consent").contains(table))throw new IllegalArgumentException();
++        try(var connection=credentials.source.getConnection();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT count(*) FROM "+table)) {
++            rows.next();return rows.getLong(1);
++        }
++    }
++
++    public void close() throws Exception {credentials.close();}
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudienceHttpTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudienceHttpTest.java
+new file mode 100644
+index 0000000..6c5b8b3
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudienceHttpTest.java
+@@ -0,0 +1,167 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.webserver.oidc.services.*;
++import io.kestra.webserver.mcp.McpResourceUrl;
++import io.micronaut.context.annotation.Factory;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import java.net.URI;
++import java.net.URLEncoder;
++import java.net.URLDecoder;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.util.Base64;
++import java.util.List;
++import java.util.Set;
++import java.util.regex.Pattern;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.oidc.enabled",value="true")
++@Property(name="kestra.oidc.issuer",value="http://localhost")
++@Property(name="kestra.rbac.application-groups.enabled",value="true")
++@Property(name="kestra.rbac.enabled",value="true")
++@Property(name="kestra.rbac.typed.enabled",value="true")
++@Property(name="kestra.rbac.evaluation.enabled",value="true")
++@Property(name="micronaut.security.enabled",value="false")
++@Property(name="oidc.resources.http.test",value="true")
++class OidcResourceAudienceHttpTest extends OidcPostgresTestBase {
++    private static OidcResourceAudienceFixture fixture;
++    @Inject EmbeddedServer server;
++    private final HttpClient client=HttpClient.newHttpClient();
++
++    private static synchronized OidcResourceAudienceFixture fixture() {
++        try {if(fixture==null)fixture=new OidcResourceAudienceFixture();return fixture;}
++        catch(Exception failure) {throw new IllegalStateException("HTTP resource fixture unavailable",failure);}
++    }
++    @BeforeEach void resetResources() {fixture().audiences.set(Set.of());}
++    @AfterAll static void closeFixture() throws Exception {if(fixture!=null)fixture.close();fixture=null;}
++
++    @Test void productionUiLoginWithEmptyResourcesIssuesClientAudienceAndMcpRejectsWithoutSideEffects() throws Exception {
++        String code=authorizationCode(authorize("ui-maintenance",null,login()));
++        var response=token("ui-maintenance","OriginalUiSecret123!",code,null);
++        assertEquals(200,response.statusCode(),response.body());
++        var json=fixture().credentials.mapper.readTree(response.body());
++        var claims=fixture().tokens.validateAccessToken(json.path("access_token").asText());
++        assertEquals(List.of("ui-maintenance"),claims.getAudience());
++        var identity=com.nimbusds.jwt.SignedJWT.parse(json.path("id_token").asText()).getJWTClaimsSet();
++        assertEquals(List.of("ui-maintenance"),identity.getAudience());
++        var trusted=new OidcTrustedIdentity(fixture().providers,fixture().credentials.protocol,fixture().credentials.configuration,fixture().credentials.source);
++        assertEquals(Set.of("ui-maintenance"),trusted.validate(io.micronaut.security.authentication.Authentication.build("owner",List.of(),identity.getClaims())).audiences());
++        long before=fixture().count("oidc_token");
++        var mcp=client.send(HttpRequest.newBuilder(server.getURI().resolve("/api/v1/main/mcp/default"))
++            .header("Authorization","Bearer "+json.path("access_token").asText()).header("Content-Type","application/json")
++            .POST(HttpRequest.BodyPublishers.ofString("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}" )).build(),HttpResponse.BodyHandlers.ofString());
++        assertEquals(401,mcp.statusCode(),mcp.body());assertTrue(mcp.body().contains("invalid_token"));
++        assertEquals(before,fixture().count("oidc_token"));
++    }
++
++    @Test void emptyResourcesDenyAuthorizeBeforeConsentAndCodeCreation() throws Exception {
++        fixture().credentials.register("http-resource-empty");String session=login();
++        long codes=fixture().count("oidc_authorization_code"),tokens=fixture().count("oidc_token"),consents=fixture().count("oidc_consent");
++        var response=authorize("http-resource-empty",OidcResourceAudienceFixture.RESOURCE,session);
++        assertEquals(307,response.statusCode(),response.body());assertTrue(response.headers().firstValue("location").orElseThrow().contains("error=invalid_scope"));
++        assertEquals(codes,fixture().count("oidc_authorization_code"));assertEquals(tokens,fixture().count("oidc_token"));
++        assertEquals(consents,fixture().count("oidc_consent"));
++    }
++
++    @Test void resourceRemovalDuringConsentRejectsWithoutNewCodeTokenOrConsumedInteraction() throws Exception {
++        fixture().credentials.register("http-resource-consent");fixture().audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++        String session=login();var preview=authorize("http-resource-consent",OidcResourceAudienceFixture.RESOURCE,session);
++        assertEquals(200,preview.statusCode());String interaction=interaction(preview);
++        long codes=fixture().count("oidc_authorization_code"),tokens=fixture().count("oidc_token");
++        fixture().audiences.set(Set.of());
++        var rejected=post("/oidc/consent","interaction="+encode(interaction)+"&decision=approve&scope-openid=yes",session,"http://localhost");
++        assertNotEquals(200,rejected.statusCode());assertFalse(rejected.headers().firstValue("location").orElse("").contains("code="));
++        assertEquals(codes,fixture().count("oidc_authorization_code"));assertEquals(tokens,fixture().count("oidc_token"));
++        try(var connection=fixture().credentials.source.getConnection();var statement=connection.prepareStatement("SELECT consumed FROM oidc_consent WHERE interaction_id=?")) {
++            statement.setString(1,interaction);try(var rows=statement.executeQuery()) {assertTrue(rows.next());assertFalse(rows.getBoolean(1));}
++        }
++    }
++
++    @Test void exactResourceProductionConsentAndTokenSucceedAndRefreshCannotWidenTarget() throws Exception {
++        var registered=fixture().credentials.register("http-resource-allowed");fixture().audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++        String session=login();var preview=authorize("http-resource-allowed",OidcResourceAudienceFixture.RESOURCE,session);assertEquals(200,preview.statusCode());
++        var consent=post("/oidc/consent","interaction="+encode(interaction(preview))+"&decision=approve&scope-openid=yes",session,"http://localhost");
++        assertEquals(303,consent.statusCode(),consent.body());
++        var response=token("http-resource-allowed",registered.clientSecret(),authorizationCode(consent),OidcResourceAudienceFixture.RESOURCE);
++        assertEquals(200,response.statusCode(),response.body());var json=fixture().credentials.mapper.readTree(response.body());
++        assertEquals(List.of(OidcResourceAudienceFixture.RESOURCE),fixture().tokens.validateResourceAccessToken(json.path("access_token").asText(),OidcResourceAudienceFixture.RESOURCE).getAudience());
++        String refresh=json.path("refresh_token").asText();long before=fixture().count("oidc_token");fixture().audiences.set(Set.of());
++        var rejected=post("/oidc/token","grant_type=refresh_token&client_id=http-resource-allowed&client_secret="+encode(registered.clientSecret())
++            +"&refresh_token="+encode(refresh)+"&resource="+encode(OidcResourceAudienceFixture.RESOURCE),null,null);
++        assertEquals(400,rejected.statusCode(),rejected.body());assertFalse(fixture().tokens.findByValue(refresh).orElseThrow().revoked());
++        assertEquals(before,fixture().count("oidc_token"));
++    }
++
++    private String login() throws Exception {
++        var response=post("/oidc/login","username=owner&password=OwnerPassword123!",null,null);assertEquals(303,response.statusCode());
++        return response.headers().allValues("set-cookie").stream().filter(value->value.startsWith("oidc_session=")).findFirst().orElseThrow().split(";",2)[0];
++    }
++    private HttpResponse<String> authorize(String clientId,String resource,String session) throws Exception {
++        String challenge=Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest("a".repeat(43).getBytes(StandardCharsets.US_ASCII)));
++        String redirect="ui-maintenance".equals(clientId)?"http://localhost/oauth/callback/kestra":"https://client.example/callback";
++        String path="/oidc/authorize?response_type=code&client_id="+encode(clientId)+"&redirect_uri="+encode(redirect)+"&scope=openid&state=state&nonce=nonce&code_challenge_method=S256&code_challenge="+encode(challenge);
++        if(resource!=null)path+="&resource="+encode(resource);
++        return client.send(HttpRequest.newBuilder(server.getURI().resolve(path)).header("Cookie",session).GET().build(),HttpResponse.BodyHandlers.ofString());
++    }
++    private static String interaction(HttpResponse<String> response) {
++        var matcher=Pattern.compile("name=\"interaction\" value=\"([^\"]+)\"").matcher(response.body());assertTrue(matcher.find());return matcher.group(1);
++    }
++    private static String authorizationCode(HttpResponse<String> response) {
++        String query=URI.create(response.headers().firstValue("location").orElseThrow()).getRawQuery();
++        for(String parameter:query.split("&"))if(parameter.startsWith("code="))return URLDecoder.decode(parameter.substring(5),StandardCharsets.UTF_8);
++        fail("No authorization code in response");return null;
++    }
++    private HttpResponse<String> token(String clientId,String secret,String code,String resource) throws Exception {
++        String redirect="ui-maintenance".equals(clientId)?"http://localhost/oauth/callback/kestra":"https://client.example/callback";
++        return post("/oidc/token","grant_type=authorization_code&client_id="+encode(clientId)+"&client_secret="+encode(secret)+"&code="+encode(code)
++            +"&redirect_uri="+encode(redirect)+"&code_verifier="+"a".repeat(43)+(resource==null?"":"&resource="+encode(resource)),null,null);
++    }
++    private HttpResponse<String> post(String path,String body,String cookie,String origin) throws Exception {
++        var request=HttpRequest.newBuilder(server.getURI().resolve(path)).header("Content-Type","application/x-www-form-urlencoded");
++        if(cookie!=null)request.header("Cookie",cookie);if(origin!=null)request.header("Origin",origin);
++        return client.send(request.POST(HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString());
++    }
++    private static String encode(String value) {return URLEncoder.encode(value,StandardCharsets.UTF_8);}
++
++    @Factory @Requires(property="oidc.resources.http.test",value="true")
++    static class Beans {
++        @Singleton @Replaces(OidcClientService.class) OidcClientService clients() {return fixture().credentials.clients;}
++        @Singleton @Replaces(OidcSessionService.class) OidcSessionService sessions() {return new OidcSessionService(fixture().credentials.configuration,lifecycle());}
++        @Singleton @Replaces(OidcJwkService.class) OidcJwkService keys() {return new OidcJwkService(fixture().credentials.source);}
++        @Singleton @Replaces(OidcUserService.class) OidcUserService users() {return new OidcUserService(fixture().credentials.source,fixture().credentials.mapper);}
++        @Singleton @Replaces(OidcIdentityLifecycle.class) OidcIdentityLifecycle lifecycle() {return new OidcIdentityLifecycle(fixture().credentials.source);}
++        @Singleton @Replaces(OidcPasswordChanges.class) OidcPasswordChanges passwords() {return new OidcPasswordChanges(fixture().credentials.source);}
++        @Singleton @Replaces(OidcTokenService.class) OidcTokenService tokens() {return fixture().tokens;}
++        @Singleton @Replaces(OidcAuthorizationCodeService.class) OidcAuthorizationCodeService codes() {return fixture().codes;}
++        @Singleton @Replaces(OidcOwnershipService.class) OidcOwnershipService ownership() {
++            return new OidcOwnershipService(fixture().credentials.source,fixture().credentials.mapper,20,fixture().credentials.configuration,
++                new OidcConsentPolicy(),null,fixture().credentials.protocol,true,fixture().tokens);
++        }
++        @Singleton @Replaces(OidcTrustedIdentity.class) OidcTrustedIdentity trusted() {
++            return new OidcTrustedIdentity(fixture().providers,fixture().credentials.protocol,fixture().credentials.configuration,fixture().credentials.source);
++        }
++        @Singleton @Replaces(OidcSetupService.class) OidcSetupService setup() {var setup=mock(OidcSetupService.class);when(setup.ready()).thenReturn(true);return setup;}
++        @Singleton @Replaces(McpResourceUrl.class) McpResourceUrl resources() {
++            var resources=mock(McpResourceUrl.class);
++            when(resources.parseExact(OidcResourceAudienceFixture.RESOURCE)).thenReturn(URI.create(OidcResourceAudienceFixture.RESOURCE));
++            when(resources.resource("main","default")).thenReturn(URI.create(OidcResourceAudienceFixture.RESOURCE));
++            when(resources.metadata("main","default")).thenReturn(URI.create("http://localhost/.well-known/oauth-protected-resource/api/v1/main/mcp/default"));
++            return resources;
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudiencePostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudiencePostgresTest.java
+new file mode 100644
+index 0000000..282888d
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcResourceAudiencePostgresTest.java
+@@ -0,0 +1,180 @@
++package io.kestra.webserver.oidc;
++
++import com.nimbusds.jwt.JWTClaimsSet;
++import com.nimbusds.oauth2.sdk.Scope;
++import io.kestra.webserver.oidc.services.*;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.Set;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class OidcResourceAudiencePostgresTest extends OidcPostgresTestBase {
++    @Test void disabledGroupsDoNotConsumeV2ProjectionOrAlterStandardAudience() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            var enabled=OidcTokenService.class.getDeclaredField("applicationGroups");enabled.setAccessible(true);enabled.set(fixture.tokens,false);
++            fixture.broken=true;fixture.unique=false;fixture.present=false;
++            var raw=fixture.codes.createForSession(0,"ui-maintenance","owner","https://client.example/callback",List.of("openid"),null,null,"nonce");
++            String code=fixture.tokens.bindApplicationGroupCode(raw.getValue(),"ui-maintenance","owner",List.of("openid"));
++            fixture.codes.consume(code,"ui-maintenance","https://client.example/callback",null);
++            var issued=fixture.tokens.issueAuthorizationTokens("ui-maintenance",fixture.user(),new Scope("openid"),null,"nonce",code);
++            var claims=fixture.tokens.validateAccessToken(issued.getAccessToken().getValue());
++            assertEquals(List.of("ui-maintenance"),claims.getAudience());assertNull(claims.getClaim(OidcTrustedIdentity.CLAIM));
++            assertFalse(issued.getRefreshToken().getValue().startsWith("application-group-v2."));
++        }
++    }
++
++    @Test void uiRequiresExactClientAudienceAndSignedVersionEvenWithEmptyResources() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            var issued=fixture.issue("ui-maintenance",null);var claims=issued.getIDToken().getJWTClaimsSet();
++            var trusted=new OidcTrustedIdentity(fixture.providers,fixture.credentials.protocol,fixture.credentials.configuration,fixture.credentials.source);
++            assertEquals(Set.of("ui-maintenance"),trusted.validate(io.micronaut.security.authentication.Authentication.build("owner",List.of(),claims.getClaims())).audiences());
++            for(List<String> audiences:List.of(List.of("other"),List.of("ui-maintenance","other"),List.of(OidcResourceAudienceFixture.RESOURCE))) {
++                var attributes=new java.util.HashMap<>(claims.getClaims());attributes.put("aud",audiences);
++                assertThrows(IllegalStateException.class,()->trusted.validate(io.micronaut.security.authentication.Authentication.build("owner",List.of(),attributes)));
++            }
++            var attributes=new java.util.HashMap<>(claims.getClaims());var group=new java.util.HashMap<>((Map<String,Object>)attributes.get(OidcTrustedIdentity.CLAIM));
++            group.remove("audience_contract_version");attributes.put(OidcTrustedIdentity.CLAIM,group);
++            assertThrows(IllegalStateException.class,()->trusted.validate(io.micronaut.security.authentication.Authentication.build("owner",List.of(),attributes)));
++        }
++    }
++
++    @Test void mcpTrustedIdentityRequiresCurrentBearerExactResourceAndCurrentProjection() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            fixture.audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++            var issued=fixture.issue("ui-maintenance",OidcResourceAudienceFixture.RESOURCE);
++            var claims=fixture.tokens.validateResourceAccessToken(issued.getAccessToken().getValue(),OidcResourceAudienceFixture.RESOURCE);
++            var authentication=io.micronaut.security.authentication.Authentication.build("owner",List.of(),claims.getClaims());
++            var trusted=new OidcTrustedIdentity(fixture.providers,fixture.credentials.protocol,fixture.credentials.configuration,fixture.credentials.source);
++            var request=io.micronaut.http.HttpRequest.POST("/api/v1/main/mcp/default","");
++            request.setAttribute("io.kestra.mcp.authentication",authentication);
++            try(var context=io.micronaut.core.propagation.PropagatedContext.getOrEmpty().plus(
++                new io.kestra.core.repositories.AuthorizationInvocationContext(request,false)).propagate()) {
++                assertEquals(Set.of(OidcResourceAudienceFixture.RESOURCE),trusted.current().audiences());
++                var stale=io.micronaut.security.authentication.Authentication.build("owner",List.of(),claims.getClaims());
++                assertThrows(IllegalStateException.class,()->trusted.validate(stale));
++                fixture.audiences.set(Set.of());assertThrows(IllegalStateException.class,trusted::current);
++            }
++        }
++    }
++
++    @Test void standardCodeCannotBecomeResourceCodeAfterResourcesAreAdded() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            String code=fixture.code("ui-maintenance",null);fixture.audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++            assertThrows(RuntimeException.class,()->fixture.codes.consume(code,"ui-maintenance","https://client.example/callback",null,OidcResourceAudienceFixture.RESOURCE));
++            assertFalse(fixture.codes.find(code).orElseThrow().used());
++            fixture.codes.consume(code,"ui-maintenance","https://client.example/callback",null);long before=fixture.count("oidc_token");
++            assertThrows(RuntimeException.class,()->fixture.tokens.issueAuthorizationTokens("ui-maintenance",fixture.user(),new Scope("openid","read"),
++                OidcResourceAudienceFixture.RESOURCE,null,code));
++            assertEquals(before,fixture.count("oidc_token"));
++        }
++    }
++
++    @Test void emptyResourcesKeepStandardAccessAndIdAudienceWithoutFillingClientId() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            var issued=fixture.issue("ui-maintenance",null);
++            var access=fixture.tokens.validateAccessToken(issued.getAccessToken().getValue());
++            assertEquals(List.of("ui-maintenance"),access.getAudience());
++            assertEquals(List.of("ui-maintenance"),issued.getIDToken().getJWTClaimsSet().getAudience());
++            assertEquals(Set.of(),fixture.audiences.get());
++            assertTrue(issued.getRefreshToken().getValue().startsWith("application-group-v2.group.1."));
++            assertThrows(RuntimeException.class,()->fixture.tokens.validateResourceAccessToken(issued.getAccessToken().getValue(),OidcResourceAudienceFixture.RESOURCE));
++        }
++    }
++
++    @Test void emptyResourcesRejectEveryResourceBeforeTokensOrCodeBinding() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            long tokens=fixture.count("oidc_token"),codes=fixture.count("oidc_authorization_code");
++            for(String resource:List.of(OidcResourceAudienceFixture.RESOURCE,"ui-maintenance",OidcResourceAudienceFixture.RESOURCE+"/"))
++                assertThrows(RuntimeException.class,()->fixture.tokens.previewConsentScopes("ui-maintenance","owner",List.of("openid"),resource));
++            assertEquals(tokens,fixture.count("oidc_token"));assertEquals(codes,fixture.count("oidc_authorization_code"));
++            assertThrows(RuntimeException.class,()->fixture.tokens.issueAuthorizationTokens("ui-maintenance",fixture.user(),new Scope("openid"),
++                OidcResourceAudienceFixture.RESOURCE,null,"application-group-v2.group.1.missing"));
++            assertEquals(tokens,fixture.count("oidc_token"));
++        }
++    }
++
++    @Test void exactResourceSignsVerifiesAndRejectsAliasesOrExtraAudiences() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            fixture.audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++            var issued=fixture.issue("ui-maintenance",OidcResourceAudienceFixture.RESOURCE);
++            var claims=fixture.tokens.validateResourceAccessToken(issued.getAccessToken().getValue(),OidcResourceAudienceFixture.RESOURCE);
++            assertEquals(List.of(OidcResourceAudienceFixture.RESOURCE),claims.getAudience());
++            assertEquals(List.of("ui-maintenance"),issued.getIDToken().getJWTClaimsSet().getAudience());
++            for(String wrong:List.of(OidcResourceAudienceFixture.RESOURCE+"/",OidcResourceAudienceFixture.RESOURCE+"-other")) {
++                assertThrows(RuntimeException.class,()->fixture.tokens.validateResourceAccessToken(issued.getAccessToken().getValue(),wrong));
++                assertThrows(RuntimeException.class,()->fixture.tokens.previewConsentScopes("ui-maintenance","owner",List.of("openid"),wrong));
++            }
++            assertThrows(RuntimeException.class,()->fixture.tokens.validateApplicationGroupClaims(new JWTClaimsSet.Builder(claims)
++                .audience(List.of(OidcResourceAudienceFixture.RESOURCE,"ui-maintenance")).build()));
++        }
++    }
++
++    @Test void nonUiClientWithEmptyResourcesDoesNotBecomeConfiguredLoginClient() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            fixture.credentials.register("ordinary-resource-test");
++            var issued=fixture.issue("ordinary-resource-test",null);
++            assertEquals(List.of("ordinary-resource-test"),fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()).getAudience());
++            var trusted=new OidcTrustedIdentity(fixture.providers,fixture.credentials.protocol,fixture.credentials.configuration,fixture.credentials.source);
++            var claims=issued.getIDToken().getJWTClaimsSet();
++            assertThrows(IllegalStateException.class,()->trusted.validate(io.micronaut.security.authentication.Authentication.build("owner",List.of(),claims.getClaims())));
++        }
++    }
++
++    @Test void expandingResourcesCannotUpgradeExistingStandardRefreshOrAccess() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            var issued=fixture.issue("ui-maintenance",null);
++            fixture.audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++            var stored=fixture.tokens.findByValue(issued.getRefreshToken().getValue()).orElseThrow();
++            assertThrows(RuntimeException.class,()->fixture.tokens.validateResourceRefreshToken(stored.value(),stored.clientId(),OidcResourceAudienceFixture.RESOURCE));
++            var refreshed=fixture.tokens.rotateRefreshToken(stored,fixture.user(),new Scope("openid","read"));
++            assertEquals(List.of("ui-maintenance"),fixture.tokens.validateAccessToken(refreshed.getAccessToken().getValue()).getAudience());
++            assertThrows(RuntimeException.class,()->fixture.tokens.validateResourceAccessToken(issued.getAccessToken().getValue(),OidcResourceAudienceFixture.RESOURCE));
++        }
++    }
++
++    @Test void narrowingResourcesRejectsOnlineAccessAndRefreshWithoutConsumingIt() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            fixture.audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++            var issued=fixture.issue("ui-maintenance",OidcResourceAudienceFixture.RESOURCE);
++            var stored=fixture.tokens.findByValue(issued.getRefreshToken().getValue()).orElseThrow();
++            long before=fixture.count("oidc_token");fixture.audiences.set(Set.of());
++            assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));
++            assertThrows(RuntimeException.class,()->fixture.tokens.rotateRefreshToken(stored,fixture.user(),new Scope("openid","read")));
++            assertFalse(fixture.tokens.findByValue(stored.value()).orElseThrow().revoked());assertEquals(before,fixture.count("oidc_token"));
++        }
++    }
++
++    @Test void v1CredentialsCannotAcquireV2MeaningDuringProviderUpgrade() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            var v2=fixture.projection.get();
++            fixture.projection.set((connection,request)->new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(
++                new ApplicationGroupProtocolProjectionV1.Projection("group","main","http://localhost",request.clientId(),request.subject(),true,true,1,1,
++                    Set.of("ui-maintenance"),List.of(new ApplicationGroupProtocolProjectionV1.Scope("read","Reader","")),Set.of("read"),Set.of("read")))));
++            String oldCode=fixture.code("ui-maintenance",null);
++            var issued=fixture.issue("ui-maintenance",null);fixture.projection.set(v2);
++            fixture.audiences.set(Set.of(OidcResourceAudienceFixture.RESOURCE));
++            fixture.codes.consume(oldCode,"ui-maintenance","https://client.example/callback",null);
++            long before=fixture.count("oidc_token");
++            assertThrows(RuntimeException.class,()->fixture.tokens.issueAuthorizationTokens("ui-maintenance",fixture.user(),new Scope("openid","read"),null,null,oldCode));
++            assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));
++            var stored=fixture.tokens.findByValue(issued.getRefreshToken().getValue()).orElseThrow();
++            assertThrows(RuntimeException.class,()->fixture.tokens.rotateRefreshToken(stored,fixture.user(),new Scope("openid","read")));
++            assertFalse(fixture.tokens.findByValue(stored.value()).orElseThrow().revoked());assertEquals(before,fixture.count("oidc_token"));
++        }
++    }
++
++    @Test void wrongIssuerGroupEpochAndUnavailableProvidersRemainFailClosed() throws Exception {
++        try(var fixture=new OidcResourceAudienceFixture()) {
++            var issued=fixture.issue("ui-maintenance",null);long before=fixture.count("oidc_token");
++            fixture.epoch=2;assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));fixture.epoch=1;
++            fixture.group="other";assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));fixture.group="group";
++            fixture.issuer="http://other.invalid";assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));fixture.issuer="http://localhost";
++            fixture.unique=false;assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));fixture.unique=true;
++            fixture.broken=true;assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));fixture.broken=false;
++            fixture.present=false;fixture.unique=false;assertThrows(RuntimeException.class,()->fixture.tokens.validateAccessToken(issued.getAccessToken().getValue()));
++            assertEquals(before,fixture.count("oidc_token"));
++        }
++    }
++}

@@ -6,23 +6,32 @@ WORK="${2:-$REPO/.work/verify}"
 PORT="${BB_MCP_PORT:-18086}"
 BASE="http://localhost:$PORT"
 NET="overlay-mcp-bb-$$"
+RESOURCE_OWNER="${BB_RESOURCE_OWNER:-$NET}"
 PG="overlay-mcp-pg-$$"
 APP="overlay-mcp-app-$$"
 TEMP_DIR=$(mktemp -d)
+REPORT_DIR="${BB_REPORT_DIR:-}"
+SDK_RUN=0
+preserve_report() {
+  if [ -n "$REPORT_DIR" ] && [ -f "$2" ]; then
+    mkdir -p "$REPORT_DIR"
+    cp "$2" "$REPORT_DIR/$1.xml"
+  fi
+}
 cleanup() {
   local code=$?
   if [ "$code" != 0 ]; then
     docker inspect -f 'MCP acceptance container: status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$APP" 2>/dev/null || true
     docker logs --tail 600 "$APP" 2>&1 | python3 -c 'import re,sys; [print("[redacted credential-bearing line]" if re.search(r"token|password|secret|cookie|authorization|Bearer|state=|code=|eyJ[A-Za-z0-9_-]+\.", line, re.I) else line, end="" if line.endswith("\n") else "\n") for line in sys.stdin]' || true
   fi
-  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$NET")
-  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$NET")
+  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   rm -rf "$TEMP_DIR"
   return "$code"
 }
 trap cleanup EXIT
-docker network create --label "owner=$NET" "$NET" >/dev/null
-docker run -d --label "owner=$NET" --name "$PG" --network "$NET" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
+docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
 cat > "$TEMP_DIR/config.yml" <<EOF
 datasources:
   postgres:
@@ -83,7 +92,7 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 [ "$PG_READY" = 1 ] || { echo 'FAIL PostgreSQL readiness timeout'; exit 1; }
-docker run -d --label "owner=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
   -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd!' \
   "$IMAGE" server standalone >/dev/null
 READY=0
@@ -102,14 +111,21 @@ HASHED_UI_CLIENT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM o
 echo 'PASS production bootstrap stores a versioned hash instead of the UI client secret'
 if [ "${MCP_PRISTINE_PROBE:-0}" = 1 ]; then exit 0; fi
 PG_PORT=$(docker port "$PG" 5432/tcp | sed 's/.*://')
+FIXTURE_EXIT=0
 (cd "$WORK" && OIDC_FIXTURE_JDBC="jdbc:postgresql://127.0.0.1:$PG_PORT/kestra" \
-  ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.OidcSecondUserFixtureTest --console=plain)
+  ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.OidcSecondUserFixtureTest --console=plain) || FIXTURE_EXIT=$?
+preserve_report fixture-second-user "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.OidcSecondUserFixtureTest.xml"
+[ "$FIXTURE_EXIT" = 0 ] || exit "$FIXTURE_EXIT"
 grep -q 'tests="1" skipped="0" failures="0" errors="0"' "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.OidcSecondUserFixtureTest.xml"
 node "$REPO/scripts/blackbox-mcp-second-user.mjs" "$BASE" "$TEMP_DIR"
 sdk() {
+  SDK_RUN=$((SDK_RUN+1))
+  local sdk_exit=0
   (cd "$WORK" && MCP_INSTANCE_URL="$BASE" MCP_TOKEN_FILE="$TEMP_DIR/$1" MCP_CALL_TOOL=overlay-acceptance MCP_EXPECT_CALL_ERROR="$2" \
-    ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.McpSdkInstanceTest --console=plain)
+    ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.McpSdkInstanceTest --console=plain) || sdk_exit=$?
   RESULT="$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.McpSdkInstanceTest.xml"
+  preserve_report "sdk-$SDK_RUN-${1%.json}" "$RESULT"
+  [ "$sdk_exit" = 0 ] || return "$sdk_exit"
   test -f "$RESULT"
   grep -q 'tests="1" skipped="0" failures="0" errors="0"' "$RESULT" || { echo 'FAIL SDK acceptance skipped or failed'; exit 1; }
 }
@@ -139,7 +155,7 @@ COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions W
 [ "$COUNT" = 1 ] || { echo 'FAIL revoked session created execution'; exit 1; }
 docker rm -f "$APP" >/dev/null
 printf '\nkestra.mcp.rbac.enabled: true\n' >> "$TEMP_DIR/config.yml"
-docker run -d --label "owner=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
   "$IMAGE" server standalone >/dev/null
 READY=0
 for attempt in $(seq 1 60); do
@@ -148,8 +164,11 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 [ "$READY" = 1 ] || { echo 'FAIL RBAC readiness'; exit 1; }
+RBAC_EXIT=0
 (cd "$WORK" && MCP_INSTANCE_URL="$BASE" MCP_TOKEN_FILE="$TEMP_DIR/rbac.json" MCP_EXPECT_TOOLS_EMPTY=true MCP_CALL_TOOL=overlay-acceptance MCP_EXPECT_HIDDEN_CALL=true \
-  ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.McpSdkInstanceTest --console=plain)
+  ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.McpSdkInstanceTest --console=plain) || RBAC_EXIT=$?
+preserve_report sdk-rbac-missing-authorizer "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.McpSdkInstanceTest.xml"
+[ "$RBAC_EXIT" = 0 ] || exit "$RBAC_EXIT"
 grep -q 'tests="1" skipped="0" failures="0" errors="0"' "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.McpSdkInstanceTest.xml"
 COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions WHERE value->>'flowId'='mcp-acceptance'")
 [ "$COUNT" = 1 ] || { echo 'FAIL RBAC unavailable created execution'; exit 1; }

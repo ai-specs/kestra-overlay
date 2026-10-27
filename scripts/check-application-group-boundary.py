@@ -27,8 +27,10 @@ def check(root, artifact=None):
     for name in forbidden:
         if (package / name).exists():
             failures.append('superseded host business contract or implementation: ' + name)
-    for name in ['ApplicationGroupProtocolProjectionV1.java', 'OidcProtocolStateV1.java',
-                 'OidcProtocolState.java', 'IdentityLifecycleGuardV1.java']:
+    for name in ['ApplicationGroupProtocolProjectionV1.java', 'ApplicationGroupProtocolProjectionV2.java',
+                 'OidcProtocolStateV1.java', 'OidcProtocolState.java', 'IdentityLifecycleGuardV1.java',
+                 'IdentityLifecycleParticipantV1.java', 'TrustedIdentityV2.java', 'UserDirectoryV2.java',
+                 'ClientCredentialsV1.java']:
         if not (package / name).is_file():
             failures.append('missing public protocol mechanism: ' + name)
     for file in main.rglob('*'):
@@ -43,6 +45,7 @@ def check(root, artifact=None):
         'services/OidcTrustedIdentity.java': ['ApplicationGroupProtocolProjectionV1', 'OidcProtocolStateV1'],
         'services/OidcUserDirectory.java': ['IdentityLifecycleGuardV1', 'OidcProtocolStateV1'],
         'services/OidcOwnershipService.java': ['IdentityLifecycleGuardV1', 'OidcProtocolStateV1'],
+        'services/OidcApplicationGroupProjection.java': ['ApplicationGroupProtocolProjectionV2', 'audience_contract_version'],
     }
     for name, required in consumers.items():
         file = package / name
@@ -61,6 +64,13 @@ def check(root, artifact=None):
             required = ['io/kestra/webserver/oidc/' + name + '.class' for name in
                         ['ApplicationGroupProtocolProjectionV1', 'ApplicationGroupProtocolProjectionV1$Request',
                          'ApplicationGroupProtocolProjectionV1$Projection', 'ApplicationGroupProtocolProjectionV1$Result',
+                         'ApplicationGroupProtocolProjectionV2', 'ApplicationGroupProtocolProjectionV2$Projection',
+                         'ApplicationGroupProtocolProjectionV2$Result', 'IdentityLifecycleParticipantV1',
+                         'IdentityLifecycleParticipantV1$Kind', 'IdentityLifecycleParticipantV1$Change',
+                         'TrustedIdentityV2', 'UserDirectoryV2', 'UserDirectoryV2$TemporaryUser',
+                         'ClientCredentialsV1', 'ClientCredentialsV1$CredentialStatus', 'ClientCredentialsV1$IssuedCredential',
+                         'ClientCredentialsV1$ClientType', 'ClientCredentialsV1$RotationMode',
+                         'ClientCredentialsV1$Failure', 'ClientCredentialsV1$CredentialException',
                          'OidcProtocolStateV1', 'OidcProtocolStateV1$PendingClient', 'OidcProtocolState', 'IdentityLifecycleGuardV1']]
             for name in required:
                 if entries.count(name) != 1:

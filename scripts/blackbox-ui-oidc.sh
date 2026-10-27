@@ -5,6 +5,7 @@ IMAGE="${1:?usage: blackbox-ui-oidc.sh <image-ref>}"
 PORT="${BB_UI_PORT:-18081}"
 BASE="http://localhost:$PORT"
 NET="kestra-ui-bb-$$"
+RESOURCE_OWNER="${BB_RESOURCE_OWNER:-$NET}"
 PG="kestra-ui-pg-$$"
 SERVER="kestra-ui-bb-$$"
 STORAGE="kestra-ui-storage-$$"
@@ -12,9 +13,9 @@ SETUP_MODE="${BB_SETUP_MODE:-form}"
 TEMP_DIR=$(mktemp -d)
 
 cleanup() {
-  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$NET")
-  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$NET")
-  while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$NET")
+  while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT
@@ -36,9 +37,16 @@ request() {
     -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "$@"
 }
 
-docker network create --label "owner=$NET" "$NET" >/dev/null
-docker volume create --label "owner=$NET" "$STORAGE" >/dev/null
-docker run -d --label "owner=$NET" --name "$PG" --network "$NET" \
+prepare_directory_probe() {
+  docker cp "$SERVER:/app/kestra" "$TEMP_DIR/host.jar"
+  javac -proc:none -cp "$TEMP_DIR/host.jar" -d "$TEMP_DIR" "$(dirname "$0")/directory-probe/HttpDirectoryCommand.java"
+  jar --create --file "$TEMP_DIR/directory-command.jar" -C "$TEMP_DIR" HttpDirectoryCommand.class
+  docker cp "$TEMP_DIR/directory-command.jar" "$SERVER:/tmp/directory-command.jar"
+}
+
+docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
+docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$STORAGE" >/dev/null
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" \
   -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
 for attempt in $(seq 1 30); do
   if docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1; then break; fi
@@ -127,7 +135,7 @@ EXTENSION_MOUNT=()
 if [ -n "${BB_UI_EXTENSION_JAR:-}" ]; then
   EXTENSION_MOUNT=(-v "$BB_UI_EXTENSION_JAR:/app/libs/kestra-rbac-authorizer.jar:ro")
 fi
-docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} \
   -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
@@ -143,7 +151,8 @@ if [ "$READY" != 1 ]; then docker logs "$SERVER"; exit 1; fi
 
 if [ "$SETUP_MODE" = form ]; then
   if [ "${BB_BROWSER:-0}" = 1 ]; then
-    BB_BROWSER_SETUP=1 BB_BROWSER_BASE="$BASE" node "$(dirname "$0")/blackbox-ui-browser.cjs"
+    prepare_directory_probe
+    BB_BROWSER_SETUP=1 BB_BROWSER_BASE="$BASE" BB_BROWSER_SERVER="$SERVER" BB_BROWSER_POSTGRES="$PG" node "$(dirname "$0")/blackbox-ui-browser.cjs"
   else
     assert_status "empty directory offers setup" 200 "$(request "$BASE/oidc/setup")"
     SETUP_CSRF=$(node -e 'const fs=require("fs");const html=fs.readFileSync(process.argv[1],"utf8");const match=html.match(/name="csrf" value="([^"]+)"/);if(!match)process.exit(1);process.stdout.write(match[1])' "$TEMP_DIR/body")
@@ -270,7 +279,8 @@ assert_status "UI intercepted after logout" 307 "$(request -H 'Accept: text/html
 assert_status "Basic Auth cookie cannot authenticate" 401 "$(curl -s -H 'Cookie: BASIC_AUTH=anything; kestraBasicAuthenticated=true' -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
 assert_status "invalid OIDC cookie cannot authenticate" 401 "$(curl -s -H 'Cookie: JWT=invalid' -o /dev/null -w '%{http_code}' "$BASE/api/v1/configs")"
 if [ "${BB_BROWSER:-0}" = 1 ]; then
-  BB_BROWSER_BASE="$BASE" node "$(dirname "$0")/blackbox-ui-browser.cjs"
+  prepare_directory_probe
+  BB_BROWSER_BASE="$BASE" BB_BROWSER_SERVER="$SERVER" BB_BROWSER_POSTGRES="$PG" node "$(dirname "$0")/blackbox-ui-browser.cjs"
 fi
 docker restart "$SERVER" >/dev/null
 for attempt in $(seq 1 60); do
@@ -282,7 +292,7 @@ assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{htt
 HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
 docker rm -f "$SERVER" >/dev/null
-docker run -d --label "owner=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} -v "$STORAGE:/app/storage" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_OIDC_BOOTSTRAP_USERNAME=attacker -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=InjectedPass123!' \
   -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")
 kestra.rbac.application-groups.enabled: true

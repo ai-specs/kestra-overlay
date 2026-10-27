@@ -110,6 +110,27 @@ async function main() {
         const setupStatus = (await context.request.get(`${base}/oidc/setup`, {maxRedirects: 0})).status();
         if (setupStatus !== 404) throw new Error(`completed setup remains open (${setupStatus})`);
         console.log('BROWSER OIDC LOGIN, REFRESH, NAVIGATION AND LOGOUT ALL GREEN');
+        const {runPasswordChangeBrowserCases} = await import('./password-change-browser-cases.mjs');
+        const {execFileSync} = require('node:child_process');
+        const temporary = () => JSON.parse(execFileSync('docker', ['exec', process.env.BB_BROWSER_SERVER, 'java',
+            '-cp', '/app/kestra:/tmp/directory-command.jar', 'HttpDirectoryCommand',
+            `jdbc:postgresql://${process.env.BB_BROWSER_POSTGRES}:5432/kestra`, 'temporary'], {encoding: 'utf8'}));
+        const first = temporary();
+        const second = temporary();
+        const passwordReport = `.work/password-change-${process.env.BB_BROWSER_SETUP === '1' ? 'setup' : 'env'}.json`;
+        try {
+            const report = await runPasswordChangeBrowserCases(page, {baseUrl: base, username: first.user.subject,
+                temporaryPassword: first.temporaryPassword, secondUsername: second.user.subject,
+                secondTemporaryPassword: second.temporaryPassword}, async (width, height, dark = false) => {
+                    await page.setViewportSize({width, height});
+                    await themeSession.send('Emulation.setEmulatedMedia', {features: [{name: 'prefers-color-scheme', value: dark ? 'dark' : 'light'}]});
+                });
+            fs.writeFileSync(passwordReport, JSON.stringify(report, null, 2));
+            console.log(`INITIAL PASSWORD BROWSER MATRIX GREEN: ${report.checks.length} checks`);
+        } catch (error) {
+            fs.writeFileSync(passwordReport, JSON.stringify(error.report ?? {completed: false}, null, 2));
+            throw error;
+        }
     } finally {
         await browser.close();
     }

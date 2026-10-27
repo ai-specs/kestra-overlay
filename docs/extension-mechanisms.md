@@ -1,5 +1,37 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+2026-10-27 当前44补丁协议候选已通过独立完整local-ci与classpath/OIDC/MCP/两种首装
+及首次强改密码镜像门。该结果不含后续UI SDK扩容，不替代正式CI和镜像推广，也不
+证明插件业务或部署组合交付。以下候选机制须由消费方取得正式通过发布门的对应镜像。
+
+## REQ-0383 资源 audience 版本门（2026-10-27，主控已接收，候选未发布）
+
+`ApplicationGroupProtocolProjectionV2` 复用唯一 classpath provider 发现槽和同一事务连接，
+不新建组表。V2 的 `currentResources` 返回可为空的精确 resourceAudiences；V1 `current`
+在 V2 实现中明确拒绝，不通过补 clientId 伪造 V1 投影。已有 V1 provider 及 DTO 语义不变。
+宿主内部只读适配统一签发、预览、code绑定、refresh与在线身份检查；V2 ID/UI 和普通
+无 resource access 精确 clientId，有 resource access/MCP 精确当前 resource。空集不授权资源。
+
+V2 claim 签名 audience_contract_version=2，code/refresh 用 v2 前缀绑定组与 epoch，
+带资源 access 另签名精确 resource。V1/V2 provider 切换拒绝旧组凭据，重新生产登录；
+不改变 issuer、组、epoch或协议 scope，不因当前资源扩张升级旧 code/refresh。
+consent 提交在同一安全锁事务中、标准身份行锁前复查资源；撤销时交互和 code/token
+写入全部回滚。版本化公开使用与安全矩阵见 `r-oidc-server.md` REQ-0383；定向门不替代
+完整 local-ci、正式 CI、镜像发布和部署仓浏览器组合门。
+
+## 2026-10-27 账号与凭据候选接线（未发布）
+
+REQ-0380–0382 复用已有 PostgreSQL 事务级安全锁和 classpath 唯一 provider。宿主拥有
+事务，参与者借用连接，不 commit/rollback/close，不自开第二连接检查；READ_COMMITTED，
+安全锁→扩展目录→扩展策略→标准身份行。`TrustedIdentityV2.current(Connection)` 候选
+用于避免 V1 在已持锁回调内另开连接等待同一锁。账号删除的扩展清理属于插件业务。
+
+临时密码受限交互不能升级为业务会话；普通 secret 在运行时事务原子轮换。配置登录
+client 只能在部署维护窗口停止 JVM、同步配置后用通用 CLI 激活；prepare 不影响旧登录，
+失败可受限回退，真实登录确认后清回退材料，不长期接受双值。两者均不要求插件构建
+读取宿主源码。提案、DTO、失败语义及必需测试见 `r-oidc-server.md` REQ-0380–0382；
+当前仅授权实施，尚无本地门/CI/镜像发布证据。R24/R25 为维护者可复核的主控设计。
+
 > **职责纠正优先（2026-10-21）**：前序把应用组目录、CRUD、内置/退役和组表放在宿主的候选被替代；这些业务迁回插件。本仓只保留标准 OIDC、版本化只读投影与必要激活点，不保留旧写目录转发。下方各候选重放/编译/探针数字只描述原版本，不证明最新职责落实。接收方向、最小机制缺口和测试顺序见 `docs/r-oidc-server.md` 的职责纠正提案。
 
 2026-10-22 当前：账号/client生命周期已通过同连接guard接线，旧宿主组API、业务实现、组CLI与组表迁移已移除。pending登记查询与consent只读预览已经补齐，绑定、签发和refresh保持严格有效client检查。40补丁重放、57份相关主源码、源码职责门及58项进程内检查通过；20项PostgreSQL仅源码编译。构建增加实际executable边界门，旧缓存产物实际被拒绝；完整数据库、网络HTTP/浏览器与发布未通过。具体阶段边界和证据以职责纠正提案当前状态为准，后文旧记录不得作为交付证明。

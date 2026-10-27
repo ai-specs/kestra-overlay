@@ -2,6 +2,10 @@
 
 > 当前应用组协议候选与发布边界见本仓 `docs/r-oidc-server.md`。应用组业务归消费插件；未经正式发布的候选不能作为独立插件的交付编译输入。
 
+2026-10-27 协议发布候选只包含0380–0383（44补丁），不包含后续UI SDK兼容扩容。
+该44版本完整本地CI与独立镜像门已通过；正式CI与镜像推广仍须对应提交实际成功。
+本地通过或源码中的公开类型不是插件正式编译输入，不代表插件或部署组合已交付。
+
 这是面向第三方独立扩展项目的 Kestra 增强镜像。
 本文说明如何部署镜像、接入 OIDC、接入 MCP，以及挂载扩展。
 
@@ -587,6 +591,106 @@ Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
 
 ## 更多
 
+### 账号与 client 凭据 V2 候选（REQ-0380–0382，未发布）
+
+本节冻结候选使用入口，不能以源码或开发树替代正式镜像。只有选择包含本契约且通过
+全部发布门的镜像，才可用于独立插件正式编译和部署。当前 V1 目录说明继续描述旧公开
+输入；组功能开启时新宿主的生产账号变更要求唯一新参与者，旧 guard-only 插件不能
+直接作为兼容组合。账号/组业务权限仍由独立扩展实现，宿主不增加业务管理 HTTP API。
+
+`io.kestra.webserver.oidc.UserDirectoryV2` 继承 V1，新增
+`createTemporary(username,name,email)` 和 `delete(subject,revision)`。前者返回
+`TemporaryUser(user,temporaryPassword)`，宿主生成随机临时密码，仅本次返回且 toString
+脱敏；调用方必须 no-store、禁止日志和浏览器存储、关闭页面清内存，不能 GET 重取。
+新账号必须首次改密，临时凭据不能建立正常 IdP/UI 会话或取得 code/token。
+subject 永远是不可改登录名；删除后持久退役，不可同名重建，不删除历史执行/审计。
+
+生产登录以临时密码进入 `/oidc/password`，使用独立 HttpOnly、SameSite=Strict 的
+`oidc_password_change` cookie（`/oidc`，10 分钟）。GET 返回主题/语言一致的独立表单。
+POST 字段固定为 `csrf`、`password`、`confirmation`（不是 `csfr`）；Origin 必须精确为
+issuer 的 scheme://authority。密码沿用至少8字符、最多72 UTF-8字节边界，不能复用临时
+密码。成功 303 到 `/oidc/login`，清受限 cookie 并单次消费交互，必须重新生产登录。
+同源 CSRF 错误返回403且无凭据字段；非法/不一致密码返回400及可重试表单；过期/已消费
+交互返回410、清 cookie 并提供登录入口；存储故障503。全部响应 no-store，不回显密码。
+外源请求可能在宿主 CORS 层先被403拒绝；不得为显示表单放宽该规则。公开退出入口
+`/oidc/logout` 同时撤销受限交互并清 cookie，不依赖业务导航或管理权限。
+
+`TrustedIdentityV2.current(Connection)` 在调用方可写 READ_COMMITTED 连接重验当前可信
+请求，不另开连接，不 commit/rollback/close。唯一 `IdentityLifecycleParticipantV1`
+实现 `beforeChange(Connection,Change)`，Change 含 contractVersion=1、kind、issuer、
+subject/clientId 和宿主重验后的 actor。kind 为 ACCOUNT_DELETE/ACCOUNT_ACTIVATE/
+ACCOUNT_DEACTIVATE/PASSWORD_RESET/CLIENT_SECRET_ROTATE。扩展在借用连接中检查管理权、
+最后管理员并在删除时清理所有组授予；异常全部回滚。禁止删除当前 actor；缺失/重复
+参与者失败关闭。R24 同连接设计为主控裁决，维护者可以复核。
+
+`ClientCredentialsV1.status(clientId)` 返回 clientId、clientType（PUBLIC/CONFIDENTIAL）、
+secretSet、maskedHint、credentialRevision、rotationMode（NONE/ONLINE/DEPLOYMENT_MAINTENANCE）。
+不返回哈希或旧明文。历史无提示时 maskedHint=null，UI 必须显示“已设置，提示不可用”。
+`rotate(clientId,credentialRevision)` 要求唯一生命周期参与者，原子生成新值并保存哈希、
+头3 + `••••••••` + 尾4提示和递增修订，返回 `IssuedCredential(status,clientSecret)`，仅
+本次下发。public 与配置登录 client 在线轮换拒绝；旧 revision 冲突不自动重试；普通
+轮换不改变已有用户 token 有效期。调用控制器自行保证 READ/MANAGE、CSRF 和审计脱敏。
+
+#### 受限维护 CLI
+
+宿主类 `io.kestra.webserver.oidc.cli.OidcClientCredentialsCommand` 提供独立 main，不启动
+服务、迁移或真实插件。只操作标准协议表，必须已有完整安装和持久安装凭据。维护者
+持有数据库与凭据卷管理权限；CLI 本身不代替这些部署权限。需显式传入环境变量：
+
+| 变量 | 用途 |
+|---|---|
+| OIDC_MAINTENANCE_JDBC_URL / OIDC_MAINTENANCE_JDBC_USER / OIDC_MAINTENANCE_JDBC_PASSWORD | 同一安装的维护数据库连接；不得写入日志或报告 |
+| OIDC_MAINTENANCE_ISSUER | 与安装精确一致的 issuer |
+| OIDC_MAINTENANCE_LOGIN_CLIENT_ID | 当前配置登录 client ID；不是普通登记目标 |
+| OIDC_MAINTENANCE_RECEIPT_PATH | 容器中可信安装凭据路径，通常 `/app/storage/.oidc-installation` |
+| OIDC_MAINTENANCE_MAX_CLIENTS / OIDC_MAINTENANCE_MAX_CLIENTS_PER_USER | 与部署登记限制一致，默认1000/20；范围1–100000/1–1000 |
+
+普通 confidential client 的正式登记入口是 `register-confidential <metadata.json>`，不是
+直接 SQL 或内部服务。JSON 只含 clientId、ownerSubject、redirectUris、grantTypes、
+protocolScopes；无组/角色/权限字段。owner 必须真实存在且可登录；不覆盖配置登录 client
+或同名记录。redirect 至多10个且不重复，仅 HTTPS 或 loopback HTTP，禁止 userinfo、
+fragment 和通配符。grantTypes 必须含 authorization_code，只允许附加 refresh_token。
+protocolScopes 必须含 openid，仅可含 profile/email/offline_access/mcp:flows:read/
+mcp:executions:write。登记不赋予组或资源权限，后续仍走标准 owner consent。
+
+```json
+{"clientId":"service-example","ownerSubject":"existing-login-name","redirectUris":["https://client.example/callback"],"grantTypes":["authorization_code","refresh_token"],"protocolScopes":["openid","profile","email"]}
+```
+
+在已有部署配置中显式传维护环境变量，使用相同固定镜像和安装凭据卷。以下命令仅
+创建一个运行 CLI 的容器，不启动 PostgreSQL 或完整服务，不编译插件 jar 或构建镜像：
+
+```bash
+docker compose run --rm --no-deps --entrypoint java \
+  -e OIDC_MAINTENANCE_JDBC_URL -e OIDC_MAINTENANCE_JDBC_USER -e OIDC_MAINTENANCE_JDBC_PASSWORD \
+  -e OIDC_MAINTENANCE_ISSUER -e OIDC_MAINTENANCE_LOGIN_CLIENT_ID -e OIDC_MAINTENANCE_RECEIPT_PATH \
+  -v "$PWD/client-registration.json:/run/client-registration.json:ro" \
+  kestra -cp /app/kestra io.kestra.webserver.oidc.cli.OidcClientCredentialsCommand \
+  register-confidential /run/client-registration.json
+```
+
+成功 stdout 是一次性 JSON，含新 secret，不能写入普通日志/截图/报告；stderr 错误脱敏，
+失败退出码1。响应丢失不会补发旧值；普通登记重复失败且不改原值，后续通过公开轮换
+取得新版本。`status <clientId>` 返回无敏感字段状态，可先取得维护所需 revision。
+
+配置登录 client 禁止在线重置，使用同一 CLI（上例命令末尾替换为以下参数）：
+
+```text
+status <clientId>
+prepare <clientId> <当前revision>
+cancel <clientId> <当前revision>
+activate <clientId> <prepare时revision>
+rollback <clientId> <activate后revision>
+confirm <clientId> <activate后revision>
+```
+
+prepare 只一次性输出待激活 secret，不影响旧登录；cancel 丢弃待激活版本。维护窗口
+必须先停止宿主 JVM、同步消费端 secret 配置，再 activate（修订+1），更新 Compose 并
+启动 JVM，通过真实生产登录验证。失败时停止 JVM，以专用 rollback（修订再+1）恢复
+旧哈希，并恢复旧消费配置后启动；成功后 confirm 清除回退材料。旧哈希不经 HTTP 返回，
+不长期同时接受两个值。CLI 不自动证明 JVM 已停止或真实登录已通过，这些是部署验收门。
+R25 维护流程为主控裁决，维护者可以复核；未经完整维护回退验收不能宣称 T8 通过。
+
 - [MCP 客户端交互流程与集成约束](docs/mcp-oauth-integration.md)
 - [OIDC 服务与首次安装契约](docs/r-oidc-server.md)
 - [R-EE-RBAC 扩展边界](docs/r-ee-rbac.md)
@@ -595,14 +699,16 @@ Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
 
 应用组、scope、应用支持登记、用户授予、权限元数据、业务初始化和管理 UI/API 归独立插件。
 本仓不提供可写组目录、组业务表、组初始化 CLI 或最后管理员业务判断。旧宿主目录及其
-CLI 已从候选源码移除，不提供兼容转发。当前候选尚未通过完整构建、PostgreSQL、正式 CI
-和镜像发布；不得用相邻源码、候选 executable 或旧正式镜像编译并交付匹配插件。
+CLI 已从候选源码移除，不提供兼容转发。当前候选已有定向 PostgreSQL/HTTP 检查，尚未
+通过本轮完整本地门、正式 CI 和镜像发布；不得用相邻源码、候选 executable 或旧正式
+镜像编译并交付匹配插件。
 
 公开 Java 契约位于 `io.kestra.webserver.oidc`：
 
 | 契约 | 职责 |
 | --- | --- |
 | `ApplicationGroupProtocolProjectionV1` | 扩展在宿主提供的同一事务连接中，为精确 issuer、tenant、client、subject 和可选 token 组 ID 返回只读协议投影 |
+| `ApplicationGroupProtocolProjectionV2` | REQ-0383 未发布候选：同连接返回可为空的精确资源 `resourceAudiences`，不自动补入登录 clientId；V1 语义不变 |
 | `OidcProtocolStateV1` | 标准账号/client 状态、有效 pending 登记查询、可登录性、安装前置核对和统一安全锁；不返回凭据或组业务数据 |
 | `IdentityLifecycleGuardV1` | 宿主提交账号状态、密码和 client 撤销/删除前调用扩展；扩展判断业务约束，拒绝或异常回滚 |
 | `TrustedIdentityV1` | 读取当前已经验证的身份；构造 DTO 不代表认证成功 |
@@ -646,6 +752,20 @@ micronaut:
 是账号认证版本，`authorizationVersion` 是组撤权 epoch，`directoryRevision` 表示当前组数据
 修订，不能互相替代。UI 要求标准配置登录 client 的精确受众，MCP 要求当前 Bearer 和精确
 resource audience。UI selector 不是角色，也不作为最终身份的业务 scope。
+
+REQ-0383 的 V2 使用 `currentResources(Connection, V1.Request)` 返回 V2.Result（版本2）。
+Projection 的资源字段为 `resourceAudiences`，其余目标、组版本和 scope 元数据与 V1 相同。
+V2 继承 V1 仅用于唯一 provider 发现；其 V1 `current` 默认拒绝，不能当作 V1 投影使用。
+只提供一个版本的 provider。V1 保持 approved 非空及包含登录 audience 的既有语义。
+V2 允许空资源集合，不补 clientId、不表示全域；ID/UI 仍精确当前 clientId，未请求
+resource 的标准 access aud 仍为 clientId，资源 access/MCP 必须精确当前登记的 resource。
+普通 client 不会因资源为空获得配置 UI client 资格，普通 access 不能用于 MCP。
+
+V2 签名组 claim 追加 `audience_contract_version=2`，code/refresh 使用
+`application-group-v2.<组ID>.<epoch>.` 前缀。带资源 access 另含签名的精确 `resource`。
+V1/V2 provider 切换使旧组凭据拒绝，用户必须重新生产登录，不自动转换或扩权。
+当前资源收窄后旧带资源 token/refresh 拒绝；空→非空不扩大旧 code/refresh 的资源。
+签名、issuer、组、epoch、协议 scope 上界不变。候选未经完整发布门不能用于插件正式编译。
 
 连接属于宿主事务调用方。投影和 guard 不得提交、回滚、关闭该连接或另开连接替代检查。
 授权状态变更使用 `READ_COMMITTED`；先取得公开安全锁，再取得扩展目录/策略锁，最后取得

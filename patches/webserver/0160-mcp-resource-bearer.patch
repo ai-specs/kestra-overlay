@@ -1,6 +1,7 @@
 # 需求: REQ-0160 MCP resource/audience/Bearer 与可信身份传播
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
+# 版本接线: REQ-0383保留V1语义，按版本调用独立V2投影；新公开DTO与回归归0383
 # 来源: 可信roles从已验证claims贯穿Authentication/context/factory； 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 25 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
@@ -16,7 +17,7 @@ index 9903d69..d936d67 100644
 +        if (verified.isPresent()) return verified.map(io.micronaut.security.authentication.Authentication::getName);
          return request.getUserPrincipal().map(Principal::getName);
      }
- 
+
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
 index e93c3ee..a044504 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
@@ -36,7 +37,7 @@ index e93c3ee..a044504 100644
 +    private final java.util.List<String> scopes;
 +    private final java.util.List<String> roles;
      private String sessionId;
- 
+
      @Override
 @@ -25,6 +29,10 @@ public class KestraMcpTransportContext implements McpTransportContext {
              case "serverId" -> serverId;
@@ -83,7 +84,7 @@ index d7e2233..40e0a1f 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionFactory.java
 @@ -7,12 +7,21 @@ import jakarta.inject.Singleton;
- 
+
  @Singleton
  public class McpSessionFactory {
 -    public KestraMcpTransportContext build(String tenantId, String serverId, @Nullable String sessionId, @Nullable String callerId) {
@@ -112,7 +113,7 @@ index 5195153..d82b6cd 100644
 @@ -81,9 +81,12 @@ public class McpToolController {
              return Mono.just(HttpResponse.status(HttpStatus.SERVICE_UNAVAILABLE));
          }
- 
+
 -        var transportContext = sessionFactory.build(
 -            tenantId, id, request.getHeaders().get(HttpHeaders.MCP_SESSION_ID), accessControl.callerId(request).orElse(null)
 -        );
@@ -122,7 +123,7 @@ index 5195153..d82b6cd 100644
 +            (String) identity.get("client_id"), (String) identity.get("resource"),
 +            (java.util.List<String>) identity.getOrDefault("scopes", java.util.List.of()),
 +            (java.util.List<String>) identity.getOrDefault("roles", java.util.List.of()));
- 
+
          return handlerRegistry.getServerHandler(transportContext).handleRequest(request, transportContext);
      }
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthenticationFetcher.java
@@ -154,7 +155,7 @@ index 0000000..bf3be71
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
 new file mode 100644
-index 0000000..bf759ec
+index 0000000..ddff294
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpBearerFilter.java
 @@ -0,0 +1,101 @@
@@ -429,10 +430,10 @@ index 21d1173..c283ea3 100644
 -        String codeChallenge, String codeChallengeMethod, String nonce, Instant expiresAt, boolean used
 +        String codeChallenge, String codeChallengeMethod, String nonce, Instant expiresAt, boolean used, String resource
      ) {}
- 
+
      @Inject
 @@ -99,7 +99,7 @@ public class OidcAuthorizationCodeService {
- 
+
      public Optional<StoredCode> find(final String codeValue) {
          final String sql = """
 -            SELECT code, client_id, subject, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, expires_at, used
@@ -450,7 +451,7 @@ index 21d1173..c283ea3 100644
                  }
                  return Optional.empty();
 @@ -128,11 +128,16 @@ public class OidcAuthorizationCodeService {
- 
+
      /** Consumes a code: full validation (D1) then marks it used. */
      public StoredCode consume(final String codeValue, final String expectedClientId, final String redirectUri, final CodeVerifier codeVerifier) {
 +        return consume(codeValue, expectedClientId, redirectUri, codeVerifier, null);
@@ -468,7 +469,7 @@ index 21d1173..c283ea3 100644
          }
 @@ -175,11 +180,11 @@ public class OidcAuthorizationCodeService {
      }
- 
+
      private void markUsed(final String codeValue) {
 -        final String sql = "UPDATE oidc_authorization_code SET used = TRUE WHERE code = ?";
 +        final String sql = "UPDATE oidc_authorization_code SET used = TRUE WHERE code = ? AND NOT used AND expires_at>now()";
@@ -502,9 +503,10 @@ index cd3f6e2..deec90f 100644
                      }
                  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
+index 9885dcd..2ff881d 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
-@@ -8,7 +8,12 @@
+@@ -8,7 +8,12 @@ import java.sql.Timestamp;
  import java.time.Instant;
  import java.util.Date;
  import java.util.List;
@@ -515,16 +517,16 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +import java.util.Set;
 +import java.util.HashSet
 +;
- 
+
  import javax.sql.DataSource;
- 
-@@ -34,9 +39,16 @@
+
+@@ -34,9 +39,16 @@ import com.nimbusds.oauth2.sdk.token.RefreshToken;
  import com.nimbusds.openid.connect.sdk.claims.IDTokenClaimsSet;
- 
+
  import io.kestra.webserver.oidc.OidcConfiguration;
 +import io.kestra.webserver.oidc.ApplicationScopeDeclarationsV1;
  import io.kestra.webserver.oidc.OidcException;
- 
+
 -import io.micronaut.context.annotation.Requires;
 +import io.
 +kestra.webserver.oidc.ApplicationGroupScopeIssuance;
@@ -536,7 +538,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
  import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
  import jakarta.inject.Inject;
  import jakarta.inject.Singleton;
-@@ -60,6 +72,16 @@
+@@ -60,6 +72,16 @@ public class OidcTokenService {
      private final ObjectMapper objectMapper;
      private final OidcConfiguration configuration;
      private final OidcJwkService jwkService;
@@ -550,10 +552,10 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        this(source, mapper, configuration, keys, null, null, null);
 +    }
 +
- 
+
      @Inject
      public OidcTokenService(
-@@ -67,18 +89,73 @@
+@@ -67,19 +89,82 @@ public class OidcTokenService {
          final ObjectMapper objectMapper,
          final OidcConfiguration configuration,
          final OidcJwkService jwkService
@@ -573,14 +575,14 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        this.declarations = declarations;
 +        this.protocol = protocol;
      }
- 
+
      /** A stored token record (mirror of the table row). */
      public record StoredToken(
          long id, String clientId, String subject, String tokenType, String value,
 -        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked
 +        List<String> scopes, Instant issuedAt, Instant expiresAt, boolean revoked, String resource
      ) {}
-+
+
 +    public com.nimbusds.openid.connect.sdk.token.OIDCTokens issueAuthorizationTokens(String clientId,
 +        OidcUserService.OidcUser user, Scope scope, String resource, String nonce, String code) {
 +        try (var connection = dataSource.getConnection()) {
@@ -605,6 +607,14 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +                        if (!rows.next() || rows.getLong(1) != version) throw new OidcException(OAuth2Error.INVALID_GRANT);
 +                    }
 +                }
++                if(authorization.claim()!=null && authorization.claim().containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION)) {
++                    try(var statement=connection.prepareStatement("SELECT resource FROM oidc_authorization_code WHERE code=? AND client_id=? AND subject=? AND used")) {
++                        statement.setString(1,code);statement.setString(2,clientId);statement.setString(3,user.sub());
++                        try(var rows=statement.executeQuery()) {
++                            if(!rows.next() || !java.util.Objects.equals(resource,rows.getString(1)))throw new OidcException(OAuth2Error.INVALID_GRANT);
++                        }
++                    }
++                }
 +                var
 +applicationGroupClaim = authorization.claim();
 +                if(applicationGroups) requireGroupBinding(code,applicationGroupClaim);
@@ -626,10 +636,11 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +            } catch (RuntimeException | SQLException failure) { connection.rollback(); throw failure; }
 +        } catch (SQLException failure) { throw new IllegalStateException("Cannot issue authorization tokens"); }
 +    }
- 
++
      /** Issues an access token (RS256 JWT), signs it with the newest active key and persists it. */
      public BearerAccessToken issueAccessToken(
-@@ -89,12 +166,30 @@
+         final String clientId,
+@@ -89,12 +174,30 @@ public class OidcTokenService {
          final List<String> roles,
          final Scope scope
      ) {
@@ -661,13 +672,15 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
              .expirationTime(Date.from(exp))
              .issueTime(Date.from(now))
              .jwtID(java.util.UUID.randomUUID().toString())
-@@ -109,18 +204,276 @@
+@@ -109,19 +212,303 @@ public class OidcTokenService {
          if (roles != null && !roles.isEmpty()) {
              claims.claim("roles", roles);
          }
 -        final String jwt = sign(claims.build()).serialize();
 -        persist("access", clientId, subject, scope.toStringList(), jwt, now, exp);
 +if (applicationGroupClaim != null) claims.claim("kestra_application_group_v1", applicationGroupClaim);
++        if (applicationGroupClaim != null && applicationGroupClaim.containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION)
++            && resource != null) claims.claim("resource", resource);
 +
 +        try {
 +            if (connection != null) {
@@ -684,7 +697,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        persist(connection, "access", clientId, subject, scope.toStringList(), jwt, now, exp, resource);
          return new BearerAccessToken(jwt, configuration.getAccessTokenTtl().getSeconds(), scope);
      }
- 
+
      /** Issues a new opaque refresh token and persists it. */
      public RefreshToken issueRefreshToken(final String clientId, final String subject, final Scope scope) {
 -        final RefreshToken refreshToken = new RefreshToken();
@@ -701,7 +714,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 + RefreshToken refreshToken = new RefreshToken();
 +if (applicationGroups && connection != null) {
 +            var authorization = applicationGroupAuthorization(connection, clientId, subject, scope.toStringList());
-+            if (authorization.claim() != null) refreshToken = new RefreshToken("application-group-v1." + authorization.claim().get("application_group_id") + "."
++            if (authorization.claim() != null) refreshToken = new RefreshToken(groupCredentialPrefix(authorization.claim()) + authorization.claim().get("application_group_id") + "."
 +                + authorization.claim().get("authorization_version") + "." + refreshToken.getValue());
 +        }
 +
@@ -710,7 +723,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        persist(connection, "refresh", clientId, subject, scope.toStringList(), refreshToken.getValue(), now, now.plus(configuration.getRefreshTokenTtl()), resource);
          return refreshToken;
      }
-+
+
 +    public com.nimbusds.oauth2.sdk.token.Tokens rotateRefreshToken(final StoredToken stored,
 +        final OidcUserService.OidcUser user, final Scope scope) {
 +        try (Connection connection = dataSource.getConnection()) {
@@ -806,12 +819,21 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        if (!applicationGroups) return code;
 +        return protocolTransaction(connection -> {
 +            var authorization = applicationGroupAuthorization(connection, clientId, subject, scopes);
++            if(authorization.claim()!=null && authorization.claim().containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION)) {
++                try(var statement=connection.prepareStatement("SELECT resource FROM oidc_authorization_code WHERE code=? AND client_id=? AND subject=? AND NOT used")) {
++                    statement.setString(1,code);statement.setString(2,clientId);statement.setString(3,subject);
++                    try(var rows=statement.executeQuery()) {
++                        if(!rows.next())throw new OidcException(OAuth2Error.INVALID_GRANT);
++                        validateApplicationGroupAudience(connection,authorization.claim(),clientId,subject,rows.getString(1));
++                    }
++                }
++            }
 +            if(authorization.claim()==null) {
 +                requireGroupBinding(code,null);
 +                return code;
 +            }
-+            if(code==null || code.isBlank() || code.startsWith("application-group-v1."))throw new OidcException(OAuth2Error.INVALID_GRANT);
-+            String bound = "application-group-v1." + authorization.claim().get("application_group_id") + "."
++            if(code==null || code.isBlank() || code.startsWith("application-group-v1.") || code.startsWith("application-group-v2."))throw new OidcException(OAuth2Error.INVALID_GRANT);
++            String bound = groupCredentialPrefix(authorization.claim()) + authorization.claim().get("application_group_id") + "."
 +                + authorization.claim().get("authorization_version") + "." + code;
 +            try (var update = connection.prepareStatement("UPDATE oidc_authorization_code SET code=? WHERE code=? AND client_id=? AND subject=? AND NOT used")) {
 +                update.setString(1, bound); update.setString(2, code); update.setString(3, clientId); update.setString(4, subject);
@@ -828,6 +850,17 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +
 +    public Scope previewConsentScopes(String clientId,String subject,List<String> requested) {
 +        return protocolTransaction(connection->applicationGroupAuthorization(connection,clientId,subject,requested,true).scope());
++    }
++
++    public Scope previewConsentScopes(String clientId,String subject,List<String> requested,String resource) {
++        return protocolTransaction(connection->validateConsentTarget(connection,clientId,subject,requested,resource));
++    }
++
++    Scope validateConsentTarget(Connection connection,String clientId,String subject,List<String> requested,String resource) {
++        var authorization=applicationGroupAuthorization(connection,clientId,subject,requested,true);
++        if(authorization.claim()!=null && authorization.claim().containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION))
++            validateApplicationGroupAudience(connection,authorization.claim(),clientId,subject,resource);
++        return authorization.scope();
 +    }
 +
 +    private ApplicationGroupAuthorization applicationGroupAuthorization(Connection connection, String clientId, String subject, List<String> requested) {
@@ -863,8 +896,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +            if(applicationGroupProjection==null || !applicationGroupProjection.isPresent())return zeroScopeLogin(client,requested);
 +            if(!applicationGroupProjection.isUnique())throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +            var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,subject,null);
-+            var result=applicationGroupProjection.get().current(connection,target);
-+            if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION)throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            var result=OidcApplicationGroupProjection.current(applicationGroupProjection.get(),connection,target);
 +            if(!result.activated()) {
 +                if(result.projection().isPresent())throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +                return zeroScopeLogin(client,requested);
@@ -893,9 +925,10 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +            var actual = new HashSet<>(issued.protocolScopes());
 +            actual.remove(ApplicationGroupScopeIssuance.UI_SELECTOR);
 +            actual.addAll(issued.applicationGroupScopes());
-+            var claim = Map.<String, Object>of("application_group_id", view.applicationGroupId(), "client_id", clientId,
++            var claim = new java.util.HashMap<String, Object>(Map.<String, Object>of("application_group_id", view.applicationGroupId(), "client_id", clientId,
 +                "application_group_scopes", issued.applicationGroupScopes(), "protocol_scopes", issued.protocolScopes().stream().filter(value -> !ApplicationGroupScopeIssuance.UI_SELECTOR.equals(value)).collect(java.util.stream.Collectors.toUnmodifiableSet()),
-+                "authorization_version", view.authorizationVersion());
++                "authorization_version", view.authorizationVersion()));
++            if(result.contractVersion()==2)claim.put(OidcApplicationGroupProjection.AUDIENCE_VERSION,2);
 +            return new ApplicationGroupAuthorization(new Scope(actual.toArray(new String[0])), claim);
 +        } catch (SQLException failure) { throw new IllegalStateException("Cannot read application group authorization", failure); }
 +    }
@@ -918,9 +951,13 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        protocol.lockSecurityState(connection);
 +    }
 +
++    private static String groupCredentialPrefix(Map<String,Object> claim) {
++        return claim.containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION)?"application-group-v2.":"application-group-v1.";
++    }
++
 +    private static void requireGroupBinding(String credential,Map<String,Object> claim) {
-+        if(credential==null || claim==null && credential.startsWith("application-group-v1.")
-+            || claim!=null && !credential.startsWith("application-group-v1."+claim.get("application_group_id")+"."+claim.get("authorization_version")+"."))
++        if(credential==null || claim==null && (credential.startsWith("application-group-v1.") || credential.startsWith("application-group-v2."))
++            || claim!=null && !credential.startsWith(groupCredentialPrefix(claim)+claim.get("application_group_id")+"."+claim.get("authorization_version")+"."))
 +            throw new OidcException(OAuth2Error.INVALID_GRANT);
 +    }
 +
@@ -939,10 +976,11 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        }catch(SQLException failure){throw new IllegalStateException("OIDC authorization state unavailable",failure);}
 +    }
 +
- 
++
      /** Issues an OIDC ID token (RS256 JWT) for the given client (audience). */
      public SignedJWT issueIdToken(
-@@ -129,7 +482,15 @@
+         final String clientId,
+@@ -129,7 +516,15 @@ public class OidcTokenService {
          final String name,
          final String email,
          final List<String> roles,
@@ -959,7 +997,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
      ) {
          final Instant now = Instant.now();
          final Instant exp = now.plus(configuration.getAccessTokenTtl());
-@@ -154,9 +515,18 @@
+@@ -154,9 +549,18 @@ public class OidcTokenService {
              final JWTClaimsSet base = idTokenClaims.toJWTClaimsSet();
              final JWTClaimsSet jwtClaims = new JWTClaimsSet.Builder(base)
                  .jwtID(java.util.UUID.randomUUID().toString())
@@ -980,7 +1018,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
              throw new IllegalStateException("Failed to build ID token claims", e);
          }
      }
-@@ -175,6 +545,9 @@
+@@ -175,6 +579,9 @@ public class OidcTokenService {
          if (exp == null || exp.before(new Date())) {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": token expired"));
          }
@@ -990,7 +1028,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
          final StoredToken stored = findByValue(value)
              .orElseThrow(() -> new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": unknown token")));
          if (stored.revoked()) {
-@@ -184,7 +557,112 @@
+@@ -184,7 +591,118 @@ public class OidcTokenService {
              throw new OidcException(OAuth2Error.INVALID_GRANT.appendDescription(": not an access token"));
          }
          validateClientAndSubject(stored);
@@ -1038,7 +1076,11 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +                || !scopeKeys.equals(current.claim().get("application_group_scopes")) || !protocolKeys.equals(current.claim().get("protocol_scopes")))
 +                throw new OidcException(OAuth2Error.INVALID_GRANT);
 +            var view=currentProjection(connection,clientId,subject,claimText(claim.get("application_group_id")));
-+            if(claims.getAudience().isEmpty() || !view.audiences().containsAll(claims.getAudience()))throw new OidcException(OAuth2Error.INVALID_GRANT);
++            int audienceVersion=current.claim().containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION)?2:1;
++            OidcApplicationGroupProjection.requireVersion(claim,audienceVersion);
++            String resource=claims.getClaim("resource")==null?null:claimText(claims.getClaim("resource"));
++            if(!OidcApplicationGroupProjection.audienceAllowed(view,audienceVersion,clientId,resource,Set.copyOf(claims.getAudience())))
++                throw new OidcException(OAuth2Error.INVALID_GRANT);
 +            return null;
 +        });
 +    }
@@ -1070,15 +1112,17 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +                return;
 +            }
 +            var view=currentProjection(connection,clientId,subject,claimText(claim.get("application_group_id")));
-+            if(!view.audiences().contains(resource==null?clientId:resource))throw new OidcException(OAuth2Error.INVALID_SCOPE);
++            int audienceVersion=claim.containsKey(OidcApplicationGroupProjection.AUDIENCE_VERSION)?2:1;
++            if(!OidcApplicationGroupProjection.audienceAllowed(view,audienceVersion,clientId,resource,Set.of(resource==null?clientId:resource)))
++                throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +        }catch(SQLException failure){throw new IllegalStateException("Cannot validate application group audience",failure);}
 +    }
 +
-+    private ApplicationGroupProtocolProjectionV1.Projection currentProjection(Connection connection,String clientId,String subject,String expectedGroup)throws SQLException {
++    private io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV2.Projection currentProjection(Connection connection,String clientId,String subject,String expectedGroup)throws SQLException {
 +        if(applicationGroupProjection==null || !applicationGroupProjection.isUnique())throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +        var request=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,subject,expectedGroup);
-+        var result=applicationGroupProjection.get().current(connection,request);
-+        if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION || !result.activated())throw new OidcException(OAuth2Error.INVALID_SCOPE);
++        var result=OidcApplicationGroupProjection.current(applicationGroupProjection.get(),connection,request);
++        if(!result.activated())throw new OidcException(OAuth2Error.INVALID_SCOPE);
 +        var view=result.projection().orElseThrow(()->new OidcException(OAuth2Error.INVALID_SCOPE));
 +        view.eligibleScopeKeys(request);
 +        if(!view.active() || !view.approved())throw new OidcException(OAuth2Error.INVALID_SCOPE);
@@ -1102,12 +1146,12 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +        for(var item:values)if(!result.add(claimText(item)))throw new OidcException(OAuth2Error.INVALID_GRANT);
 +        return Set.copyOf(result);
      }
- 
+
      /** Validates a refresh token for exchange, returning its stored record. */
-@@ -235,9 +713,15 @@
+@@ -235,9 +753,15 @@ public class OidcTokenService {
          }
      }
- 
+
 +    public StoredToken validateResourceRefreshToken(final String value, final String clientId, final String resource) {
 +        final var stored = validateRefreshToken(value, clientId);
 +        if (!java.util.Objects.equals(stored.resource(), resource)) throw new OidcException(OAuth2Error.INVALID_GRANT);
@@ -1121,9 +1165,9 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
              FROM oidc_token WHERE value = ?""";
          try (Connection connection = dataSource.getConnection();
               PreparedStatement ps = connection.prepareStatement(sql)) {
-@@ -263,7 +747,13 @@
+@@ -263,7 +787,13 @@ public class OidcTokenService {
      }
- 
+
      private SignedJWT sign(final JWTClaimsSet claims) {
 -        final var key = jwkService.activeSigningKey();
 +return sign(null, claims); }
@@ -1136,8 +1180,8 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
          try {
              final JWSSigner signer = new RSASSASigner(key);
              final SignedJWT jwt = new SignedJWT(
-@@ -317,13 +807,25 @@
- 
+@@ -317,13 +847,25 @@ public class OidcTokenService {
+
      private void persist(
          final String type, final String clientId, final String subject,
 -        final List<String> scopes, final String value, final Instant issuedAt, final Instant expiresAt
@@ -1167,7 +1211,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
              ps.setString(1, clientId);
              ps.setString(2, subject);
              ps.setString(3, type);
-@@ -331,6 +833,7 @@
+@@ -331,6 +873,7 @@ public class OidcTokenService {
              ps.setString(5, toJson(scopes));
              ps.setTimestamp(6, Timestamp.from(issuedAt));
              ps.setTimestamp(7, Timestamp.from(expiresAt));
@@ -1175,7 +1219,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
              ps.executeUpdate();
          } catch (SQLException e) {
              throw new IllegalStateException("Failed to persist OIDC token", e);
-@@ -349,7 +852,7 @@
+@@ -349,7 +892,7 @@ public class OidcTokenService {
              fromJson(rs.getString("scopes")),
              issuedAt == null ? null : issuedAt.toInstant(),
              expiresAt == null ? null : expiresAt.toInstant(),
@@ -1183,8 +1227,8 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcToken
 +            rs.getBoolean("revoked"), rs.getString("resource")
          );
      }
- 
-@@ -368,4 +871,5 @@
+
+@@ -368,4 +911,5 @@ public class OidcTokenService {
              throw new IllegalStateException("Failed to parse scopes", e);
          }
      }
@@ -1205,7 +1249,7 @@ index 7d64c04..fd20578 100644
 @@ -49,6 +49,24 @@ class McpServerHandlerTransportTest {
          assertThat(mcpServerHandlerTransport.listToolsForServer(null, serverB).collectList().block()).isEmpty();
      }
- 
+
 +    @Test
 +    void shouldSeparateHandlersByVerifiedCallerAndCapabilities() {
 +        final String server = UUID.randomUUID().toString();

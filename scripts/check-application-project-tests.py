@@ -4,6 +4,15 @@ import sys
 import xml.etree.ElementTree as ET
 
 REQUIRED = {
+    "io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV2Test": 5,
+    "io.kestra.webserver.oidc.OidcResourceAudiencePostgresTest": 12,
+    "io.kestra.webserver.oidc.OidcResourceAudienceHttpTest": 4,
+    "io.kestra.webserver.oidc.OidcAccountDeletionPostgresTest": 4,
+    "io.kestra.webserver.oidc.TrustedIdentityBorrowedConnectionTest": 1,
+    "io.kestra.webserver.oidc.OidcPasswordChangePostgresTest": 3,
+    "io.kestra.webserver.oidc.OidcPasswordChangeHttpTest": 1,
+    "io.kestra.webserver.oidc.OidcClientCredentialMaintenanceTest": 7,
+    "io.kestra.webserver.oidc.OidcClientCredentialsHttpTest": 2,
     "io.kestra.webserver.ui.UiExtensionEntryHttpTest": 4,
     "io.kestra.webserver.rbac.ExtensionDiscoveryRouteTest": 1,
     "io.kestra.webserver.oidc.OauthAuthorizationErrorRoutingTest": 6,

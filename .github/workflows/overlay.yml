@@ -87,7 +87,24 @@ jobs:
       - name: MCP OAuth image acceptance with real SDK and zero-side-effect scope denial
         env:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
+          BB_REPORT_DIR: ${{ github.workspace }}/.work/mcp-image-tests
         run: bash ./scripts/blackbox-mcp-oauth.sh "$CANDIDATE_IMAGE" "${{ github.workspace }}/.work/verify"
+      - name: Preserve UI unit matrix evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-ui-unit-tests
+          path: .work/verify/ui/build/reports/ui-extension-tests.json
+          include-hidden-files: true
+          if-no-files-found: warn
+      - name: Preserve image-only fixture and SDK test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-mcp-image-tests
+          path: .work/mcp-image-tests/*.xml
+          include-hidden-files: true
+          if-no-files-found: warn
   oidc-blackbox:
     needs: build-push
     runs-on: ubuntu-24.04
@@ -130,6 +147,7 @@ jobs:
           path: |
             .work/auth-theme-*.json
             .work/auth-i18n-*.json
+            .work/password-change-*.json
             .work/directory-http-*.json
             .work/ui-extension-*.json
           include-hidden-files: true
