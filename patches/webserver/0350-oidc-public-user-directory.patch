@@ -1,6 +1,6 @@
 # 需求: REQ-0350，公开最小账号目录、原子创建与认证生命周期失效，不承载授权业务。
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；账号/client的13项guard单元探针通过；PostgreSQL与完整CI未通过，未发布。
+# 状态: core；目录PG14项与完整本地门通过；仅对应提交CI及正式镜像推广成功后可消费。
 # 来源: 新写；依据 R-OIDC-SERVER 目录反馈与发布宿主组件探针；无客户角色或路径特例。
 # 触达上游文件: 新增公开 SPI、目录适配及版本迁移，修改登录/session/code激活点及测试，共14文件；client生命周期机制归0190，发行与token验证归0150/0160。
 # 移除条件: 上游 OSS 提供等价公开账号目录与完整认证生命周期失效机制。
@@ -334,9 +334,10 @@ index 8e2e2a6e6a30d149225e992a7c0347eeb474ac4c..03461d721ffebc9e5b67a0ad4d203b7f
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 new file mode 100644
+index 0000000000000000000000000000000000000000..cc5ea8397b7cf35edd62a492c3b4cbfef6df02a6
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,186 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import java.nio.charset.StandardCharsets;
@@ -410,6 +411,12 @@ new file mode 100644
 +            throw new DirectoryException(Failure.INVALID);
 +        return BCrypt.hashpw(password, BCrypt.gensalt());
 +    }
++    private static String profile(String value) {
++        if (value == null) return "";
++        if (value.length() > 256 || value.codePoints().anyMatch(Character::isISOControl))
++            throw new DirectoryException(Failure.INVALID);
++        return value.isBlank() ? "" : text(value);
++    }
 +    private static User read(ResultSet rows) throws SQLException {
 +        return new User(rows.getString("username"), rows.getString("name"), rows.getString("email"),
 +            "ACTIVE".equals(rows.getString("user_state")), rows.getLong("directory_revision"));
@@ -464,12 +471,14 @@ new file mode 100644
 +        if (count != 1) throw new DirectoryException(find(connection, subject).isPresent() ? Failure.CONFLICT : Failure.NOT_FOUND);
 +    }
 +    @Override public User update(String subject, long revision, String name, String email) {
-+        text(subject); text(name); text(email);
++        text(subject);
++        String display = profile(name);
++        String address = profile(email);
 +        if (revision < 0) throw new DirectoryException(Failure.INVALID);
 +        return transaction(connection -> {
-+            try (var statement = connection.prepareStatement("UPDATE oidc_user SET name=?,email=?,email_verified=CASE WHEN email=? THEN email_verified ELSE false END,"
++            try (var statement = connection.prepareStatement("UPDATE oidc_user SET name=?,email=?,email_verified=CASE WHEN email=? AND email<>'' THEN email_verified ELSE false END,"
 +                + "directory_revision=directory_revision+1,updated_at=now() WHERE username=? AND directory_revision=?")) {
-+                statement.setString(1, name); statement.setString(2, email); statement.setString(3, email);
++                statement.setString(1, display); statement.setString(2, address); statement.setString(3, address);
 +                statement.setString(4, subject); statement.setLong(5, revision);
 +                changed(connection, subject, statement.executeUpdate());
 +            }
@@ -526,10 +535,10 @@ index 0000000000000000000000000000000000000000..7a210b96b724d77e2bd8ae1ae23ca7a8
 +ALTER TABLE oidc_authorization_code ADD COLUMN IF NOT EXISTS authentication_version BIGINT NOT NULL DEFAULT 0;
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..66e85d60f0a9465e6bcd349fb13c6d9ba8690dbb
+index 0000000000000000000000000000000000000000..10b41e4458b7d3aac2434a358b467cc4119a6125
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/UserDirectoryContractTest.java
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,294 @@
 +package io.kestra.webserver.oidc;
 +
 +import java.util.List;
@@ -568,6 +577,86 @@ index 0000000000000000000000000000000000000000..66e85d60f0a9465e6bcd349fb13c6d9b
 +    private UserDirectoryV1.User create() { return directory.create(subject, "Initial", "initial@example.invalid", "InitialPassword123!"); }
 +    private void failure(UserDirectoryV1.Failure expected, Runnable action) {
 +        assertEquals(expected, assertThrows(UserDirectoryV1.DirectoryException.class, action::run).failure());
++    }
++    @Test void temporaryCreateStoresAbsentAndBlankProfilesWithoutInventedDefaults() {
++        UserDirectoryV2 publicDirectory = directory;
++        for (String value : new String[] {null, "", "   "}) {
++            String username = subject + "-" + UUID.randomUUID();
++            var created = publicDirectory.createTemporary(username, value, value);
++            assertEquals("", created.user().name());
++            assertEquals("", created.user().email());
++            assertEquals(username, created.user().subject());
++            assertTrue(created.user().active());
++            assertEquals(0, created.user().revision());
++            assertEquals(created.user(), publicDirectory.find(username).orElseThrow());
++            assertTrue(publicDirectory.list(1, 100).items().contains(created.user()));
++            assertTrue(users.bySubject(username).orElseThrow().roles().isEmpty());
++            assertTrue(new OidcIdentityLifecycle(dataSource()).authenticate(username, created.temporaryPassword()).isEmpty());
++        }
++        var baseline = publicDirectory.list(1, 100);
++        for (String invalid : new String[] {"x".repeat(257), " ".repeat(257), " leading", "trailing ", "\n", "bad\u0000value"}) {
++            failure(UserDirectoryV1.Failure.INVALID, () -> publicDirectory.createTemporary(subject + "-invalid", invalid, ""));
++            failure(UserDirectoryV1.Failure.INVALID, () -> publicDirectory.createTemporary(subject + "-invalid", "", invalid));
++            assertEquals(baseline, publicDirectory.list(1, 100));
++        }
++    }
++    @Test void clearProfilePreservesCredentialsAuthorizationAndCompareAndSet() throws Exception {
++        UserDirectoryV2 publicDirectory = directory;
++        var initial = create();
++        var sessions = new OidcSessionService(new OidcConfiguration(), new OidcIdentityLifecycle(dataSource()));
++        String session = sessions.create(subject);
++        try (var connection = dataSource().getConnection(); var statement = connection.prepareStatement(
++            "UPDATE oidc_user SET email_verified=true WHERE username=?")) {
++            statement.setString(1, subject); statement.executeUpdate();
++        }
++        var same = publicDirectory.update(subject, initial.revision(), "Changed", initial.email());
++        assertTrue(users.bySubject(subject).orElseThrow().emailVerified());
++        var changed = publicDirectory.update(subject, same.revision(), "Updated", "updated@example.invalid");
++        assertFalse(users.bySubject(subject).orElseThrow().emailVerified());
++        changed = publicDirectory.update(subject, changed.revision(), "", changed.email());
++        assertEquals("", changed.name()); assertEquals("updated@example.invalid", changed.email());
++        changed = publicDirectory.update(subject, changed.revision(), "Restored", "");
++        assertEquals("Restored", changed.name()); assertEquals("", changed.email());
++        changed = publicDirectory.update(subject, changed.revision(), "Filled", "filled@example.invalid");
++        assertEquals("Filled", changed.name()); assertEquals("filled@example.invalid", changed.email());
++        for (String value : new String[] {"", null, "   "}) {
++            long revision = changed.revision();
++            changed = publicDirectory.update(subject, revision, value, value);
++            assertEquals("", changed.name()); assertEquals("", changed.email());
++            assertEquals(subject, changed.subject()); assertTrue(changed.active());
++            assertEquals(revision + 1, changed.revision());
++            assertEquals(changed, publicDirectory.find(subject).orElseThrow());
++            assertTrue(publicDirectory.list(1, 100).items().contains(changed));
++            failure(UserDirectoryV1.Failure.CONFLICT, () -> publicDirectory.update(subject, revision, "Stale", "stale@example.invalid"));
++            assertEquals(changed, publicDirectory.find(subject).orElseThrow());
++        }
++        var before = publicDirectory.find(subject).orElseThrow();
++        for (String invalid : new String[] {"x".repeat(257), " ".repeat(257), " leading", "trailing ", "\n", "bad\u0000value"}) {
++            failure(UserDirectoryV1.Failure.INVALID, () -> publicDirectory.update(subject, before.revision(), invalid, ""));
++            failure(UserDirectoryV1.Failure.INVALID, () -> publicDirectory.update(subject, before.revision(), "", invalid));
++            assertEquals(before, publicDirectory.find(subject).orElseThrow());
++        }
++        failure(UserDirectoryV1.Failure.INVALID, () -> publicDirectory.update(" " + subject, before.revision(), "", ""));
++        assertEquals(before, publicDirectory.find(subject).orElseThrow());
++        assertTrue(users.validateCredentials(subject, "InitialPassword123!"));
++        assertEquals(subject, sessions.subject(session).orElseThrow());
++        assertTrue(new OidcIdentityLifecycle(dataSource()).matches(subject, 0L));
++        assertTrue(users.bySubject(subject).orElseThrow().roles().isEmpty());
++        assertFalse(users.bySubject(subject).orElseThrow().emailVerified());
++    }
++    @Test void legacyCreateRetainsNullDefaultsAndRejectsInvalidSubjects() {
++        UserDirectoryV1 legacy = directory;
++        var created = legacy.create(subject, null, null, "InitialPassword123!");
++        assertEquals(subject, created.name()); assertEquals(subject + "@localhost", created.email());
++        var emailSubject = subject + "@example.invalid";
++        assertEquals(emailSubject, legacy.create(emailSubject, null, null, "InitialPassword123!").email());
++        var baseline = legacy.list(1, 100);
++        for (String invalid : new String[] {null, "", " ", "leading ", "\n", "x".repeat(257)}) {
++            failure(UserDirectoryV1.Failure.INVALID, () -> directory.createTemporary(invalid, "", ""));
++            assertEquals(baseline, legacy.list(1, 100));
++        }
++        failure(UserDirectoryV1.Failure.INVALID, () -> legacy.create(subject + "-blank", "", "", "InitialPassword123!"));
++        assertEquals(baseline, legacy.list(1, 100));
 +    }
 +    @Test void duplicateCreatePreservesCredentialsAndRoles() {
 +        create();

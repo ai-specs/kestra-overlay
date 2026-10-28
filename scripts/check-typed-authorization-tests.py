@@ -31,11 +31,11 @@ for suite, expected in {
     print(f"PASS: {suite}: {expected} tests executed, no failures or skips")
 
 directory = ET.parse(results / "TEST-io.kestra.webserver.oidc.UserDirectoryContractTest.xml").getroot()
-if int(directory.attrib["tests"]) != 11 or any(
+if int(directory.attrib["tests"]) != 14 or any(
     int(directory.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
 ):
-    raise SystemExit("FAIL: UserDirectoryContractTest must execute 11 tests without failures or skips")
-print("PASS: UserDirectoryContractTest: 11 tests executed, no failures or skips")
+    raise SystemExit("FAIL: UserDirectoryContractTest must execute 14 tests without failures or skips")
+print("PASS: UserDirectoryContractTest: 14 tests executed, no failures or skips")
 
 mcp_evaluation = ET.parse(results / "TEST-io.kestra.mcp.McpEvaluationLifecycleTest.xml").getroot()
 if int(mcp_evaluation.attrib["tests"]) != 3 or any(

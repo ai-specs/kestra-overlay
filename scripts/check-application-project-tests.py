@@ -4,6 +4,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 REQUIRED = {
+    "io.kestra.webserver.oidc.UserDirectoryContractTest": 14,
     "io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV2Test": 5,
     "io.kestra.webserver.oidc.OidcResourceAudiencePostgresTest": 12,
     "io.kestra.webserver.oidc.OidcResourceAudienceHttpTest": 4,

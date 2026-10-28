@@ -1,6 +1,6 @@
 # 需求: REQ-0380 标准账号删除与同连接可信操作者生命周期参与
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；候选未发布
+# 状态: core；完整本地门通过；仅对应提交CI及正式镜像推广成功后可消费
 # 来源: 新写；公开UserDirectoryV1与协议安全锁；R24主控设计维护者可复核
 # 触达上游文件: 13 个（公开SPI、同连接适配、迁移与独立PG探针）
 # 移除条件: 上游提供等价标准身份生命周期和借用连接公开机制
@@ -268,7 +268,7 @@ index 62e3e3e..da663d7 100644
 
      private static String text(Object value) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
-index c771a32..d1c814d 100644
+index cc5ea8397b7cf35edd62a492c3b4cbfef6df02a6..50b704baa00cc97c30ffe50a37c46fb673580a4e 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 @@ -8,6 +8,8 @@ import java.util.ArrayList;
@@ -305,7 +305,7 @@ index c771a32..d1c814d 100644
      public OidcUserDirectory(DataSource source,
          BeanProvider<IdentityLifecycleGuardV1> guards,OidcProtocolStateV1 protocol,OidcConfiguration configuration,
          @io.micronaut.context.annotation.Value("${kestra.rbac.application-groups.enabled:false}") boolean applicationGroups) {
-@@ -107,7 +118,12 @@ public final class OidcUserDirectory implements UserDirectoryV1 {
+@@ -113,7 +124,12 @@ public final class OidcUserDirectory implements UserDirectoryV1 {
          String display = text(name == null ? subject : name);
          String address = text(email == null ? (subject.contains("@") ? subject : subject + "@localhost") : email);
          String credential = hash(password);
@@ -319,7 +319,7 @@ index c771a32..d1c814d 100644
              try (var statement = connection.prepareStatement("INSERT INTO oidc_user(username,name,email,roles) VALUES (?,?,?,'[]'::jsonb)")) {
                  statement.setString(1, subject); statement.setString(2, display); statement.setString(3, address); statement.executeUpdate();
              }
-@@ -115,6 +131,30 @@ public final class OidcUserDirectory implements UserDirectoryV1 {
+@@ -121,6 +137,30 @@ public final class OidcUserDirectory implements UserDirectoryV1 {
              return find(connection, subject).orElseThrow();
          });
      }
@@ -350,7 +350,7 @@ index c771a32..d1c814d 100644
      private static void password(Connection connection, String subject, String credential) throws SQLException {
          try (var statement = connection.prepareStatement("INSERT INTO oidc_user_auth_method(user_id,type,credential) VALUES (?,'PASSWORD',?) "
              + "ON CONFLICT(user_id,type) DO UPDATE SET credential=EXCLUDED.credential,state='ACTIVE',updated_at=now()")) {
-@@ -147,7 +187,14 @@ public final class OidcUserDirectory implements UserDirectoryV1 {
+@@ -155,7 +195,14 @@ public final class OidcUserDirectory implements UserDirectoryV1 {
          text(subject);
          if (revision < 0) throw new DirectoryException(Failure.INVALID);
          return transaction(true,connection -> {
@@ -535,11 +535,10 @@ index 0000000..0736b07
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
-index 3262778..86b116f 100644
+index 3262778ed4442625d42e6168599ca1002991045b..71ed6b5f5fe373fbed09ff5c601c05621e94bb7d 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
-@@ -25,7 +25,9 @@ public abstract class OidcPostgresTestBase {
-      * class, which would hand later classes an empty database while the migration flag is
+@@ -26,7 +26,15 @@ public abstract class OidcPostgresTestBase {
       * already set — the exact failure this base exists to prevent.
       */
 -    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18");
@@ -548,4 +547,11 @@ index 3262778..86b116f 100644
 +            System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_OWNER", "kestra-overlay-" + java.util.UUID.randomUUID())));
 
      static {
++        String volume = System.getenv("KESTRA_TEST_PG_VOLUME");
++        if (volume != null && !volume.isBlank()) {
++            POSTGRES.withCreateContainerCmdModifier(command -> command.getHostConfig().withBinds(
++                new com.github.dockerjava.api.model.Bind(volume,
++                    new com.github.dockerjava.api.model.Volume("/var/lib/postgresql"))));
++        }
          POSTGRES.start();
+     }

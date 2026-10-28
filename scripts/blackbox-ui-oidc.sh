@@ -15,6 +15,8 @@ TEMP_DIR=$(mktemp -d)
 PASSWORD_RBAC_REPORT="$(dirname "$0")/../.work/password-rbac-$SETUP_MODE.json"
 mkdir -p "$(dirname "$PASSWORD_RBAC_REPORT")"
 printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$PASSWORD_RBAC_REPORT"
+PROFILE_REPORT="$(dirname "$0")/../.work/profile-directory-$SETUP_MODE.json"
+printf '{"completed":false,"checks":[],"expectedChecks":26,"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$PROFILE_REPORT"
 
 cleanup() {
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
@@ -179,6 +181,7 @@ assert_status "completed setup POST cannot reactivate" 404 "$(curl -s -X POST -H
   -d 'username=attacker&password=AttackerPass123!' -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 python3 "$(dirname "$0")/directory-probe/http-check.py" "$BASE" "$SERVER" "$PG" \
   "$(dirname "$0")/../.work/directory-http-$SETUP_MODE.json"
+python3 "$(dirname "$0")/directory-probe/profile-check.py" "$BASE" "$SERVER" "$PG" "$PROFILE_REPORT"
 HASH_BEFORE=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 [[ "$HASH_BEFORE" == '$2a$'* ]] || { echo 'FAIL: password must be bcrypt'; exit 1; }
 

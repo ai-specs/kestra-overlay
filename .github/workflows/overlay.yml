@@ -166,6 +166,7 @@ jobs:
             .work/password-change-*.json
             .work/password-rbac-*.json
             .work/directory-http-*.json
+            .work/profile-directory-*.json
             .work/ui-extension-*.json
           include-hidden-files: true
           if-no-files-found: error

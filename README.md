@@ -622,6 +622,16 @@ Namespace 查询扩展可以替换公开的 `GlobalNamespaceAccessControl` 和
 新账号必须首次改密，临时凭据不能建立正常 IdP/UI 会话或取得 code/token。
 subject 永远是不可改登录名；删除后持久退役，不可同名重建，不删除历史执行/审计。
 
+空资料公开契约（2026-10-28；仅对应提交 CI 与正式镜像推广成功后可消费）：V2
+`createTemporary` 及目录 `update` 的姓名、
+邮箱接受 null、空字符串和无控制字符的纯空白，统一存储并由 `find/list` 返回空字符串，
+不编造 subject、`@localhost` 或“—”资料。非空字段仍最多256字符、不得带首尾空白或
+控制字符；超长或控制字符纯空白仍拒绝。V1 `create` 保留 null 默认显示名/邮箱的既有
+行为，不能据此假定 V2 也默认补全。更新空邮箱清除 email_verified，相同非空邮箱保留
+该标记，其他邮箱变化清除标记。资料更新只推进目录 revision，不改变登录名、active、
+角色、凭据或认证版本；旧 revision 拒绝且不保存。本地完整门通过不替代对应提交 CI、
+正式镜像推广或部署仓组合验收。
+
 生产登录以临时密码进入 `/oidc/password`，使用独立 HttpOnly、SameSite=Strict 的
 `oidc_password_change` cookie（`/oidc`，10 分钟）。GET 返回主题/语言一致的独立表单。
 POST 字段固定为 `csrf`、`password`、`confirmation`（不是 `csfr`）；Origin 必须精确为
