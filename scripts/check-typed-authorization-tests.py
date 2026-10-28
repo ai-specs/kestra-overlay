@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
+    "RbacActivationTest": 8,
     "TypedAuthorizationContractTest": 6,
     "TypedAuthorizationGateTest": 2,
     "OssRestOperationAdapterTest": 4,

@@ -164,6 +164,7 @@ jobs:
             .work/auth-theme-*.json
             .work/auth-i18n-*.json
             .work/password-change-*.json
+            .work/password-rbac-*.json
             .work/directory-http-*.json
             .work/ui-extension-*.json
           include-hidden-files: true

@@ -294,10 +294,10 @@ index 0000000..70965f8
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 new file mode 100644
-index 0000000..e4fc901
+index 0000000000000000000000000000000000000000..b5a1560b55eab73d1cc98d2ebbbc35af5467a8f4
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,105 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -382,6 +382,11 @@ index 0000000..e4fc901
 +            return path.equals("/oauth/logout") && method.getMethodName().equals("endSession");
 +        }
 +        String controller = method.getDeclaringType().getName();
++        if (controller.equals("io.kestra.webserver.oidc.controllers.OidcPasswordChangeController")) {
++            return path.equals("/oidc/password")
++                && (request.getMethod() == HttpMethod.GET && method.getMethodName().equals("page")
++                    || request.getMethod() == HttpMethod.POST && method.getMethodName().equals("submit"));
++        }
 +        if (controller.equals("io.kestra.webserver.controllers.RootController")) return path.equals("/ping");
 +        if (controller.equals("io.kestra.webserver.controllers.api.MiscController")) return path.equals("/api/v1/configs/login");
 +        if (controller.equals("io.kestra.webserver.controllers.api.UiController")) return path.equals("/ui") || path.startsWith("/ui/");
@@ -400,10 +405,10 @@ index 0000000..e4fc901
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java
 new file mode 100644
-index 0000000..fbe4079
+index 0000000000000000000000000000000000000000..c579ea7dc0c23cdf6a5d1a12b612e9888a8d7d2b
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,152 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.util.*;
@@ -424,6 +429,36 @@ index 0000000..fbe4079
 +import static org.mockito.Mockito.*;
 +
 +class RbacActivationTest {
++    @SuppressWarnings({"rawtypes", "unchecked"})
++    private HttpRequest<?> passwordRequest(HttpMethod verb, String path, Class<?> controller, String handler) {
++        var request = HttpRequest.create(verb, path);
++        MethodBasedRouteMatch route = mock(MethodBasedRouteMatch.class);
++        when(route.getDeclaringType()).thenReturn(controller);
++        when(route.getMethodName()).thenReturn(handler);
++        RouteAttributes.setRouteMatch(request, route);
++        return request;
++    }
++
++    @Test void passwordProtocolOnlyAllowsExactControllerMethodAndPath() {
++        var controller = io.kestra.webserver.oidc.controllers.OidcPasswordChangeController.class;
++        assertTrue(RestRbacFilter.protocol(passwordRequest(HttpMethod.GET, "/oidc/password", controller, "page")));
++        assertTrue(RestRbacFilter.protocol(passwordRequest(HttpMethod.POST, "/oidc/password", controller, "submit")));
++        for (String path : List.of("/oidc/password/", "/oidc/password/extra", "/oidc/%70assword", "/oidc//password", "/oidc/../oidc/password", "/oidc/unknown")) {
++            assertFalse(RestRbacFilter.protocol(passwordRequest(HttpMethod.GET, path, controller, "page")), path);
++        }
++        assertFalse(RestRbacFilter.protocol(passwordRequest(HttpMethod.GET, "/oidc/password", RbacActivationTest.class, "page")));
++        assertFalse(RestRbacFilter.protocol(passwordRequest(HttpMethod.GET, "/oidc/password", controller, "unknown")));
++        assertFalse(RestRbacFilter.protocol(passwordRequest(HttpMethod.POST, "/oidc/password", controller, "page")));
++        assertFalse(RestRbacFilter.protocol(passwordRequest(HttpMethod.GET, "/oidc/password", controller, "submit")));
++        assertFalse(RestRbacFilter.protocol(passwordRequest(HttpMethod.DELETE, "/oidc/password", controller, "submit")));
++        assertFalse(RestRbacFilter.protocol(HttpRequest.GET("/oidc/password")));
++        var filter = new TypedRestRbacFilter(new RbacConfiguration(true, false), null, null, mock(ProblemFactory.class));
++        var chain = mock(ServerFilterChain.class);
++        var unknown = passwordRequest(HttpMethod.GET, "/oidc/password", RbacActivationTest.class, "page");
++        assertEquals(HttpStatus.UNAUTHORIZED, Mono.from(filter.doFilter(unknown, chain)).block().getStatus());
++        verifyNoInteractions(chain);
++    }
++
 +    final RbacAuthorizer.Principal alice = new RbacAuthorizer.Principal("alice", List.of("reader"), "ui", "api", List.of());
 +    final RbacAuthorizer.Resource flow = new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW, RbacAuthorizer.Scope.NAMESPACE, "main", "private.ns", "flow");
 +    @SuppressWarnings("unchecked") <T> BeanProvider<T> provider(T bean) {

@@ -11,6 +11,9 @@ SERVER="kestra-ui-bb-$$"
 STORAGE="kestra-ui-storage-$$"
 SETUP_MODE="${BB_SETUP_MODE:-form}"
 TEMP_DIR=$(mktemp -d)
+PASSWORD_RBAC_REPORT="$(dirname "$0")/../.work/password-rbac-$SETUP_MODE.json"
+mkdir -p "$(dirname "$PASSWORD_RBAC_REPORT")"
+printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$PASSWORD_RBAC_REPORT"
 
 cleanup() {
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
@@ -308,6 +311,9 @@ assert_status "recreated container ignores injected bootstrap account" 404 "$(cu
 ATTACKER_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*) FROM oidc_user WHERE username='attacker'")
 assert_status "bootstrap cannot add another initial account" 0 "$ATTACKER_COUNT"
 node "$(dirname "$0")/protocol-session-probe.mjs" "$BASE"
+prepare_directory_probe
+python3 "$(dirname "$0")/directory-probe/password-rbac-check.py" "$BASE" "$SERVER" "$PG" \
+  "$PASSWORD_RBAC_REPORT"
 UNBOUND_CODES=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*) FROM oidc_authorization_code WHERE client_id<>'kestra-ui' AND created_at>now()-interval '1 minute' AND NOT used")
 assert_status "missing projection creates no ordinary authorization code" 0 "$UNBOUND_CODES"
 INSTALLATION_ID=$(docker exec "$PG" psql -U kestra -d kestra -Atc 'SELECT installation_id FROM oidc_setup')
