@@ -10,6 +10,8 @@ REQUIRED = {
     "io.kestra.webserver.oidc.OidcResourceAudienceHttpTest": 4,
     "io.kestra.webserver.oidc.OidcAccountDeletionPostgresTest": 4,
     "io.kestra.webserver.oidc.TrustedIdentityBorrowedConnectionTest": 1,
+    "io.kestra.webserver.oidc.TrustedIdentityFailureClassificationTest": 6,
+    "io.kestra.webserver.oidc.TrustedIdentityLockRecheckPostgresTest": 4,
     "io.kestra.webserver.oidc.OidcPasswordChangePostgresTest": 3,
     "io.kestra.webserver.oidc.OidcPasswordChangeHttpTest": 1,
     "io.kestra.webserver.oidc.OidcClientCredentialMaintenanceTest": 7,

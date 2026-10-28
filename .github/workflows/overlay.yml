@@ -168,6 +168,7 @@ jobs:
             .work/directory-http-*.json
             .work/profile-directory-*.json
             .work/favicon-*.json
+            .work/identity-recheck-*.json
             .work/ui-extension-*.json
           include-hidden-files: true
           if-no-files-found: error

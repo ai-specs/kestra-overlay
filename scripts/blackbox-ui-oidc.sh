@@ -19,6 +19,8 @@ PROFILE_REPORT="$(dirname "$0")/../.work/profile-directory-$SETUP_MODE.json"
 printf '{"completed":false,"checks":[],"expectedChecks":26,"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$PROFILE_REPORT"
 FAVICON_REPORT="$(dirname "$0")/../.work/favicon-$SETUP_MODE.json"
 printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$FAVICON_REPORT"
+IDENTITY_RECHECK_REPORT="$(dirname "$0")/../.work/identity-recheck-$SETUP_MODE.json"
+printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$IDENTITY_RECHECK_REPORT"
 
 cleanup() {
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
@@ -47,8 +49,9 @@ request() {
 
 prepare_directory_probe() {
   docker cp "$SERVER:/app/kestra" "$TEMP_DIR/host.jar"
-  javac -proc:none -cp "$TEMP_DIR/host.jar" -d "$TEMP_DIR" "$(dirname "$0")/directory-probe/HttpDirectoryCommand.java"
-  jar --create --file "$TEMP_DIR/directory-command.jar" -C "$TEMP_DIR" HttpDirectoryCommand.class
+  javac -proc:none -cp "$TEMP_DIR/host.jar" -d "$TEMP_DIR" "$(dirname "$0")/directory-probe/HttpDirectoryCommand.java" "$(dirname "$0")/directory-probe/IdentityRecheckCommand.java"
+  jar --create --file "$TEMP_DIR/directory-command.jar" -C "$TEMP_DIR" HttpDirectoryCommand.class \
+    -C "$TEMP_DIR" IdentityRecheckCommand.class -C "$TEMP_DIR" 'IdentityRecheckCommand$Provider.class'
   docker cp "$TEMP_DIR/directory-command.jar" "$SERVER:/tmp/directory-command.jar"
 }
 
@@ -322,6 +325,14 @@ ATTACKER_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*
 assert_status "bootstrap cannot add another initial account" 0 "$ATTACKER_COUNT"
 node "$(dirname "$0")/protocol-session-probe.mjs" "$BASE"
 prepare_directory_probe
+docker exec "$SERVER" java -cp /app/kestra:/tmp/directory-command.jar IdentityRecheckCommand \
+  "jdbc:postgresql://$PG:5432/kestra" "$BASE" > "$IDENTITY_RECHECK_REPORT"
+python3 - "$IDENTITY_RECHECK_REPORT" <<'PYIDENTITY'
+import json,sys
+report=json.load(open(sys.argv[1]))
+assert report['completed'] and len(report['checks'])==24 and all(row['passed'] for row in report['checks'])
+print('IDENTITY LOCK RECHECK IMAGE GREEN: 24 checks')
+PYIDENTITY
 python3 "$(dirname "$0")/directory-probe/password-rbac-check.py" "$BASE" "$SERVER" "$PG" \
   "$PASSWORD_RBAC_REPORT"
 if [ "${BB_BROWSER:-0}" = 1 ]; then

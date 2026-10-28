@@ -123,10 +123,9 @@ index 0000000..bf151cb
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-index da663d7..060cf0b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -78,8 +78,8 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+@@ -82,8 +82,8 @@
                  if(projections.isPresent()) {
                      if(!projections.isUnique())throw denied();
                      var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,authentication.getName(),null);
@@ -137,30 +136,97 @@ index da663d7..060cf0b 100644
                  }
                  connection.commit();
              }catch(SQLException|RuntimeException failure) {
-@@ -119,17 +119,20 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
-                     || account.authenticationVersion()!=authenticationVersion)throw denied();
-                 var client=protocol.client(connection,target.issuer(),target.clientId()).orElseThrow(OidcTrustedIdentity::denied);
-                 if(!client.issuer().equals(target.issuer()) || !client.clientId().equals(target.clientId()) || !client.active())throw denied();
+@@ -107,41 +107,69 @@
+     }
+
+     private Identity validateCurrent(Authentication authentication,Connection connection,boolean borrowed)throws SQLException {
+-        if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")) || !projections.isUnique())throw denied();
++        if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")))throw identityFailure(borrowed);
++        if(!projections.isUnique())throw infrastructureFailure(borrowed);
+         Object raw=authentication.getAttributes().get(CLAIM);
+-        if(!(raw instanceof Map<?,?> claim))throw denied();
+-        var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",text(claim.get("client_id")),
+-            authentication.getName(),text(claim.get("application_group_id")));
+-        long epoch=number(claim.get("authorization_version"));
+-        long authenticationVersion=number(authentication.getAttributes().get(OidcIdentityLifecycle.CLAIM));
+-        if(epoch<=0 || authenticationVersion<0)throw denied();
+-        var audiences=strings(authentication.getAttributes().get("aud"),true);
+-        var scopes=strings(claim.get("application_group_scopes"),false);
+-        var protocols=strings(claim.get("protocol_scopes"),false);
+-                var account=protocol.account(connection,target.issuer(),target.subject()).orElseThrow(OidcTrustedIdentity::denied);
++        if(!(raw instanceof Map<?,?> claim))throw identityFailure(borrowed);
++        ApplicationGroupProtocolProjectionV1.Request target;
++        try {
++            target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",identityText(claim.get("client_id"),borrowed),
++                authentication.getName(),identityText(claim.get("application_group_id"),borrowed));
++        } catch(IllegalArgumentException failure) {throw identityFailure(borrowed);}
++        long epoch=identityNumber(claim.get("authorization_version"),borrowed);
++        long authenticationVersion=identityNumber(authentication.getAttributes().get(OidcIdentityLifecycle.CLAIM),borrowed);
++        if(epoch<=0 || authenticationVersion<0)throw identityFailure(borrowed);
++        var audiences=identityStrings(authentication.getAttributes().get("aud"),true,borrowed);
++        var scopes=identityStrings(claim.get("application_group_scopes"),false,borrowed);
++        var protocols=identityStrings(claim.get("protocol_scopes"),false,borrowed);
++                var account=protocol.account(connection,target.issuer(),target.subject()).orElseThrow(()->identityFailure(borrowed));
+                 if(!account.issuer().equals(target.issuer()) || !account.subject().equals(target.subject()) || !account.active()
+-                    || account.authenticationVersion()!=authenticationVersion)throw denied();
+-                var client=protocol.client(connection,target.issuer(),target.clientId()).orElseThrow(OidcTrustedIdentity::denied);
+-                if(!client.issuer().equals(target.issuer()) || !client.clientId().equals(target.clientId()) || !client.active())throw denied();
 -                var result=projections.get().current(connection,target);
 -                if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION || !result.activated())throw denied();
+-                var projection=result.projection().orElseThrow(OidcTrustedIdentity::denied);
++                    || account.authenticationVersion()!=authenticationVersion)throw identityFailure(borrowed);
++                var client=protocol.client(connection,target.issuer(),target.clientId()).orElseThrow(()->identityFailure(borrowed));
++                if(!client.issuer().equals(target.issuer()) || !client.clientId().equals(target.clientId()) || !client.active())throw identityFailure(borrowed);
 +                var result=OidcApplicationGroupProjection.current(projections.get(),connection,target);
-+                if(!result.activated())throw denied();
-+                OidcApplicationGroupProjection.requireVersion(claim,result.contractVersion());
-                 var projection=result.projection().orElseThrow(OidcTrustedIdentity::denied);
++                if(!result.activated())throw infrastructureFailure(borrowed);
++                try {OidcApplicationGroupProjection.requireVersion(claim,result.contractVersion());}
++                catch(IllegalStateException failure) {throw identityFailure(borrowed);}
++                var projection=result.projection().orElseThrow(()->identityFailure(borrowed));
                  var allowed=projection.eligibleScopeKeys(target);
                  if(!projection.active() || !projection.approved() || projection.authorizationVersion()!=epoch
 -                    || audiences.isEmpty() || !projection.audiences().containsAll(audiences) || !allowed.containsAll(scopes))throw denied();
-+                    || audiences.isEmpty() || !allowed.containsAll(scopes))throw denied();
++                    || audiences.isEmpty() || !allowed.containsAll(scopes))throw identityFailure(borrowed);
                  var request=AuthorizationInvocationContext.currentRequest().orElse(null);
                  var bearer=request==null?null:request.getAttribute("io.kestra.mcp.authentication",Authentication.class).orElse(null);
                  if(bearer!=null) {
-                     if(bearer!=authentication || !audiences.equals(Set.of(text(authentication.getAttributes().get("resource")))))throw denied();
-                 }else if(!client.configuredLoginClient() || !audiences.equals(Set.of(target.clientId())))throw denied();
-+                String resource=bearer==null?null:text(authentication.getAttributes().get("resource"));
-+                if(!OidcApplicationGroupProjection.audienceAllowed(projection,result.contractVersion(),target.clientId(),resource,audiences))throw denied();
+-                    if(bearer!=authentication || !audiences.equals(Set.of(text(authentication.getAttributes().get("resource")))))throw denied();
+-                }else if(!client.configuredLoginClient() || !audiences.equals(Set.of(target.clientId())))throw denied();
++                    if(bearer!=authentication || !audiences.equals(Set.of(identityText(authentication.getAttributes().get("resource"),borrowed))))throw identityFailure(borrowed);
++                }else if(!client.configuredLoginClient() || !audiences.equals(Set.of(target.clientId())))throw identityFailure(borrowed);
++                String resource=bearer==null?null:identityText(authentication.getAttributes().get("resource"),borrowed);
++                if(!OidcApplicationGroupProjection.audienceAllowed(projection,result.contractVersion(),target.clientId(),resource,audiences))throw identityFailure(borrowed);
                  var vocabulary=new HashSet<>(Set.of("openid","profile","email","offline_access"));
                  vocabulary.addAll(configuration.getMcpScopes());
                  if(!vocabulary.containsAll(protocols) || !client.registeredScopes().containsAll(protocols)
+                     || protocols.contains(ApplicationGroupScopeIssuance.UI_SELECTOR)
+-                    || projection.scopes().stream().anyMatch(scope->vocabulary.contains(scope.key())))throw denied();
++                    || projection.scopes().stream().anyMatch(scope->vocabulary.contains(scope.key())))throw identityFailure(borrowed);
+                 var identity=new Identity(1,target.issuer(),target.subject(),target.clientId(),audiences,target.tenant(),
+                     projection.applicationGroupId(),protocols,scopes,authenticationVersion,epoch,projection.revision());
+                 return identity;
++    }
++
++    private static RuntimeException identityFailure(boolean borrowed) {
++        return borrowed?new io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Rejected(io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Failure.FORBIDDEN):denied();
++    }
++
++    private static RuntimeException infrastructureFailure(boolean borrowed) {
++        return borrowed?new io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Rejected(io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Failure.UNAVAILABLE):denied();
++    }
++
++    private static String identityText(Object value,boolean borrowed) {
++        try {return text(value);}catch(IllegalStateException failure) {throw identityFailure(borrowed);}
++    }
++
++    private static long identityNumber(Object value,boolean borrowed) {
++        try {return number(value);}catch(IllegalStateException failure) {throw identityFailure(borrowed);}
++    }
++
++    private static Set<String> identityStrings(Object value,boolean scalar,boolean borrowed) {
++        try {return strings(value,scalar);}catch(IllegalStateException failure) {throw identityFailure(borrowed);}
+     }
+
+     private static String text(Object value) {
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2Test.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2Test.java
 new file mode 100644
 index 0000000..214172c

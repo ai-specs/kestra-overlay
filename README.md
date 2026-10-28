@@ -649,7 +649,10 @@ issuer 的 scheme://authority。密码沿用至少8字符、最多72 UTF-8字节
 `/oidc/logout` 同时撤销受限交互并清 cookie，不依赖业务导航或管理权限。
 
 `TrustedIdentityV2.current(Connection)` 在调用方可写 READ_COMMITTED 连接重验当前可信
-请求，不另开连接，不 commit/rollback/close。唯一 `IdentityLifecycleParticipantV1`
+请求，不另开连接，不 commit/rollback/close。已失效的actor/认证版本/可信claim或授予
+返回既有生命周期FORBIDDEN；SQL、投影故障或损坏、缺失/重复组件返回UNAVAILABLE。
+V1普通身份验证保持原失败契约；分派保留明确拒绝，不将未知运行错误视为权限拒绝。
+唯一 `IdentityLifecycleParticipantV1`
 实现 `beforeChange(Connection,Change)`，Change 含 contractVersion=1、kind、issuer、
 subject/clientId 和宿主重验后的 actor。kind 为 ACCOUNT_DELETE/ACCOUNT_ACTIVATE/
 ACCOUNT_DEACTIVATE/PASSWORD_RESET/CLIENT_SECRET_ROTATE。扩展在借用连接中检查管理权、

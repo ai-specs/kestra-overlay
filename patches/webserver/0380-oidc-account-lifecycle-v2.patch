@@ -2,7 +2,7 @@
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；完整本地门通过；仅对应提交CI及正式镜像推广成功后可消费
 # 来源: 新写；公开UserDirectoryV1与协议安全锁；R24主控设计维护者可复核
-# 触达上游文件: 13 个（公开SPI、同连接适配、迁移与独立PG探针）
+# 触达上游文件: 15 个（公开SPI、同连接适配、迁移与独立PG探针）
 # 移除条件: 上游提供等价标准身份生命周期和借用连接公开机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleParticipantV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleParticipantV1.java
 new file mode 100644
@@ -107,10 +107,9 @@ index 0000000..209dda2
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLifecycleParticipants.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLifecycleParticipants.java
 new file mode 100644
-index 0000000..64b8988
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLifecycleParticipants.java
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,47 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import io.kestra.webserver.oidc.IdentityLifecycleGuardV1;
@@ -142,6 +141,7 @@ index 0000000..64b8988
 +        if (!participants.isUnique() || !identities.isUnique()) throw unavailable();
 +        try {
 +            var actor = identities.get().current(connection);
++            if (actor == null) throw unavailable();
 +            if (kind == IdentityLifecycleParticipantV1.Kind.ACCOUNT_DELETE && actor.subject().equals(subject))
 +                throw new IdentityLifecycleGuardV1.Rejected(IdentityLifecycleGuardV1.Failure.FORBIDDEN);
 +            participants.get().beforeChange(connection, new IdentityLifecycleParticipantV1.Change(
@@ -184,10 +184,9 @@ index 0000000..7604bdf
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-index 62e3e3e..da663d7 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -6,6 +6,7 @@ import io.kestra.webserver.oidc.ApplicationGroupScopeIssuance;
+@@ -6,6 +6,7 @@
  import io.kestra.webserver.oidc.OidcConfiguration;
  import io.kestra.webserver.oidc.OidcProtocolStateV1;
  import io.kestra.webserver.oidc.TrustedIdentityV1;
@@ -195,7 +194,7 @@ index 62e3e3e..da663d7 100644
  import io.micronaut.context.BeanProvider;
  import io.micronaut.context.annotation.Requires;
  import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
-@@ -23,7 +24,7 @@ import javax.sql.DataSource;
+@@ -23,7 +24,7 @@
 
  @Singleton
  @Requires(property="kestra.rbac.application-groups.enabled",value="true")
@@ -204,24 +203,28 @@ index 62e3e3e..da663d7 100644
      public static final String CLAIM="kestra_application_group_v1";
      private final BeanProvider<ApplicationGroupProtocolProjectionV1> projections;
      private final OidcProtocolStateV1 protocol;
-@@ -43,6 +44,16 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
+@@ -41,6 +42,20 @@
+         var authentication=request.getAttribute("io.kestra.mcp.authentication",Authentication.class)
+             .or(()->request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class)).orElseThrow(OidcTrustedIdentity::denied);
          return validate(authentication);
-     }
-
-+    @Override public Identity current(Connection connection) {
-+        var request=AuthorizationInvocationContext.currentRequest().orElseThrow(OidcTrustedIdentity::denied);
-+        var authentication=request.getAttribute("io.kestra.mcp.authentication",Authentication.class)
-+            .or(()->request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class)).orElseThrow(OidcTrustedIdentity::denied);
-+        try {
-+            protocol.lockSecurityState(connection);
-+            return validateCurrent(authentication,connection);
-+        } catch(SQLException|RuntimeException failure) { throw denied(); }
 +    }
 +
++    @Override public Identity current(Connection connection) {
++        try {
++            var request=AuthorizationInvocationContext.currentRequest().orElseThrow(()->identityFailure(true));
++            var authentication=request.getAttribute("io.kestra.mcp.authentication",Authentication.class)
++                .or(()->request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class)).orElseThrow(()->identityFailure(true));
++            protocol.lockSecurityState(connection);
++            return validateCurrent(authentication,connection,true);
++        } catch(io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Rejected failure) {
++            throw failure;
++        } catch(SQLException|RuntimeException failure) {
++            throw infrastructureFailure(true);
++        }
+     }
+
      public Identity validate(Authentication authentication) {
-         try{return validateCurrent(authentication);}
-         catch(RuntimeException failure){throw denied();}
-@@ -78,6 +89,20 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
+@@ -78,6 +93,20 @@
      }
 
      private Identity validateCurrent(Authentication authentication) {
@@ -229,7 +232,7 @@ index 62e3e3e..da663d7 100644
 +            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
 +            try {
 +                protocol.lockSecurityState(connection);
-+                var identity=validateCurrent(authentication,connection);
++                var identity=validateCurrent(authentication,connection,false);
 +                connection.commit();return identity;
 +            }catch(SQLException|RuntimeException failure) {
 +                try{connection.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}
@@ -238,11 +241,11 @@ index 62e3e3e..da663d7 100644
 +        }catch(SQLException|RuntimeException failure){throw denied();}
 +    }
 +
-+    private Identity validateCurrent(Authentication authentication,Connection connection)throws SQLException {
++    private Identity validateCurrent(Authentication authentication,Connection connection,boolean borrowed)throws SQLException {
          if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")) || !projections.isUnique())throw denied();
          Object raw=authentication.getAttributes().get(CLAIM);
          if(!(raw instanceof Map<?,?> claim))throw denied();
-@@ -89,10 +114,6 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
+@@ -89,10 +118,6 @@
          var audiences=strings(authentication.getAttributes().get("aud"),true);
          var scopes=strings(claim.get("application_group_scopes"),false);
          var protocols=strings(claim.get("protocol_scopes"),false);
@@ -253,7 +256,7 @@ index 62e3e3e..da663d7 100644
                  var account=protocol.account(connection,target.issuer(),target.subject()).orElseThrow(OidcTrustedIdentity::denied);
                  if(!account.issuer().equals(target.issuer()) || !account.subject().equals(target.subject()) || !account.active()
                      || account.authenticationVersion()!=authenticationVersion)throw denied();
-@@ -116,12 +137,7 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
+@@ -116,12 +141,7 @@
                      || projection.scopes().stream().anyMatch(scope->vocabulary.contains(scope.key())))throw denied();
                  var identity=new Identity(1,target.issuer(),target.subject(),target.clientId(),audiences,target.tenant(),
                      projection.applicationGroupId(),protocols,scopes,authenticationVersion,epoch,projection.revision());
@@ -482,7 +485,6 @@ index 0000000..17c5aa9
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityBorrowedConnectionTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityBorrowedConnectionTest.java
 new file mode 100644
-index 0000000..0736b07
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityBorrowedConnectionTest.java
 @@ -0,0 +1,48 @@
@@ -528,7 +530,7 @@ index 0000000..0736b07
 +        try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
 +            assertEquals("alice",service.current(connection).subject());
 +            when(protocol.account(connection,issuer,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(issuer,"alice",false,false,4)));
-+            assertThrows(IllegalStateException.class,()->service.current(connection));
++            assertEquals(IdentityLifecycleGuardV1.Failure.FORBIDDEN,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->service.current(connection)).failure());
 +        }
 +        verifyNoInteractions(source);
 +        verify(connection,never()).commit();verify(connection,never()).rollback();verify(connection,never()).close();
@@ -556,3 +558,271 @@ index 3262778ed4442625d42e6168599ca1002991045b..71ed6b5f5fe373fbed09ff5c601c0562
 +        }
          POSTGRES.start();
      }
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityFailureClassificationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityFailureClassificationTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityFailureClassificationTest.java
+@@ -0,0 +1,153 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.kestra.webserver.oidc.services.OidcLifecycleParticipants;
++import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.Set;
++import java.util.function.Supplier;
++import javax.sql.DataSource;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class TrustedIdentityFailureClassificationTest {
++    static final String ISSUER="https://issuer.example";
++    final Connection connection=mock(Connection.class);
++    final DataSource source=mock(DataSource.class);
++    final OidcProtocolStateV1 protocol=mock(OidcProtocolStateV1.class);
++    final ApplicationGroupProtocolProjectionV1 projection=mock(ApplicationGroupProtocolProjectionV1.class);
++    final BeanProvider<ApplicationGroupProtocolProjectionV1> projections=mock(BeanProvider.class);
++    final OidcConfiguration configuration=new OidcConfiguration();
++    final IdentityLifecycleParticipantV1 participant=mock(IdentityLifecycleParticipantV1.class);
++
++    OidcTrustedIdentity service()throws Exception {
++        configuration.setIssuer(ISSUER);
++        when(connection.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_READ_COMMITTED);
++        when(projections.isUnique()).thenReturn(true);when(projections.get()).thenReturn(projection);
++        when(protocol.account(connection,ISSUER,"actor")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"actor",true,true,3)));
++        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid"),true)));
++        when(projection.current(eq(connection),any())).thenReturn(view(Set.of("manage")));
++        return new OidcTrustedIdentity(projections,protocol,configuration,source);
++    }
++
++    ApplicationGroupProtocolProjectionV1.Result view(Set<String> grants) {
++        return new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(new ApplicationGroupProtocolProjectionV1.Projection(
++            "group","main",ISSUER,"ui","actor",true,true,1,2,Set.of("ui"),
++            List.of(new ApplicationGroupProtocolProjectionV1.Scope("manage","Manage","")),Set.of("manage"),grants)));
++    }
++
++    Authentication authentication() {
++        return Authentication.build("actor",List.of(),Map.of("iss",ISSUER,"aud",Set.of("ui"),OidcIdentityLifecycle.CLAIM,3L,
++            OidcTrustedIdentity.CLAIM,Map.of("application_group_id","group","client_id","ui","authorization_version",2L,
++                "application_group_scopes",Set.of("manage"),"protocol_scopes",Set.of("openid"))));
++    }
++
++    <Result> Result request(Supplier<Result> work) {
++        return request(authentication(),work);
++    }
++
++    <Result> Result request(Authentication authentication,Supplier<Result> work) {
++        var request=HttpRequest.GET("/api/v1/test").setAttribute(SecurityFilter.AUTHENTICATION,authentication);
++        try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {return work.get();}
++    }
++
++    void rejected(IdentityLifecycleGuardV1.Failure expected,Runnable work) {
++        assertEquals(expected,assertThrows(IdentityLifecycleGuardV1.Rejected.class,work::run).failure());
++    }
++
++    @Test void deletedDisabledVersionChangedAndRevokedActorsAreForbidden()throws Exception {
++        var service=service();
++        for(var account:List.of(Optional.<OidcProtocolStateV1.Account>empty(),
++            Optional.of(new OidcProtocolStateV1.Account(ISSUER,"actor",false,false,4)),
++            Optional.of(new OidcProtocolStateV1.Account(ISSUER,"actor",true,true,4)))) {
++            when(protocol.account(connection,ISSUER,"actor")).thenReturn(account);
++            request(()->{rejected(IdentityLifecycleGuardV1.Failure.FORBIDDEN,()->service.current(connection));return null;});
++        }
++        when(protocol.account(connection,ISSUER,"actor")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"actor",true,true,3)));
++        when(projection.current(eq(connection),any())).thenReturn(view(Set.of()));
++        request(()->{rejected(IdentityLifecycleGuardV1.Failure.FORBIDDEN,()->service.current(connection));return null;});
++        verifyNoInteractions(source);verify(connection,never()).commit();verify(connection,never()).rollback();verify(connection,never()).close();
++    }
++
++    @Test void lockSqlProjectionFailureAndMissingOrDuplicateProvidersAreUnavailable()throws Exception {
++        var service=service();
++        doThrow(new SQLException("Injected lock failure")).when(protocol).lockSecurityState(connection);
++        request(()->{rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->service.current(connection));return null;});
++        doNothing().when(protocol).lockSecurityState(connection);
++        when(projection.current(eq(connection),any())).thenThrow(new IllegalStateException("Injected projection failure"));
++        request(()->{rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->service.current(connection));return null;});
++        when(projections.isUnique()).thenReturn(false);
++        for(boolean present:List.of(false,true)) {
++            when(projections.isPresent()).thenReturn(present);
++            request(()->{rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->service.current(connection));return null;});
++        }
++        verifyNoInteractions(source);verify(connection,never()).commit();verify(connection,never()).rollback();verify(connection,never()).close();
++    }
++
++    @Test void lifecyclePreservesExplicitFailuresAndUnknownExceptionsRemainUnavailable()throws Exception {
++        var identity=mock(TrustedIdentityV2.class);var identities=mock(BeanProvider.class);var participants=mock(BeanProvider.class);
++        when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);
++        when(participants.isUnique()).thenReturn(true);when(participants.get()).thenReturn(participant);
++        var dispatch=new OidcLifecycleParticipants(participants,identities,configuration);
++        for(var failure:List.of(IdentityLifecycleGuardV1.Failure.FORBIDDEN,IdentityLifecycleGuardV1.Failure.UNAVAILABLE)) {
++            doThrow(new IdentityLifecycleGuardV1.Rejected(failure)).when(identity).current(connection);
++            rejected(failure,()->{try{dispatch.beforeChange(connection,IdentityLifecycleParticipantV1.Kind.ACCOUNT_DELETE,"target",null);}catch(SQLException exception){throw new AssertionError(exception);}});
++        }
++        doThrow(new IllegalStateException("Unknown identity failure")).when(identity).current(connection);
++        rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->{try{dispatch.beforeChange(connection,IdentityLifecycleParticipantV1.Kind.ACCOUNT_DELETE,"target",null);}catch(SQLException exception){throw new AssertionError(exception);}});
++        verifyNoInteractions(participant);
++    }
++
++    @Test void v1ValidationKeepsItsOrdinaryFailureContract()throws Exception {
++        var service=service();when(source.getConnection()).thenReturn(connection);
++        when(protocol.account(connection,ISSUER,"actor")).thenReturn(Optional.empty());
++        var failure=assertThrows(IllegalStateException.class,()->service.validate(authentication()));
++        assertEquals(IllegalStateException.class,failure.getClass());
++        verify(connection).rollback();verify(connection).close();
++    }
++
++    @Test void invalidTrustedClaimsAreForbiddenButCorruptProjectionResultsAreUnavailable()throws Exception {
++        var service=service();
++        var attributes=new java.util.HashMap<>(authentication().getAttributes());attributes.put(OidcIdentityLifecycle.CLAIM,"3");
++        request(Authentication.build("actor",List.of(),attributes),()->{rejected(IdentityLifecycleGuardV1.Failure.FORBIDDEN,()->service.current(connection));return null;});
++        attributes=new java.util.HashMap<>(authentication().getAttributes());
++        var claim=new java.util.HashMap<>((Map<String,Object>)attributes.get(OidcTrustedIdentity.CLAIM));claim.put("application_group_id","invalid/group");
++        attributes.put(OidcTrustedIdentity.CLAIM,claim);
++        request(Authentication.build("actor",List.of(),attributes),()->{rejected(IdentityLifecycleGuardV1.Failure.FORBIDDEN,()->service.current(connection));return null;});
++        when(projection.current(eq(connection),any())).thenReturn(null);
++        request(()->{rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->service.current(connection));return null;});
++        when(projection.current(eq(connection),any())).thenReturn(new ApplicationGroupProtocolProjectionV1.Result(1,false,Optional.empty()));
++        request(()->{rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->service.current(connection));return null;});
++        var wrong=new ApplicationGroupProtocolProjectionV1.Projection("other","main",ISSUER,"ui","other-actor",true,true,1,2,Set.of("ui"),
++            List.of(new ApplicationGroupProtocolProjectionV1.Scope("manage","Manage","")),Set.of("manage"),Set.of("manage"));
++        when(projection.current(eq(connection),any())).thenReturn(new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(wrong)));
++        request(()->{rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,()->service.current(connection));return null;});
++    }
++
++    @Test void lifecycleMissingDuplicateAndNullIdentityComponentsAreUnavailable()throws Exception {
++        var identity=mock(TrustedIdentityV2.class);var identities=mock(BeanProvider.class);var participants=mock(BeanProvider.class);
++        when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);
++        when(participants.isUnique()).thenReturn(true);when(participants.get()).thenReturn(participant);
++        var dispatch=new OidcLifecycleParticipants(participants,identities,configuration);
++        Runnable action=()->{try{dispatch.beforeChange(connection,IdentityLifecycleParticipantV1.Kind.ACCOUNT_DELETE,"target",null);}catch(SQLException exception){throw new AssertionError(exception);}};
++        rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,action);
++        for(boolean present:List.of(false,true)) {
++            when(identities.isPresent()).thenReturn(present);when(identities.isUnique()).thenReturn(false);
++            rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,action);
++            when(identities.isUnique()).thenReturn(true);when(participants.isPresent()).thenReturn(present);when(participants.isUnique()).thenReturn(false);
++            rejected(IdentityLifecycleGuardV1.Failure.UNAVAILABLE,action);when(participants.isUnique()).thenReturn(true);
++        }
++        verifyNoInteractions(participant);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityLockRecheckPostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityLockRecheckPostgresTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityLockRecheckPostgresTest.java
+@@ -0,0 +1,105 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.oidc.services.OidcLifecycleParticipants;
++import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.sql.Connection;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.Set;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++class TrustedIdentityLockRecheckPostgresTest extends OidcPostgresTestBase {
++    static final String ISSUER="https://issuer.example";
++    <Value> BeanProvider<Value> provider(Value value) {
++        var provider=mock(BeanProvider.class);when(provider.isUnique()).thenReturn(true);when(provider.get()).thenReturn(value);return provider;
++    }
++
++    @Test void deletedActorWaitingForSecurityLockIsForbiddenWithoutParticipantWrites()throws Exception {race("delete");}
++    @Test void disabledActorWaitingForSecurityLockIsForbiddenWithoutParticipantWrites()throws Exception {race("disable");}
++    @Test void changedAuthenticationVersionWaitingForSecurityLockIsForbiddenWithoutParticipantWrites()throws Exception {race("version");}
++    @Test void revokedGrantWaitingForSecurityLockIsForbiddenWithoutParticipantWrites()throws Exception {race("revoke");}
++
++    void race(String mutation)throws Exception {
++        try(var fixture=new OidcAccountLifecycleGuardPostgresTest.Fixture()) {
++            try(var connection=fixture.source.getConnection();var statement=connection.createStatement()) {
++                statement.execute("CREATE TABLE trusted_identity_test_projection (singleton BOOLEAN PRIMARY KEY, granted BOOLEAN NOT NULL)");
++                statement.execute("INSERT INTO trusted_identity_test_projection VALUES(true,true)");
++            }
++            ApplicationGroupProtocolProjectionV1 projection=(connection,request)->{
++                boolean granted;
++                try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT granted FROM trusted_identity_test_projection WHERE singleton")) {
++                    assertTrue(rows.next());granted=rows.getBoolean(1);
++                }
++                return new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(new ApplicationGroupProtocolProjectionV1.Projection(
++                    "group","main",ISSUER,"ui","first",true,true,1,2,Set.of("ui"),
++                    List.of(new ApplicationGroupProtocolProjectionV1.Scope("manage","Manage","")),Set.of("manage"),granted?Set.of("manage"):Set.of())));
++            };
++            var attemptingLock=new CountDownLatch(1);
++            var borrowedConnection=new java.util.concurrent.atomic.AtomicReference<Connection>();
++            var protocol=spy(fixture.protocol);
++            doAnswer(call->{
++                if(call.getArgument(0)==borrowedConnection.get())attemptingLock.countDown();
++                return call.callRealMethod();
++            }).when(protocol).lockSecurityState(any(Connection.class));
++            var identity=new OidcTrustedIdentity(provider(projection),protocol,fixture.configuration,fixture.source);
++            var authentication=Authentication.build("first",List.of(),Map.of("iss",ISSUER,"aud",Set.of("ui"),"authentication_version",0L,
++                OidcTrustedIdentity.CLAIM,Map.of("application_group_id","group","client_id","ui","authorization_version",2L,
++                    "application_group_scopes",Set.of("manage"),"protocol_scopes",Set.of("openid"))));
++            assertEquals("first",identity.validate(authentication).subject());
++            var participant=mock(IdentityLifecycleParticipantV1.class);
++            var dispatch=new OidcLifecycleParticipants(provider(participant),provider((TrustedIdentityV2)identity),fixture.configuration);
++            try(var winner=fixture.source.getConnection();var borrowed=fixture.source.getConnection();var executor=Executors.newSingleThreadExecutor()) {
++                winner.setAutoCommit(false);winner.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
++                borrowed.setAutoCommit(false);borrowed.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
++                var checked=spy(borrowed);borrowedConnection.set(checked);
++                int backend;
++                try(var statement=borrowed.createStatement();var rows=statement.executeQuery("SELECT pg_backend_pid()")){assertTrue(rows.next());backend=rows.getInt(1);}
++                fixture.protocol.lockSecurityState(winner);
++                var task=executor.submit(()->{
++                    var request=HttpRequest.DELETE("/api/v1/test").setAttribute(SecurityFilter.AUTHENTICATION,authentication);
++                    try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
++                        return assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->dispatch.beforeChange(checked,IdentityLifecycleParticipantV1.Kind.ACCOUNT_DELETE,"other",null)).failure();
++                    }
++                });
++                assertTrue(attemptingLock.await(5,TimeUnit.SECONDS));
++                boolean waiting=false;long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
++                while(System.nanoTime()<deadline&&!waiting) {
++                    try(var statement=winner.prepareStatement("SELECT wait_event_type FROM pg_stat_activity WHERE pid=?")) {
++                        statement.setInt(1,backend);try(var rows=statement.executeQuery()){waiting=rows.next()&&"Lock".equals(rows.getString(1));}
++                    }
++                    if(!waiting)Thread.sleep(10);
++                }
++                assertTrue(waiting,"Borrowed identity lookup must actually wait on PostgreSQL security lock");
++                try(var statement=winner.createStatement()) {
++                    switch(mutation) {
++                        case "delete"->{statement.executeUpdate("DELETE FROM oidc_user_auth_method WHERE user_id='first'");statement.executeUpdate("DELETE FROM oidc_user WHERE username='first'");}
++                        case "disable"->statement.executeUpdate("UPDATE oidc_user SET user_state='INACTIVE' WHERE username='first'");
++                        case "version"->statement.executeUpdate("UPDATE oidc_user SET authentication_version=authentication_version+1 WHERE username='first'");
++                        case "revoke"->statement.executeUpdate("UPDATE trusted_identity_test_projection SET granted=false WHERE singleton");
++                        default->throw new IllegalArgumentException("Unknown test mutation");
++                    }
++                }
++                winner.commit();
++                assertEquals(IdentityLifecycleGuardV1.Failure.FORBIDDEN,task.get(10,TimeUnit.SECONDS));
++                verifyNoInteractions(participant);
++                verify(checked,never()).commit();verify(checked,never()).rollback();verify(checked,never()).close();
++                assertFalse(checked.isClosed());assertFalse(checked.getAutoCommit());
++                try(var statement=borrowed.createStatement();var rows=statement.executeQuery("SELECT count(*) FROM guard_test_event")) {assertTrue(rows.next());assertEquals(0,rows.getLong(1));}
++                borrowed.rollback();
++            }
++        }
++    }
++}
