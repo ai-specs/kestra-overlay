@@ -1,5 +1,16 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## 普通授权依赖故障传播（2026-10-28，已接收，未发布）
+
+认证身份复查及评估provider位于业务Controller前；故障分类必须跨该边界传播。
+TrustedIdentityV2新增default currentForAuthorization委派旧current，宿主覆盖精确
+依赖分类，V1普通验证与V2借用连接契约保持。公开AuthorizationUnavailableException
+只由受控依赖或provider明确报告，typed链精确保留并返回安全503 ProblemDetail。
+未知异常/未知路由及独立授权provider缺失重复保持原403失败关闭，不按消息猜测。
+插件目录/策略依赖不唯一503与独立授权provider原门不得混淆；细节与独立门见r-oidc-server。
+当前本地395项与实际签名cookie的投影故障503/恢复200通过；未改变生命周期filter，
+不以假设顺序扩大绕过。发布和真实插件消费仍按对应提交CI、正式镜像推广及组合门执行。
+
 ## V2 借用连接身份拒绝分类（2026-10-28，已接收，未发布）
 
 消费扩展生产互删204+503暴露锁后身份失效被折叠为依赖不可用。V2借用连接复查使用

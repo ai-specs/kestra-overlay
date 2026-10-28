@@ -125,7 +125,36 @@ index 0000000..bf151cb
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -82,8 +82,8 @@
+@@ -63,6 +63,28 @@
+         catch(RuntimeException failure){throw denied();}
+     }
+
++    @Override public Identity currentForAuthorization() {
++        var request=AuthorizationInvocationContext.currentRequest().orElseThrow(OidcTrustedIdentity::denied);
++        var authentication=request.getAttribute("io.kestra.mcp.authentication",Authentication.class)
++            .or(()->request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class)).orElseThrow(OidcTrustedIdentity::denied);
++        if(!projections.isUnique())throw denied();
++        try(var connection=source.getConnection()) {
++            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
++            try {
++                protocol.lockSecurityState(connection);
++                var identity=validateCurrent(authentication,connection,true,true);
++                connection.commit();return identity;
++            } catch(SQLException|RuntimeException failure) {
++                try {connection.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}
++                if(failure instanceof io.kestra.webserver.rbac.AuthorizationUnavailableException unavailable)throw unavailable;
++                if(failure instanceof SQLException || failure instanceof io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Rejected rejected
++                    && rejected.failure()==io.kestra.webserver.oidc.IdentityLifecycleGuardV1.Failure.UNAVAILABLE)
++                    throw new io.kestra.webserver.rbac.AuthorizationUnavailableException();
++                throw denied();
++            }
++        } catch(SQLException failure) {throw new io.kestra.webserver.rbac.AuthorizationUnavailableException();}
++    }
++
+     public void validateSession(Authentication authentication) {
+         if(authentication!=null && authentication.getAttributes().containsKey(CLAIM)) {validate(authentication);return;}
+         if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")))throw denied();
+@@ -82,8 +104,8 @@
                  if(projections.isPresent()) {
                      if(!projections.isUnique())throw denied();
                      var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,authentication.getName(),null);
@@ -136,11 +165,15 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
                  }
                  connection.commit();
              }catch(SQLException|RuntimeException failure) {
-@@ -107,41 +107,69 @@
+@@ -107,41 +129,83 @@
      }
 
      private Identity validateCurrent(Authentication authentication,Connection connection,boolean borrowed)throws SQLException {
 -        if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")) || !projections.isUnique())throw denied();
++        return validateCurrent(authentication,connection,borrowed,false);
++    }
++
++    private Identity validateCurrent(Authentication authentication,Connection connection,boolean borrowed,boolean authorization)throws SQLException {
 +        if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")))throw identityFailure(borrowed);
 +        if(!projections.isUnique())throw infrastructureFailure(borrowed);
          Object raw=authentication.getAttributes().get(CLAIM);
@@ -174,15 +207,26 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
 -                var result=projections.get().current(connection,target);
 -                if(result==null || result.contractVersion()!=ApplicationGroupProtocolProjectionV1.CONTRACT_VERSION || !result.activated())throw denied();
 -                var projection=result.projection().orElseThrow(OidcTrustedIdentity::denied);
+-                var allowed=projection.eligibleScopeKeys(target);
 +                    || account.authenticationVersion()!=authenticationVersion)throw identityFailure(borrowed);
 +                var client=protocol.client(connection,target.issuer(),target.clientId()).orElseThrow(()->identityFailure(borrowed));
 +                if(!client.issuer().equals(target.issuer()) || !client.clientId().equals(target.clientId()) || !client.active())throw identityFailure(borrowed);
-+                var result=OidcApplicationGroupProjection.current(projections.get(),connection,target);
++                OidcApplicationGroupProjection.State result;
++                try {result=OidcApplicationGroupProjection.current(projections.get(),connection,target);}
++                catch(SQLException|RuntimeException failure) {
++                    if(authorization)throw new io.kestra.webserver.rbac.AuthorizationUnavailableException();
++                    throw failure;
++                }
 +                if(!result.activated())throw infrastructureFailure(borrowed);
 +                try {OidcApplicationGroupProjection.requireVersion(claim,result.contractVersion());}
 +                catch(IllegalStateException failure) {throw identityFailure(borrowed);}
 +                var projection=result.projection().orElseThrow(()->identityFailure(borrowed));
-                 var allowed=projection.eligibleScopeKeys(target);
++                Set<String> allowed;
++                try {allowed=projection.eligibleScopeKeys(target);}
++                catch(IllegalArgumentException failure) {
++                    if(authorization)throw new io.kestra.webserver.rbac.AuthorizationUnavailableException();
++                    throw failure;
++                }
                  if(!projection.active() || !projection.approved() || projection.authorizationVersion()!=epoch
 -                    || audiences.isEmpty() || !projection.audiences().containsAll(audiences) || !allowed.containsAll(scopes))throw denied();
 +                    || audiences.isEmpty() || !allowed.containsAll(scopes))throw identityFailure(borrowed);

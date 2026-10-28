@@ -148,6 +148,7 @@ jobs:
           BB_BROWSER: '1'
           BB_UI_EXTENSION_PROBE: 'true'
           BB_UI_EXTENSION_JAR: ${{ github.workspace }}/.work/host-extension-probe/host-extension-probe.jar
+          BB_DEPENDENCY_PROBE_JAR: ${{ github.workspace }}/.work/host-extension-probe/host-extension-probe.jar
           NODE_PATH: ${{ runner.temp }}/oidc-browser/node_modules
           CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
         run: |
@@ -169,6 +170,7 @@ jobs:
             .work/profile-directory-*.json
             .work/favicon-*.json
             .work/identity-recheck-*.json
+            .work/dependency503-*.json
             .work/ui-extension-*.json
           include-hidden-files: true
           if-no-files-found: error

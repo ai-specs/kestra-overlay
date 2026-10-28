@@ -1,5 +1,43 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 普通授权依赖故障的明确503传播（2026-10-29，已接收，未发布）
+
+消费项目为`kestra-plugin-rbac`。部署主控round11重命名统一目录表后，生产管理GET
+返回403而非需求规定的503。普通可信身份在Controller前执行，现有V1路径将SQL/投影
+异常折叠为普通IllegalStateException，typed评估前置再统一403，插件503分支不可达。
+这是公开机制分类缺口，不通过放宽根仓状态断言处理，不包含MCP或资源audience变更。
+
+最小契约在`TrustedIdentityV2`增加向后兼容default入口`currentForAuthorization()`，
+默认调用`current()`，旧实现无需新增方法且保持旧失败关闭。宿主实现覆盖此入口并复用
+校验逻辑。V1 `current()`及普通validate的实际异常类保持不变；V2借用连接生命周期
+FORBIDDEN/UNAVAILABLE分类保持不变，不新增V3或业务模型。
+
+新增公开`AuthorizationUnavailableException`，仅表示在受控SQL/连接/投影调用边界或
+授权provider明确报告的依赖不可用。身份、issuer/audience、epoch/授予失效和策略拒绝
+仍403；未认证仍按原401。未知RuntimeException、未知操作、缺失/重复独立授权provider
+保持原失败关闭，不整体改503。需求中的“依赖不唯一503”指插件管理目录/策略依赖，
+不指独立授权provider原有缺失/重复门。不得按message或任意cause链搜索分类。
+
+`AuthorizationEvaluations`在支持V2时调用新入口，typed gate及filter仅保留精确公开
+异常并映射503固定安全ProblemDetail；同步抛出、异步begin/authorize失败均须保留。
+只按框架实际规定解开CompletionException/ExecutionException包装；未知包装不猜测。
+普通拒绝与其他HTTP错误路径不变，响应不暴露SQL、cause或凭据。
+
+宿主使用自有最小provider先红后绿验证兼容、身份SQL/投影、begin/authorize同步异步
+503、未知异常403、缺组件/重复provider/路由原门和无副作用，随后完整local-ci及镜像门。
+不读取真实插件源码或jar作为宿主测试输入，不改SDK。扩展必须等宿主对应提交CI与
+正式镜像推广成功后消费新默认入口与异常，再验证自身管理故障和根仓组合；候选不交付。
+
+本地结果（2026-10-29）：真实HTTP红测明确begin依赖预期503、实际403；29项定向
+绿测及最终97份XML395项（393通过、2项镜像专用前置跳过）、UI87通过。classPath、
+OIDC35、四份MCP专项各1项零跳过通过。另用自有最小投影provider实际执行生产登录、
+JWKS验证签名UI cookie、带组claim允许请求200→投影表故障503安全ProblemDetail→
+同cookie恢复200及账号无副作用检查。生命周期filter启用但实际链未截断明确503，
+因此未改该filter或V1 validateSession；诊断报告real-cookie-red.json实际为7项绿测，
+文件名不是红测证据。form/env门均须含同一7项probe，不用mock身份替代。
+输入审计覆盖58个触达源码、46补丁独立重放与编译class/executable一致；SDK10/UI532
+逐字节等正式父2b67，最终提交CI949仍须实际执行及下载，不能沿用父报告当新后端通过。
+
 ## V2 借用连接身份复查的拒绝分类（2026-10-28，已授权实施，未发布）
 
 消费项目为 `kestra-plugin-rbac`。部署主控在正式 `dae2b4a` 镜像与匹配插件的

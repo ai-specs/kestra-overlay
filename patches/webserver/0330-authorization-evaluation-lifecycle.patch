@@ -2,7 +2,7 @@
 # 消费扩展仓: kestra-plugin-rbac
 # 状态: core；定向测试通过，正式 CI 与发布待验收
 # 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档
-# 触达上游文件: 13 个（通用生命周期、typed gate、引用桥接与独立探针）
+# 触达上游文件: 17 个（通用生命周期、typed gate、引用桥接与独立探针）
 # 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
 new file mode 100644
@@ -112,10 +112,9 @@ index 0000000..5471c85
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
 new file mode 100644
-index 0000000..ad236d9
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,211 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -195,7 +194,9 @@ index 0000000..ad236d9
 +                principal.clientId(), principal.audience(), List.copyOf(principal.scopes()));
 +final AuthorizationEvaluationProviderV1 provider;
 +            if (applicationGroups) {
-+                var trusted = identities.get().current();
++                var identityProvider=identities.get();
++                var trusted = identityProvider instanceof io.kestra.webserver.oidc.TrustedIdentityV2 modernIdentity
++                    ?modernIdentity.currentForAuthorization():identityProvider.current();
 +                if (!trusted.subject().equals(principal.subject()) || !trusted.tenant().equals(tenant)) return Flux.error(denied());
 +                provider = (ignoredPrincipal, ignoredTenant) -> applicationGroupProviders.get().begin(trusted, tenant);
 +            } else {
@@ -342,19 +343,18 @@ index 9488059..ca33508 100644
          RbacAuthorizer.Action action, boolean completeQuery) {
          return Mono.defer(() -> {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
-index 201c734..9e098fe 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
-@@ -10,16 +10,42 @@ import static io.kestra.webserver.rbac.TypedAuthorization.*;
+@@ -10,16 +10,42 @@
  @Singleton
  public final class TypedAuthorizationGate {
      private final BeanProvider<TypedAuthorizationResolver> policies;
 +    private AuthorizationEvaluations evaluations;
- 
+
      public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies) {
          this.policies = policies;
      }
- 
+
 +    @jakarta.inject.Inject
 +    public TypedAuthorizationGate(BeanProvider<TypedAuthorizationResolver> policies, AuthorizationEvaluations evaluations) {
 +        this(policies);
@@ -392,10 +392,9 @@ index 201c734..9e098fe 100644
                      if (!decision.allowed()) return Decision.deny(decision.reason());
                      QueryDomain effective = operation.queryDomain().intersect(decision.scope());
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-index 06722d6..0fef9e6 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-@@ -45,10 +45,20 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+@@ -45,10 +45,24 @@
          if (!configuration.enabled() || RestRbacFilter.protocol(request)) return chain.proceed(request);
          Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
          if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
@@ -404,9 +403,13 @@ index 06722d6..0fef9e6 100644
 +        String tenant = route == null ? "main" : (String) route.getVariableValues().getOrDefault("tenant", "main");
 +        return gate.boundary(principal, tenant, () -> authorize(request, principal)
 +            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).timeout(Duration.ofSeconds(10))
-+            .defaultIfEmpty(false).onErrorReturn(false)
++            .defaultIfEmpty(false).onErrorResume(failure -> {
++                var unavailable=AuthorizationUnavailableException.classified(failure);
++                return unavailable!=null?Mono.error(unavailable):Mono.just(false);
++            })
 +            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN))))
-+            .onErrorResume(failure -> Mono.just(error(request, HttpStatus.FORBIDDEN)));
++            .onErrorResume(failure -> Mono.just(error(request, AuthorizationUnavailableException.classified(failure)!=null
++                ?HttpStatus.SERVICE_UNAVAILABLE:HttpStatus.FORBIDDEN)));
 +    }
 +
 +    private Mono<Boolean> authorize(HttpRequest<?> request, RbacAuthorizer.Principal principal) {
@@ -417,7 +420,7 @@ index 06722d6..0fef9e6 100644
              Map<String, List<String>> query = new LinkedHashMap<>();
              request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
              return body(request).flatMap(bytes -> {
-@@ -66,9 +76,7 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+@@ -66,9 +80,7 @@
                              operation.coverage(), operation.aggregate(), operation.sideEffect()) : operation))
                      .all(TypedAuthorization.Decision::allowed);
              });
@@ -426,7 +429,7 @@ index 06722d6..0fef9e6 100644
 -            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
 +        });
      }
- 
+
      private Mono<byte[]> body(HttpRequest<?> request) {
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 new file mode 100644
@@ -1148,5 +1151,265 @@ index 0000000..af85f2f
 +            }
 +        })).single().block();
 +        assertThat(provider.closes.get()).isEqualTo(1);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java
+@@ -0,0 +1,17 @@
++package io.kestra.webserver.rbac;
++
++public final class AuthorizationUnavailableException extends RuntimeException {
++    public AuthorizationUnavailableException() {
++        super("Authorization dependency is unavailable");
++    }
++
++    static AuthorizationUnavailableException classified(Throwable failure) {
++        for(int depth=0;depth<16;depth++) {
++            if(failure instanceof AuthorizationUnavailableException unavailable)return unavailable;
++            if(!(failure instanceof java.util.concurrent.CompletionException || failure instanceof java.util.concurrent.ExecutionException)
++                || failure.getCause()==null || failure.getCause()==failure)return null;
++            failure=failure.getCause();
++        }
++        return null;
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java
+@@ -0,0 +1,110 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.junit.jupiter.api.Assertions.*;
++
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.rbac.enabled",value="true")
++@Property(name="kestra.rbac.typed.enabled",value="true")
++@Property(name="kestra.rbac.evaluation.enabled",value="true")
++@Property(name="micronaut.security.enabled",value="true")
++@Property(name="micronaut.security.filter.enabled",value="true")
++@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
++@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
++@Property(name="mcp.http.security.fixture",value="true")
++@Property(name="authorization.unavailable.probe",value="true")
++class AuthorizationUnavailableHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject FlowRepositoryInterface flows;
++
++    @Test void explicitDependencyFailuresAre503AcrossSynchronousAndAsynchronousStages()throws Exception {
++        for(String mode:List.of("identity-sql","begin-sync","begin-async","authorize-sync","authorize-async","wrapped-async")) {
++            var response=send(mode,"/api/v1/main/flows","POST");
++            assertEquals(503,response.statusCode(),mode);
++            assertTrue(response.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
++            var problem=io.kestra.core.serializers.JacksonMapper.ofJson().readTree(response.body());
++            assertEquals(503,problem.path("status").intValue());
++            assertFalse(response.body().contains("secret-probe"));assertFalse(response.body().contains("AuthorizationUnavailableException"));
++            assertTrue(flows.findByIdWithoutAcl("main","dependency.probe","never-created",Optional.empty()).isEmpty());
++        }
++    }
++
++    @Test void unknownErrorsDecisionsAndUnknownRoutesRetain403()throws Exception {
++        for(String mode:List.of("unknown-begin","unknown-authorize","deny","unknown-wrapper")) {
++            assertEquals(403,send(mode,"/api/v1/main/flows","POST").statusCode(),mode);
++            assertTrue(flows.findByIdWithoutAcl("main","dependency.probe","never-created",Optional.empty()).isEmpty());
++        }
++        assertEquals(403,send("allow","/not-a-route","GET").statusCode());
++        assertEquals(401,send("anonymous","/api/v1/configs","GET").statusCode());
++    }
++
++    HttpResponse<String> send(String mode,String path,String method)throws Exception {
++        var builder=HttpRequest.newBuilder(server.getURI().resolve(path)).header("X-Unavailable-Probe",mode);
++        if(method.equals("POST"))builder.header("Content-Type","application/x-yaml").POST(HttpRequest.BodyPublishers.ofString("namespace: dependency.probe\nid: never-created\ntasks: []"));
++        else builder.GET();
++        return HttpClient.newHttpClient().send(builder.build(),HttpResponse.BodyHandlers.ofString());
++    }
++
++    @Singleton
++    @Requires(property="authorization.unavailable.probe",value="true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            String mode=request.getHeaders().get("X-Unavailable-Probe");
++            return mode==null||mode.equals("anonymous")?Mono.empty():Mono.just(Authentication.build(mode,List.of()));
++        }
++    }
++
++    @Singleton
++    @Requires(property="authorization.unavailable.probe",value="true")
++    static class Policy implements AuthorizationEvaluationProviderV1 {
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal,String tenant) {
++            String mode=principal.subject();
++            if(mode.equals("identity-sql"))return identitySqlFailure();
++            if(mode.equals("begin-sync"))throw new AuthorizationUnavailableException();
++            if(mode.equals("begin-async"))return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
++            if(mode.equals("unknown-begin"))throw new IllegalStateException("secret-probe");
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    if(mode.equals("authorize-sync"))throw new AuthorizationUnavailableException();
++                    if(mode.equals("authorize-async"))return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
++                    if(mode.equals("wrapped-async"))return CompletableFuture.failedFuture(new java.util.concurrent.CompletionException(new AuthorizationUnavailableException()));
++                    if(mode.equals("unknown-authorize"))throw new IllegalStateException("secret-probe");
++                    if(mode.equals("unknown-wrapper"))return CompletableFuture.failedFuture(new IllegalStateException("secret-probe",new AuthorizationUnavailableException()));
++                    return CompletableFuture.completedFuture(mode.equals("allow")?Decision.allow(QueryDomain.unrestricted()):Decision.deny("denied"));
++                }
++                public CompletionStage<Void> close(){return CompletableFuture.completedFuture(null);}
++            });
++        }
++
++        CompletionStage<AuthorizationEvaluationV1> identitySqlFailure() {
++            var source=org.mockito.Mockito.mock(javax.sql.DataSource.class);
++            try {org.mockito.Mockito.when(source.getConnection()).thenThrow(new java.sql.SQLException("secret-probe SQL"));}
++            catch(java.sql.SQLException failure){throw new AssertionError(failure);}
++            var projections=org.mockito.Mockito.mock(io.micronaut.context.BeanProvider.class);
++            org.mockito.Mockito.when(projections.isUnique()).thenReturn(true);
++            var configuration=new io.kestra.webserver.oidc.OidcConfiguration();configuration.setIssuer("https://issuer.example");
++            var identity=new io.kestra.webserver.oidc.services.OidcTrustedIdentity(projections,
++                org.mockito.Mockito.mock(io.kestra.webserver.oidc.OidcProtocolStateV1.class),configuration,source);
++            identity.currentForAuthorization();throw new AssertionError("Unavailable identity must not open an evaluation");
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java
+@@ -0,0 +1,34 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.webserver.oidc.TrustedIdentityV1;
++import io.kestra.webserver.oidc.TrustedIdentityV2;
++import io.micronaut.context.BeanProvider;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AuthorizationUnavailableBoundaryTest {
++    @Test void applicationGroupBoundaryUsesNewDefaultCompatibleEntryAndPreservesExplicitUnavailable() {
++        var identities=mock(BeanProvider.class);var legacy=mock(BeanProvider.class);var modern=mock(BeanProvider.class);
++        var identity=mock(TrustedIdentityV2.class);
++        when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);when(modern.isUnique()).thenReturn(true);
++        when(identity.currentForAuthorization()).thenThrow(new AuthorizationUnavailableException());
++        var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,legacy,modern,identities,true);
++        var principal=new RbacAuthorizer.Principal("actor",List.of(),null,null,List.of());
++        assertThrows(AuthorizationUnavailableException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
++        verify(identity).currentForAuthorization();verify(identity,never()).current();
++    }
++
++    @Test void missingOrDuplicateProvidersAndLegacyUnknownFailuresKeepExistingDenial() {
++        var identities=mock(BeanProvider.class);var legacy=mock(BeanProvider.class);var modern=mock(BeanProvider.class);
++        var identity=mock(TrustedIdentityV1.class);when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);
++        var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,legacy,modern,identities,true);
++        var principal=new RbacAuthorizer.Principal("actor",List.of(),null,null,List.of());
++        assertThrows(IllegalStateException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
++        verifyNoInteractions(identity);
++        when(modern.isUnique()).thenReturn(true);when(identity.current()).thenThrow(new IllegalStateException("unknown"));
++        assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast()).getClass());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationIdentityUnavailablePostgresTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationIdentityUnavailablePostgresTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationIdentityUnavailablePostgresTest.java
+@@ -0,0 +1,79 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.oidc.*;
++import io.kestra.webserver.oidc.services.*;
++import io.kestra.webserver.errors.ProblemFactory;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.*;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.util.*;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AuthorizationIdentityUnavailablePostgresTest extends OidcPostgresTestBase {
++    <Value> BeanProvider<Value> provider(Value value) {
++        var provider=mock(BeanProvider.class);when(provider.isUnique()).thenReturn(true);when(provider.get()).thenReturn(value);return provider;
++    }
++    @Test void realProjectionTableFaultIs503BeforeBusinessActionAndRecoversWithoutSideEffects()throws Exception {
++        var source=dataSource();String issuer="https://issuer.example";String suffix=UUID.randomUUID().toString().replace("-","");
++        String subject="dependency-"+suffix,client="client-"+suffix,table="dependency_projection_"+suffix,hidden=table+"_hidden";
++        new OidcUserDirectory(source).create(subject,"Dependency Test",subject+"@example.invalid","DependencyTestOnly123!");
++        try(var connection=source.getConnection();var statement=connection.createStatement()) {
++            statement.execute("CREATE TABLE "+table+" (singleton BOOLEAN PRIMARY KEY, granted BOOLEAN NOT NULL)");
++            statement.execute("INSERT INTO "+table+" VALUES(true,true)");
++            try(var insert=connection.prepareStatement("INSERT INTO oidc_client(client_id,client_secret,client_kind,active,scopes) VALUES(?,'test-only','system',true,'[\"openid\"]')")){insert.setString(1,client);insert.executeUpdate();}
++        }
++        try {
++            var configuration=new OidcConfiguration();configuration.setIssuer(issuer);
++            var protocol=new OidcProtocolState(issuer,client,new OidcInstallationReceipt(java.nio.file.Path.of("unused-dependency-receipt")),new com.fasterxml.jackson.databind.ObjectMapper());
++            ApplicationGroupProtocolProjectionV1 projection=(connection,target)->{
++                try(var statement=connection.createStatement();var rows=statement.executeQuery("SELECT granted FROM "+table+" WHERE singleton")) {
++                    assertTrue(rows.next());
++                    return new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(new ApplicationGroupProtocolProjectionV1.Projection("group","main",issuer,client,subject,true,true,1,1,Set.of(client),
++                        List.of(new ApplicationGroupProtocolProjectionV1.Scope("read","Read","")),Set.of("read"),rows.getBoolean(1)?Set.of("read"):Set.of())));
++                }
++            };
++            var identity=new OidcTrustedIdentity(provider(projection),protocol,configuration,source);
++            var authentication=Authentication.build(subject,List.of(),Map.of("iss",issuer,"aud",Set.of(client),"authentication_version",0L,
++                OidcTrustedIdentity.CLAIM,Map.of("application_group_id","group","client_id",client,"authorization_version",1L,"application_group_scopes",Set.of("read"),"protocol_scopes",Set.of("openid"))));
++            var request=HttpRequest.GET("/api/v1/configs").setAttribute(SecurityFilter.AUTHENTICATION,authentication);
++            var principal=new RbacAuthorizer.Principal(subject,List.of(),null,null,List.of());
++            var writes=new AtomicInteger();
++            AuthorizationEvaluationProviderV2 evaluation=(trusted,tenant)->CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation){return CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));}
++                public java.util.concurrent.CompletionStage<Void> close(){return CompletableFuture.completedFuture(null);}
++            });
++            var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,provider(null),provider(evaluation),provider((TrustedIdentityV1)identity),true);
++            var gate=new TypedAuthorizationGate(provider(null),evaluations);
++            var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),null,gate,mock(ProblemFactory.class));
++            var chain=mock(ServerFilterChain.class);when(chain.proceed(any())).thenAnswer(call->{writes.incrementAndGet();return Mono.just(HttpResponse.ok());});
++            try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
++                assertTrue(evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
++                try(var connection=source.getConnection();var statement=connection.createStatement()){statement.execute("ALTER TABLE "+table+" RENAME TO "+hidden);}
++                try {
++                    assertEquals(HttpStatus.SERVICE_UNAVAILABLE,Mono.from(filter.doFilter(request,chain)).block().getStatus());
++                    assertEquals(0,writes.get());
++                    try(var connection=source.getConnection();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT granted FROM "+hidden+" WHERE singleton")){assertTrue(rows.next());assertTrue(rows.getBoolean(1));assertFalse(rows.next());}
++                } finally {
++                    try(var connection=source.getConnection();var statement=connection.createStatement()){statement.execute("ALTER TABLE "+hidden+" RENAME TO "+table);}
++                }
++                assertTrue(evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());assertEquals(0,writes.get());
++            }
++        } finally {
++            try(var connection=source.getConnection();var statement=connection.createStatement()) {
++                statement.execute("DROP TABLE IF EXISTS "+table);statement.execute("DROP TABLE IF EXISTS "+hidden);
++                try(var credentials=connection.prepareStatement("DELETE FROM oidc_user_auth_method WHERE user_id=?");var account=connection.prepareStatement("DELETE FROM oidc_user WHERE username=?");var registered=connection.prepareStatement("DELETE FROM oidc_client WHERE client_id=?")) {
++                    credentials.setString(1,subject);credentials.executeUpdate();account.setString(1,subject);account.executeUpdate();registered.setString(1,client);registered.executeUpdate();
++                }
++            }
++        }
 +    }
 +}

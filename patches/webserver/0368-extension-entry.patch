@@ -712,10 +712,9 @@ index 0000000..c6e8d4e
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-index 0fef9e6..20d8174 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-@@ -62,10 +62,12 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+@@ -66,10 +66,12 @@
              Map<String, List<String>> query = new LinkedHashMap<>();
              request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
              return body(request).flatMap(bytes -> {

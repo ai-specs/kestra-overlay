@@ -257,10 +257,9 @@ index 0000000000000000000000000000000000000000..c684ab936f7839d22191174962873829
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..201c7345424bcca10b1fe91c8f6e3213044e0027
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,37 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -292,7 +291,10 @@ index 0000000000000000000000000000000000000000..201c7345424bcca10b1fe91c8f6e3213
 +                });
 +        }).timeout(Duration.ofSeconds(5))
 +            .defaultIfEmpty(Decision.deny("Missing authorization decision"))
-+            .onErrorReturn(Decision.deny("Authorization failed"));
++            .onErrorResume(failure -> {
++                var unavailable=AuthorizationUnavailableException.classified(failure);
++                return unavailable!=null?Mono.error(unavailable):Mono.just(Decision.deny("Authorization failed"));
++            });
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java

@@ -652,6 +652,12 @@ issuer 的 scheme://authority。密码沿用至少8字符、最多72 UTF-8字节
 请求，不另开连接，不 commit/rollback/close。已失效的actor/认证版本/可信claim或授予
 返回既有生命周期FORBIDDEN；SQL、投影故障或损坏、缺失/重复组件返回UNAVAILABLE。
 V1普通身份验证保持原失败契约；分派保留明确拒绝，不将未知运行错误视为权限拒绝。
+普通授权评估可以调用`TrustedIdentityV2.currentForAuthorization()`；该default方法默认
+委派旧`current()`，旧实现无需改动。宿主覆盖此入口，明确的SQL/连接/投影故障或provider
+报告的`io.kestra.webserver.rbac.AuthorizationUnavailableException`通过typed链返回503
+固定安全ProblemDetail。异常消息固定为`Authorization dependency is unavailable`，
+不携带SQL或cause。未知运行异常、未知路由、独立授权provider缺失/重复保持原拒绝门；
+不按异常消息或任意cause搜索分类。新入口使用自己的事务，不借用V2连接入口结束事务。
 唯一 `IdentityLifecycleParticipantV1`
 实现 `beforeChange(Connection,Change)`，Change 含 contractVersion=1、kind、issuer、
 subject/clientId 和宿主重验后的 actor。kind 为 ACCOUNT_DELETE/ACCOUNT_ACTIVATE/

@@ -33,7 +33,7 @@ PROCESSORS="$(cat "$TASK_WORK/processor-path")"
 mkdir -p "$TASK_WORK/classes" "$TASK_WORK/libs"
 "$JAVA_HOME/bin/javac" -parameters -cp "$EXE:$PROCESSORS" -processorpath "$PROCESSORS" \
     -d "$TASK_WORK/classes" "$REPO/scripts/tests/classpath-probe/RbacProbe.java" \
-    "$REPO/scripts/tests/classpath-probe/UiPageProbe.java"
+    "$REPO/scripts/tests/classpath-probe/UiPageProbe.java" "$REPO/scripts/tests/classpath-probe/Dependency503Probe.java"
 cp -R "$REPO/scripts/tests/classpath-probe/ui-extensions" "$TASK_WORK/classes/"
 "$JAVA_HOME/bin/jar" --create --file "$TASK_WORK/libs/kestra-rbac-authorizer.jar" -C "$TASK_WORK/classes" .
 "$JAVA_HOME/bin/jar" tf "$TASK_WORK/libs/kestra-rbac-authorizer.jar" > "$TASK_WORK/entries"

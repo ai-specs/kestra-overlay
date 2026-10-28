@@ -21,6 +21,8 @@ FAVICON_REPORT="$(dirname "$0")/../.work/favicon-$SETUP_MODE.json"
 printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$FAVICON_REPORT"
 IDENTITY_RECHECK_REPORT="$(dirname "$0")/../.work/identity-recheck-$SETUP_MODE.json"
 printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$IDENTITY_RECHECK_REPORT"
+DEPENDENCY503_REPORT="$(dirname "$0")/../.work/dependency503-$SETUP_MODE.json"
+printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$DEPENDENCY503_REPORT"
 
 cleanup() {
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
@@ -363,3 +365,8 @@ assert_status "receipt restores original installation identity" "$INSTALLATION_I
 docker exec "$SERVER" sh -c 'printf "kestra-oidc-installation-v1\n00000000-0000-0000-0000-000000000000\n" > /app/storage/.oidc-installation'
 assert_status "replaced receipt fails closed" 500 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 echo 'UI OIDC BLACKBOX ALL GREEN'
+if [ -n "${BB_DEPENDENCY_PROBE_JAR:-}" ]; then
+  docker rm -f "$SERVER" "$PG" >/dev/null
+  BB_RESOURCE_OWNER="$RESOURCE_OWNER" BB_DEPENDENCY_PORT="$PORT" bash "$(dirname "$0")/blackbox-dependency503.sh" \
+    "$IMAGE" "$BB_DEPENDENCY_PROBE_JAR" "$DEPENDENCY503_REPORT" 503
+fi
