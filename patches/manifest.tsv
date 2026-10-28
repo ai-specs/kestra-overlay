@@ -3,7 +3,7 @@
 # 0200/0211：生产审计修复，client secret哈希与pending quota错误语义；交付以对应提交CI为准。
 # 外部 RBAC jar/REST适配/具体资源隔离未交付；本地通过不等于真CI交付。
 # 列：id | patch文件 | status(core|transition|reserved) | 消费扩展仓 | 摘要 | 触达上游文件数 | 来源 | 移除条件
-0380	0380-oidc-account-lifecycle-v2.patch	core	ai-specs/kestra-plugin-rbac	同连接可信身份与账号删除事务参与者	13	64c4498基础已发布；空资料重放坐标及owner命名卷验证通过；消费须对应提交CI及正式镜像推广成功	上游提供等价标准身份生命周期和借用连接公开机制
+0380	0380-oidc-account-lifecycle-v2.patch	core	ai-specs/kestra-plugin-rbac	同连接可信身份与账号删除事务参与者；PG测试owner/run归属标签	13	64c4498基础已发布；空资料重放坐标及owner命名卷验证通过；新增run标签随本轮完整验证；消费须对应提交CI及正式镜像推广成功	上游提供等价标准身份生命周期和借用连接公开机制
 0381	0381-oidc-initial-password-change.patch	core	ai-specs/kestra-plugin-rbac	宿主生成临时密码与生产首次受限改密；V2不编造空资料默认值	14	64c4498基础已发布；新完整本地及两种首装空资料26项通过；消费须对应提交CI和正式镜像推广成功	上游提供等价临时凭据及首次改密完整流程
 0382	0382-oidc-client-credentials.patch	core	ai-specs/kestra-plugin-rbac	公开client凭据状态与轮换、受限confidential登记与维护CLI	10	64c4498正式CI40523539018及推广通过；R20头3尾4；R25主控裁决，维护者可复核设计	上游提供等价凭据修订、脱敏提示及维护轮换
 0383	0383-oidc-resource-audience-v2.patch	core	ai-specs/kestra-plugin-rbac	V2资源audience允许空且不补clientId；精确登录与资源受众分离；旧凭据不扩权	7	64c4498正式CI40523539018及推广通过；协议钩子归0150/0160/0190	上游提供等价版本化资源投影及签发与在线受众分离机制
@@ -56,3 +56,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0368	0368-extension-entry.patch	core	ai-specs/kestra-plugin-rbac及独立管理页面	认证descriptor和capability准入;业务配置403时通用扩展安全壳层;拒绝页发现入口;精确manifest逐项授权委派	16	主控接收;候选测试通过;未发布	上游提供等价已认证扩展独立初始化及条件安全壳层
 0369	0369-system-theme-lifecycle.patch	core	ai-specs/kestra-plugin-rbac及宿主页面	通用主题生命周期跟随系统配色变化并卸载监听;显式主题不受影响	2	主控接收;前端64项通过;未发布	上游全局主题生命周期提供等价系统配色监听及清理
 0370	0370-oidc-protocol-projection.patch	core	ai-specs/kestra-plugin-rbac	只读应用组投影、标准协议及pending登记查询、事务锁与生命周期guard契约	7	5项纯契约及8项标准查询探针通过；职责迁移源码通过；真实数据库、HTTP及发布未通过	上游提供等价只读协议输入与标准身份生命周期公开机制
+0385	0385-public-favicon.patch	core	ai-specs/kestra-plugin-rbac及生产OIDC页面	精确GET/HEAD favicon真实静态映射归属判定及授权/失效会话激活	6	主控接收；HTTP红绿及完整本地、新镜像form/env各favicon26项通过；对应提交CI和正式发布待验证	上游OSS提供等价精确静态资源公开判定及全链认证回归

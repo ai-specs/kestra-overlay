@@ -59,7 +59,7 @@ jobs:
         with:
           node-version: '24'
       - name: Shared SDK browser adapter regression tests
-        run: node --test scripts/tests/ui-sdk-browser-driver.test.cjs scripts/tests/sdk-browser-diagnostics.test.cjs scripts/rbac-ui-probe/sdk-canonical.test.mjs scripts/rbac-ui-probe/sdk-theme.test.mjs scripts/rbac-ui-probe/sdk-evidence.test.mjs
+        run: node --test scripts/tests/ui-sdk-browser-driver.test.cjs scripts/tests/sdk-browser-diagnostics.test.cjs scripts/tests/favicon-browser-diagnostics.test.mjs scripts/rbac-ui-probe/sdk-canonical.test.mjs scripts/rbac-ui-probe/sdk-theme.test.mjs scripts/rbac-ui-probe/sdk-evidence.test.mjs
       - name: Apply patches, compile UI/webserver, build and push candidate
         id: candidate
         env:
@@ -167,6 +167,7 @@ jobs:
             .work/password-rbac-*.json
             .work/directory-http-*.json
             .work/profile-directory-*.json
+            .work/favicon-*.json
             .work/ui-extension-*.json
           include-hidden-files: true
           if-no-files-found: error

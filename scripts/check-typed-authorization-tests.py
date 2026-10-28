@@ -4,6 +4,8 @@ import xml.etree.ElementTree as ET
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
+    "PublicFaviconHttpTest": 2,
+    "PublicFaviconTest": 5,
     "RbacActivationTest": 8,
     "TypedAuthorizationContractTest": 6,
     "TypedAuthorizationGateTest": 2,

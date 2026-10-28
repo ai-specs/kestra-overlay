@@ -1,0 +1,257 @@
+# 需求：REQ-0385 精确favicon静态资源在RBAC和身份生命周期门中的激活
+# 消费扩展仓：ai-specs/kestra-plugin-rbac及生产OIDC认证页面
+# 状态：core
+# 来源：新写；复用Micronaut 4 StaticResourceResolver及宿主已打包root/favicon.ico，不读取扩展业务
+# 触达上游文件（6）：公共静态资源判定、三个过滤器、真实HTTP与失败关闭测试
+# 移除条件：上游OSS提供等价精确静态资源公开判定及全链认证回归
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/PublicFavicon.java b/webserver/src/main/java/io/kestra/webserver/rbac/PublicFavicon.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/PublicFavicon.java
+@@ -0,0 +1,32 @@
++package io.kestra.webserver.rbac;
++
++import io.micronaut.http.HttpMethod;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.web.router.RouteAttributes;
++import io.micronaut.web.router.resource.StaticResourceResolver;
++import jakarta.inject.Singleton;
++
++@Singleton
++public final class PublicFavicon {
++    private final StaticResourceResolver resources;
++
++    public PublicFavicon(StaticResourceResolver resources) {
++        this.resources=resources;
++    }
++
++    public boolean matches(HttpRequest<?> request) {
++        if ((request.getMethod()!=HttpMethod.GET && request.getMethod()!=HttpMethod.HEAD)
++            || !"/favicon.ico".equals(request.getPath())
++            || !"/favicon.ico".equals(request.getUri().getRawPath())
++            || request.getUri().getRawFragment()!=null
++            || RouteAttributes.getRouteMatch(request).isPresent()) return false;
++        var expected=PublicFavicon.class.getResource("/root/favicon.ico");
++        if(expected==null || resources==null)return false;
++        try {
++            return resources.resolve("/favicon.ico")
++                .filter(resource->expected.toExternalForm().equals(resource.toExternalForm())).isPresent();
++        } catch(RuntimeException failure) {
++            return false;
++        }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+@@ -22,6 +22,8 @@
+ @Filter("/**")
+ @io.micronaut.context.annotation.Requires(property = "kestra.rbac.typed.enabled", value = "false", defaultValue = "false")
+ public class RestRbacFilter implements HttpServerFilter {
++    @jakarta.inject.Inject
++    private PublicFavicon publicFavicon;
+     private final RbacConfiguration configuration;
+     private final BeanProvider<RestAuthorizationResolver> resolvers;
+     private final RbacGate gate;
+@@ -32,7 +34,7 @@
+     }
+     @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
+     @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
+-        if (!configuration.enabled() || protocol(request)) return chain.proceed(request);
++        if (!configuration.enabled() || protocol(request) || publicFavicon!=null && publicFavicon.matches(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+         if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
+         return Mono.defer(() -> {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+@@ -22,6 +22,8 @@
+ @Filter("/**")
+ @Requires(property = "kestra.rbac.typed.enabled", value = "true")
+ public final class TypedRestRbacFilter implements HttpServerFilter {
++    @jakarta.inject.Inject
++    private PublicFavicon publicFavicon;
+     private final RbacConfiguration configuration;
+     private final OssRestOperationAdapter adapter;
+     private final TypedAuthorizationGate gate;
+@@ -42,7 +44,7 @@
+
+     @Override
+     public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
+-        if (!configuration.enabled() || RestRbacFilter.protocol(request)) return chain.proceed(request);
++        if (!configuration.enabled() || RestRbacFilter.protocol(request) || publicFavicon!=null && publicFavicon.matches(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+         if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
+         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+@@ -18,6 +18,8 @@
+ @Filter("/**")
+ @Requires(property = "kestra.oidc.enabled", value = "true")
+ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
++    @jakarta.inject.Inject
++    private io.kestra.webserver.rbac.PublicFavicon publicFavicon;
+     private final OidcConfiguration configuration;
+     private final OidcIdentityLifecycle lifecycle
+ ;
+@@ -29,6 +31,7 @@
+     }
+     @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
+     @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++        if(publicFavicon!=null && publicFavicon.matches(request))return chain.proceed(request);
+         String path = request.getPath();
+         if (path.startsWith("/oauth/") || path.startsWith("/.well-known/") || path.startsWith("/ui/assets/")
+             || path.equals("/api/v1/configs/login") || java.util.Set.of("/oidc/login", "/oidc/logout", "/oidc/setup",
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconHttpTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconHttpTest.java
+@@ -0,0 +1,53 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.runtime.server.EmbeddedServer;
++import jakarta.inject.Inject;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.router.static-resources.root.paths[0]", value = "classpath:root")
++@Property(name = "micronaut.router.static-resources.root.mapping", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++class PublicFaviconHttpTest {
++    @Inject EmbeddedServer server;
++
++    @Test void anonymousGetAndHeadServeTheActualPackagedIcon() throws Exception {
++        var client=HttpClient.newHttpClient();
++        byte[] expected;
++        try(var resource=getClass().getResourceAsStream("/root/favicon.ico")) {
++            assertNotNull(resource);expected=resource.readAllBytes();
++        }
++        var response=client.send(HttpRequest.newBuilder(server.getURI().resolve("/favicon.ico")).GET().build(),HttpResponse.BodyHandlers.ofByteArray());
++        assertEquals(200,response.statusCode());assertArrayEquals(expected,response.body());
++        assertTrue(response.headers().firstValue("content-type").orElse("").startsWith("image/"));
++        var head=client.send(HttpRequest.newBuilder(server.getURI().resolve("/favicon.ico")).method("HEAD",HttpRequest.BodyPublishers.noBody()).build(),HttpResponse.BodyHandlers.ofByteArray());
++        assertEquals(200,head.statusCode());assertEquals(0,head.body().length);
++        head.headers().firstValue("content-type").ifPresent(contentType->assertEquals(response.headers().firstValue("content-type").orElseThrow(),contentType));
++    }
++
++    @Test void methodsPathVariantsAndBusinessApisDoNotBecomePublic() throws Exception {
++        var client=HttpClient.newHttpClient();
++        for(String method:List.of("POST","PUT","DELETE","PATCH")) {
++            var response=client.send(HttpRequest.newBuilder(server.getURI().resolve("/favicon.ico")).method(method,HttpRequest.BodyPublishers.noBody()).build(),HttpResponse.BodyHandlers.ofByteArray());
++            assertTrue(response.statusCode()>=400,method);
++        }
++        for(String path:List.of("/favicon.ico/","/favicon.ico/unknown","/favicon2.ico","/%66avicon.ico","/favicon%2eico","/other/../favicon.ico","//favicon.ico","/api/v1/configs","/api/v1/main/flows/search")) {
++            var uri=java.net.URI.create(server.getURI().toString()+path);
++            var response=client.send(HttpRequest.newBuilder(uri).GET().build(),HttpResponse.BodyHandlers.ofByteArray());
++            assertTrue(response.statusCode()>=400,path+": "+response.statusCode());
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconTest.java
+@@ -0,0 +1,89 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.webserver.errors.ProblemFactory;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.MethodBasedRouteMatch;
++import io.micronaut.web.router.RouteAttributes;
++import io.micronaut.web.router.resource.StaticResourceResolver;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class PublicFaviconTest {
++    StaticResourceResolver resources() {
++        var resources=mock(StaticResourceResolver.class);
++        when(resources.resolve("/favicon.ico")).thenReturn(Optional.ofNullable(getClass().getResource("/root/favicon.ico")));
++        return resources;
++    }
++
++    void install(Object filter,PublicFavicon favicon)throws Exception {
++        var field=filter.getClass().getDeclaredField("publicFavicon");field.setAccessible(true);field.set(filter,favicon);
++    }
++
++    @Test void onlyTheConfiguredPackagedResourceIsPublic()throws Exception {
++        var resources=resources();var favicon=new PublicFavicon(resources);
++        assertTrue(favicon.matches(HttpRequest.GET("/favicon.ico")));
++        assertTrue(favicon.matches(HttpRequest.HEAD("/favicon.ico")));
++        when(resources.resolve("/favicon.ico")).thenReturn(Optional.of(java.net.URI.create("file:/untrusted/favicon.ico").toURL()));
++        assertFalse(favicon.matches(HttpRequest.GET("/favicon.ico")));
++    }
++
++    @Test void unsafePathsMethodsAndMethodRoutesNeverUseTheStaticException() {
++        var resources=resources();var favicon=new PublicFavicon(resources);
++        for(String path:List.of("/%66avicon.ico","/favicon%2eico","/other/../favicon.ico","//favicon.ico","/favicon.ico/","/favicon2.ico","/favicon.ico#fragment","/api/v1/configs"))
++            assertFalse(favicon.matches(HttpRequest.GET(path)),path);
++        for(String method:List.of("POST","PUT","DELETE","PATCH","OPTIONS"))
++            assertFalse(favicon.matches(HttpRequest.create(io.micronaut.http.HttpMethod.valueOf(method),"/favicon.ico")),method);
++        var request=HttpRequest.GET("/favicon.ico");
++        RouteAttributes.setRouteMatch(request,mock(MethodBasedRouteMatch.class));
++        assertFalse(favicon.matches(request));
++        verifyNoInteractions(resources);
++    }
++
++    @Test void missingDisabledOrFailingResolversFailClosed() {
++        assertFalse(new PublicFavicon(null).matches(HttpRequest.GET("/favicon.ico")));
++        assertFalse(new PublicFavicon(StaticResourceResolver.EMPTY).matches(HttpRequest.GET("/favicon.ico")));
++        var resources=resources();when(resources.resolve("/favicon.ico")).thenReturn(Optional.empty());
++        assertFalse(new PublicFavicon(resources).matches(HttpRequest.GET("/favicon.ico")));
++        when(resources.resolve("/favicon.ico")).thenThrow(new IllegalStateException("Unavailable resource mapping"));
++        assertFalse(new PublicFavicon(resources).matches(HttpRequest.GET("/favicon.ico")));
++    }
++
++    @Test void bothAuthorizationFiltersRetainAnonymousBusinessDenial()throws Exception {
++        var favicon=new PublicFavicon(resources());
++        var chain=mock(ServerFilterChain.class);when(chain.proceed(any())).thenReturn(Mono.just(HttpResponse.ok()));
++        var legacy=new RestRbacFilter(new RbacConfiguration(true,false),null,null,mock(ProblemFactory.class));
++        var typed=new TypedRestRbacFilter(new RbacConfiguration(true,false),null,null,mock(ProblemFactory.class));
++        install(legacy,favicon);install(typed,favicon);
++        for(var filter:List.of(legacy,typed)) {
++            assertEquals(HttpStatus.OK,Mono.from(filter.doFilter(HttpRequest.GET("/favicon.ico"),chain)).block().getStatus());
++            assertEquals(HttpStatus.UNAUTHORIZED,Mono.from(filter.doFilter(HttpRequest.GET("/api/v1/configs"),chain)).block().getStatus());
++            assertEquals(HttpStatus.UNAUTHORIZED,Mono.from(filter.doFilter(HttpRequest.POST("/favicon.ico",""),chain)).block().getStatus());
++        }
++    }
++
++    @Test void staleSessionCanReadTheIconButStillCannotReadBusinessApis()throws Exception {
++        var configuration=new OidcConfiguration();configuration.setIssuer("https://issuer.example");
++        var lifecycle=mock(OidcIdentityLifecycle.class);var filter=new OidcIdentityLifecycleFilter(configuration,lifecycle);
++        install(filter,new PublicFavicon(resources()));
++        var chain=mock(ServerFilterChain.class);when(chain.proceed(any())).thenReturn(Mono.just(HttpResponse.ok()));
++        var authentication=Authentication.build("stale",List.of(),Map.of("iss","https://issuer.example"));
++        var icon=HttpRequest.GET("/favicon.ico").setAttribute(SecurityFilter.AUTHENTICATION,authentication);
++        assertEquals(HttpStatus.OK,Mono.from(filter.doFilter(icon,chain)).block().getStatus());
++        verifyNoInteractions(lifecycle);
++        var business=HttpRequest.GET("/api/v1/configs").setAttribute(SecurityFilter.AUTHENTICATION,authentication);
++        assertEquals(HttpStatus.UNAUTHORIZED,Mono.from(filter.doFilter(business,chain)).block().getStatus());
++    }
++}

@@ -17,6 +17,8 @@ mkdir -p "$(dirname "$PASSWORD_RBAC_REPORT")"
 printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$PASSWORD_RBAC_REPORT"
 PROFILE_REPORT="$(dirname "$0")/../.work/profile-directory-$SETUP_MODE.json"
 printf '{"completed":false,"checks":[],"expectedChecks":26,"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$PROFILE_REPORT"
+FAVICON_REPORT="$(dirname "$0")/../.work/favicon-$SETUP_MODE.json"
+printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$FAVICON_REPORT"
 
 cleanup() {
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
@@ -112,6 +114,8 @@ micronaut:
       - pattern: /ping
         access: [isAnonymous()]
       - pattern: /ui/assets/**
+        access: [isAnonymous()]
+      - pattern: /favicon.ico
         access: [isAnonymous()]
       - pattern: /api/v1/configs/login
         access: [isAnonymous()]
@@ -320,6 +324,17 @@ node "$(dirname "$0")/protocol-session-probe.mjs" "$BASE"
 prepare_directory_probe
 python3 "$(dirname "$0")/directory-probe/password-rbac-check.py" "$BASE" "$SERVER" "$PG" \
   "$PASSWORD_RBAC_REPORT"
+if [ "${BB_BROWSER:-0}" = 1 ]; then
+  FAVICON_SHA256=$(python3 - "$TEMP_DIR/host.jar" <<'PYFAVICON'
+import hashlib,sys,zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    print(hashlib.sha256(archive.read('root/favicon.ico')).hexdigest())
+PYFAVICON
+  )
+  BB_BROWSER_BASE="$BASE" BB_BROWSER_SERVER="$SERVER" BB_BROWSER_POSTGRES="$PG" \
+    BB_FAVICON_EXPECTED_SHA256="$FAVICON_SHA256" BB_FAVICON_REPORT="$FAVICON_REPORT" \
+    node "$(dirname "$0")/favicon-browser.cjs"
+fi
 UNBOUND_CODES=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*) FROM oidc_authorization_code WHERE client_id<>'kestra-ui' AND created_at>now()-interval '1 minute' AND NOT used")
 assert_status "missing projection creates no ordinary authorization code" 0 "$UNBOUND_CODES"
 INSTALLATION_ID=$(docker exec "$PG" psql -U kestra -d kestra -Atc 'SELECT installation_id FROM oidc_setup')

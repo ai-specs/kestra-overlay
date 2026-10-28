@@ -538,13 +538,14 @@ diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBa
 index 3262778ed4442625d42e6168599ca1002991045b..71ed6b5f5fe373fbed09ff5c601c05621e94bb7d 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
-@@ -26,7 +26,15 @@ public abstract class OidcPostgresTestBase {
+@@ -26,7 +26,16 @@ public abstract class OidcPostgresTestBase {
       * already set — the exact failure this base exists to prevent.
       */
 -    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18");
 +    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18")
 +        .withLabel("owner", System.getProperty("kestra.test.resource.owner",
-+            System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_OWNER", "kestra-overlay-" + java.util.UUID.randomUUID())));
++            System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_OWNER", "kestra-overlay-" + java.util.UUID.randomUUID())))
++        .withLabel("run", System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_RUN", "oidc-local-tests"));
 
      static {
 +        String volume = System.getenv("KESTRA_TEST_PG_VOLUME");
