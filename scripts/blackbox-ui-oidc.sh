@@ -7,6 +7,7 @@ BASE="http://localhost:$PORT"
 NET="kestra-ui-bb-$$"
 RESOURCE_OWNER="${BB_RESOURCE_OWNER:-$NET}"
 PG="kestra-ui-pg-$$"
+PG_DATA="$PG-data"
 SERVER="kestra-ui-bb-$$"
 STORAGE="kestra-ui-storage-$$"
 SETUP_MODE="${BB_SETUP_MODE:-form}"
@@ -49,8 +50,10 @@ prepare_directory_probe() {
 
 docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
 docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$STORAGE" >/dev/null
+if docker volume inspect "$PG_DATA" >/dev/null 2>&1; then echo 'FAIL: test database volume already exists'; exit 1; fi
+docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$PG_DATA" >/dev/null
 docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" \
-  -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
+  -v "$PG_DATA:/var/lib/postgresql" -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
 for attempt in $(seq 1 30); do
   if docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1; then break; fi
   sleep 2

@@ -16,6 +16,7 @@ IMAGE="${1:?usage: blackbox-oidc.sh <image-ref>}"
 NET="kestra-bb-$$"
 RESOURCE_OWNER="${BB_RESOURCE_OWNER:-$NET}"
 PG="kestra-bb-pg-$$"
+PG_DATA="$PG-data"
 K1="kestra-bb-a-$$"
 K2="kestra-bb-b-$$"
 PORT="${BB_PORT:-18080}"
@@ -40,6 +41,7 @@ cleanup() {
   rm -rf "$T"
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
 }
 trap cleanup EXIT
 
@@ -128,8 +130,10 @@ wait_ready() { # container-name
 
 echo "== Phase A: 默认关（vanilla 等价 + UI 保留）=="
 docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
+if docker volume inspect "$PG_DATA" >/dev/null 2>&1; then echo 'FAIL: test database volume already exists'; exit 1; fi
+docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$PG_DATA" >/dev/null
 docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" \
-  -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=k3str4 postgres:18 >/dev/null
+  -v "$PG_DATA:/var/lib/postgresql" -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=k3str4 postgres:18 >/dev/null
 for i in $(seq 1 30); do docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1 && break; sleep 2; done
 
 docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$K1" --network "$NET" -p "$PORT:8080" \

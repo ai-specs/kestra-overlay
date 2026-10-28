@@ -8,6 +8,7 @@ BASE="http://localhost:$PORT"
 NET="overlay-mcp-bb-$$"
 RESOURCE_OWNER="${BB_RESOURCE_OWNER:-$NET}"
 PG="overlay-mcp-pg-$$"
+PG_DATA="$PG-data"
 APP="overlay-mcp-app-$$"
 TEMP_DIR=$(mktemp -d)
 REPORT_DIR="${BB_REPORT_DIR:-}"
@@ -26,12 +27,15 @@ cleanup() {
   fi
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   rm -rf "$TEMP_DIR"
   return "$code"
 }
 trap cleanup EXIT
 docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
+if docker volume inspect "$PG_DATA" >/dev/null 2>&1; then echo 'FAIL: test database volume already exists'; exit 1; fi
+docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$PG_DATA" >/dev/null
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" -v "$PG_DATA:/var/lib/postgresql" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
 cat > "$TEMP_DIR/config.yml" <<EOF
 datasources:
   postgres:
