@@ -5,7 +5,7 @@
 # 触达上游文件: UI扩展协议、runtime、ExtensionPage、SDK及一致性测试、内置SDK README/类型/元数据/适配/矩阵，共13文件。
 # 移除条件: 上游OSS提供等价独立扩展ShadowRoot弹层、焦点生命周期、默认popper隔离和可拒绝异步导航公开SDK。
 # 来源增量提交: 7cb9999、618a57a、86a0461、6969acf、04dc980、2f2984a；仅独占开发树提交，未发布。
-# 本轮来源: 正式parent4151/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
+# 本轮来源: 正式parent1e363/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 index 28025b9..b6f7f39 100644
 --- a/ui/src/components/extensions/ExtensionPage.vue
@@ -353,10 +353,10 @@ index 009d80f..5b82937 100644
      it("isolates known root selectors and omits redundant font resources", () => {
 diff --git a/ui/src/extensions/shadow-overlays.spec.ts b/ui/src/extensions/shadow-overlays.spec.ts
 new file mode 100644
-index 0000000..858587e
+index 0000000..a4a5f6e
 --- /dev/null
 +++ b/ui/src/extensions/shadow-overlays.spec.ts
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,501 @@
 +import {afterEach, describe, expect, it, vi} from "vitest";
 +import {createApp, defineComponent, h, nextTick, onBeforeUnmount, ref, watch} from "vue";
 +import * as Vue from "vue";
@@ -383,6 +383,16 @@ index 0000000..858587e
 +    cleanups.push(() => scope.dispose());
 +    vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
 +    return {container, content, portal, root, trigger, fallback, controller, scope};
++}
++
++// Resolve the two published style forms numerically so the unchanged +8 baseline
++// is checked as geometry, not rejected merely because the old helper used calc().
++function mobileStyle(sheet: HTMLElement) {
++    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
++    const oldTop = /^calc\((-?[\d.]+)px \+ var\(--ks-spacing-2\)\)$/.exec(sheet.style.top);
++    const oldHeight = /^min\(75vh, calc\(100vh - (-?[\d.]+)px - var\(--ks-spacing-2\)\)\)$/.exec(sheet.style.maxHeight);
++    return {top: oldTop ? Number(oldTop[1]) + 8 : parseFloat(sheet.style.top),
++        height: oldHeight ? Math.max(0, Math.min(viewportHeight * .75, viewportHeight - Number(oldHeight[1]) - 8)) : parseFloat(sheet.style.maxHeight)};
 +}
 +
 +describe("pinned overlay shadow compatibility", () => {
@@ -637,6 +647,135 @@ index 0000000..858587e
 +        expect(current.content.inert).not.toBe(true);
 +        expect(deepActiveElement()).toBe(trigger);
 +    });
++    it("constrains an offscreen mobile anchor to visible positive viewport bounds", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const viewport = Object.assign(new EventTarget(), {height: 700, width: 390, offsetTop: 20, offsetLeft: 0});
++        const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
++        Object.defineProperty(window, "visualViewport", {configurable: true, value: viewport});
++        cleanups.push(() => {if (originalViewport) Object.defineProperty(window, "visualViewport", originalViewport); else delete (window as unknown as Record<string, unknown>).visualViewport;});
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "mobile-filter"}, [
++            h("div", {class: "mobile-bar"}, h("button", {class: "mobile-toggle", "data-test": "mobile-trigger", onClick: () => {opened.value = true;}}, "Native filter")),
++            opened.value ? h("div", {class: "mobile-scrim", onClick: () => {opened.value = false;}}) : null,
++            opened.value ? h("div", {class: "mobile-sheet", role: "dialog", "aria-label": "Native filter"}, h("button", "Native field")) : null,
++        ])});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        const trigger = current.root.querySelector<HTMLButtonElement>('[data-test="mobile-trigger"]')!;
++        vi.spyOn(current.root.querySelector<HTMLElement>(".mobile-bar")!, "getBoundingClientRect").mockReturnValue({left: 12, right: 378, top: 1637, bottom: 1669, width: 366, height: 32} as DOMRect);
++        trigger.focus();
++        trigger.click();
++        await nextTick();
++        const sheet = current.portal.querySelector<HTMLElement>('.mobile-sheet')!;
++        expect(mobileStyle(sheet).top).toBeGreaterThanOrEqual(8);
++        expect(mobileStyle(sheet).height).toBeGreaterThan(0);
++        expect(mobileStyle(sheet).top + mobileStyle(sheet).height).toBeLessThanOrEqual(viewport.offsetTop + viewport.height - 8);
++        expect(current.portal.querySelector('.mobile-scrim')).not.toBeNull();
++        expect(current.content.querySelector('.mobile-sheet')).toBeNull();
++        viewport.height = 500; viewport.offsetTop = 40;
++        viewport.dispatchEvent(new Event("resize"));
++        viewport.dispatchEvent(new Event("scroll"));
++        expect(mobileStyle(sheet).top + mobileStyle(sheet).height).toBeLessThanOrEqual(532);
++        expect(current.content.inert).toBe(true);
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++        current.root.querySelector('.mobile-sheet button')!.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        await nextTick();
++        expect(opened.value).toBe(false);
++        expect(current.portal.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).not.toBe(true);
++        expect(deepActiveElement()).toBe(trigger);
++    });
++    it("flips a bottom mobile anchor above while keeping positive bounds", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "mobile-filter"}, [
++            h("div", {class: "mobile-bar"}, h("button", {class: "mobile-toggle", "data-test": "mobile-trigger", onClick: () => {opened.value = true;}}, "Native filter")),
++            opened.value ? h("div", {class: "mobile-scrim", onClick: () => {opened.value = false;}}) : null,
++            opened.value ? h("div", {class: "mobile-sheet", role: "dialog", "aria-label": "Native filter"}, h("button", "Native field")) : null,
++        ])});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        const trigger = current.root.querySelector<HTMLButtonElement>('[data-test="mobile-trigger"]')!;
++        vi.spyOn(current.root.querySelector<HTMLElement>(".mobile-bar")!, "getBoundingClientRect").mockReturnValue({left: 12, right: 378, top: 700, bottom: 732, width: 366, height: 32} as DOMRect);
++        trigger.focus();
++        trigger.click();
++        await nextTick();
++        const sheet = current.portal.querySelector<HTMLElement>('.mobile-sheet')!;
++        expect(mobileStyle(sheet).top).toBeGreaterThanOrEqual(8);
++        expect(mobileStyle(sheet).top).toBeLessThan(700);
++        expect(mobileStyle(sheet).height).toBeGreaterThan(0);
++        expect(mobileStyle(sheet).top + mobileStyle(sheet).height).toBeLessThanOrEqual(window.innerHeight - 8);
++        expect(current.portal.querySelector('.mobile-scrim')).not.toBeNull();
++        expect(current.content.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).toBe(true);
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++        current.root.querySelector('.mobile-sheet button')!.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        await nextTick();
++        expect(opened.value).toBe(false);
++        expect(current.portal.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).not.toBe(true);
++        expect(deepActiveElement()).toBe(trigger);
++    });
++    it("keeps sufficient lower mobile space at anchor plus eight", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "mobile-filter"}, [
++            h("div", {class: "mobile-bar"}, h("button", {class: "mobile-toggle", "data-test": "mobile-trigger", onClick: () => {opened.value = true;}}, "Native filter")),
++            opened.value ? h("div", {class: "mobile-scrim", onClick: () => {opened.value = false;}}) : null,
++            opened.value ? h("div", {class: "mobile-sheet", role: "dialog", "aria-label": "Native filter"}, h("button", "Native field")) : null,
++        ])});
++        cleanups.push(() => app.unmount());
++        app.mount(target);
++        const trigger = current.root.querySelector<HTMLButtonElement>('[data-test="mobile-trigger"]')!;
++        vi.spyOn(current.root.querySelector<HTMLElement>(".mobile-bar")!, "getBoundingClientRect").mockReturnValue({left: 12, right: 378, top: 20, bottom: 52, width: 366, height: 32} as DOMRect);
++        trigger.focus();
++        trigger.click();
++        await nextTick();
++        const sheet = current.portal.querySelector<HTMLElement>('.mobile-sheet')!;
++        expect(mobileStyle(sheet).top).toBe(60);
++        expect(mobileStyle(sheet).height).toBeGreaterThan(0);
++        expect(mobileStyle(sheet).top + mobileStyle(sheet).height).toBeLessThanOrEqual(window.innerHeight - 8);
++        expect(current.portal.querySelector('.mobile-scrim')).not.toBeNull();
++        expect(current.content.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).toBe(true);
++        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
++        current.root.querySelector('.mobile-sheet button')!.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, composed: true, cancelable: true}));
++        await nextTick();
++        expect(opened.value).toBe(false);
++        expect(current.portal.querySelector('.mobile-sheet')).toBeNull();
++        expect(current.content.inert).not.toBe(true);
++        expect(deepActiveElement()).toBe(trigger);
++    });
++    it("preserves migrated mobile logical parent and sibling without accepting foreign insertion", () => {
++        const current = fixture();
++        let operations: typeof Vue.nodeOps;
++        const intercepted = {...Vue, createRenderer: (options: typeof Vue.nodeOps) => {operations = options; return {createApp: vi.fn()};}};
++        createShadowRenderer(intercepted as unknown as typeof Vue, current.scope);
++        const parent = document.createElement("div"); parent.className = "mobile-filter";
++        const bar = document.createElement("div"); bar.className = "mobile-bar";
++        const trigger = document.createElement("button"); trigger.className = "mobile-toggle"; bar.append(trigger); parent.append(bar);
++        const anchor = document.createComment("original sibling"); parent.append(anchor); current.content.append(parent);
++        trigger.click();
++        const scrim = document.createElement("div"); scrim.className = "mobile-scrim";
++        const sheet = document.createElement("div"); sheet.className = "mobile-sheet"; sheet.innerHTML = "<button>Field</button>";
++        operations!.insert(scrim, parent, anchor); operations!.insert(sheet, parent, anchor);
++        expect(sheet.parentNode).toBe(current.portal);
++        expect(operations!.parentNode(sheet)).toBe(parent);
++        expect(operations!.nextSibling(sheet)).toBe(anchor);
++        expect(operations!.parentNode(scrim)).toBe(parent);
++        const foreign = document.createElement("div"); document.body.append(foreign);
++        expect(() => operations!.insert(document.createElement("span"), foreign, null)).toThrow("Teleport escaped");
++        operations!.remove(sheet); operations!.remove(scrim);
++        expect(operations!.parentNode(sheet)).toBeNull();
++        expect(current.scope.inspect().modals).toHaveLength(0);
++        expect(current.content.inert).not.toBe(true);
++    });
 +    it("returns to the pointer opener when nested layers release in either order", () => {
 +        for (const outerFirst of [true, false]) {
 +            const current = fixture();
@@ -720,7 +859,7 @@ index 0000000..858587e
 +    });
 +});
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
-index 927e127..fd8c37a 100644
+index 927e127..4328693 100644
 --- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 @@ -1,6 +1,9 @@
@@ -811,7 +950,7 @@ index 927e127..fd8c37a 100644
  `/api/v1/{tenant}/...` with query parameters, includes cookies and write CSRF, and returns standard
  Response including 401/403. It rejects redirects, fragments, encoded path ambiguity and external
  origins. The server continues to authorize every API request.
-@@ -44,3 +102,16 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
+@@ -44,3 +102,18 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
  Run `node check-translations.mjs path/to/translations`; failure includes missing, extra, empty
  messages and interpolation differences for all public locales. The checker does not translate
  messages or prove translation quality. No host-internal JSON import is supported.
@@ -828,6 +967,8 @@ index 927e127..fd8c37a 100644
 +Native mobile sheets retain the bar of their actual owned mobile trigger across renderer moves.
 +Only registered advanced-layer style updates are re-positioned after the normal renderer patch,
 +so a host document filter cannot replace an extension anchor. No global DOM function is patched.
++
++Mobile native filter sheets keep their own bar anchor. When lower viewport space is sufficient, the sheet remains 8px below the bar; otherwise placement flips above or clamps inside viewport safety margins with positive scrollable height, including offscreen layout changes. Placement is recalculated on owned-root/window scroll and resize; original modal/focus cleanup remains required. For this overlayCompatibility V1 implementation, the below-bar offset applies only when lower viewport space is sufficient; upward/clamped placement is its explicit boundary exception. Migrated mobile nodes are weak keys in the renderer logical-parent/anchor registry: the registry does not strongly retain its keys, remove deletes associations, and scope disposal releases modal registrations and viewport listeners. Foreign-root insertion remains rejected.
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
 index 93849a9..8a85d91 100644
 --- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
@@ -981,10 +1122,10 @@ index 0000000..74c3f65
 +): {[Name in keyof Components]: Vue.Component};
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
 new file mode 100644
-index 0000000..4eba4d9
+index 0000000..3e1e2b1
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,447 @@
 +export function deepActiveElement(root = document) {
 +    let active = root.activeElement;
 +    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
@@ -1212,6 +1353,7 @@ index 0000000..4eba4d9
 +    if (!vue.nodeOps || typeof vue.patchProp !== "function" || typeof vue.createRenderer !== "function") throw new Error("Pinned Vue DOM renderer is required");
 +    const nativeFilters = new Map();
 +    const mobileScrims = new WeakMap();
++    const mobileParents = new WeakMap();
 +    const mobileAnchors = new WeakMap();
 +    const advancedPositions = new WeakMap();
 +    const view = scope.portal.ownerDocument.defaultView;
@@ -1264,6 +1406,11 @@ index 0000000..4eba4d9
 +            if (!target) throw new Error("Unknown extension Teleport target: " + selector);
 +            return target;
 +        },
++        parentNode(node) {return mobileParents.get(node)?.parent ?? vue.nodeOps.parentNode(node);},
++        nextSibling(node) {
++            const original = mobileParents.get(node);
++            return original ? (original.anchor?.parentNode === original.parent ? original.anchor : null) : vue.nodeOps.nextSibling(node);
++        },
 +        insert(node, parent, anchor) {
 +            if (parent.isConnected && parent.getRootNode() !== scope.root) throw new Error("Teleport escaped extension ShadowRoot");
 +            const advanced = node.nodeType === 1 && node.matches(".adv-overlay");
@@ -1280,6 +1427,7 @@ index 0000000..4eba4d9
 +                mobileAnchors.set(node, bar);
 +                mobileAnchor = undefined;
 +            }
++            if (mobile && !mobileParents.has(node)) mobileParents.set(node, {parent, anchor});
 +            const destination = mobile ? scope.portal : parent;
 +            vue.nodeOps.insert(node, destination, mobile && anchor?.parentNode !== destination ? null : anchor);
 +            if (mobile && node.matches(".mobile-scrim")) mobileScrims.set(parent, node);
@@ -1308,13 +1456,43 @@ index 0000000..4eba4d9
 +                    if (!bar.isConnected) return;
 +                    if (bar.getRootNode() !== scope.root) throw new Error("Native mobile filter anchor is not owned");
 +                    const bounds = bar.getBoundingClientRect();
-+                    Object.assign(node.style, {position: "fixed", left: bounds.left + "px", right: "auto", top: `calc(${bounds.bottom}px + var(--ks-spacing-2))`, width: bounds.width + "px", maxHeight: `min(75vh, calc(100vh - ${bounds.bottom}px - var(--ks-spacing-2)))`});
++                    const margin = 8;
++                    const viewport = view.visualViewport;
++                    const viewportTop = viewport?.offsetTop ?? 0;
++                    const viewportLeft = viewport?.offsetLeft ?? 0;
++                    const viewportHeight = viewport?.height ?? view.innerHeight;
++                    const viewportWidth = viewport?.width ?? view.innerWidth;
++                    const minimumTop = viewportTop + margin;
++                    const maximumBottom = viewportTop + viewportHeight - margin;
++                    const availableHeight = Math.max(1, viewportHeight - 2 * margin);
++                    const desiredHeight = Math.min(node.scrollHeight || availableHeight, viewportHeight * .75, availableHeight);
++                    const below = maximumBottom - bounds.bottom - margin;
++                    const above = bounds.top - margin - minimumTop;
++                    let top;
++                    let height;
++                    if (bounds.bottom >= minimumTop && below >= desiredHeight) {
++                        top = bounds.bottom + margin;
++                        height = Math.min(viewportHeight * .75, below);
++                    } else if (bounds.top <= maximumBottom && above >= desiredHeight) {
++                        height = Math.min(viewportHeight * .75, above);
++                        top = Math.max(minimumTop, bounds.top - margin - desiredHeight);
++                    } else {
++                        height = Math.min(viewportHeight * .75, availableHeight);
++                        top = Math.min(Math.max(bounds.bottom + margin, minimumTop), Math.max(minimumTop, maximumBottom - height));
++                    }
++                    height = Math.max(1, Math.min(height, maximumBottom - top));
++                    const width = Math.max(1, Math.min(bounds.width, viewportWidth - 2 * margin));
++                    const left = Math.min(Math.max(bounds.left, viewportLeft + margin), viewportLeft + viewportWidth - margin - width);
++                    Object.assign(node.style, {position: "fixed", left: left + "px", right: "auto", top: top + "px", width: width + "px", maxHeight: height + "px"});
 +                };
 +                if (advanced) advancedPositions.set(element, position);
 +                position();
 +                const release = scope.activate(element, dismiss);
-+                const cleanup = () => {advancedPositions.delete(element); release(); view.removeEventListener("resize", position); view.removeEventListener("scroll", position, true); scope.root.removeEventListener("scroll", position, true);};
++                const visualViewport = mobile ? view.visualViewport : undefined;
++                const cleanup = () => {advancedPositions.delete(element); release(); view.removeEventListener("resize", position); view.removeEventListener("scroll", position, true); scope.root.removeEventListener("scroll", position, true); visualViewport?.removeEventListener("resize", position); visualViewport?.removeEventListener("scroll", position);};
 +                nativeFilters.set(node, cleanup);
++                visualViewport?.addEventListener("resize", position);
++                visualViewport?.addEventListener("scroll", position);
 +                view.addEventListener("resize", position);
 +                view.addEventListener("scroll", position, true);
 +                scope.root.addEventListener("scroll", position, true);
@@ -1324,6 +1502,7 @@ index 0000000..4eba4d9
 +        remove(node) {
 +            nativeFilters.get(node)?.();
 +            nativeFilters.delete(node);
++            mobileParents.delete(node);
 +            vue.nodeOps.remove(node);
 +        },
 +    });

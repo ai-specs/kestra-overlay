@@ -564,4 +564,6 @@ predicate 保持(namespace,id)关联。无 ID 列的 JDBC 资源只对 RESTRICTE
 镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
 使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。
 
-原生filter锚定候选（2026-10-29，未发布）：REQ-0384公开renderer仅在owned原生filter触发后适配高级层viewport坐标及根内scroll/resize；已登记层的style更新后重算，拒绝宿主document decoy干扰。缺失/跨根高级锚点拒绝，移动sheet按实际mobile trigger所属bar关联，chip编辑保持原生定位。独立真实KsFilter几何门与原949矩阵分别报告，不以业务插件或旧SDK结果替代。
+原生filter锚定正式基线（2026-10-29，`1e3632e`，成功CI `40822882820`）：REQ-0384公开renderer仅在owned原生filter触发后适配高级层viewport坐标及根内scroll/resize；已登记层的style更新后重算，拒绝宿主document decoy干扰。缺失/跨根高级锚点拒绝，移动sheet按实际mobile trigger所属bar关联，chip编辑保持原生定位。独立真实KsFilter几何门与原949矩阵分别报告，不以业务插件或旧SDK结果替代。
+
+移动filter视口边界候选（2026-10-30，未发布）：仅owned mobile sheet在下方空间足够时保留+8，否则上翻或视口安全边距clamp，maxHeight严格为正且不超过当前top到视口底的空间。内容展开依靠该上界和原生overflow保持可滚动；window/root scroll、window resize和visualViewport scroll/resize成对重算/清理。仅已迁移sheet/scrim保存逻辑父与原anchor，parentNode/nextSibling成对实现Vue后续patch关系，remove清理，不接受跨根插入或任意null兜底。desktop本轮不改变。原949/36保留，新增12几何单列，总48、8诊断源必须零错误。

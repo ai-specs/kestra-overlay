@@ -25,8 +25,8 @@ class UiExtensionReportTest(unittest.TestCase):
             GATE.check(self.report())
 
     def test_requires_exact_added_shadow_tests(self):
-        self.assertEqual(sum(GATE.REQUIRED.values()), 89)
-        self.assertEqual(GATE.REQUIRED["src/extensions/shadow-overlays.spec.ts"], 15)
+        self.assertEqual(sum(GATE.REQUIRED.values()), 93)
+        self.assertEqual(GATE.REQUIRED["src/extensions/shadow-overlays.spec.ts"], 19)
         report = self.report()
         suite = next(item for item in report["testResults"] if item["name"].endswith("shadow-overlays.spec.ts"))
         suite["assertionResults"] = suite["assertionResults"][:13]

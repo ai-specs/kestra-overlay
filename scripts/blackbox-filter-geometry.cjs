@@ -119,6 +119,28 @@ async function main(){
      return {automatic:{trigger:a,panel:b},nativeChipOffset:8};
     });
     assert.equal(await page.locator('#host-decoy').getAttribute('style'),decoyBefore,'host decoy style changed');
+    if(width===390) for(const name of ['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']) await check(name,async()=>{
+     await page.evaluate(()=>{const root=document.querySelector('#extension').shadowRoot;root.querySelector('.fixture-scroll').style.cssText='height:auto;overflow:visible';for(const row of root.querySelectorAll('.fixture-row'))row.style.marginTop='1200px';});
+     const samples=[];
+     for(const index of name==='mobile-boundary-reopen-resize'?[0,1,0]:[1]){
+      await page.waitForFunction(()=>!document.querySelector('#extension').shadowRoot.querySelector('.mobile-scrim'));
+      const trigger=await open(index);
+      if(name==='mobile-offscreen-anchor-clamp')await page.evaluate(()=>window.scrollTo(0,0)); // explicit host-layout stimulus, not a business click
+      if(name==='mobile-boundary-reopen-resize')await page.setViewportSize({width:390,height:700});
+      await page.waitForFunction(()=>{const root=document.querySelector('#extension').shadowRoot,node=root.querySelector('.mobile-sheet');if(!node)return false;const b=node.getBoundingClientRect();return b.top>=7&&b.bottom<=innerHeight-7&&b.height>0&&b.left>=7&&b.right<=innerWidth-7;});
+      const sample=await page.evaluate(index=>{const root=document.querySelector('#extension').shadowRoot,bar=root.querySelector('[data-filter-instance="'+index+'"] .mobile-bar'),sheet=root.querySelector('.mobile-sheet'),r=n=>{const b=n.getBoundingClientRect();return {x:b.x,y:b.y,width:b.width,height:b.height,bottom:b.bottom,right:b.right}};return {bar:r(bar),sheet:r(sheet),maxHeight:getComputedStyle(sheet).maxHeight,viewport:{width:innerWidth,height:innerHeight}};},index);
+      samples.push(sample);assert(parseFloat(sample.maxHeight)>0);
+      await panel().locator('.field-row-header').filter({has:page.locator('span').filter({hasText:/^Kind$/})}).click();
+      await page.waitForFunction(()=>{const sheet=document.querySelector('#extension').shadowRoot.querySelector('.mobile-sheet'),b=sheet?.getBoundingClientRect();return b&&b.top>=7&&b.bottom<=innerHeight-7&&b.height>0;});
+      await panel().locator('.field-row-body .kel-select__wrapper').click();
+      await page.getByRole('option',{name:'Second',exact:true}).filter({visible:true}).click();
+      await page.getByRole('option').filter({visible:true}).first().waitFor({state:'hidden'});
+      await panel().locator('.sheet-apply').click();await panel().waitFor({state:'hidden'});
+      await page.waitForFunction(()=>!document.querySelector('#extension').shadowRoot.querySelector('.mobile-sheet,.mobile-scrim'));
+      await page.setViewportSize({width:390,height:900});
+     }
+     return {samples,actualNativeFieldSelectionAndApply:true,layoutStimulus:name==='mobile-offscreen-anchor-clamp'?'window.scrollTo layout stimulus after real open':null};
+    });
     await check('dispose-cleans-owned-layers-and-listeners',async()=>{
      await open(0);await page.evaluate(()=>window.filterGeometry.dispose());await page.keyboard.press('Escape');
      await page.evaluate(()=>{window.dispatchEvent(new Event('resize'));window.dispatchEvent(new Event('scroll'));});
@@ -129,9 +151,9 @@ async function main(){
     const snapshot=await diagnostics.snapshot();report.diagnostics??=[];report.diagnostics.push({theme,width,...snapshot});await persist();await context.close();
    }
   }
-  assert.equal(report.checks.length,36,'exact native geometry matrix required');
+  assert.equal(report.checks.length,48,'exact native geometry matrix required');
   assert.equal(report.diagnostics.length,8,'exact geometry diagnostic sources required');
-  const expected=new Set();for(const theme of ['light','dark','dark-2','system'])for(const width of [1280,390])for(const name of ['two-owned-native-filter-instances','native-condition-and-nested-select-escape','rules-pill-reopen-scroll-resize',...(width===1280?['direct-chip-and-add-filter-autoopen-retain-native-position']:[]),'dispose-cleans-owned-layers-and-listeners'])expected.add(theme+'|'+width+'|'+name);
+  const expected=new Set();for(const theme of ['light','dark','dark-2','system'])for(const width of [1280,390])for(const name of ['two-owned-native-filter-instances','native-condition-and-nested-select-escape','rules-pill-reopen-scroll-resize',...(width===1280?['direct-chip-and-add-filter-autoopen-retain-native-position']:[]),'dispose-cleans-owned-layers-and-listeners',...(width===390?['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']:[])])expected.add(theme+'|'+width+'|'+name);
   assert.deepEqual(new Set(report.checks.map(row=>row.theme+'|'+row.width+'|'+row.name)),expected);
   const errors=report.diagnostics.flatMap(snapshot=>snapshot.events).filter(event=>['console-error','page-error','http-error','request-failed','diagnostic-integrity-error'].includes(event.kind));
   assert.equal(errors.length,0,'native geometry has source-associated browser errors');
