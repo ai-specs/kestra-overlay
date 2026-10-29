@@ -72,6 +72,12 @@ async function main(){
       await open(0);await panel().locator('.field-row-header').filter({hasText:'Kind'}).click();
       await panel().locator('.field-row-body').waitFor();
       await panel().locator('.kel-select__wrapper').click();await page.getByRole('option',{name:'First',exact:true}).filter({visible:true}).click();
+      const select=panel().locator('.kel-select__wrapper');
+      if(await page.evaluate(()=>window.filterGeometry.inspect().scope.popups.length>0)) {
+       await select.press('Escape');
+       await page.waitForFunction(()=>window.filterGeometry.inspect().scope.popups.length===0);
+       assert.equal(await panel().isVisible(),true,'nested select Escape closed mobile parent');
+      }
       await panel().locator('.sheet-apply').click();await panel().waitFor({state:'hidden'});
       return {mobileNativeFieldClicked:true,state:await page.evaluate(()=>window.filterGeometry.inspect())};
      }
