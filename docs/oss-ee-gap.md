@@ -317,4 +317,6 @@ PostgreSQL 与最多一个活动连接的受限 DataSource，不将连接暴露�
 
 REQ-0384原生filter定位正式基线已发布（2026-10-29，`1e3632e`，成功CI `40822882820`）：消费独立扩展的ShadowRoot原生KsFilter；仅宿主renderer承担锚点/portal坐标、实例归属和监听生命周期。groupable与AND等业务配置仍归扩展；详见r-ee-rbac顶部失败/接收提案。
 
-REQ-0384移动视口边界候选已接收、未发布（2026-10-30）：长页底部/离屏锚点不得生成0高度或视口外不可交互sheet；通用flip/clamp及迁移节点逻辑父/邻接由宿主renderer承担。原949/36与新增12几何及最终发布门须对应同源输入；插件业务和CRUD不迁入。详见r-ee-rbac本轮提案。
+REQ-0384移动视口边界已随27520a2/CI40941713707正式发布（2026-10-30）：长页底部/离屏锚点不得生成0高度或视口外不可交互sheet；通用flip/clamp及迁移节点逻辑父/邻接由宿主renderer承担。原949/36与新增12几何及最终发布门须对应同源输入；插件业务和CRUD不迁入。详见r-ee-rbac本轮提案。
+
+REQ-0384桌面advanced视口边界增量（2026-10-30，候选未发布）：registered高级层下方足够仍+6，不足翻转或clamp并提供正maxHeight/原生overflow；visualViewport监听成对清理。原949/48保留，新增12，总60几何；不改chip/mobile业务语义，不引入业务路径。详见r-ee-rbac本轮接收提案。

@@ -1,7 +1,69 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
 
-## 移动筛选视口边界缺口（2026-10-30，已接收实施，候选未发布）
+
+## 桌面高级筛选视口边界缺口（2026-10-30，已接收实施，候选未发布）
+
+### 消费与实际失败
+
+消费项目为 `kestra-plugin-rbac`，当前正式宿主为 `27520a2`（CI `40941713707`，
+正式 digest `bd04a934…460e191`）。部署仓 `root local-ci-full146` 在唯一生产登录组合中
+记录：移动geometry48生产观察通过、projects三项筛选通过；桌面权限页面原生
+`.adv-clear` 的真实鼠标点击报 outside viewport。失败PNG由该报告的failureArtifact
+指向。主控另保留初次居中安全基线 `production-desktop-bottom-anchor-gap.json`；
+明确失败复现为真实打开后施加host-layout scroll刺激，并等待scroll定位生效：
+viewport1280×900、anchor.bottom=880.1875、adv.top=886.1875、bottom=997.6875、
+Clear.y=941.1875、maxHeight=630。证据 `production-desktop-bottom-layout-gap.json`
+明确该刺激不是业务写入；不能据此声称每次首次打开都越界。
+上一轮明确未扩桌面范围，不能以移动修复发布或浅页面桌面用例通过替代本次失败。
+
+### 原生基线与归属
+
+公开 DS0.5 `AdvancedFilterBuilder` 原生 `computePosition` 以 document 内的原生按钮
+或rules-pill为锚，取anchor.bottom + window.scrollY + 6，并写absolute；原生CSS提供
+max-height:70vh和overflow:auto，但没有按该锚点的实际剩余垂直空间翻转/收窄。
+宿主公开renderer为扩展ShadowRoot捕获本实例锚点并改成viewport-fixed，当前桌面
+分支仅横向clamp，top恒为anchor.bottom+6，没有纵向翻转/clamp/可用高度约束。
+70vh本身不能保证面板底部或Clear按钮可见，离屏锚点更不能靠此恢复。
+
+因此最小缺口属于宿主通用高级筛选renderer定位，不是插件权限模型、业务布局或CRUD。
+不得按业务路径特判、复制vendor、改全局查询、换键盘激活或放宽真实内部按钮断言。
+
+### 已接收的最小公开契约（候选未发布）
+
+1. 仅对本renderer已登记、由当前owned customize/rules-pill激活的adv-builder处理。
+   继续使用本实例锚点及现有横向边界，host document decoy不参与定位。
+2. 下方空间足够时保持原top=anchor.bottom+6及既有正常样式；不足时优先上翻。
+   上下空间均不足或锚点离屏时，在visual viewport安全边距内clamp。
+3. maxHeight严格为正且不超过实际top到viewport底的空间，并保留原生overflow滚动；
+   内容展开、重复添加条件或说明增高不能把面板/实际Clear按钮永久推到不可达区域。
+   真实滚动后必须能点击Clear、Add condition及关闭按钮，不要求所有长内容同时可见。
+4. 延续registered style patch后的重算，处理window/root scroll、resize及visualViewport
+   scroll/resize；如需观测内容尺寸，只允许本登记层的有界生命周期监听，先证明必要性，
+   不引入定时轮询或自触发MutationObserver循环。
+5. 关闭/remove/dispose成对释放监听和modal/inert/focus；chip edit保持原生语义，
+   移动已正式发布的viewport/逻辑父修复不回退，不扩大公共组件或业务权限。
+
+### 必需红绿与发布门
+
+- 用正式275 helper保留桌面底部/离屏真实点击失败、精确rect、source document/events和PNG，
+  再验证候选；不能只通过模拟overlay或mock矩形宣布真实几何通过。
+- 原949全部ID/断言及原48几何完整保留。建议新增桌面矩阵为4主题×3具名场景：
+  desktop-bottom-anchor-flip、desktop-offscreen-anchor-clamp、
+  desktop-boundary-expand-reopen-resize，共12项，总几何60、原8诊断源仍必须零错误。
+  主控已接收总60精确矩阵；不得静默变更生产checker。
+- 新增场景用至少1280桌面、两个owned filter交替重开、host decoy、真实字段展开/选值、
+  多条件增高、原生滚动、真实Clear/关闭、resize/ESC/焦点与dispose清理。
+  正常空间+6基线与移动+8/flip/clamp继续原门核验，不减少覆盖。
+- 单元、完整local-ci、普通镜像门、949与最终几何同source/build/image绑定；最终CI实际
+  下载报告及失败PNG、正式推广/双架构provenance和pull/exe审计后，插件才能消费新SDK。
+  真实业务插件不进入宿主构建或CI；部署仓最后重新执行正式组合真实鼠标操作验收。
+
+本轮仅在独立release实施；未通过最终发布门前仍是候选，不向插件提供编译输入。当前根仓独占Compose/PG，资源交接前只运行无PG检查与独立探针。
+
+## 移动筛选视口边界缺口（2026-10-30，历史正式基线）
+
+该增量已随正式 `27520a2`、成功CI `40941713707` 发布。以下保留当时失败与设计依据，不表示本轮桌面增量已发布。
 
 消费项目为 `kestra-plugin-rbac`。正式宿主 `1e3632e` 的 SDK 在长详情页暴露移动弹层
 垂直边界缺口：部署仓生产 Ego 记录 viewport 390×900、mobile-bar.bottom=1669、
@@ -9,7 +71,7 @@ sheet.maxHeight=0px、目标字段纵坐标1766；同矩阵 Playwright 真实点
 证据为部署仓 `production-mobile-bottom-anchor-gap.json`。此前浅页面36项几何通过，
 不能证明底部或离屏锚点可用。插件布局使触发位置变深，但视口定位属于宿主通用 renderer。
 
-现正式 helper 将移动层迁入专有 portal 后固定 top=bar.bottom+8，并按下方剩余空间计算
+当时正式1e363 helper 将移动层迁入专有 portal 后固定 top=bar.bottom+8，并按下方剩余空间计算
 maxHeight；没有翻转或视口 clamp。原生 DS0.5 自身为相对父容器向下 absolute 展开，
 不能直接证明迁入 fixed portal 后的边界正确。不得按插件业务路径、字段或模型特判。
 
@@ -27,8 +89,7 @@ renderer.remove、modal/inert/焦点释放及监听清理，不增加全局 DOM 
 源码/构建/镜像绑定和全部诊断源，正式CI必须实际执行并下载核验。
 
 本轮仅在独立 overlay release 与自有验证树实施；真实插件不是宿主构建或CI输入。
-公开SDK正式发布后插件才能消费，部署仓再执行真实生产组合验收。当前仍为候选未发布，
-单元、本地几何或历史正式发布记录均不得代替本轮最终发布门。
+公开SDK正式发布后插件才能消费，部署仓再执行真实生产组合验收。该移动基线已通过其对应最终发布门；历史结果不得替代本轮桌面增量发布门。
 
 ## 原生筛选弹层锚定缺口（2026-10-29，历史正式基线）
 

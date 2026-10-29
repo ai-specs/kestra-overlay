@@ -141,6 +141,42 @@ async function main(){
      }
      return {samples,actualNativeFieldSelectionAndApply:true,layoutStimulus:name==='mobile-offscreen-anchor-clamp'?'window.scrollTo layout stimulus after real open':null};
     });
+    if(width===1280) for(const name of ['desktop-bottom-anchor-flip','desktop-offscreen-anchor-clamp','desktop-boundary-expand-reopen-resize']) await check(name,async()=>{
+     await page.evaluate(()=>{const root=document.querySelector('#extension').shadowRoot;root.querySelector('.fixture-scroll').style.cssText='height:auto;overflow:visible';for(const row of root.querySelectorAll('.fixture-row'))row.style.marginTop='1200px';});
+     const samples=[];
+     for(const index of name==='desktop-boundary-expand-reopen-resize'?[0,1,0]:[1]){
+      await page.waitForFunction(()=>!document.querySelector('#extension').shadowRoot.querySelector('.adv-builder'));
+      await instance(index).locator('.customize-button').evaluate((node,bottomCase)=>{const b=node.getBoundingClientRect();window.scrollTo(0,scrollY+b.bottom-(bottomCase?innerHeight/2:innerHeight-24));},name==='desktop-bottom-anchor-flip'); // explicit host-layout bottom-anchor stimulus before real click
+      const otherBefore=await page.evaluate(index=>window.filterGeometry.inspect().queries[1-index],index);
+      const trigger=await open(index);
+      if(name==='desktop-bottom-anchor-flip') {
+       await trigger.evaluate(node=>{const b=node.getBoundingClientRect();window.scrollTo(0,scrollY+b.bottom-(innerHeight-20));});
+       await page.waitForFunction(index=>{const root=document.querySelector('#extension').shadowRoot,a=root.querySelector('[data-filter-instance="'+index+'"] .customize-button').getBoundingClientRect(),b=root.querySelector('.adv-builder').getBoundingClientRect();return a.bottom>=innerHeight-25&&a.bottom<=innerHeight-15&&Math.abs(b.bottom-(a.top-6))<=4;},index);
+      }
+      if(name==='desktop-offscreen-anchor-clamp')await page.evaluate(()=>window.scrollTo(0,0)); // host-layout stimulus, not a substitute for interaction
+      if(name==='desktop-boundary-expand-reopen-resize')await page.setViewportSize({width:1280,height:700});
+      const sample=async()=>page.evaluate(index=>{const root=document.querySelector('#extension').shadowRoot,anchor=root.querySelector('[data-filter-instance="'+index+'"] .customize-button'),layer=root.querySelector('.adv-builder'),rect=node=>{const b=node.getBoundingClientRect();return {x:b.x,y:b.y,width:b.width,height:b.height,bottom:b.bottom,right:b.right}};return {anchor:rect(anchor),panel:rect(layer),maxHeight:getComputedStyle(layer).maxHeight,viewport:{width:innerWidth,height:innerHeight}}},index);
+      await page.waitForFunction(()=>{const layer=document.querySelector('#extension').shadowRoot.querySelector('.adv-builder');if(!layer)return false;const b=layer.getBoundingClientRect();return b.top>=7&&b.bottom<=innerHeight-7&&b.height>0;});
+      samples.push(await sample());
+      for(let count=0;count<4;count++)await panel().locator('.adv-footer .adv-add').first().click();
+      await page.waitForFunction(()=>{const layer=document.querySelector('#extension').shadowRoot.querySelector('.adv-builder'),b=layer.getBoundingClientRect();return b.top>=7&&b.bottom<=innerHeight-7&&b.height>0;});
+      samples.push(await sample());
+      const firstRow=panel().locator('.adv-row').first();
+      await firstRow.locator('.cond-field .kel-select__wrapper').click();
+      await page.getByRole('option',{name:'Kind',exact:true}).filter({visible:true}).click();
+      await choose(firstRow,'Second');
+      await page.getByRole('option').filter({visible:true}).first().waitFor({state:'hidden'});
+      assert.equal(await page.evaluate(index=>window.filterGeometry.inspect().queries[index]['filters[kind][EQUALS]'],index),'second');
+      await panel().hover();await page.mouse.wheel(0,900); // actual native panel scroll
+      await panel().locator('.adv-clear').click();await page.waitForFunction(()=>document.querySelector('#extension').shadowRoot.querySelectorAll('.adv-row').length===0);
+      assert.deepEqual(await page.evaluate(index=>window.filterGeometry.inspect().queries[1-index],index),otherBefore,'boundary field action changed the other filter');
+      await panel().locator('.adv-header-close').click();await panel().waitFor({state:'hidden'});
+      await page.waitForFunction(()=>!document.querySelector('#extension').shadowRoot.querySelector('.adv-builder'));
+      await page.setViewportSize({width:1280,height:900});
+     }
+     assert.equal(await page.locator('#host-decoy').getAttribute('style'),decoyBefore,'boundary positioning changed host decoy');
+     return {samples,addedConditions:4,actualFieldSelection:true,actualWheelAndClear:true,actualClose:true,layoutStimulus:'bottom case opens safely then scrolls host layout to bottom+waits positioned; offscreen case scrolls after open'};
+    });
     await check('dispose-cleans-owned-layers-and-listeners',async()=>{
      await open(0);await page.evaluate(()=>window.filterGeometry.dispose());await page.keyboard.press('Escape');
      await page.evaluate(()=>{window.dispatchEvent(new Event('resize'));window.dispatchEvent(new Event('scroll'));});
@@ -151,9 +187,9 @@ async function main(){
     const snapshot=await diagnostics.snapshot();report.diagnostics??=[];report.diagnostics.push({theme,width,...snapshot});await persist();await context.close();
    }
   }
-  assert.equal(report.checks.length,48,'exact native geometry matrix required');
+  assert.equal(report.checks.length,60,'exact native geometry matrix required');
   assert.equal(report.diagnostics.length,8,'exact geometry diagnostic sources required');
-  const expected=new Set();for(const theme of ['light','dark','dark-2','system'])for(const width of [1280,390])for(const name of ['two-owned-native-filter-instances','native-condition-and-nested-select-escape','rules-pill-reopen-scroll-resize',...(width===1280?['direct-chip-and-add-filter-autoopen-retain-native-position']:[]),'dispose-cleans-owned-layers-and-listeners',...(width===390?['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']:[])])expected.add(theme+'|'+width+'|'+name);
+  const expected=new Set();for(const theme of ['light','dark','dark-2','system'])for(const width of [1280,390])for(const name of ['two-owned-native-filter-instances','native-condition-and-nested-select-escape','rules-pill-reopen-scroll-resize',...(width===1280?['direct-chip-and-add-filter-autoopen-retain-native-position']:[]),'dispose-cleans-owned-layers-and-listeners',...(width===1280?['desktop-bottom-anchor-flip','desktop-offscreen-anchor-clamp','desktop-boundary-expand-reopen-resize']:[]),...(width===390?['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']:[])])expected.add(theme+'|'+width+'|'+name);
   assert.deepEqual(new Set(report.checks.map(row=>row.theme+'|'+row.width+'|'+row.name)),expected);
   const errors=report.diagnostics.flatMap(snapshot=>snapshot.events).filter(event=>['console-error','page-error','http-error','request-failed','diagnostic-integrity-error'].includes(event.kind));
   assert.equal(errors.length,0,'native geometry has source-associated browser errors');

@@ -5,7 +5,7 @@
 # 触达上游文件: UI扩展协议、runtime、ExtensionPage、SDK及一致性测试、内置SDK README/类型/元数据/适配/矩阵，共13文件。
 # 移除条件: 上游OSS提供等价独立扩展ShadowRoot弹层、焦点生命周期、默认popper隔离和可拒绝异步导航公开SDK。
 # 来源增量提交: 7cb9999、618a57a、86a0461、6969acf、04dc980、2f2984a；仅独占开发树提交，未发布。
-# 本轮来源: 正式parent1e363/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
+# 本轮来源: 正式parent27520a2/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 index 28025b9..b6f7f39 100644
 --- a/ui/src/components/extensions/ExtensionPage.vue
@@ -353,10 +353,10 @@ index 009d80f..5b82937 100644
      it("isolates known root selectors and omits redundant font resources", () => {
 diff --git a/ui/src/extensions/shadow-overlays.spec.ts b/ui/src/extensions/shadow-overlays.spec.ts
 new file mode 100644
-index 0000000..a4a5f6e
+index 0000000..9f83b84
 --- /dev/null
 +++ b/ui/src/extensions/shadow-overlays.spec.ts
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,523 @@
 +import {afterEach, describe, expect, it, vi} from "vitest";
 +import {createApp, defineComponent, h, nextTick, onBeforeUnmount, ref, watch} from "vue";
 +import * as Vue from "vue";
@@ -604,6 +604,28 @@ index 0000000..a4a5f6e
 +        current.controller.abort();
 +        expect(current.portal.childNodes.length).toBe(0);
 +        window.dispatchEvent(new Event("scroll")); expect(stillMounted.style.top).toBe("426px");
++    });
++    it.each([{label: "bottom", top: 700, bottom: 732}, {label: "offscreen", top: 1637, bottom: 1669}])("bounds desktop $label anchors and expanded content without changing native close cleanup", async ({top, bottom}) => {
++        const current = fixture(), opened = ref(false);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "filter"}, [
++            h("button", {class: "customize-button", onClick: () => {opened.value = true;}}, "Filters"),
++            opened.value ? h(Vue.Teleport, {to: "body"}, h("div", {class: "adv-overlay", onClick: () => {opened.value = false;}}, h("div", {class: "adv-builder"}, h("button", "Clear")))) : null,
++        ])});
++        cleanups.push(() => app.unmount()); app.mount(current.content);
++        const trigger = current.root.querySelector<HTMLButtonElement>(".customize-button")!;
++        vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({left: 40, top, bottom, width: 100, height: 32} as DOMRect);
++        trigger.click(); await nextTick(); await nextTick();
++        const panel = current.portal.querySelector<HTMLElement>(".adv-builder")!;
++        Object.defineProperty(panel, "scrollHeight", {configurable: true, value: 1500});
++        window.dispatchEvent(new Event("resize"));
++        expect(parseFloat(panel.style.top)).toBeGreaterThanOrEqual(8);
++        const heightLimit = panel.style.maxHeight ? parseFloat(panel.style.maxHeight) : window.innerHeight * .7; // published native CSS default
++        expect(heightLimit).toBeGreaterThan(0);
++        expect(parseFloat(panel.style.top) + heightLimit).toBeLessThanOrEqual(window.innerHeight - 8);
++        current.portal.querySelector<HTMLElement>(".adv-overlay")!.click(); await nextTick();
++        expect(current.scope.inspect().modals).toHaveLength(0);
++        expect(current.content.inert).not.toBe(true);
++        expect(deepActiveElement()).toBe(trigger);
 +    });
 +    it("rejects unowned or missing advanced anchors instead of reusing an earlier filter", async () => {
 +        const current = fixture(); const open = ref(false); const errors: unknown[] = [];
@@ -859,7 +881,7 @@ index 0000000..a4a5f6e
 +    });
 +});
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
-index 927e127..4328693 100644
+index 927e127..ea7e532 100644
 --- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 @@ -1,6 +1,9 @@
@@ -950,7 +972,7 @@ index 927e127..4328693 100644
  `/api/v1/{tenant}/...` with query parameters, includes cookies and write CSRF, and returns standard
  Response including 401/403. It rejects redirects, fragments, encoded path ambiguity and external
  origins. The server continues to authorize every API request.
-@@ -44,3 +102,18 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
+@@ -44,3 +102,17 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
  Run `node check-translations.mjs path/to/translations`; failure includes missing, extra, empty
  messages and interpolation differences for all public locales. The checker does not translate
  messages or prove translation quality. No host-internal JSON import is supported.
@@ -958,8 +980,7 @@ index 927e127..4328693 100644
 +Desktop native advanced filters are positioned only after a current owned `.customize-button` or
 +`.rules-pill` activation within that native filter. The renderer consumes that anchor once; absent,
 +detached or foreign anchors reject before portal insertion, rather than reusing another filter.
-+Coordinates use viewport-fixed placement, six pixels below the trigger, with native horizontal
-+viewport bounds. Scroll/resize listeners belong to the layer and are removed on close/dispose.
++Coordinates use viewport-fixed placement, six pixels below the trigger when lower space is sufficient, with native horizontal viewport bounds. Registered advanced panels flip upward or clamp inside viewport safety margins when required, with a positive maximum height capped by native70vh and actual remaining space. Native overflow scrolling keeps long content and footer actions reachable. Scroll/resize listeners, including visualViewport events, belong to the layer and are removed on close/dispose.
 +Chip edit popovers, including automatic opening after adding a filter, retain the native chip's
 +own positioning. Consumers must use supported native filter configuration; this SDK does not
 +interpret business fields or supply missing groupable fields. Published version gates remain required.
@@ -1122,10 +1143,10 @@ index 0000000..74c3f65
 +): {[Name in keyof Components]: Vue.Component};
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
 new file mode 100644
-index 0000000..3e1e2b1
+index 0000000..1490e5c
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,469 @@
 +export function deepActiveElement(root = document) {
 +    let active = root.activeElement;
 +    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
@@ -1446,9 +1467,31 @@ index 0000000..3e1e2b1
 +                    if (!mobile) {
 +                        if (!desktopAnchor?.isConnected || desktopAnchor.getRootNode() !== scope.root) return;
 +                        const bounds = desktopAnchor.getBoundingClientRect();
++                        const margin = 8, gap = 6;
++                        const viewport = view.visualViewport;
++                        const viewportTop = viewport?.offsetTop ?? 0, viewportLeft = viewport?.offsetLeft ?? 0;
++                        const viewportHeight = viewport?.height ?? view.innerHeight, viewportWidth = viewport?.width ?? view.innerWidth;
++                        const minimumTop = viewportTop + margin, maximumBottom = viewportTop + viewportHeight - margin;
++                        const availableHeight = Math.max(1, viewportHeight - 2 * margin);
++                        const preferredHeight = Math.min(viewportHeight * .7, availableHeight);
++                        const desiredHeight = Math.min(element.scrollHeight || element.offsetHeight || 1, preferredHeight);
++                        const anchorTop = Number.isFinite(bounds.top) ? bounds.top : bounds.bottom - (bounds.height || 0);
++                        const below = maximumBottom - bounds.bottom - gap, above = anchorTop - gap - minimumTop;
++                        let top, height;
++                        if (bounds.bottom >= minimumTop && below >= desiredHeight) {
++                            top = bounds.bottom + gap;
++                            height = Math.min(preferredHeight, below);
++                        } else if (anchorTop <= maximumBottom && above >= desiredHeight) {
++                            top = Math.max(minimumTop, anchorTop - gap - desiredHeight);
++                            height = Math.min(preferredHeight, above);
++                        } else {
++                            height = preferredHeight;
++                            top = Math.min(Math.max(bounds.bottom + gap, minimumTop), Math.max(minimumTop, maximumBottom - height));
++                        }
++                        height = Math.max(1, Math.min(height, maximumBottom - top));
 +                        const width = element.offsetWidth || 720;
-+                        const left = Math.min(Math.max(bounds.left, 8), Math.max(8, view.innerWidth - width - 8));
-+                        Object.assign(element.style, {position: "fixed", left: left + "px", top: bounds.bottom + 6 + "px"});
++                        const left = Math.min(Math.max(bounds.left, viewportLeft + margin), Math.max(viewportLeft + margin, viewportLeft + viewportWidth - width - margin));
++                        Object.assign(element.style, {position: "fixed", left: left + "px", top: top + "px", maxHeight: height + "px"});
 +                        return;
 +                    }
 +                    const bar = mobileAnchors.get(node);
@@ -1488,7 +1531,7 @@ index 0000000..3e1e2b1
 +                if (advanced) advancedPositions.set(element, position);
 +                position();
 +                const release = scope.activate(element, dismiss);
-+                const visualViewport = mobile ? view.visualViewport : undefined;
++                const visualViewport = mobile || advanced ? view.visualViewport : undefined;
 +                const cleanup = () => {advancedPositions.delete(element); release(); view.removeEventListener("resize", position); view.removeEventListener("scroll", position, true); scope.root.removeEventListener("scroll", position, true); visualViewport?.removeEventListener("resize", position); visualViewport?.removeEventListener("scroll", position);};
 +                nativeFilters.set(node, cleanup);
 +                visualViewport?.addEventListener("resize", position);
