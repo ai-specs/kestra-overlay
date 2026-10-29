@@ -9,7 +9,7 @@ const tree = resolve(process.env.SDK_DEV_TREE ?? "..");
 const sdk = resolve(tree, "webserver/src/main/resources/META-INF/kestra/ui-sdk/v1");
 const inputHash = createHash("sha256");
 const sourceHashes = {};
-for (const path of ["sdk-components.js", "sdk-shell.js", "sdk.html", "sdk-build.mjs", "sdk-browser-matrix.mjs", "sdk-evidence.mjs", "sdk-theme.mjs", "package.json", resolve(sdk, "README.md"), resolve(sdk, "index.d.ts"), resolve(sdk, "shadow-overlays.d.mts"), resolve(sdk, "shadow-overlays.mjs"), resolve(sdk, "contract.json"), resolve(sdk, "probe-matrix.mjs"), resolve(sdk, "shadow-styles.mjs"), resolve(tree, "ui/src/extensions/runtime.ts")]) {
+for (const path of ["sdk-filter-geometry.js", "sdk-filter-geometry.html", "sdk-components.js", "sdk-shell.js", "sdk.html", "sdk-build.mjs", "sdk-browser-matrix.mjs", "sdk-evidence.mjs", "sdk-theme.mjs", "package.json", resolve(sdk, "README.md"), resolve(sdk, "index.d.ts"), resolve(sdk, "shadow-overlays.d.mts"), resolve(sdk, "shadow-overlays.mjs"), resolve(sdk, "contract.json"), resolve(sdk, "probe-matrix.mjs"), resolve(sdk, "shadow-styles.mjs"), resolve(tree, "ui/src/extensions/runtime.ts")]) {
     const bytes = await readFile(path);
     inputHash.update(bytes);
     sourceHashes[path] = createHash("sha256").update(bytes).digest("hex");
@@ -18,7 +18,7 @@ const buildId = inputHash.digest("hex");
 const {prepareShadowStyles} = await import(resolve(sdk, "shadow-styles.mjs"));
 await build({configFile: false, plugins: [vue()], resolve: {dedupe: ["vue", "vue-router", "vue-i18n", "element-plus"], alias: {"@sdk": sdk, "@host-runtime": resolve(tree, "ui/src/extensions/runtime.ts")}},
     define: {"process.env.NODE_ENV": JSON.stringify("production"), __SDK_BUILD_ID__: JSON.stringify(buildId)},
-    build: {outDir: "dist", cssCodeSplit: false, rollupOptions: {input: "sdk.html", output: {assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "sdk.css" : "assets/[name]-[hash][extname]"}}}});
+    build: {outDir: "dist", cssCodeSplit: false, rollupOptions: {input: {sdk: "sdk.html", filterGeometry: "sdk-filter-geometry.html"}, output: {assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "sdk.css" : "assets/[name]-[hash][extname]"}}}});
 const cssPath = "dist/sdk.css";
 const css = await readFile(cssPath, "utf8");
 const adapted = prepareShadowStyles(css, postcss);

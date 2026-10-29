@@ -1,10 +1,11 @@
 # 需求: REQ-0384，独立管理页面通用ShadowRoot弹层、规范导航及精确公开SDK能力/消费契约。
 # 消费扩展仓: ai-specs/kestra-plugin-rbac；独立探针不消费真实扩展源码或产物。
 # 状态: core；能力契约overlayCompatibility V1 supported；源码不是发布声明；新元数据输入完整949及CI/推广仍须验证。
-# 来源: 新写；公开npm机制调查与真实949机制证据；补齐内置README/元数据一致性，不改变04dc980已验证helper/runtime。
+# 来源: 新写；公开npm机制调查与真实949机制证据；补齐内置README/元数据一致性，本轮按4151完整46补丁父输入演进原生高级筛选桌面锚定；chip编辑保留原生定位。
 # 触达上游文件: UI扩展协议、runtime、ExtensionPage、SDK及一致性测试、内置SDK README/类型/元数据/适配/矩阵，共13文件。
 # 移除条件: 上游OSS提供等价独立扩展ShadowRoot弹层、焦点生命周期、默认popper隔离和可拒绝异步导航公开SDK。
 # 来源增量提交: 7cb9999、618a57a、86a0461、6969acf、04dc980、2f2984a；仅独占开发树提交，未发布。
+# 本轮来源: 正式parent4151/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 index 28025b9..b6f7f39 100644
 --- a/ui/src/components/extensions/ExtensionPage.vue
@@ -352,10 +353,10 @@ index 009d80f..5b82937 100644
      it("isolates known root selectors and omits redundant font resources", () => {
 diff --git a/ui/src/extensions/shadow-overlays.spec.ts b/ui/src/extensions/shadow-overlays.spec.ts
 new file mode 100644
-index 0000000..c2106ca
+index 0000000..858587e
 --- /dev/null
 +++ b/ui/src/extensions/shadow-overlays.spec.ts
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,362 @@
 +import {afterEach, describe, expect, it, vi} from "vitest";
 +import {createApp, defineComponent, h, nextTick, onBeforeUnmount, ref, watch} from "vue";
 +import * as Vue from "vue";
@@ -558,13 +559,63 @@ index 0000000..c2106ca
 +        expect(() => app.mount(target)).toThrow("Teleport escaped extension ShadowRoot");
 +        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
 +    });
++    it("anchors desktop native filter layers to the current shadow trigger and repositions on reopen and scroll", async () => {
++        const current = fixture();
++        const opened = ref(false);
++        const target = document.createElement("div");
++        current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "filter"}, [
++            h("button", {class: "customize-button", onClick: () => {opened.value = true;}}, "Add filters"),
++            h("button", {class: "rules-pill", onClick: () => {opened.value = true;}}, "Two rules"),
++            opened.value ? h(Vue.Teleport, {to: "body"}, h("div", {class: "adv-overlay", onClick: () => {opened.value = false;}}, h("div", {class: "adv-builder"}, h("button", {onClick: (event: Event) => event.stopPropagation()}, "Add condition")))) : null,
++        ])});
++        cleanups.push(() => app.unmount()); app.mount(target);
++        const trigger = current.root.querySelector<HTMLButtonElement>(".customize-button")!;
++        let left = 311, bottom = 195;
++        vi.spyOn(trigger, "getBoundingClientRect").mockImplementation(() => ({left, bottom, width: 123, height: 32} as DOMRect));
++        trigger.click(); await nextTick(); await nextTick();
++        let panel = current.portal.querySelector<HTMLElement>(".adv-builder")!;
++        expect(panel.style.position).toBe("fixed"); expect(panel.style.top).toBe("201px");
++        expect(panel.style.left).not.toBe("0px");
++        panel.querySelector<HTMLButtonElement>("button")!.click(); await nextTick();
++        expect(current.portal.querySelector(".adv-builder")).toBe(panel);
++        bottom = 260; window.dispatchEvent(new Event("scroll")); expect(panel.style.top).toBe("266px");
++        current.portal.querySelector<HTMLElement>(".adv-overlay")!.click(); await nextTick();
++        expect(current.portal.querySelector(".adv-builder")).toBeNull();
++        bottom = 300; trigger.click(); await nextTick(); await nextTick();
++        panel = current.portal.querySelector<HTMLElement>(".adv-builder")!;
++        expect(panel.style.top).toBe("306px");
++        current.portal.querySelector<HTMLElement>(".adv-overlay")!.click(); await nextTick();
++        const rules = current.root.querySelector<HTMLButtonElement>(".rules-pill")!;
++        vi.spyOn(rules, "getBoundingClientRect").mockReturnValue({left: 150, bottom: 420, width: 100, height: 32} as DOMRect);
++        rules.click(); await nextTick(); await nextTick();
++        expect(current.portal.querySelector<HTMLElement>(".adv-builder")!.style.top).toBe("426px");
++        const stillMounted = current.portal.querySelector<HTMLElement>(".adv-builder")!;
++        current.controller.abort();
++        expect(current.portal.childNodes.length).toBe(0);
++        window.dispatchEvent(new Event("scroll")); expect(stillMounted.style.top).toBe("426px");
++    });
++    it("rejects unowned or missing advanced anchors instead of reusing an earlier filter", async () => {
++        const current = fixture(); const open = ref(false); const errors: unknown[] = [];
++        const target = document.createElement("div"); current.content.append(target);
++        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", [
++            h("div", {class: "filter"}, h("button", {class: "customize-button"}, "Remember without opening")),
++            h("button", {class: "rules-pill", onClick: () => {open.value = true;}}, "Not a native filter"),
++            open.value ? h(Vue.Teleport, {to: "body"}, h("div", {class: "adv-overlay"}, h("div", {class: "adv-builder"}, "Unsupported"))) : null,
++        ])});
++        app.config.errorHandler = error => errors.push(error); cleanups.push(() => app.unmount()); app.mount(target);
++        current.root.querySelector<HTMLButtonElement>(".customize-button")!.click();
++        current.root.querySelector<HTMLButtonElement>(".rules-pill")!.click(); await nextTick();
++        expect(errors).toHaveLength(1); expect(String(errors[0])).toContain("anchor is missing or not owned");
++        expect(current.portal.querySelector(".adv-builder")).toBeNull(); expect(current.scope.inspect().modals).toEqual([]);
++    });
 +    it("keeps the native mobile filter sheet and scrim in the owned portal with Escape cleanup", async () => {
 +        const current = fixture();
 +        const opened = ref(false);
 +        const target = document.createElement("div");
 +        current.content.append(target);
 +        const app = createShadowRenderer(Vue, current.scope).createApp({render: () => h("div", {class: "mobile-filter"}, [
-+            h("div", {class: "mobile-bar"}, h("button", {"data-test": "mobile-trigger", onClick: () => {opened.value = true;}}, "Native filter")),
++            h("div", {class: "mobile-bar"}, h("button", {class: "mobile-toggle", "data-test": "mobile-trigger", onClick: () => {opened.value = true;}}, "Native filter")),
 +            opened.value ? h("div", {class: "mobile-scrim", onClick: () => {opened.value = false;}}) : null,
 +            opened.value ? h("div", {class: "mobile-sheet", role: "dialog", "aria-label": "Native filter"}, h("button", "Native field")) : null,
 +        ])});
@@ -669,7 +720,7 @@ index 0000000..c2106ca
 +    });
 +});
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
-index 927e127..faaf8af 100644
+index 927e127..fd8c37a 100644
 --- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 @@ -1,6 +1,9 @@
@@ -760,6 +811,23 @@ index 927e127..faaf8af 100644
  `/api/v1/{tenant}/...` with query parameters, includes cookies and write CSRF, and returns standard
  Response including 401/403. It rejects redirects, fragments, encoded path ambiguity and external
  origins. The server continues to authorize every API request.
+@@ -44,3 +102,16 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
+ Run `node check-translations.mjs path/to/translations`; failure includes missing, extra, empty
+ messages and interpolation differences for all public locales. The checker does not translate
+ messages or prove translation quality. No host-internal JSON import is supported.
++
++Desktop native advanced filters are positioned only after a current owned `.customize-button` or
++`.rules-pill` activation within that native filter. The renderer consumes that anchor once; absent,
++detached or foreign anchors reject before portal insertion, rather than reusing another filter.
++Coordinates use viewport-fixed placement, six pixels below the trigger, with native horizontal
++viewport bounds. Scroll/resize listeners belong to the layer and are removed on close/dispose.
++Chip edit popovers, including automatic opening after adding a filter, retain the native chip's
++own positioning. Consumers must use supported native filter configuration; this SDK does not
++interpret business fields or supply missing groupable fields. Published version gates remain required.
++
++Native mobile sheets retain the bar of their actual owned mobile trigger across renderer moves.
++Only registered advanced-layer style updates are re-positioned after the normal renderer patch,
++so a host document filter cannot replace an extension anchor. No global DOM function is patched.
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
 index 93849a9..8a85d91 100644
 --- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
@@ -913,10 +981,10 @@ index 0000000..74c3f65
 +): {[Name in keyof Components]: Vue.Component};
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
 new file mode 100644
-index 0000000..38703ee
+index 0000000..4eba4d9
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,409 @@
 +export function deepActiveElement(root = document) {
 +    let active = root.activeElement;
 +    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
@@ -1144,8 +1212,26 @@ index 0000000..38703ee
 +    if (!vue.nodeOps || typeof vue.patchProp !== "function" || typeof vue.createRenderer !== "function") throw new Error("Pinned Vue DOM renderer is required");
 +    const nativeFilters = new Map();
 +    const mobileScrims = new WeakMap();
++    const mobileAnchors = new WeakMap();
++    const advancedPositions = new WeakMap();
 +    const view = scope.portal.ownerDocument.defaultView;
 +    const owner = scope.portal.ownerDocument;
++    let filterAnchor;
++    let mobileAnchor;
++    const rememberFilter = event => {
++        const mobileControl = event.composedPath().find(node => node?.matches?.('.mobile-toggle'));
++        if (mobileControl) mobileAnchor = mobileControl.getRootNode() === scope.root ? mobileControl.closest('.mobile-filter')?.querySelector('.mobile-bar') : undefined;
++        const control = event.composedPath().find(node => node?.matches?.('.customize-button,.rules-pill'));
++        if (control) filterAnchor = control.getRootNode() === scope.root && control.closest('.filter')?.getRootNode() === scope.root ? control : undefined;
++    };
++    scope.root.addEventListener("pointerdown", rememberFilter, true);
++    scope.root.addEventListener("click", rememberFilter, true);
++    scope.onDispose(() => {
++        scope.root.removeEventListener("pointerdown", rememberFilter, true);
++        scope.root.removeEventListener("click", rememberFilter, true);
++        filterAnchor = undefined;
++        mobileAnchor = undefined;
++    });
 +    let idState;
 +    let popperId;
 +    if (options.idInjectionKey) {
@@ -1167,7 +1253,11 @@ index 0000000..38703ee
 +    scope.onDispose(() => {for (const cleanup of nativeFilters.values()) cleanup(); nativeFilters.clear();});
 +    const renderer = vue.createRenderer({
 +        ...vue.nodeOps,
-+        patchProp: vue.patchProp,
++        patchProp(...args) {
++            const result = vue.patchProp(...args);
++            if (args[1] === "style") advancedPositions.get(args[0])?.();
++            return result;
++        },
 +        querySelector(selector) {
 +            if (selector === "body" || (popperId && selector === "#" + popperId)) return scope.portal;
 +            const target = scope.root.querySelector(selector);
@@ -1176,7 +1266,20 @@ index 0000000..38703ee
 +        },
 +        insert(node, parent, anchor) {
 +            if (parent.isConnected && parent.getRootNode() !== scope.root) throw new Error("Teleport escaped extension ShadowRoot");
++            const advanced = node.nodeType === 1 && node.matches(".adv-overlay");
++            const desktopAnchor = advanced ? filterAnchor : null;
++            if (advanced) {
++                filterAnchor = undefined;
++                if (!desktopAnchor?.isConnected || desktopAnchor.getRootNode() !== scope.root || !desktopAnchor.closest('.filter'))
++                    throw new Error("Native desktop filter anchor is missing or not owned");
++            }
 +            const mobile = node.nodeType === 1 && node.matches(".mobile-scrim,.mobile-sheet");
++            if (mobile && node.matches(".mobile-sheet") && !mobileAnchors.has(node)) {
++                const bar = mobileAnchor;
++                if (!bar?.isConnected || bar.getRootNode() !== scope.root) throw new Error("Native mobile filter anchor is missing or not owned");
++                mobileAnchors.set(node, bar);
++                mobileAnchor = undefined;
++            }
 +            const destination = mobile ? scope.portal : parent;
 +            vue.nodeOps.insert(node, destination, mobile && anchor?.parentNode !== destination ? null : anchor);
 +            if (mobile && node.matches(".mobile-scrim")) mobileScrims.set(parent, node);
@@ -1191,22 +1294,31 @@ index 0000000..38703ee
 +                    if (!scrim) throw new Error("Native filter dismiss target is missing");
 +                    scrim.click();
 +                };
-+                const position = () => {
-+                    if (!mobile) return;
-+                    const bar = parent.querySelector(".mobile-bar");
++                const position = event => {
++                    if (!mobile) {
++                        if (!desktopAnchor?.isConnected || desktopAnchor.getRootNode() !== scope.root) return;
++                        const bounds = desktopAnchor.getBoundingClientRect();
++                        const width = element.offsetWidth || 720;
++                        const left = Math.min(Math.max(bounds.left, 8), Math.max(8, view.innerWidth - width - 8));
++                        Object.assign(element.style, {position: "fixed", left: left + "px", top: bounds.bottom + 6 + "px"});
++                        return;
++                    }
++                    const bar = mobileAnchors.get(node);
 +                    if (!bar) throw new Error("Native mobile filter anchor is missing");
++                    if (!bar.isConnected) return;
++                    if (bar.getRootNode() !== scope.root) throw new Error("Native mobile filter anchor is not owned");
 +                    const bounds = bar.getBoundingClientRect();
 +                    Object.assign(node.style, {position: "fixed", left: bounds.left + "px", right: "auto", top: `calc(${bounds.bottom}px + var(--ks-spacing-2))`, width: bounds.width + "px", maxHeight: `min(75vh, calc(100vh - ${bounds.bottom}px - var(--ks-spacing-2)))`});
 +                };
++                if (advanced) advancedPositions.set(element, position);
 +                position();
 +                const release = scope.activate(element, dismiss);
-+                const cleanup = () => {release(); view.removeEventListener("resize", position); view.removeEventListener("scroll", position, true);};
++                const cleanup = () => {advancedPositions.delete(element); release(); view.removeEventListener("resize", position); view.removeEventListener("scroll", position, true); scope.root.removeEventListener("scroll", position, true);};
 +                nativeFilters.set(node, cleanup);
-+                if (mobile) {
-+                    view.addEventListener("resize", position);
-+                    view.addEventListener("scroll", position, true);
-+                    void vue.nextTick(() => {if (nativeFilters.has(node)) position();});
-+                }
++                view.addEventListener("resize", position);
++                view.addEventListener("scroll", position, true);
++                scope.root.addEventListener("scroll", position, true);
++                void vue.nextTick(() => {if (nativeFilters.has(node)) position();});
 +            }
 +        },
 +        remove(node) {

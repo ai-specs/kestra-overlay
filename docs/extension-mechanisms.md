@@ -563,3 +563,5 @@ predicate 保持(namespace,id)关联。无 ID 列的 JDBC 资源只对 RESTRICTE
 先前段落中的“候选／未发布”描述提案与实施时状态；本条只确认指定提交的宿主公开机制、
 镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
 使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。
+
+原生filter锚定候选（2026-10-29，未发布）：REQ-0384公开renderer仅在owned原生filter触发后适配高级层viewport坐标及根内scroll/resize；已登记层的style更新后重算，拒绝宿主document decoy干扰。缺失/跨根高级锚点拒绝，移动sheet按实际mobile trigger所属bar关联，chip编辑保持原生定位。独立真实KsFilter几何门与原949矩阵分别报告，不以业务插件或旧SDK结果替代。

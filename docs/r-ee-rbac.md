@@ -1,5 +1,32 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+## 原生筛选弹层锚定缺口（2026-10-29，已接收实施，未发布）
+
+消费项目为 kestra-plugin-rbac。维护者要求复用宿主原生筛选的弹窗位置与内部交互。
+主控用正式90388镜像及正式862ccf9插件经生产登录实际对照 Namespaces：宿主触发器
+(301,92,112,32)，高级弹窗以left301/top130锚定；插件应用组触发器(311,163,123,32)，
+高级弹窗却在(0,0)，style为空，关闭重开仍偏移。用户/权限页面也复现。证据位于部署仓
+.work/access-control-v3-20261027/resumed/filter-native-comparison。按钮失效另由插件的
+groupable:false配置造成，属于插件修复，不将业务字段或筛选规则迁入宿主。
+
+现有公开createShadowRenderer仅重定向Teleport与移动弹层位置；上游AdvancedFilterBuilder
+使用document.querySelector查锚点，无法看到扩展ShadowRoot。最小通用契约是在扩展专有
+renderer中核对当前触发控件及所属原生filter后，为桌面高级筛选和chip编辑层计算该根内
+锚点；不得临时替换全局document.querySelector、复制vendor实现、按业务路径特判或读取
+插件源码。保持上游按钮、条件编辑和样式，计算坐标时明确viewport与portal定位基准，
+覆盖多filter、滚动、resize、重复开关、嵌套select、ESC/焦点及销毁监听清理。
+
+宿主需补独立真实原生filter矩阵与精确几何/点击断言，并执行自身发布门；插件仅消费
+已发布SDK。部署仓最后用Ego对照宿主页面验证，旧949或静态组件存在不能证明本修复。
+
+本轮候选实现以正式4151完整46补丁为父输入；高级层仅在本根原生customize/rules-pill
+触发后定位，单次消费锚点，缺失或跨根拒绝；原生style patch后仅重算已登记高级节点。
+根内scroll捕获与window监听共同跟随布局；移动sheet保存实际mobile-toggle所属bar，
+避免节点重排后从portal误查anchor。原生chip编辑定位保持不变，不修改vendor或全局查询。
+本地完整395后端（2个专用镜像skip由MCP专项覆盖）、UI89及新增原生几何36通过；
+旧949矩阵ID/断言保持原字节，必须实际重跑及核对应提交CI/推广后才能消费。旧失败、
+测试前置遗漏和修正证据独立保留，不将本地候选或部署仓Ego检查写成正式发布。
+
 ## 系统主题生命周期（REQ-0369，已接收、未发布）
 
 正式宿主 `5cac500` 与插件 `e285360` 的真实浏览器矩阵通过 light、dark、dark-2

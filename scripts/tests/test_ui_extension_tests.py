@@ -24,6 +24,15 @@ class UiExtensionReportTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             GATE.check(self.report())
 
+    def test_requires_exact_added_shadow_tests(self):
+        self.assertEqual(sum(GATE.REQUIRED.values()), 89)
+        self.assertEqual(GATE.REQUIRED["src/extensions/shadow-overlays.spec.ts"], 15)
+        report = self.report()
+        suite = next(item for item in report["testResults"] if item["name"].endswith("shadow-overlays.spec.ts"))
+        suite["assertionResults"] = suite["assertionResults"][:13]
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+            GATE.check(report)
+
     def test_rejects_missing_or_duplicate_files(self):
         for mutation in (lambda suites: suites.pop(), lambda suites: suites.__setitem__(1, copy.deepcopy(suites[0]))):
             report = self.report()
@@ -39,7 +48,7 @@ class UiExtensionReportTest(unittest.TestCase):
 
     def test_rejects_failed_pending_or_reduced_totals(self):
         for field, value in (("success", False), ("numFailedTests", 1), ("numPendingTests", 1),
-                             ("numTotalTests", 86), ("numPassedTests", 86)):
+                             ("numTotalTests", 88), ("numPassedTests", 88)):
             report = self.report()
             report[field] = value
             with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):

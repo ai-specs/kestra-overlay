@@ -314,3 +314,5 @@ PostgreSQL 与最多一个活动连接的受限 DataSource，不将连接暴露�
 先前段落中的“候选／未发布”描述提案与实施时状态；本条只确认指定提交的宿主公开机制、
 镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
 使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。
+
+REQ-0384原生filter定位增量已接收、未发布（2026-10-29）：消费独立扩展的ShadowRoot原生KsFilter；仅宿主renderer承担锚点/portal坐标、实例归属和监听生命周期。groupable与AND等业务配置仍归扩展；详见r-ee-rbac顶部失败/接收提案。

@@ -8,6 +8,7 @@ cp "$scripts"/sdk-{components.js,shell.js,build.mjs} "$scripts/sdk.html" "$work/
 cp "$scripts/sdk-browser-matrix.mjs" "$work/"
 cp "$scripts/sdk-evidence.mjs" "$work/"
 cp "$scripts/sdk-theme.mjs" "$work/"
+cp "$scripts"/sdk-filter-geometry.{js,html} "$work/"
 cp "$scripts/sdk-package.json" "$work/package.json"
 cp "$scripts/sdk-package-lock.json" "$work/package-lock.json"
 cd "$work"

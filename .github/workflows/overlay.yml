@@ -190,6 +190,7 @@ jobs:
         run: |
           (cd .work/host-ui-sdk-inputs && sha256sum -c host-ui-sdk-inputs.sha256)
           mkdir -p .work/host-ui-sdk-tree
+          node -e 'require("fs").writeFileSync(".work/filter-geometry.json",JSON.stringify({completed:false,checks:[],phase:"not_run_before_sdk949"}))'
           tar -xzf .work/host-ui-sdk-inputs/host-ui-sdk-inputs.tar.gz -C .work/host-ui-sdk-tree
           node -e 'require("fs").writeFileSync(".work/ui-sdk-browser.json",JSON.stringify({completed:false,passedGate:false,expectedRows:949,rows:[],notRun:949,phase:"probe-build"}))'
       - name: Build host-owned SDK probe without business plugins
@@ -207,6 +208,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/sdk-browser" playwright@1.61.1
           "$RUNNER_TEMP/sdk-browser/node_modules/.bin/playwright" install --with-deps chromium
           node ./scripts/blackbox-ui-sdk.cjs
+          FILTER_GEOMETRY_REPORT="$GITHUB_WORKSPACE/.work/filter-geometry.json" node ./scripts/blackbox-filter-geometry.cjs
       - name: Preserve SDK matrix including partial failures and document diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -214,6 +216,8 @@ jobs:
           name: ui-sdk-browser
           path: |
             .work/ui-sdk-browser.json
+            .work/filter-geometry.json
+            .work/filter-geometry.json.*.png
             .work/ui-sdk-browser-failures/
           include-hidden-files: true
           if-no-files-found: error

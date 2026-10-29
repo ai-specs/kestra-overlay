@@ -12,7 +12,7 @@ REQUIRED = {
     "src/extensions/navigation.spec.ts": 6,
     "src/extensions/runtime.spec.ts": 8,
     "src/extensions/sdk.spec.ts": 7,
-    "src/extensions/shadow-overlays.spec.ts": 13,
+    "src/extensions/shadow-overlays.spec.ts": 15,
     "src/extensions/system-theme.spec.ts": 4,
     "src/utils/authentication.spec.ts": 2,
 }
