@@ -1,12 +1,70 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+## 授权身份复查阻塞事件循环（2026-10-30，已实施候选，未发布）
+
+消费项目：`kestra-plugin-rbac`。部署方以正式宿主`e0e952b`、正式插件`73fa96e`
+运行两个真实管理员互删。原1.5秒并发门只有一个JDBC waiter及本次holder；两次完整
+运行均失败，同一环境独立诊断可通过，说明调度相关而非允许降低双waiter标准。
+第二次失败的实际SIGQUIT线程栈显示`default-eventLoopGroup-1-2`在
+`OidcSecurityTransactions.lock → OidcProtocolState.lockSecurityState →
+OidcTrustedIdentity.currentForAuthorization → AuthorizationEvaluations.boundary`等待JDBC。
+宿主JVM持续运行；诊断仅打印线程栈。失败命令为部署方完整生产组合验收，实际锁样本
+与线程栈已保存；本节自包含其归因，不要求宿主构建读取部署仓证据。
+
+按入口C接收：0330既有通用授权boundary在订阅线程同步调用阻塞身份复查，控制器的
+`@ExecuteOn(IO)`发生在更后面，不能保护此宿主激活点。不得用扩大事件循环数、延长
+验收超时或复制扩展CRUD规避。最小面是在现有边界将可能阻塞的可信身份/评估初始化
+调度到受控阻塞工作线程，并只传播所需授权来源/身份。不得复制JDBC事务上下文，不改
+业务模型、存储、API形状或安全锁，不取消锁后身份重查，不降低403/503分类。
+
+宿主负责边界调度、请求来源传播、取消/错误/资源释放。插件继续负责业务策略与CRUD。
+公开类型与默认行为兼容；发布新宿主后插件仅从正式产物重编译，根仓再真实组合。
+独立测试必须在单事件循环上提交两个被安全锁阻塞的授权初始化，证明循环上的独立心跳
+仍可执行且两个初始化均能进入；还须覆盖请求上下文、身份不匹配、依赖不可用、取消和
+评估资源恰好释放一次，并保留全部旧门。完整本地CI、正式镜像门与成功CI是发布门；
+部署仓另须原1.5秒真实双waiter、互删/互停各一允许一拒绝、旧会话撤权及持久清理。
+**附加面接收（2026-10-30，主控明确授权）**：公开`AuthorizationEvaluationV1.close()`
+没有承诺创建CompletionStage的调用本身非阻塞。独立probe在已取得handle的取消线程
+和取消后晚到handle的完成线程均复现心跳及回调阻塞，2项红测均失败、无error/skip。
+仅扩充既有`closeOnce`的调度：同步唯一closing标记，实际close工厂在有界阻塞池和
+空上下文执行；不复制请求、owner或JDBC事务上下文，不丢异常，保留released/failure/
+timeout及恰好一次。资源释放通知不是此附加面接收依据，以后续明确授权为准。
+精确新增门为`AuthorizationInitializationTest`10项及`AuthorizationCleanupSchedulingTest`
+2项，原`AuthorizationEvaluationTest`16项完整保留。三组合并28项零失败、零跳过；
+关闭工厂两项绿测均heartbeat=true、回调返回true、closes=1。完整门已针对最终补丁执行，结果见下文。
+
+候选0330在订阅线程先建立owner，再用Reactor有界阻塞线程池执行可信身份读取和
+provider初始化。只从Reactor或当前线程提取`AuthorizationInvocationContext`，从空上下文
+重建来源；初始化不携带连接、事务、外层owner或查询上下文。身份读取期间取消后不再
+进入begin；begin已经进入时不持owner监视器，取消可以立即结束边界，晚到句柄仍由
+既有closeOnce释放。V1/V2公开签名、安全锁、锁后读取与403/503分类不变。
+
+本轮证据保存在`.work/authorization-io-host/`。初始化红测2项及关闭工厂红测2项
+均为实际行为失败，无error/skip；初始化旧实现采样entered=1、heartbeat=false，
+新实现两个初始化均进入且心跳继续。关闭新实现取消/晚到两路均heartbeat=true、
+回调返回true、closes=1。初始化/provider屏障模拟阻塞锁，不冒称真实PostgreSQL并发。
+原生命周期16项保留；取消测试先等begin/authorize进入，100轮竞争先等owner晚到
+回调注册；保留原future竞争2秒限制及恰好一次断言，异步close另在2秒内检查释放。
+检查器精确要求初始化10项、关闭2项，并已由最终XML验证，未删旧门或放宽跳过检查。
+
+最终完整local-ci为99份XML、407项，405通过、失败/错误0，2项既有镜像前置跳过
+另由镜像专项实际执行。46补丁干净BASE顺序应用、335文件源码一致、UI95项与
+executable构建通过；公开类签名无变化，编译class与实际executable逐字节一致。
+classpath、OIDC35和MCP四份专项XML各1项零跳过已通过；两模式生产UI/身份镜像门
+通过，SDK949/几何60门通过。全部运行资源带owner标签、单PG逐阶段使用并定点清理。
+最终SDK949/949、几何60/60及8份诊断通过，诊断事件只有request/http-response/document。
+两门同buildId`b4271b56c3cb6b2c3b95c7f88d12499730376bcdedff9e3d2188cff97b3fc0cb`，
+本地镜像digest`f67aaa8a4dbb9a471766a6072d4d6f2b7fb87f0b12e0baf67d6e03bba096162b`；
+镜像executable与暂存SHA256均为`c18a0ab95c40dea505881211ef9ff66115c10f96ed5610499eac509068866476`。
+运行中的check先写passed:false，37行中间观察不是最终失败；原进程最终60全绿，无重跑。
+本地门完整通过，候选仍未发布；正式CI、推广与部署组合须分别核验，不能提前作为插件正式编译输入。
 
 
-## 桌面高级筛选视口边界缺口（2026-10-30，已接收实施，候选未发布）
+## 桌面高级筛选视口边界缺口（2026-10-30，历史失败输入，父基线已发布）
 
 ### 消费与实际失败
 
-消费项目为 `kestra-plugin-rbac`，当前正式宿主为 `27520a2`（CI `40941713707`，
+消费项目为 `kestra-plugin-rbac`，当时失败输入的正式宿主为 `27520a2`（CI `40941713707`，
 正式 digest `bd04a934…460e191`）。部署仓 `root local-ci-full146` 在唯一生产登录组合中
 记录：移动geometry48生产观察通过、projects三项筛选通过；桌面权限页面原生
 `.adv-clear` 的真实鼠标点击报 outside viewport。失败PNG由该报告的failureArtifact
@@ -17,19 +75,24 @@ Clear.y=941.1875、maxHeight=630。证据 `production-desktop-bottom-layout-gap.
 明确该刺激不是业务写入；不能据此声称每次首次打开都越界。
 上一轮明确未扩桌面范围，不能以移动修复发布或浅页面桌面用例通过替代本次失败。
 
-### 原生基线与归属
+本节保留当时的失败、归属及验收依据，不表示当前仍待发布。桌面修复已包含在本次
+授权任务的正式父基线`e0e952ba77804e84724d23d415ec11bbcc8f3684`，其正式镜像digest为
+`sha256:1b2b11023c35adf44f3f0dd534d591eaeeb243acab76ddcb9fc98625486e269a`。
+本次0330授权修复不改SDK/UI源码；新候选仍须针对自己的输入执行完整门。
+
+### 原生基线与归属（历史调查）
 
 公开 DS0.5 `AdvancedFilterBuilder` 原生 `computePosition` 以 document 内的原生按钮
 或rules-pill为锚，取anchor.bottom + window.scrollY + 6，并写absolute；原生CSS提供
 max-height:70vh和overflow:auto，但没有按该锚点的实际剩余垂直空间翻转/收窄。
-宿主公开renderer为扩展ShadowRoot捕获本实例锚点并改成viewport-fixed，当前桌面
+当时宿主公开renderer为扩展ShadowRoot捕获本实例锚点并改成viewport-fixed，桌面
 分支仅横向clamp，top恒为anchor.bottom+6，没有纵向翻转/clamp/可用高度约束。
 70vh本身不能保证面板底部或Clear按钮可见，离屏锚点更不能靠此恢复。
 
 因此最小缺口属于宿主通用高级筛选renderer定位，不是插件权限模型、业务布局或CRUD。
 不得按业务路径特判、复制vendor、改全局查询、换键盘激活或放宽真实内部按钮断言。
 
-### 已接收的最小公开契约（候选未发布）
+### 已接收的最小公开契约（已随本次正式父基线发布）
 
 1. 仅对本renderer已登记、由当前owned customize/rules-pill激活的adv-builder处理。
    继续使用本实例锚点及现有横向边界，host document decoy不参与定位。
@@ -59,11 +122,12 @@ max-height:70vh和overflow:auto，但没有按该锚点的实际剩余垂直空�
   下载报告及失败PNG、正式推广/双架构provenance和pull/exe审计后，插件才能消费新SDK。
   真实业务插件不进入宿主构建或CI；部署仓最后重新执行正式组合真实鼠标操作验收。
 
-本轮仅在独立release实施；未通过最终发布门前仍是候选，不向插件提供编译输入。当前根仓独占Compose/PG，资源交接前只运行无PG检查与独立探针。
+上述“候选”和资源限制描述当时的实施阶段，已由本节正式父基线状态取代。本次
+授权修复已获主控明确资源交接，单PG逐阶段验收；尚未提交或发布新授权候选。
 
 ## 移动筛选视口边界缺口（2026-10-30，历史正式基线）
 
-该增量已随正式 `27520a2`、成功CI `40941713707` 发布。以下保留当时失败与设计依据，不表示本轮桌面增量已发布。
+该增量已随正式 `27520a2`、成功CI `40941713707` 发布。以下保留当时失败与设计依据；桌面增量的当前状态见上一节正式父基线说明。
 
 消费项目为 `kestra-plugin-rbac`。正式宿主 `1e3632e` 的 SDK 在长详情页暴露移动弹层
 垂直边界缺口：部署仓生产 Ego 记录 viewport 390×900、mobile-bar.bottom=1669、

@@ -1,5 +1,24 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## 授权初始化阻塞隔离（2026-10-30，已实施候选，未发布）
+
+可信身份复查可能执行JDBC安全锁，不能在Netty事件循环同步运行。既有0330 boundary
+须用受控阻塞执行机制隔离初始化，仅传必要AuthorizationInvocationContext等来源，
+不把连接/事务传播给长生命周期任务；保持当前身份、锁后复查、403/503及恰好一次释放。
+候选0330先建立owner，再由`Schedulers.boundedElastic()`执行可信身份读取与begin。
+来源优先从Reactor Context提取，否则取当前线程同类元素；从空上下文构造，仅含
+`AuthorizationInvocationContext`。取消可独立于阻塞begin完成；初始化已取消时不进入
+begin，已返回或晚到的句柄仍由原owner恰好关闭一次。不复制JDBC/事务或外层评估。
+2026-10-30主控另明确接收同一生命周期内的关闭工厂隔离：SPI仅返回CompletionStage，
+没有非阻塞工厂承诺。仅closeOnce同步标记唯一closing，实际close在有界阻塞池、空
+上下文执行，保留released、失败、超时及恰好一次。请求/JDBC/旧owner上下文不传播。
+取消与晚到handle的单eventloop红2/绿2已实证；精确新增门为初始化10项、关闭2项，
+原生命周期16项保留，合并28项通过。资源释放与此附加面接收是两条独立授权记录。
+实际线程栈、最小面和回归门见r-ee-rbac同名节。最终完整local-ci为407项，405通过、
+失败/错误0、2项既有镜像前置跳过，精确新增12项全执行；UI95、46补丁重放及335文件
+一致、executable通过。classpath、OIDC35及MCP四份专项各1项零跳过通过，生产UI
+两模式通过，SDK949/几何60门通过。公开SPI类型兼容，正式CI与发布未执行。
+
 ## 普通授权依赖故障传播（2026-10-28，已接收，未发布）
 
 认证身份复查及评估provider位于业务Controller前；故障分类必须跨该边界传播。

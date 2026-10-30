@@ -18,6 +18,8 @@ for suite, expected in {
     "AuthorizationInvocationContextTest": 1,
     "ExpandedSubflowAuthorizationTest": 1,
     "AuthorizationEvaluationTest": 16,
+    "AuthorizationInitializationTest": 10,
+    "AuthorizationCleanupSchedulingTest": 2,
     "AuthorizationEvaluationRestTest": 2,
     "AuthorizationEvaluationHttpTest": 2,
     "AuthorizationEvaluationApplicationGroupTest": 2,

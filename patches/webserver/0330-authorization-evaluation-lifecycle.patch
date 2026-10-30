@@ -1,8 +1,8 @@
 # 需求: REQ-0330 完整授权评估生命周期
 # 消费扩展仓: kestra-plugin-rbac
-# 状态: core；定向测试通过，正式 CI 与发布待验收
-# 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档
-# 触达上游文件: 17 个（通用生命周期、typed gate、引用桥接与独立探针）
+# 状态: core；阻塞初始化隔离候选；定向测试通过，完整本地门及正式 CI 与发布待验收
+# 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档；2026-10-30入口C事件循环阻塞证据，初始化仅传播请求来源
+# 触达上游文件: 19 个（通用生命周期、typed gate、引用桥接与独立探针）
 # 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
 new file mode 100644
@@ -112,9 +112,10 @@ index 0000000..5471c85
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
 new file mode 100644
+index 0000000..b1822cd
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,231 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -138,6 +139,7 @@ new file mode 100644
 +import reactor.core.publisher.Flux;
 +import reactor.core.publisher.Mono;
 +import reactor.util.context.ContextView;
++import reactor.core.scheduler.Schedulers;
 +
 +@Singleton
 +public final class AuthorizationEvaluations {
@@ -183,42 +185,49 @@ new file mode 100644
 +    public <Result> Flux<Result> boundary(RbacAuthorizer.Principal principal, String tenant,
 +        Supplier<? extends Publisher<Result>> action) {
 +        if (!enabled) return Flux.defer(action);
-+        return Flux.defer(() -> {
-+            if (
-+(applicationGroups ? !applicationGroupProviders.isUnique() || !identities.isUnique() :
-+!providers.isUnique(
-+)
-+) || principal == null || principal.subject() == null || principal.subject().isBlank()
++        return Flux.deferContextual(reactorContext -> {
++            if ((applicationGroups ? !applicationGroupProviders.isUnique() || !identities.isUnique() : !providers.isUnique())
++                || principal == null || principal.subject() == null || principal.subject().isBlank()
 +                || tenant == null || tenant.isBlank()) return Flux.error(denied());
 +            var identity = new RbacAuthorizer.Principal(principal.subject(), List.copyOf(principal.roles()),
 +                principal.clientId(), principal.audience(), List.copyOf(principal.scopes()));
-+final AuthorizationEvaluationProviderV1 provider;
-+            if (applicationGroups) {
-+                var identityProvider=identities.get();
-+                var trusted = identityProvider instanceof io.kestra.webserver.oidc.TrustedIdentityV2 modernIdentity
-+                    ?modernIdentity.currentForAuthorization():identityProvider.current();
-+                if (!trusted.subject().equals(principal.subject()) || !trusted.tenant().equals(tenant)) return Flux.error(denied());
-+                provider = (ignoredPrincipal, ignoredTenant) -> applicationGroupProviders.get().begin(trusted, tenant);
-+            } else {
-+                provider = providers.get();
-+            }
-+
++            var invocation = minimalContext(reactorContext);
++            // Own cancellation before any blocking identity read or synchronous provider.begin call.
 +            var owner = new Owner(identity, tenant);
-+            return Flux.usingWhen(Mono.just(owner), active -> active.acquire(
-+provider
-+).flatMapMany(ignored -> {
-+                var context = minimalContext().plus(new AuthorizationEvaluationContext(active));
-+                return Flux.from(ReactivePropagation.propagate(context, Flux.defer(() -> {
-+                    try (var scope = context.propagate()) { return Flux.from(action.get()); }
-+                }))).contextWrite(current -> ReactorPropagation.addPropagatedContext(current, context));
-+            }), Owner::finish, (active, failure) -> active.finish().onErrorResume(cleanup -> Mono.empty()),
++            var boundary = Flux.usingWhen(Mono.just(owner), active -> initialize(active, invocation)
++                .flatMapMany(ignored -> {
++                    var context = invocation.plus(new AuthorizationEvaluationContext(active));
++                    return Flux.from(ReactivePropagation.propagate(context, Flux.defer(() -> {
++                        try (var scope = context.propagate()) { return Flux.from(action.get()); }
++                    }))).contextWrite(current -> ReactorPropagation.addPropagatedContext(current, context));
++                }), Owner::finish, (active, failure) -> active.finish().onErrorResume(cleanup -> Mono.empty()),
 +                active -> active.finish().onErrorResume(cleanup -> Mono.empty()));
++            // Subscribe under the minimal origin too: scheduler instrumentation must not capture a transaction.
++            return Flux.from(ReactivePropagation.propagate(invocation, boundary))
++                .contextWrite(current -> ReactorPropagation.addPropagatedContext(current, invocation));
 +        });
 +    }
 +
-+    private static PropagatedContext minimalContext() {
++    private Mono<AuthorizationEvaluationV1> initialize(Owner owner, PropagatedContext invocation) {
++        return Mono.fromCallable(() -> {
++            try (var scope = invocation.propagate()) {
++                if (!applicationGroups) return providers.get();
++                var identityProvider = identities.get();
++                var trusted = identityProvider instanceof io.kestra.webserver.oidc.TrustedIdentityV2 modernIdentity
++                    ? modernIdentity.currentForAuthorization() : identityProvider.current();
++                if (trusted == null || !trusted.subject().equals(owner.principal.subject()) || !trusted.tenant().equals(owner.tenant))
++                    throw denied();
++                return (AuthorizationEvaluationProviderV1) (ignoredPrincipal, ignoredTenant) -> applicationGroupProviders.get().begin(trusted, owner.tenant);
++            }
++        }).flatMap(provider -> {
++            try (var scope = invocation.propagate()) { return owner.acquire(provider); }
++        }).subscribeOn(Schedulers.boundedElastic());
++    }
++
++    private static PropagatedContext minimalContext(ContextView reactorContext) {
 +        var context = PropagatedContext.empty();
-+        var origin = AuthorizationInvocationContext.current().orElse(null);
++        var origin = ReactorPropagation.findContextElement(reactorContext, AuthorizationInvocationContext.class)
++            .or(AuthorizationInvocationContext::current).orElse(null);
 +        return origin == null ? context : context.plus(origin);
 +    }
 +
@@ -259,6 +268,8 @@ new file mode 100644
 +        }
 +
 +        Mono<AuthorizationEvaluationV1> acquire(AuthorizationEvaluationProviderV1 provider) {
++            // Never hold the owner monitor across a blocking begin: cancellation must remain non-blocking.
++            synchronized (this) { if (ended) return Mono.empty(); }
 +            try { Objects.requireNonNull(provider.begin(principal, tenant)).whenComplete(this::arrived); }
 +            catch (Throwable failure) { ready.completeExceptionally(failure); }
 +            return Mono.fromFuture(ready, true).timeout(TIMEOUT);
@@ -312,10 +323,20 @@ new file mode 100644
 +        private void closeOnce() {
 +            if (closing) return;
 +            closing = true;
-+            try {
-+                Objects.requireNonNull(evaluation.close()).whenComplete((ignored, failure) -> {
-+                    if (failure == null) released.complete(null);
-+                    else failedClose(failure);
++            // close() returns a stage, but its factory may block. Do not run it on a cancelling
++            // event loop or a late-completion thread, and do not capture either caller's context.
++            try (var scope = PropagatedContext.empty().propagate()) {
++                Schedulers.boundedElastic().schedule(() -> {
++                    try (var cleanupScope = PropagatedContext.empty().propagate()) {
++                        try {
++                            Objects.requireNonNull(evaluation.close()).whenComplete((ignored, failure) -> {
++                                try (var completionScope = PropagatedContext.empty().propagate()) {
++                                    if (failure == null) released.complete(null);
++                                    else failedClose(failure);
++                                }
++                            });
++                        } catch (Throwable failure) { failedClose(failure); }
++                    }
 +                });
 +            } catch (Throwable failure) { failedClose(failure); }
 +        }
@@ -821,10 +842,10 @@ index 0000000..dd4b3d7
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
 new file mode 100644
-index 0000000..af85f2f
+index 0000000..196530e
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,345 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -982,7 +1003,10 @@ index 0000000..af85f2f
 +        var pending = new CompletableFuture<AuthorizationEvaluationV1>();
 +        var closed = new AtomicInteger();
 +        var effects = new AtomicInteger();
-+        var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet)).subscribe();
++        var begins = new AtomicInteger();
++        var subscription = evaluations((principal, tenant) -> { begins.incrementAndGet(); return pending; })
++            .boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet)).subscribe();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(begins.get()).isEqualTo(1));
 +        subscription.dispose();
 +        assertThat(pending.isCancelled()).isFalse();
 +        pending.complete(handle(closed, CompletableFuture.completedFuture(null)));
@@ -1048,15 +1072,27 @@ index 0000000..af85f2f
 +    @Test
 +    void shouldCloseExactlyOnceDuringConcurrentCancelAndLateBegin() throws Exception {
 +        for (int iteration = 0; iteration < 100; iteration++) {
-+            var pending = new CompletableFuture<AuthorizationEvaluationV1>();
++            var registered = new CountDownLatch(1);
++            var pending = new CompletableFuture<AuthorizationEvaluationV1>() {
++                @Override
++                public CompletableFuture<AuthorizationEvaluationV1> whenComplete(
++                    java.util.function.BiConsumer<? super AuthorizationEvaluationV1, ? super Throwable> callback) {
++                    var result = super.whenComplete(callback);
++                    registered.countDown();
++                    return result;
++                }
++            };
 +            var closed = new AtomicInteger();
 +            var start = new CompletableFuture<Void>();
-+            var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", Mono::never).subscribe();
++            var subscription = evaluations((principal, tenant) -> pending)
++                .boundary(PRINCIPAL, "main", Mono::never).subscribe();
++            // begin is now asynchronous: race only once the owner has registered its late-arrival callback.
++            assertThat(registered.await(2, TimeUnit.SECONDS)).isTrue();
 +            var cancellation = CompletableFuture.runAsync(() -> { start.join(); subscription.dispose(); });
 +            var acquisition = CompletableFuture.runAsync(() -> { start.join(); pending.complete(handle(closed, CompletableFuture.completedFuture(null))); });
 +            start.complete(null);
 +            CompletableFuture.allOf(cancellation, acquisition).get(2, TimeUnit.SECONDS);
-+            assertThat(closed.get()).isEqualTo(1);
++            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed.get()).isEqualTo(1));
 +        }
 +    }
 +
@@ -1082,18 +1118,20 @@ index 0000000..af85f2f
 +        assertThatThrownBy(() -> evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", () -> Mono.just(true)).blockLast())
 +            .hasCauseInstanceOf(java.util.concurrent.TimeoutException.class);
 +        pending.complete(handle(closed, CompletableFuture.completedFuture(null)));
-+        assertThat(closed.get()).isEqualTo(1);
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed.get()).isEqualTo(1));
 +    }
 +
 +    @Test
 +    void shouldKeepInflightDecisionOwnedUntilItsLateCompletion() {
 +        var decision = new CompletableFuture<Decision>();
 +        var closed = new AtomicInteger();
++        var calls = new AtomicInteger();
 +        var gate = gate((principal, tenant) -> CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
-+            public CompletionStage<Decision> authorize(Operation operation) { return decision; }
++            public CompletionStage<Decision> authorize(Operation operation) { calls.incrementAndGet(); return decision; }
 +            public CompletionStage<Void> close() { closed.incrementAndGet(); return CompletableFuture.completedFuture(null); }
 +        }));
 +        var subscription = gate.boundary(PRINCIPAL, "main", () -> gate.authorize(PRINCIPAL, operation(Resource.FLOW, "team.a"))).subscribe();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(calls.get()).isEqualTo(1));
 +        subscription.dispose();
 +        assertThat(closed.get()).isZero();
 +        assertThat(decision.isCancelled()).isFalse();
@@ -1411,5 +1449,404 @@ new file mode 100644
 +                }
 +            }
 +        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInitializationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInitializationTest.java
+new file mode 100644
+index 0000000..8e0cea0
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationInitializationTest.java
+@@ -0,0 +1,273 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.oidc.TrustedIdentityV1;
++import io.kestra.webserver.oidc.TrustedIdentityV2;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++import io.micronaut.http.HttpRequest;
++import io.netty.channel.DefaultEventLoop;
++import java.sql.Connection;
++import java.time.Duration;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.junit.jupiter.api.Test;
++import reactor.core.Disposable;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.bean;
++import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.handle;
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++
++/** No database/container: a trusted identity/provider barrier models the blocking security-lock wait. */
++class AuthorizationInitializationTest {
++    private static final Duration LIMIT = Duration.ofSeconds(3);
++    private static final RbacAuthorizer.Principal PRINCIPAL = new RbacAuthorizer.Principal("alice", List.of(), null, null, List.of());
++    private static final HttpRequest<?> REQUEST = HttpRequest.GET("/initialization-probe");
++    private static final AuthorizationInvocationContext ORIGIN = new AuthorizationInvocationContext(REQUEST, false);
++    private record TransactionProbe(Connection connection) implements PropagatedContextElement {}
++
++    private static TrustedIdentityV1.Identity identity(String subject, String tenant) {
++        return new TrustedIdentityV1.Identity(1, "https://issuer.example", subject, "ui", Set.of("ui"), tenant,
++            "group", Set.of("openid"), Set.of(), 1, 1, 1);
++    }
++
++    private static AuthorizationEvaluations service(TrustedIdentityV1 identity, AuthorizationEvaluationProviderV2 provider) {
++        return new AuthorizationEvaluations(true, new RbacConfiguration(true, false), true, bean(null), bean(provider), bean(identity), true);
++    }
++
++    private static <T> reactor.core.publisher.Flux<T> request(reactor.core.publisher.Flux<T> work) {
++        return work.contextWrite(context -> ReactorPropagation.addPropagatedContext(context, PropagatedContext.empty().plus(ORIGIN)));
++    }
++
++    private static void assertMinimalOrigin() {
++        assertThat(AuthorizationInvocationContext.current()).contains(ORIGIN);
++        assertThat(AuthorizationInvocationContext.currentRequest()).contains(REQUEST);
++        assertThat(AuthorizationEvaluationContext.current()).isEmpty();
++        assertThat(PropagatedContext.getOrEmpty().find(TransactionProbe.class)).isEmpty();
++        assertThat(PropagatedContext.getOrEmpty().getAllElements()).containsExactly(ORIGIN);
++    }
++
++    // Drivers can return after cancel: ignore its interrupt to force the late-handle ownership path.
++    private static void releaseAfter(CountDownLatch latch) {
++        boolean interrupted = false;
++        while (true) {
++            try { latch.await(); break; }
++            catch (InterruptedException ignored) { interrupted = true; }
++        }
++        if (interrupted) Thread.currentThread().interrupt();
++    }
++
++    @Test
++    void singleEventLoopMustAdmitTwoBlockedIdentitiesAndHeartbeat() throws Exception {
++        var loop = new DefaultEventLoop();
++        var entered = new CountDownLatch(2);
++        var unlock = new CountDownLatch(1);
++        var heartbeat = new CountDownLatch(1);
++        var completed = new CountDownLatch(2);
++        var closed = new AtomicInteger();
++        var failure = new AtomicReference<Throwable>();
++        var workers = java.util.concurrent.ConcurrentHashMap.<Thread>newKeySet();
++        var service = service(() -> {
++            assertMinimalOrigin();
++            // Assert event-loop isolation after the barrier so the old implementation reproduces blocking.
++            workers.add(Thread.currentThread()); entered.countDown(); releaseAfter(unlock);
++            assertThat(loop.inEventLoop()).isFalse();
++            return identity("alice", "main");
++        }, (trusted, tenant) -> {
++            assertMinimalOrigin();
++            return CompletableFuture.completedFuture(handle(closed, CompletableFuture.completedFuture(null)));
++        });
++        boolean bothEntered;
++        boolean heartBeats;
++        try {
++            for (int i = 0; i < 2; i++) loop.execute(() -> {
++                try (var scope = PropagatedContext.empty().plus(ORIGIN).propagate()) {
++                    request(service.boundary(PRINCIPAL, "main", () -> Mono.just(true)))
++                        .subscribe(ignored -> {}, error -> { failure.set(error); completed.countDown(); }, completed::countDown);
++                }
++            });
++            loop.execute(heartbeat::countDown);
++            bothEntered = entered.await(1500, TimeUnit.MILLISECONDS);
++            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
++            System.out.printf("initialization barrier: entered=%d heartbeat=%s bothEntered=%s%n", 2 - entered.getCount(), heartBeats, bothEntered);
++        } finally {
++            unlock.countDown();
++            assertThat(completed.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
++        }
++        assertThat(bothEntered).as("both security-lock initializations enter from one event loop").isTrue();
++        assertThat(heartBeats).as("heartbeat continues while identity initialization waits").isTrue();
++        assertThat(failure.get()).isNull(); assertThat(workers).hasSize(2); assertThat(closed).hasValue(2);
++    }
++
++    @Test
++    void shouldIsolateBlockingLegacyBeginAndNotCopyTransactionOrOuterOwner() throws Exception {
++        var loop = new DefaultEventLoop();
++        var entered = new CountDownLatch(2); var unlock = new CountDownLatch(1);
++        var heartbeat = new CountDownLatch(1); var completed = new CountDownLatch(2);
++        var closed = new AtomicInteger(); var failure = new AtomicReference<Throwable>();
++        var service = AuthorizationEvaluationTest.evaluations((principal, tenant) -> {
++            assertMinimalOrigin(); entered.countDown(); releaseAfter(unlock);
++            assertThat(loop.inEventLoop()).isFalse();
++            return CompletableFuture.completedFuture(handle(closed, CompletableFuture.completedFuture(null)));
++        });
++        var full = PropagatedContext.empty().plus(ORIGIN).plus(new TransactionProbe(org.mockito.Mockito.mock(Connection.class)))
++            .plus(new AuthorizationEvaluationContext(new Object()));
++        boolean bothEntered; boolean heartBeats;
++        try {
++            for (int i = 0; i < 2; i++) loop.execute(() -> {
++                try (var scope = full.propagate()) {
++                    service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(() -> {
++                        assertThat(AuthorizationEvaluations.current()).isNotNull();
++                        assertThat(PropagatedContext.getOrEmpty().find(TransactionProbe.class)).isEmpty(); return true;
++                    })).subscribe(ignored -> {}, error -> { failure.set(error); completed.countDown(); }, completed::countDown);
++                }
++            });
++            loop.execute(heartbeat::countDown);
++            bothEntered = entered.await(1500, TimeUnit.MILLISECONDS);
++            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
++            System.out.printf("initialization barrier: entered=%d heartbeat=%s bothEntered=%s%n", 2 - entered.getCount(), heartBeats, bothEntered);
++        } finally {
++            unlock.countDown(); assertThat(completed.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
++        }
++        assertThat(bothEntered).isTrue(); assertThat(heartBeats).isTrue(); assertThat(failure.get()).isNull();
++        assertThat(closed).hasValue(2); assertThat(AuthorizationInvocationContext.current()).isEmpty();
++        assertThat(AuthorizationEvaluationContext.current()).isEmpty();
++    }
++
++    @Test
++    void shouldCloseHandleReturnedByBlockingBeginAfterCancellationExactlyOnce() throws Exception {
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1);
++        var closed = new AtomicInteger(); var effects = new AtomicInteger();
++        var service = service(() -> identity("alice", "main"), (trusted, tenant) -> {
++            assertMinimalOrigin(); entered.countDown(); releaseAfter(unlock);
++            return CompletableFuture.completedFuture(handle(closed, CompletableFuture.completedFuture(null)));
++        });
++        Disposable subscription = null;
++        try {
++            subscription = request(service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet))).subscribe();
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
++        } finally { unlock.countDown(); if (subscription != null) subscription.dispose(); }
++        await().atMost(LIMIT).untilAsserted(() -> assertThat(closed).hasValue(1)); assertThat(effects).hasValue(0);
++    }
++
++    @Test
++    void shouldCloseAsynchronouslyArrivingHandleAfterCancellationExactlyOnce() throws Exception {
++        var entered = new CountDownLatch(1); var pending = new CompletableFuture<AuthorizationEvaluationV1>();
++        var closed = new AtomicInteger(); var effects = new AtomicInteger();
++        var service = service(() -> identity("alice", "main"), (trusted, tenant) -> { entered.countDown(); return pending; });
++        var subscription = request(service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet))).subscribe();
++        assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose(); subscription.dispose();
++        assertThat(pending).isNotCancelled(); pending.complete(handle(closed, CompletableFuture.completedFuture(null)));
++        await().atMost(LIMIT).untilAsserted(() -> assertThat(closed).hasValue(1)); assertThat(effects).hasValue(0);
++    }
++
++    @Test
++    void shouldNotRunProviderOrActionWhenCancelledDuringIdentityRead() throws Exception {
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var returned = new CountDownLatch(1);
++        var begins = new AtomicInteger(); var effects = new AtomicInteger(); var closed = new AtomicInteger();
++        var service = service(() -> {
++            assertMinimalOrigin(); entered.countDown(); releaseAfter(unlock); returned.countDown(); return identity("alice", "main");
++        }, (trusted, tenant) -> {
++            begins.incrementAndGet(); return CompletableFuture.completedFuture(handle(closed, CompletableFuture.completedFuture(null)));
++        });
++        Disposable subscription = null;
++        try {
++            subscription = request(service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet))).subscribe();
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
++        } finally { unlock.countDown(); if (subscription != null) subscription.dispose(); }
++        assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
++        await().during(Duration.ofMillis(100)).atMost(LIMIT).untilAsserted(() -> {
++            assertThat(effects).hasValue(0); assertThat(begins).hasValue(0); assertThat(closed).hasValue(0);
++        });
++    }
++
++    @Test
++    void shouldPreserveV2AuthorizationEntryAndUnavailableOrUnknownFailure() {
++        for (RuntimeException failure : List.of(new AuthorizationUnavailableException(), new IllegalStateException("unknown"))) {
++            var v2 = new TrustedIdentityV2() {
++                public Identity current() { throw new AssertionError("must use V2 authorization entry"); }
++                public Identity current(Connection connection) { throw new AssertionError("must not borrow a request transaction"); }
++                public Identity currentForAuthorization() { assertMinimalOrigin(); throw failure; }
++            };
++            var begins = new AtomicInteger();
++            var service = service(v2, (trusted, tenant) -> { begins.incrementAndGet(); throw new AssertionError("begin after rejection"); });
++            assertThatThrownBy(() -> request(service.boundary(PRINCIPAL, "main", () -> Mono.just(true))).blockLast(LIMIT)).isSameAs(failure);
++            assertThat(begins).hasValue(0);
++        }
++    }
++
++    @Test
++    void shouldFailClosedForMissingRequestAndSubjectOrTenantMismatch() {
++        var begins = new AtomicInteger();
++        AuthorizationEvaluationProviderV2 provider = (trusted, tenant) -> { begins.incrementAndGet(); throw new AssertionError("begin after rejection"); };
++        var missing = service(() -> {
++            AuthorizationInvocationContext.currentRequest().orElseThrow(AuthorizationEvaluations::denied);
++            return identity("alice", "main");
++        }, provider);
++        assertThatThrownBy(() -> missing.boundary(PRINCIPAL, "main", () -> Mono.just(true)).blockLast(LIMIT)).isInstanceOf(IllegalStateException.class);
++        for (var trusted : List.of(identity("bob", "main"), identity("alice", "other"))) {
++            var service = service(() -> trusted, provider);
++            assertThatThrownBy(() -> request(service.boundary(PRINCIPAL, "main", () -> Mono.just(true))).blockLast(LIMIT)).isInstanceOf(AuthorizationEvaluations.EvaluationDeniedException.class);
++        }
++        assertThatThrownBy(() -> request(missing.boundary(PRINCIPAL, null, () -> Mono.just(true))).blockLast(LIMIT)).isInstanceOf(AuthorizationEvaluations.EvaluationDeniedException.class);
++        assertThatThrownBy(() -> request(missing.boundary(null, "main", () -> Mono.just(true))).blockLast(LIMIT)).isInstanceOf(AuthorizationEvaluations.EvaluationDeniedException.class);
++        assertThat(begins).hasValue(0);
++    }
++
++    @Test
++    void shouldKeepSynchronousAndAsynchronousBeginFailuresAndNeverRunAction() {
++        var effects = new AtomicInteger();
++        for (boolean synchronous : List.of(true, false)) {
++            var failure = new AuthorizationUnavailableException();
++            var service = service(() -> identity("alice", "main"), (trusted, tenant) -> {
++                assertMinimalOrigin(); if (synchronous) throw failure; return CompletableFuture.failedFuture(failure);
++            });
++            assertThatThrownBy(() -> request(service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet))).blockLast(LIMIT)).isSameAs(failure);
++        }
++        assertThat(effects).hasValue(0);
++    }
++
++    @Test
++    void shouldFinishCancelledInitializationThatThrowsWithoutBusinessEffects() throws Exception {
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var returned = new CountDownLatch(1);
++        var effects = new AtomicInteger(); var errors = new AtomicInteger();
++        var service = service(() -> identity("alice", "main"), (trusted, tenant) -> {
++            assertMinimalOrigin(); entered.countDown(); releaseAfter(unlock);
++            try { throw new AuthorizationUnavailableException(); } finally { returned.countDown(); }
++        });
++        var subscription = request(service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet)))
++            .subscribe(ignored -> effects.incrementAndGet(), ignored -> errors.incrementAndGet());
++        try {
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
++        } finally { unlock.countDown(); subscription.dispose(); }
++        assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
++        await().during(Duration.ofMillis(100)).atMost(LIMIT).untilAsserted(() -> {
++            assertThat(effects).hasValue(0); assertThat(errors).hasValue(0);
++        });
++    }
++
++    @Test
++    void shouldKeepLateAsyncBeginFailureOwnedAfterCancellation() throws Exception {
++        var entered = new CountDownLatch(1); var pending = new CompletableFuture<AuthorizationEvaluationV1>();
++        var effects = new AtomicInteger(); var errors = new AtomicInteger();
++        var service = service(() -> identity("alice", "main"), (trusted, tenant) -> { entered.countDown(); return pending; });
++        var subscription = request(service.boundary(PRINCIPAL, "main", () -> Mono.fromCallable(effects::incrementAndGet)))
++            .subscribe(ignored -> effects.incrementAndGet(), ignored -> errors.incrementAndGet());
++        assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
++        pending.completeExceptionally(new AuthorizationUnavailableException());
++        await().during(Duration.ofMillis(100)).atMost(LIMIT).untilAsserted(() -> {
++            assertThat(effects).hasValue(0); assertThat(errors).hasValue(0);
++        });
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java
+new file mode 100644
+index 0000000..9d584ed
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java
+@@ -0,0 +1,114 @@
++package io.kestra.webserver.rbac;
++
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.http.HttpRequest;
++import io.netty.channel.DefaultEventLoop;
++import java.time.Duration;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++
++/** A CompletionStage return type alone does not make a close factory non-blocking. */
++class AuthorizationCleanupSchedulingTest {
++    private record TransactionProbe(java.sql.Connection connection) implements PropagatedContextElement {}
++
++    private static PropagatedContext callerContext() {
++        return PropagatedContext.empty().plus(new AuthorizationInvocationContext(HttpRequest.GET("/cleanup-probe"), false))
++            .plus(new TransactionProbe(org.mockito.Mockito.mock(java.sql.Connection.class)));
++    }
++    private static AuthorizationEvaluationV1 blockingClose(CountDownLatch entered, CountDownLatch unlock,
++        AtomicInteger closed, AtomicReference<Thread> thread, AtomicReference<PropagatedContext> context) {
++        return new AuthorizationEvaluationV1() {
++            public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
++                return CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
++            }
++            public java.util.concurrent.CompletionStage<Void> close() {
++                closed.incrementAndGet(); thread.set(Thread.currentThread()); context.set(PropagatedContext.getOrEmpty());
++                entered.countDown();
++                boolean interrupted = false;
++                while (true) {
++                    try { unlock.await(); break; } catch (InterruptedException ignored) { interrupted = true; }
++                }
++                if (interrupted) Thread.currentThread().interrupt();
++                return CompletableFuture.completedFuture(null);
++            }
++        };
++    }
++
++    @Test
++    void cancelAndBlockingCloseMustNotBlockEventLoop() throws Exception {
++        var loop = new DefaultEventLoop();
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var acquired = new CountDownLatch(1);
++        var heartbeat = new CountDownLatch(1); var returned = new CountDownLatch(1); var closed = new AtomicInteger();
++        var thread = new AtomicReference<Thread>(); var context = new AtomicReference<PropagatedContext>();
++        var handle = blockingClose(entered, unlock, closed, thread, context);
++        var subscription = evaluations((principal, tenant) -> CompletableFuture.completedFuture(handle))
++            .boundary(PRINCIPAL, "main", () -> { acquired.countDown(); return Mono.never(); }).subscribe();
++        boolean heartBeats; boolean cancellationReturns;
++        try {
++            assertThat(acquired.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.execute(() -> {
++                try (var scope = callerContext().propagate()) { subscription.dispose(); returned.countDown(); }
++            });
++            loop.execute(heartbeat::countDown);
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
++            cancellationReturns = returned.getCount() == 0;
++            System.out.printf("cancel-close barrier: heartbeat=%s cancelReturned=%s closes=%d%n", heartBeats, cancellationReturns, closed.get());
++        } finally {
++            unlock.countDown(); subscription.dispose();
++            assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
++        }
++        assertThat(heartBeats).as("blocking close factory must not block the cancelling event loop").isTrue();
++        assertThat(cancellationReturns).isTrue(); assertThat(loop.inEventLoop(thread.get())).isFalse();
++        assertThat(context.get().getAllElements()).isEmpty();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed).hasValue(1));
++    }
++
++    @Test
++    void lateHandleBlockingCloseMustNotBlockCompletingEventLoop() throws Exception {
++        var loop = new DefaultEventLoop();
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var registered = new CountDownLatch(1);
++        var heartbeat = new CountDownLatch(1); var returned = new CountDownLatch(1); var closed = new AtomicInteger();
++        var thread = new AtomicReference<Thread>(); var context = new AtomicReference<PropagatedContext>();
++        var pending = new CompletableFuture<AuthorizationEvaluationV1>() {
++            @Override public CompletableFuture<AuthorizationEvaluationV1> whenComplete(
++                java.util.function.BiConsumer<? super AuthorizationEvaluationV1, ? super Throwable> callback) {
++                var result = super.whenComplete(callback); registered.countDown(); return result;
++            }
++        };
++        var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", Mono::never).subscribe();
++        var handle = blockingClose(entered, unlock, closed, thread, context);
++        boolean heartBeats; boolean completionReturns;
++        try {
++            assertThat(registered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
++            loop.execute(() -> {
++                try (var scope = callerContext().propagate()) { pending.complete(handle); returned.countDown(); }
++            });
++            loop.execute(heartbeat::countDown);
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
++            completionReturns = returned.getCount() == 0;
++            System.out.printf("late-close barrier: heartbeat=%s completeReturned=%s closes=%d%n", heartBeats, completionReturns, closed.get());
++        } finally {
++            unlock.countDown(); subscription.dispose();
++            assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
++        }
++        assertThat(heartBeats).as("late close factory must not block the completion event loop").isTrue();
++        assertThat(completionReturns).isTrue(); assertThat(loop.inEventLoop(thread.get())).isFalse();
++        assertThat(context.get().getAllElements()).isEmpty(); assertThat(pending).isNotCancelled();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed).hasValue(1));
 +    }
 +}

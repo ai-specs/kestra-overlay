@@ -23,6 +23,14 @@ FORBIDDEN/UNAVAILABLE分类保持不变，不新增V3或业务模型。
 只按框架实际规定解开CompletionException/ExecutionException包装；未知包装不猜测。
 普通拒绝与其他HTTP错误路径不变，响应不暴露SQL、cause或凭据。
 
+2026-10-30初始化阻塞隔离候选仅调整0330调用方调度，不改变本节身份校验或事务实现。
+可信身份与评估begin在Reactor有界阻塞线程池执行；先建owner，跨线程仅传播请求来源。
+V1 current、V2 currentForAuthorization、同连接current(Connection)的签名、连接所有权、
+安全锁及锁后读取均不变。取消与晚到句柄仍由owner释放；close工厂在有界阻塞池/空上下文执行，
+不把连接或事务上下文复制到清理任务。明确UNAVAILABLE仍503，
+身份失效/不匹配和未知故障仍保留拒绝分类。独立红绿与完整门状态见r-ee-rbac同名节；
+候选尚未发布，不能作为插件正式编译输入。
+
 宿主使用自有最小provider先红后绿验证兼容、身份SQL/投影、begin/authorize同步异步
 503、未知异常403、缺组件/重复provider/路由原门和无副作用，随后完整local-ci及镜像门。
 不读取真实插件源码或jar作为宿主测试输入，不改SDK。扩展必须等宿主对应提交CI与
