@@ -1198,3 +1198,65 @@ Flow 全文或身份。不插入阶段状态，不包装或重构调用链；诊
 无失败或跳过；结构门无跨补丁重叠，37 个补丁从固定 BASE 顺序应用成功。
 相对 `d63518c` 的实际宿主源码只改变最终 fallback 的诊断调用并新增 helper/测试。
 这些结果不代表正式 CI、镜像发布或真实 MCP 执行通过。
+
+### HTTP 授权边界显式请求来源（2026-10-31，入口 B 已接收，发布须核匹配提交CI）
+
+消费项目为 `ai-specs/kestra-plugin-rbac`。部署仓使用正式镜像
+`sha256:0238b214fdd284dab3017c8cd2049e5f599f2f2e71afe3dbf1d94c0d26ba4784`、
+宿主 executable `6c4bd609bd6a5e19b521b543cf3811da6e20ea20f454524c66f75d512522f7f7`、
+插件提交 `3ff3d099bb7633660b23ee1a777ea189df9ea431` 执行真实 T6。
+最近三次全量报告中，一个请求约 103ms 返回 RFC7807 403，未观察到两个安全锁等待者；
+另一个请求在观察器释放锁后完成。实际 holder 持有 bigint 安全锁 `1380073797`。
+JWT 约一秒前签发、有效期一小时，CSRF cookie/header hash 一致，不能归因过期或双提交值不匹配。
+失败报告入口名为 `root-final-target-denial-local`、`root-final-target-denial-repeat1`、
+`t6-early-refusal-credential-diagnostic`。前两次分别在 disable、delete 失败，第三次在 disable 失败。
+同一保留部署后续两次真实 T6 均为 4/4，成功时有两个实际等待者且拒绝来自 controller code。
+**这些历史 403 与本节缺口是否同源仍未证明**；本节宿主反例不替代部署组合归因。
+
+现有机制中，`AuthorizationInvocationFilter` 在 FIRST+1 写入调用来源，
+`AuthorizationInvocationContext.currentRequest()` 支持 `ServerRequestContext` 回退。
+但 `AuthorizationEvaluations.minimalContext()` 只截取 Reactor/Propagated 中已有的调用来源；
+没有来源时，异步初始化不能仅依赖订阅线程的请求上下文。`TypedRestRbacFilter` 此时仍持有
+真实 `HttpRequest` 和认证属性，却未把它显式绑定到新评估边界。可信身份入口找不到请求时，
+在安全锁前抛异常，既有错误映射返回 403。FIRST 过滤器存在不能证明后续订阅一定携带其上下文。
+
+宿主独立反例使用真实 `HttpRequest`、宿主过滤器/评估代码及最小 `TrustedIdentityV2` 测试实现，
+不读取真实插件、不启动数据库或容器。没有 ambient 调用来源时，原代码得到 403，
+可信身份入口计数为 1、模拟安全锁入口计数为 0；显式绑定后为 200，两计数均为 1。
+此测试只证明来源传递，不证明 JWT 签名、安全锁 SQL、真实 PG 并发或历史 T6 的根因。
+
+主控按入口 B 接收的最小机制：在持有真实 HTTP request 的 typed REST 边界上，通过
+Reactor 绑定 `PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false))`。
+来源必须是本次 filter 参数，覆盖陈旧 HTTP 或 internal 来源，不从 subject/角色构造可信身份。
+只带来源，不复制连接、事务、旧评估或查询上下文；下游继续执行全部身份、租户、provider、
+业务授权和安全锁检查。身份缺失仍拒绝，未知异常仍 403，明确依赖不可用仍 503。
+独立非 HTTP boundary 缺来源继续失败关闭，不推断 internal。
+
+修复归既有 REQ-0330 HTTP 激活点，不增加 SPI、配置、业务模型、SDK 或公开响应字段。
+插件仍负责策略、controller 权限和最后管理员业务判断；部署仓负责真实生产登录、两个实际
+等待者、允许/拒绝、存储及延迟副作用检查。上游升级须复核 filter 参数、Reactor 传播和
+初始化/取消/关闭生命周期；上游提供等价可靠 HTTP 来源绑定后可移除这一增量。
+
+独立门为 `AuthorizationHttpOriginBoundaryTest` 的五个具名测试：
+
+- `actualHttpRequestWithoutAmbientOriginSurvivesAsyncInitialization`
+- `concurrentRequestsOverrideStaleOriginsAndTrimTransactions`
+- `missingOriginOutsideHttpFilterStillFailsClosed`
+- `requestWithoutAuthenticationStillReturns401BeforeIdentityOrBusiness`
+- `explicitUnavailableAndUnknownFailureKeep503And403`
+
+新增门核对无来源允许路径、两个真实请求并行初始化且各自来源不串用、陈旧 HTTP/internal
+来源覆盖、事务/旧评估/查询上下文裁剪、缺来源/认证拒绝和 403/503 分类。
+原 `AuthorizationEvaluationRestTest` 两项及其全部断言保持原文；backend checker 要求新增
+5 项的精确名称、数量及零失败/跳过。既有取消、晚到句柄、close 恰好一次及事务裁剪门仍保留。
+
+本轮定向本地 42 项全部通过（新增 5 项、既有 37 项），无失败、错误、跳过；
+命名红测 1 项失败、绿测与并发/拒绝门 5 项通过。证据位于忽略目录
+`.work/request-origin-boundary/` 的 `named-red.log`、`named-green.log`、`regression.log`、
+`regression-reports/` 与 `inputs.json`。定向运行使用当前补丁重放源码与缓存宿主依赖，
+未生成 Micronaut 索引，不能替代完整 Gradle/local-ci。
+主控随后实际完成完整 local-ci：100份XML共412项，410通过、零失败/错误，2项既有
+镜像前置检查另由镜像四份XML各1项零跳过执行；UI95通过。classpath、OIDC35、MCP4、
+form/env两种首装及20份认证JSON均已检查，SDK949/949与几何60/60零错误通过。
+这些是发布前本地门，不是正式发布或部署组合通过。正式消费必须另核匹配提交的成功CI、
+候选推广及registry正式产物；UI未改也必须保留正式CI全部既有门。

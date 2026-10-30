@@ -2,6 +2,21 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
+HTTP_ORIGIN_TESTS = {
+    "actualHttpRequestWithoutAmbientOriginSurvivesAsyncInitialization",
+    "concurrentRequestsOverrideStaleOriginsAndTrimTransactions",
+    "missingOriginOutsideHttpFilterStillFailsClosed",
+    "requestWithoutAuthenticationStillReturns401BeforeIdentityOrBusiness",
+    "explicitUnavailableAndUnknownFailureKeep503And403",
+}
+
+
+def check_http_origin_names(report):
+    names = [case.attrib.get("name", "").removesuffix("()") for case in report.findall("testcase")]
+    if len(names) != len(HTTP_ORIGIN_TESTS) or set(names) != HTTP_ORIGIN_TESTS:
+        raise SystemExit("FAIL: AuthorizationHttpOriginBoundaryTest must execute all five named HTTP origin cases")
+
+
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
     "PublicFaviconHttpTest": 2,
@@ -21,6 +36,7 @@ for suite, expected in {
     "AuthorizationInitializationTest": 10,
     "AuthorizationCleanupSchedulingTest": 2,
     "AuthorizationEvaluationRestTest": 2,
+    "AuthorizationHttpOriginBoundaryTest": len(HTTP_ORIGIN_TESTS),
     "AuthorizationEvaluationHttpTest": 2,
     "AuthorizationEvaluationApplicationGroupTest": 2,
     "ExtensionResourceAdapterTest": 2,
@@ -32,6 +48,8 @@ for suite, expected in {
         int(report.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
     ):
         raise SystemExit(f"FAIL: {suite} must execute {expected} tests without failures or skips")
+    if suite == "AuthorizationHttpOriginBoundaryTest":
+        check_http_origin_names(report)
     print(f"PASS: {suite}: {expected} tests executed, no failures or skips")
 
 directory = ET.parse(results / "TEST-io.kestra.webserver.oidc.UserDirectoryContractTest.xml").getroot()
