@@ -1,5 +1,13 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## 原生popup reference归属修复（2026-10-31，已接收，未发布）
+
+0384的window mouseup capture必须识别当前popup真实reference，而不只识别portal内
+弹层节点。否则reference会先被outside处理关闭，再被原生click重新打开。修复只允许
+本ShadowRoot内、与当前注册popup精确关联的reference；不同根、不同实例、失效引用
+和普通外部点击保持原关闭语义。优先使用公开组件实际ARIA/reference关联，不给插件
+暴露私有序号或要求插件修改vendor DOM。完整行为证据、边界和发布门见r-ee-rbac。
+
 ## 授权初始化阻塞隔离（2026-10-30，已在48946d6独立发布）
 
 可信身份复查可能执行JDBC安全锁，不能在Netty事件循环同步运行。既有0330 boundary
@@ -590,3 +598,25 @@ predicate 保持(namespace,id)关联。无 ID 列的 JDBC 资源只对 RESTRICTE
 移动filter视口边界正式基线（2026-10-30，27520a2/CI40941713707）：仅owned mobile sheet在下方空间足够时保留+8，否则上翻或视口安全边距clamp，maxHeight严格为正且不超过当前top到视口底的空间。内容展开依靠该上界和原生overflow保持可滚动；window/root scroll、window resize和visualViewport scroll/resize成对重算/清理。仅已迁移sheet/scrim保存逻辑父与原anchor，parentNode/nextSibling成对实现Vue后续patch关系，remove清理，不接受跨根插入或任意null兜底。desktop本轮不改变。原949/36保留，新增12几何单列，总48、8诊断源必须零错误。
 
 REQ-0384桌面advanced视口边界增量（2026-10-30，候选未发布）：registered高级层下方足够仍+6，不足翻转或clamp并提供正maxHeight/原生overflow；visualViewport监听成对清理。原949/48保留，新增12，总60几何；不改chip/mobile业务语义，不引入业务路径。详见r-ee-rbac本轮接收提案。
+
+
+### 原生 reference 与 REST 测试修复候选（2026-11-01，未发布）
+
+0384 保持 13 个触达文件与 V1 公开 API，仅在同一 ShadowRoot 中沿真实事件目标的
+祖先核对 ARIA，要求唯一解析到当前注册 popup 的 portal 内容；嵌套 tooltip 有独立
+ARIA 时仍可找到真实外层 reference。不同根、不同实例、缺失/失效/重复引用仍按
+outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
+
+0330 的两条既有 REST 测试已接收最小消费修复：
+`Flux.from(...).single().block(Duration.ofSeconds(10))` 等待完整响应终结，且要求恰好
+一个响应。403/200、零业务副作用、快照查询、begin/close 次数的全部原断言保留；
+生产 Java 与取消语义不变，0330 仍为 20 文件。相关类 2 项及未修改的取消/晚到句柄/
+关闭调度 18 项通过。修正后完整 local-ci 通过：后端 412 项中 410 通过、0 失败、
+2 个受控镜像入口跳过；UI 105 项全部通过，其中 shadow 31 项，无跳过。
+
+当前唯一新候选为 `kestra-overlay:popup-reference-final-20261101`，镜像 ID
+`sha256:6dde36977bd08452269413e64dd7a31a113572a94d9075624d99c23d7c8f80dd`，
+内含 executable SHA-256
+`64c978d7e490ed7378b125a268bff56d19417295ceb53c0379ed0486ed2ff3c5`。
+新候选镜像门与 SDK949/几何64在独占 `final-candidate/` 目录重新执行；原报告保持
+原 image 绑定，不用于替代新候选结果。对应提交 CI、推广与正式发布仍须另行验证。

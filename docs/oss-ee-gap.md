@@ -1,5 +1,12 @@
 # OSS vs EE 架构能力差异表（kestra-overlay 立身依据）
 
+2026-10-31 按入口C接收既有REQ-0384 popup reference归属缺陷：消费插件独立CI
+41211531677的7份trace和本机稳定状态原生事件证实，同一trigger在mouseup被outside
+误关，随后click重新打开。仅修公开SDK当前popup/reference的同ShadowRoot精确关联，
+不引入业务UI/CRUD，不修改vendor或动画；保持真正外部关闭与跨根隔离。详细提案及
+反例/发布门见r-ee-rbac同名节。当前为已接收、未实施/未发布，不以旧SDK949/几何60
+通过代替本次稳定toggle具名门；先宿主正式发布，再插件消费与root流程验收。
+
 2026-10-31 按入口 B 接收 R-EE-RBAC / REQ-0330 HTTP 边界显式请求来源绑定。
 消费 `kestra-plugin-rbac` 的真实 T6 曾出现约103ms锁前RFC7807 403；与本缺口同源仍未证明。
 独立宿主反例已证实：filter持有真实request/Authentication而无ambient来源时，
@@ -343,3 +350,25 @@ REQ-0384原生filter定位正式基线已发布（2026-10-29，`1e3632e`，成�
 REQ-0384移动视口边界已随27520a2/CI40941713707正式发布（2026-10-30）：长页底部/离屏锚点不得生成0高度或视口外不可交互sheet；通用flip/clamp及迁移节点逻辑父/邻接由宿主renderer承担。原949/36与新增12几何及最终发布门须对应同源输入；插件业务和CRUD不迁入。详见r-ee-rbac本轮提案。
 
 REQ-0384桌面advanced视口边界增量（2026-10-30，候选未发布）：registered高级层下方足够仍+6，不足翻转或clamp并提供正maxHeight/原生overflow；visualViewport监听成对清理。原949/48保留，新增12，总60几何；不改chip/mobile业务语义，不引入业务路径。详见r-ee-rbac本轮接收提案。
+
+
+### 原生 reference 与 REST 测试修复候选（2026-11-01，未发布）
+
+0384 保持 13 个触达文件与 V1 公开 API，仅在同一 ShadowRoot 中沿真实事件目标的
+祖先核对 ARIA，要求唯一解析到当前注册 popup 的 portal 内容；嵌套 tooltip 有独立
+ARIA 时仍可找到真实外层 reference。不同根、不同实例、缺失/失效/重复引用仍按
+outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
+
+0330 的两条既有 REST 测试已接收最小消费修复：
+`Flux.from(...).single().block(Duration.ofSeconds(10))` 等待完整响应终结，且要求恰好
+一个响应。403/200、零业务副作用、快照查询、begin/close 次数的全部原断言保留；
+生产 Java 与取消语义不变，0330 仍为 20 文件。相关类 2 项及未修改的取消/晚到句柄/
+关闭调度 18 项通过。修正后完整 local-ci 通过：后端 412 项中 410 通过、0 失败、
+2 个受控镜像入口跳过；UI 105 项全部通过，其中 shadow 31 项，无跳过。
+
+当前唯一新候选为 `kestra-overlay:popup-reference-final-20261101`，镜像 ID
+`sha256:6dde36977bd08452269413e64dd7a31a113572a94d9075624d99c23d7c8f80dd`，
+内含 executable SHA-256
+`64c978d7e490ed7378b125a268bff56d19417295ceb53c0379ed0486ed2ff3c5`。
+新候选镜像门与 SDK949/几何64在独占 `final-candidate/` 目录重新执行；原报告保持
+原 image 绑定，不用于替代新候选结果。对应提交 CI、推广与正式发布仍须另行验证。

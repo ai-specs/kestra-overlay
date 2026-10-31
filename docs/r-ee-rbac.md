@@ -1,5 +1,42 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+## 原生 popup reference 被误判外部点击（2026-10-31，入口C已接收，未发布）
+
+消费项目：`kestra-plugin-rbac`。其独立真实Chromium门在正式宿主`ff707ddd`、镜像
+`sha256:15c7cace895531459fa1ef03446ec3945cd9ec1440c36a165c62b52e21472bac`的公开SDK
+与固定design-system 0.5.0上复现：打开原生KsFilter的Add filters，进入高级筛选并Esc，
+再次打开、滚动、点击同一trigger关闭时，popup先关闭又重开。插件CI41211531677中720项
+全部运行，713通过/7失败，失败均为桌面此行为；Java286/PG108/生命周期24均通过。
+完整artifact13046354851为67403323字节，ZIP SHA-256
+`521d1e94fada2c0c28d6d6a5d32ffc7393bd046534b51a4dada44b0f87eb7798`。
+七份真实trace均确认同一trigger的`aria-describedby`和同一popover id在leave后再次enter，
+并非另一个tooltip。独立本机原生事件复现等待实际enter/leave类消失后失败；仅等visible
+可能早于onShow注册，不能将此前本地绿色视为此行为通过。不得以固定延时或换关闭按钮掩盖。
+
+现有机制为何不足：0384 SDK的window capture `mouseup`执行pointerOutside，insidePopup
+只识别popup class或data标记；公开KsPopover的reference DOM未获得这个标记，虽然实际
+reference与popover已有原生ARIA关联。SDK先当outside关闭，随后的原生click又切换打开。
+公开helper本应隔离ShadowRoot中的原生outside行为；扩展无法可靠取得内部popup序号，
+不应修改vendor组件或给其私有DOM打补丁。该归因来自公开SDK/npm实现与真实事件，不包含
+插件业务路径或数据模型，因此按入口C接收为已有机制缺陷，不增加业务能力。
+
+最小修复范围：只修0384已有ShadowRoot popup逻辑归属，确认当前已注册popup的真实
+reference/trigger也在其内部；优先复用公开组件实际reference语义或本根内精确ARIA关联。
+不得把任意button、同名id、其他ShadowRoot或失效reference当内部，不得全局禁止outside。
+不变更业务API、Java授权、存储、主题CSS、vendor源码或默认动画。公开contract V1保持
+兼容；修复算法由宿主适配组件的精确版本。若必须新增类型或属性，应先另行提出最小契约。
+
+安全与异常：真正外部点击仍关闭当前popup；嵌套弹层按真实归属/激活顺序处理；同根不同
+实例、不同根相同id、失效/移除触发器、未知ARIA与卸载后监听均须反例。不能依赖其他
+客户端焦点，不能将内层点击误关外层，不能留下全局监听或把关闭改成授权放行。
+
+双方职责和发布门：overlay以自有最小原生组件探针复现并补单元/真实浏览器门，不读取
+插件源码或产物，不含业务CRUD；原SDK949与几何60不得减少，新增稳定进入后的trigger
+toggle具名用例。必须完整本地校验、对应提交CI、实际下载报告及正式镜像推广。
+插件先保留失败报告，强化精确实例与稳定原生状态断言，待正式SDK发布后才更新固定宿主
+输入、独立编译jar、全720及自身CI；root仅在两者发布后运行生产流程与集成计划。
+上游提供等价reference/ShadowRoot outside机制时移除该适配，不扩大支持组件名单。
+
 ## 授权身份复查阻塞事件循环（2026-10-30，已在48946d6独立发布）
 
 版本记录：`48946d6`的CI`41007119467`五job成功，7件artifact实际下载重解析，
@@ -1260,3 +1297,47 @@ Reactor 绑定 `PropagatedContext.empty().plus(new AuthorizationInvocationContex
 form/env两种首装及20份认证JSON均已检查，SDK949/949与几何60/60零错误通过。
 这些是发布前本地门，不是正式发布或部署组合通过。正式消费必须另核匹配提交的成功CI、
 候选推广及registry正式产物；UI未改也必须保留正式CI全部既有门。
+
+
+### 原生 reference 与 REST 测试修复候选（2026-11-01，未发布）
+
+0384 保持 13 个触达文件与 V1 公开 API，仅在同一 ShadowRoot 中沿真实事件目标的
+祖先核对 ARIA，要求唯一解析到当前注册 popup 的 portal 内容；嵌套 tooltip 有独立
+ARIA 时仍可找到真实外层 reference。不同根、不同实例、缺失/失效/重复引用仍按
+outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
+
+0330 的两条既有 REST 测试已接收最小消费修复：
+`Flux.from(...).single().block(Duration.ofSeconds(10))` 等待完整响应终结，且要求恰好
+一个响应。403/200、零业务副作用、快照查询、begin/close 次数的全部原断言保留；
+生产 Java 与取消语义不变，0330 仍为 20 文件。相关类 2 项及未修改的取消/晚到句柄/
+关闭调度 18 项通过。修正后完整 local-ci 通过：后端 412 项中 410 通过、0 失败、
+2 个受控镜像入口跳过；UI 105 项全部通过，其中 shadow 31 项，无跳过。
+
+当前唯一新候选为 `kestra-overlay:popup-reference-final-20261101`，镜像 ID
+`sha256:6dde36977bd08452269413e64dd7a31a113572a94d9075624d99c23d7c8f80dd`，
+内含 executable SHA-256
+`64c978d7e490ed7378b125a268bff56d19417295ceb53c0379ed0486ed2ff3c5`。
+新候选镜像门与 SDK949/几何64在独占 `final-candidate/` 目录重新执行；原报告保持
+原 image 绑定，不用于替代新候选结果。对应提交 CI、推广与正式发布仍须另行验证。
+
+历史失败与证据入口（保留）：根目录
+`.work/popup-reference-20261031/` 中，`unit-red.json` 为原实现 3 失败；
+`geometry-red-final.json` 使用最终同一几何驱动复现同 trigger 关闭后重开。
+`geometry-green.json` 的最近 ARIA 判断仍漏掉外层 reference；
+`geometry-green-2.json` 已关闭精确 popover，但错误地断言整个 scope 无任何 popup，
+原生 tooltip 仍存在；`geometry-green-3.json` 改为精确同实例关闭断言并通过全部64项。
+关闭、重开、实际滚动、原生过渡结束与同 trigger 身份断言始终保留，原60项未删减。
+新增四项的 evidence 固定为 `triggerPopoverRelation`（trigger、ariaAttribute、ariaValue、
+popoverId）及四个 true 布尔字段 `nativeTransitionsSettled`、`sameTriggerClosed`、
+`sameTriggerReopened`、`afterScrollClosed`；顺序和64个ID由 `geometry-contract.json` 声明。
+
+SDK 修复后的额外 Java 复测失败为
+`AuthorizationEvaluationRestTest.shouldDenySwitchingCompositePlanBeforeBusinessContinuation`：
+先前完整 local-ci 通过，补存报告复测及最低必要单类复测均在即时读取异步 close
+次数时失败。`backend-extra-failure/`、`backend-focused-once/` 保存旧失败 XML/HTML，
+`CancellationCleanupProbe.java` 与 `cancellation-cleanup-probe.json` 保存确定性取消
+时序证据。相关 Java 与父 HEAD 全部原补丁的定向重放逐字节一致；不是父镜像完整门
+重新执行结论。主控据此接收0330测试消费修复，新绿色报告另存
+`response-completion-fix/focused-green/`、`cancellation-green/`、`complete-backend/`
+及 `local-ci.log`，不覆盖旧失败。最终唯一新候选的实际产物门报告位于
+`final-candidate/`；正式交付仍取决于匹配提交 CI 与发布证据。

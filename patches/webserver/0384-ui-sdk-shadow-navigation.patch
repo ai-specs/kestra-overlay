@@ -6,6 +6,7 @@
 # 移除条件: 上游OSS提供等价独立扩展ShadowRoot弹层、焦点生命周期、默认popper隔离和可拒绝异步导航公开SDK。
 # 来源增量提交: 7cb9999、618a57a、86a0461、6969acf、04dc980、2f2984a；仅独占开发树提交，未发布。
 # 本轮来源: 正式parent27520a2/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
+# 本轮修复: 2026-10-31入口C；同根唯一ARIA reference归属，保留13文件；独占树Git tree diff生成，无提交；原949/60保留并新增4项至64，尚未发布。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
 index 28025b9..b6f7f39 100644
 --- a/ui/src/components/extensions/ExtensionPage.vue
@@ -353,10 +354,10 @@ index 009d80f..5b82937 100644
      it("isolates known root selectors and omits redundant font resources", () => {
 diff --git a/ui/src/extensions/shadow-overlays.spec.ts b/ui/src/extensions/shadow-overlays.spec.ts
 new file mode 100644
-index 0000000..9f83b84
+index 0000000..7e55d4c
 --- /dev/null
 +++ b/ui/src/extensions/shadow-overlays.spec.ts
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,592 @@
 +import {afterEach, describe, expect, it, vi} from "vitest";
 +import {createApp, defineComponent, h, nextTick, onBeforeUnmount, ref, watch} from "vue";
 +import * as Vue from "vue";
@@ -879,9 +880,78 @@ index 0000000..9f83b84
 +        expect(owned[0].isConnected).toBe(false);
 +        expect(existing.isConnected).toBe(true);
 +    });
++    function referencePopup(current: ReturnType<typeof fixture>, id = "native-popover") {
++        const close = vi.fn();
++        const popup = current.scope.popup(close);
++        const element = document.createElement("div");
++        element.id = id;
++        element.className = `sdk-popup-${popup.id}`;
++        element.setAttribute("role", "tooltip");
++        current.portal.append(element);
++        current.trigger.setAttribute("aria-describedby", id);
++        popup.show();
++        return {popup, element, close};
++    }
++    const mouseup = (node: HTMLElement) => node.dispatchEvent(new MouseEvent("mouseup", {bubbles: true, composed: true}));
++    it("keeps the exact connected native ARIA reference inside its registered popup", () => {
++        const current = fixture(), {close} = referencePopup(current);
++        const icon = document.createElement("span");icon.setAttribute("aria-describedby", "nested-tooltip-description");current.trigger.append(icon);
++        mouseup(icon);expect(close).not.toHaveBeenCalled();
++    });
++    it("closes on the real outside while retaining reference focus", () => {
++        const current = fixture(), {close} = referencePopup(current);
++        current.trigger.focus();mouseup(current.fallback);
++        expect(close).toHaveBeenCalledOnce();expect(deepActiveElement()).toBe(current.trigger);
++    });
++    it("rejects a different ShadowRoot reference with the same native popup ID", () => {
++        const current = fixture(), other = fixture();
++        const {close} = referencePopup(current);referencePopup(other);
++        mouseup(other.trigger);expect(close).toHaveBeenCalledOnce();
++    });
++    it("closes the other same-root popup but preserves the exact current reference", () => {
++        const current = fixture(), first = referencePopup(current, "first");
++        const second = referencePopup(current, "second");
++        current.trigger.setAttribute("aria-describedby", "first");
++        mouseup(current.trigger);expect(second.close).toHaveBeenCalledOnce();expect(first.close).not.toHaveBeenCalled();
++    });
++    it("rejects a stale ARIA reference after its native popup is removed", () => {
++        const current = fixture(), {element, close} = referencePopup(current);
++        element.remove();mouseup(current.trigger);expect(close).toHaveBeenCalledOnce();
++    });
++    it("rejects missing and unknown native ARIA references", () => {
++        const current = fixture(), {close} = referencePopup(current);
++        for (const id of [null, "unknown"]) {
++            if (id === null) current.trigger.removeAttribute("aria-describedby");else current.trigger.setAttribute("aria-describedby", id);
++            mouseup(current.trigger);
++        }
++        expect(close).toHaveBeenCalledTimes(2);
++    });
++    it("rejects duplicate same-root IDs instead of guessing the reference target", () => {
++        const current = fixture(), {element, close} = referencePopup(current);
++        const duplicate = document.createElement("div");duplicate.id = element.id;current.content.append(duplicate);
++        mouseup(current.trigger);expect(close).toHaveBeenCalledOnce();
++    });
++    it("rejects unowned native ARIA targets even when the popup remains registered", () => {
++        const current = fixture(), {element, close} = referencePopup(current);
++        element.className = "unowned";mouseup(current.trigger);expect(close).toHaveBeenCalledOnce();
++    });
++    it("preserves nested tooltip and parent popup ownership in activation order", () => {
++        const current = fixture(), parent = referencePopup(current, "parent");
++        const nested = referencePopup(current, "nested-tooltip");
++        const reference = document.createElement("button");reference.setAttribute("aria-describedby", nested.element.id);parent.element.append(reference);
++        mouseup(reference);expect(nested.close).not.toHaveBeenCalled();expect(parent.close).not.toHaveBeenCalled();
++        mouseup(parent.element);expect(nested.close).toHaveBeenCalledOnce();expect(parent.close).not.toHaveBeenCalled();
++    });
++    it("forgets hidden popups and removes reference listeners on dispose", () => {
++        const current = fixture(), {popup, close} = referencePopup(current);
++        popup.hide();mouseup(current.fallback);expect(close).not.toHaveBeenCalled();
++        popup.show();current.scope.dispose();mouseup(current.fallback);expect(close).not.toHaveBeenCalled();
++        expect(current.scope.inspect().popups).toEqual([]);
++    });
++
 +});
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
-index 927e127..ea7e532 100644
+index 927e127..382f520 100644
 --- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
 @@ -1,6 +1,9 @@
@@ -895,7 +965,7 @@ index 927e127..ea7e532 100644
  published executable. The SDK and npm package are the only host inputs for independent extensions.
  `contract.json` pins the supported component package and integrity, language IDs and fallback.
  `index.d.ts` is the ESM protocol; `locales.mjs` resolves public locale aliases.
-@@ -14,9 +17,43 @@ Duplicate IDs, invalid metadata and missing or mismatched files reject registrat
+@@ -14,9 +17,47 @@ Duplicate IDs, invalid metadata and missing or mismatched files reject registrat
 
  The host route is `/ui/{tenant}/extensions/{id}/...`. The host owns navigation and lifetime;
  the module owns its app and ShadowRoot. Never add extension styles to document. Load only
@@ -926,7 +996,11 @@ index 927e127..ea7e532 100644
 +filter's globally resolved supporting components. Register those wrappers in the consumer app before
 +mounting KsFilter. The native filter still owns its responsive DOM, filtering and UI; the renderer
 +only adapts its desktop/mobile overlay target, focus and lifetime. Raw popovers are not independently
-+supported by this internal filter adaptation. Helpers never place overlay content or CSS in
++supported by this internal filter adaptation. A registered native filter popover treats its exact
++connected reference as inside: ARIA IDs resolve uniquely within the same ShadowRoot to that popup's
++owned portal content, including references inside a nested tooltip. Unknown, removed, duplicate-ID
++or cross-root targets remain outside. Consumers do not assign private popup IDs or change vendor DOM.
++Helpers never place overlay content or CSS in
 +document.body and never lock document scrolling. Keep modal `beforeClose` responsible for dirty
 +confirmation and saving confinement; use the adapted owned KsDialog, not global MessageBox.
 +
@@ -942,7 +1016,7 @@ index 927e127..ea7e532 100644
 
  At build time apply `prepareShadowStyles(css,postcss)` from `shadow-styles.mjs` to CSS generated
  from the pinned public component package. Pass the consumer's PostCSS 8 parser; the helper has
-@@ -30,7 +67,28 @@ can be asynchronous. Unmount must be idempotent. The host aborts on navigation,
+@@ -30,7 +71,28 @@ can be asynchronous. Unmount must be idempotent. The host aborts on navigation,
  retains the latest pending context and cleans late mount results. Lifecycle timeout is 5 seconds;
  trusted extension code must stop effects on abort because JavaScript is not a security sandbox.
 
@@ -972,7 +1046,7 @@ index 927e127..ea7e532 100644
  `/api/v1/{tenant}/...` with query parameters, includes cookies and write CSRF, and returns standard
  Response including 401/403. It rejects redirects, fragments, encoded path ambiguity and external
  origins. The server continues to authorize every API request.
-@@ -44,3 +102,17 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
+@@ -44,3 +106,17 @@ Use locale-wrapped `<locale>.json` files and your own vue-i18n instance with fal
  Run `node check-translations.mjs path/to/translations`; failure includes missing, extra, empty
  messages and interpolation differences for all public locales. The checker does not translate
  messages or prove translation quality. No host-internal JSON import is supported.
@@ -1143,10 +1217,10 @@ index 0000000..74c3f65
 +): {[Name in keyof Components]: Vue.Component};
 diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
 new file mode 100644
-index 0000000..1490e5c
+index 0000000..fda2098
 --- /dev/null
 +++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/shadow-overlays.mjs
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,486 @@
 +export function deepActiveElement(root = document) {
 +    let active = root.activeElement;
 +    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
@@ -1246,7 +1320,24 @@ index 0000000..1490e5c
 +        focus(first(layer));
 +        redirecting = false;
 +    };
-+    const insidePopup = (popup, node) => node?.closest?.(`.sdk-popup-${popup.id},[data-sdk-popup="${popup.id}"]`);
++    const insidePopup = (popup, node) => {
++        if (!node?.isConnected || node.getRootNode() !== root) return false;
++        const marker = `.sdk-popup-${popup.id},[data-sdk-popup="${popup.id}"]`;
++        if (node.closest?.(marker)) return true;
++        // Pinned native popover references expose their content ID through ARIA.
++        // Resolve only a unique, connected target owned by this registered popup
++        // in this scope; never resolve an ID through the host document.
++        for (let reference = node; reference && reference.getRootNode() === root; reference = reference.parentElement) {
++            if (!reference.hasAttribute?.("aria-describedby") || !available(reference)) continue;
++            const owned = reference.getAttribute("aria-describedby").trim().split(/\s+/).some(id => {
++                if (!id) return false;
++                const targets = [...root.querySelectorAll("[id]")].filter(element => element.id === id);
++                return targets.length === 1 && portal.contains(targets[0]) && targets[0].matches(marker);
++            });
++            if (owned) return true;
++        }
++        return false;
++    };
 +    const pointerInside = event => {
 +        if (popups.some(popup => insidePopup(popup, event.composedPath()[0]))) event.stopPropagation();
 +    };

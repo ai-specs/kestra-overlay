@@ -5,6 +5,32 @@ const {createHash}=require('node:crypto');
 const {createStaticServer}=require('./blackbox-ui-sdk.cjs');
 const {createDiagnostics}=require('./sdk-browser-diagnostics.cjs');
 
+const REFERENCE_CASE='stable-native-popup-reference-toggle-after-scroll';
+function expectedGeometryIds(){
+ const ids=[];
+ for(const theme of ['light','dark','dark-2','system'])for(const width of [1280,390]){
+  const names=['two-owned-native-filter-instances','native-condition-and-nested-select-escape','rules-pill-reopen-scroll-resize',
+   ...(width===1280?['direct-chip-and-add-filter-autoopen-retain-native-position',REFERENCE_CASE,'desktop-bottom-anchor-flip','desktop-offscreen-anchor-clamp','desktop-boundary-expand-reopen-resize']:['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']),
+   'dispose-cleans-owned-layers-and-listeners'];
+  for(const name of names)ids.push(theme+'|'+width+'|'+name);
+ }
+ return ids;
+}
+function validateGeometryChecks(checks){
+ assert.equal(checks.length,64,'exact native geometry matrix required');
+ assert.deepEqual(checks.map(row=>row.theme+'|'+row.width+'|'+row.name),expectedGeometryIds(),'exact ordered geometry IDs required');
+ for(const row of checks){
+  assert.equal(row.passed,true,'geometry case must pass: '+row.name);
+  if(row.name!==REFERENCE_CASE)continue;
+  const evidence=row.evidence,relation=evidence?.triggerPopoverRelation;
+  assert(relation&&typeof relation.trigger==='string'&&relation.trigger.trim(),'exact native trigger required');
+  assert(['aria-describedby','aria-controls'].includes(relation.ariaAttribute),'native ARIA relation required');
+  assert(typeof relation.popoverId==='string'&&relation.popoverId.trim(),'exact native popover ID required');
+  assert(typeof relation.ariaValue==='string'&&relation.ariaValue.trim().split(/\s+/).includes(relation.popoverId),'ARIA must reference the exact popup');
+  for(const key of ['nativeTransitionsSettled','sameTriggerClosed','sameTriggerReopened','afterScrollClosed'])assert.equal(evidence[key],true,'native reference evidence missing: '+key);
+ }
+}
+
 async function main(){
  const directory=path.resolve(process.env.UI_SDK_PROBE_DIR??'');assert(process.env.UI_SDK_PROBE_DIR);
  const output=path.resolve(process.env.FILTER_GEOMETRY_REPORT??'.work/filter-geometry.json');await fs.mkdir(path.dirname(output),{recursive:true});
@@ -119,6 +145,38 @@ async function main(){
      return {automatic:{trigger:a,panel:b},nativeChipOffset:8};
     });
     assert.equal(await page.locator('#host-decoy').getAttribute('style'),decoyBefore,'host decoy style changed');
+    if(width===1280)await check('stable-native-popup-reference-toggle-after-scroll',async()=>{
+     const trigger=instance(1).locator('.customize-button');
+     const handle=await trigger.elementHandle();assert(handle,'exact native trigger missing');
+     const settled=async()=>page.waitForFunction(()=>{
+      const root=document.querySelector('#extension').shadowRoot;
+      return ![...root.querySelectorAll('*')].some(node=>[...node.classList].some(name=>/-(enter|leave)-(from|active|to)$/.test(name))||node.getAnimations().some(animation=>animation.playState==='running'));
+     });
+     const pointerClick=async()=>{assert.equal(await trigger.evaluate((node,exact)=>node===exact,handle),true,'native trigger instance changed');await trigger.click();};
+     const relation=async()=>trigger.evaluate(node=>{
+      const ariaValue=node.getAttribute('aria-describedby'),root=node.getRootNode(),popover=ariaValue?root.getElementById(ariaValue):null;
+      return {trigger:node.className,ariaAttribute:'aria-describedby',ariaValue,popoverId:popover?.id??null};
+     });
+     await pointerClick();await settled();
+     await page.waitForFunction(()=>window.filterGeometry.inspect().scope.popups.length>0);
+     const triggerPopoverRelation=await relation();assert(triggerPopoverRelation.ariaValue);assert.equal(triggerPopoverRelation.ariaValue,triggerPopoverRelation.popoverId);
+     const popover=page.locator('[id="'+triggerPopoverRelation.popoverId+'"]');await popover.waitFor({state:'visible'});
+     // Open and leave the real advanced layer before testing the same native reference.
+     await visible('.advanced-add').click();await panel().waitFor({state:'visible'});await settled();
+     await page.keyboard.press('Escape');await panel().waitFor({state:'hidden'});await settled();
+     await pointerClick();await popover.waitFor({state:'visible'});await settled();
+     assert.deepEqual(await relation(),triggerPopoverRelation,'reference must resolve to the exact original popup');
+     await pointerClick();await settled();await popover.waitFor({state:'hidden'});
+     assert.equal(await popover.isVisible(),false,'same exact popover reopened after native close');
+     await pointerClick();await popover.waitFor({state:'visible'});await settled();
+     assert.deepEqual(await relation(),triggerPopoverRelation);
+     const before=await page.locator('.fixture-scroll').evaluate(node=>node.scrollTop);
+     await page.mouse.move(1276,500);await page.mouse.wheel(0,20);
+     await page.waitForFunction(before=>document.querySelector('#extension').shadowRoot.querySelector('.fixture-scroll').scrollTop>before,before);
+     await settled();await pointerClick();await settled();await popover.waitFor({state:'hidden'});
+     assert.equal(await popover.isVisible(),false,'same exact popover reopened after scroll close');
+     return {triggerPopoverRelation,nativeTransitionsSettled:true,sameTriggerClosed:true,sameTriggerReopened:true,afterScrollClosed:true};
+    });
     if(width===390) for(const name of ['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']) await check(name,async()=>{
      await page.evaluate(()=>{const root=document.querySelector('#extension').shadowRoot;root.querySelector('.fixture-scroll').style.cssText='height:auto;overflow:visible';for(const row of root.querySelectorAll('.fixture-row'))row.style.marginTop='1200px';});
      const samples=[];
@@ -187,10 +245,8 @@ async function main(){
     const snapshot=await diagnostics.snapshot();report.diagnostics??=[];report.diagnostics.push({theme,width,...snapshot});await persist();await context.close();
    }
   }
-  assert.equal(report.checks.length,60,'exact native geometry matrix required');
+  validateGeometryChecks(report.checks);
   assert.equal(report.diagnostics.length,8,'exact geometry diagnostic sources required');
-  const expected=new Set();for(const theme of ['light','dark','dark-2','system'])for(const width of [1280,390])for(const name of ['two-owned-native-filter-instances','native-condition-and-nested-select-escape','rules-pill-reopen-scroll-resize',...(width===1280?['direct-chip-and-add-filter-autoopen-retain-native-position']:[]),'dispose-cleans-owned-layers-and-listeners',...(width===1280?['desktop-bottom-anchor-flip','desktop-offscreen-anchor-clamp','desktop-boundary-expand-reopen-resize']:[]),...(width===390?['mobile-bottom-anchor-flip','mobile-offscreen-anchor-clamp','mobile-boundary-reopen-resize']:[])])expected.add(theme+'|'+width+'|'+name);
-  assert.deepEqual(new Set(report.checks.map(row=>row.theme+'|'+row.width+'|'+row.name)),expected);
   const errors=report.diagnostics.flatMap(snapshot=>snapshot.events).filter(event=>['console-error','page-error','http-error','request-failed','diagnostic-integrity-error'].includes(event.kind));
   assert.equal(errors.length,0,'native geometry has source-associated browser errors');
   for(const [file,expected]of Object.entries(inputHashes))assert.equal(createHash('sha256').update(await fs.readFile(path.join(directory,file))).digest('hex'),expected,'geometry input changed during run: '+file);
@@ -198,3 +254,5 @@ async function main(){
  }catch(error){report.completed=false;report.failure=String(error.stack??error);try{await verifySources();report.finalSourceHashesEqual=true;}catch{report.finalSourceHashesEqual=false;}report.finalInputHashesEqual=true;for(const [file,expected]of Object.entries(inputHashes))if(createHash('sha256').update(await fs.readFile(path.join(directory,file))).digest('hex')!==expected)report.finalInputHashesEqual=false;await persist();throw error;}finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
 }
 if(require.main===module)main().catch(error=>{console.error(error.stack??error);process.exitCode=1;});
+
+module.exports={expectedGeometryIds,validateGeometryChecks};

@@ -4,6 +4,7 @@
 # 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档；2026-10-30入口C事件循环阻塞证据，初始化仅传播请求来源；2026-10-31入口B接收真实HTTP边界最小来源绑定
 # 触达上游文件: 20 个（通用生命周期、typed gate、引用桥接与独立探针）
 # 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
+# 测试消费修复: 2026-11-01主控授权；两条REST完整响应测试用Flux.single及10秒有界block等待终结；保留全部断言与取消专项门，不改生产Java；20文件不扩面。
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
 new file mode 100644
 index 0000000..82756d5
@@ -748,13 +749,14 @@ index 0000000..5b8a415
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java
 new file mode 100644
-index 0000000..dd4b3d7
+index 0000000..1f0c756
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationRestTest.java
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,86 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.lang.reflect.Proxy;
++import java.time.Duration;
 +import java.util.List;
 +import java.util.Map;
 +import java.util.Set;
@@ -773,6 +775,7 @@ index 0000000..dd4b3d7
 +import org.junit.jupiter.api.AfterAll;
 +import org.junit.jupiter.api.BeforeAll;
 +import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Flux;
 +import reactor.core.publisher.Mono;
 +import reactor.core.scheduler.Schedulers;
 +
@@ -808,10 +811,10 @@ index 0000000..dd4b3d7
 +        var gate = AuthorizationEvaluationTest.gate(provider);
 +        provider.afterDecision = () -> provider.grants.set(Set.of("team.b"));
 +        var effects = new AtomicInteger();
-+        var response = Mono.from(filter(gate).doFilter(request(), ignored -> {
++        var response = Flux.from(filter(gate).doFilter(request(), ignored -> {
 +            effects.incrementAndGet();
 +            return Mono.just(HttpResponse.ok());
-+        })).block();
++        })).single().block(Duration.ofSeconds(10));
 +        assertThat(response.code()).isEqualTo(403);
 +        assertThat(effects.get()).isZero();
 +        assertThat(provider.begins.get()).isEqualTo(1);
@@ -824,13 +827,13 @@ index 0000000..dd4b3d7
 +        provider.grants.set(Set.of("team.a", "team.b"));
 +        var gate = AuthorizationEvaluationTest.gate(provider);
 +        var namespaces = new TypedNamespaceAccessControl(gate);
-+        var response = Mono.from(filter(gate).doFilter(request(), ignored -> io.kestra.core.repositories.AuthorizationEvaluationContext.<io.micronaut.http.MutableHttpResponse<?>>call(() -> {
++        var response = Flux.from(filter(gate).doFilter(request(), ignored -> io.kestra.core.repositories.AuthorizationEvaluationContext.<io.micronaut.http.MutableHttpResponse<?>>call(() -> {
 +            assertThat(provider.closes.get()).isZero();
 +            provider.grants.set(Set.of("other"));
 +            assertThat(namespaces.domain(QueryFilter.Resource.FLOW).exactNamespaces()).containsExactlyInAnyOrder("team.a", "team.b");
 +            assertThat(namespaces.domain(QueryFilter.Resource.EXECUTION).exactNamespaces()).containsExactlyInAnyOrder("team.a", "team.b");
 +            return HttpResponse.ok();
-+        }).subscribeOn(Schedulers.boundedElastic()))).block();
++        }).subscribeOn(Schedulers.boundedElastic()))).single().block(Duration.ofSeconds(10));
 +        assertThat(response.code()).isEqualTo(200);
 +        assertThat(provider.begins.get()).isEqualTo(1);
 +        assertThat(provider.closes.get()).isEqualTo(1);
