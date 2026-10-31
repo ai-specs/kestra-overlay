@@ -76,7 +76,19 @@ docker run -d --name "$PG" --label "owner=$OWNER" --label "run=$RUN" --network "
  --mount "type=volume,source=$VOLUME,target=/var/lib/postgresql" -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
 created_containers+=("$PG")
 owned_container "$PG"
-for attempt in $(seq 1 60); do if docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1; then break; fi; sleep 1; done
+PG_READY=0
+for attempt in $(seq 1 60); do
+ if docker exec "$PG" pg_isready -h 127.0.0.1 -U kestra -d kestra >/dev/null 2>&1 \
+  && [ "$(docker exec "$PG" psql -h 127.0.0.1 -X -U kestra -d kestra -At -v ON_ERROR_STOP=1 -c 'SELECT 1' 2>/dev/null)" = 1 ]; then
+  PG_READY=1
+  break
+ fi
+ sleep 1
+done
+if [ "$PG_READY" != 1 ]; then
+ echo 'FAIL: dependency503 PostgreSQL TCP readiness and SELECT 1 timed out after 60 attempts' >&2
+ exit 1
+fi
 docker exec "$PG" psql -U kestra -d kestra -v ON_ERROR_STOP=1 -c 'CREATE TABLE host_dependency503_probe(singleton BOOLEAN PRIMARY KEY, available BOOLEAN NOT NULL); INSERT INTO host_dependency503_probe VALUES(true,true);' >/dev/null
 CONFIG="$(cat <<YAML
 datasources:
