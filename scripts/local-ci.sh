@@ -71,8 +71,8 @@ python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/buil
 python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 
 echo "== executable jar =="
-(cd "$WORK/ui" && npm ci && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/extensions --reporter=default --reporter=json --outputFile=build/reports/ui-extension-tests.json)
+(cd "$WORK/ui" && npm ci && npm run translations:check && npm run build)
+(cd "$WORK/ui" && npm run test:unit -- src/utils/authentication.spec.ts src/oidc-setup-wait.spec.ts src/extensions --reporter=default --reporter=json --outputFile=build/reports/ui-extension-tests.json)
 python3 "$REPO/scripts/check-ui-extension-tests.py" "$WORK/ui/build/reports/ui-extension-tests.json"
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 (cd "$WORK" && ./gradlew executableJar --console=plain -x test -x check)

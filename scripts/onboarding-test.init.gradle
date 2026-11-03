@@ -1,0 +1,13 @@
+allprojects {
+    afterEvaluate {
+        if (path == ':webserver') {
+            tasks.named('test', Test).configure {
+                outputs.upToDateWhen { false }
+                outputs.doNotCacheIf('Browser runner and live HTTP evidence must execute') { true }
+                reports.junitXml.outputLocation = file(System.getenv('OIDC_ONBOARDING_TEST_OUTPUT') + '/xml')
+                reports.html.outputLocation = file(System.getenv('OIDC_ONBOARDING_TEST_OUTPUT') + '/html')
+                binaryResultsDirectory = file(System.getenv('OIDC_ONBOARDING_TEST_OUTPUT') + '/binary')
+            }
+        }
+    }
+}

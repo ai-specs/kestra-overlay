@@ -5,10 +5,10 @@
 # 触达上游文件: 23 个（宿主适配、查询 ACL、精确资源读取、dashboard 与自身探针）
 # 移除条件: 上游 OSS 提供等价宿主 typed operation 适配与查询授权执行入口
 diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-index f1d9fc873d1305227f25a726fafde2ed649dd1e1..a5def986a101595e87d76a2d6f787ad31f97c416 100644
+index f1d9fc873d1305227f25a726fafde2ed649dd1e1..6a59e4a09b3972c97519b003b147835081c44830 100644
 --- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 +++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-@@ -39,4 +39,57 @@ resourceDomains(resource).stream().noneMatch(term -> term.idScope() == ResourceD
+@@ -39,4 +39,56 @@ resourceDomains(resource).stream().noneMatch(term -> term.idScope() == ResourceD
              &&
   namespaceScope(resource).namespaceAllowed(namespace);
      }
@@ -60,12 +60,11 @@ index f1d9fc873d1305227f25a726fafde2ed649dd1e1..a5def986a101595e87d76a2d6f787ad3
 +            resourceIds = java.util.List.copyOf(resourceIds
 +);
 +    }
- }
++}
 +default java.util.List<ResourceDomain> resourceDomains(QueryFilter.Resource resource) {
 +        return java.util.List.of();
 +    }
-+}
-+
+ }
 diff --git a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
 index 4b7bfe444f34c5d02488114e2b56b14690aead3a..cb863211fde9ac7254767410704ff072f071b7e4 100644
 --- a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
@@ -652,7 +651,7 @@ index 78087d1477d66c920ecc960187dca51acb3df36b..94880596c227cdf30c4a46c1c37d20de
          return completeQuery && resource != null && resource.kind() != null && resource.scope() == RbacAuthorizer.Scope.TENANT
              && resource.tenant() != null && !resource.tenant().isBlank() && resource.namespace() == null && resource.id() == null
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
-index e4fc901a8d2790140fe22c1d70f70ca94ba9ceb3..1d6e8a0b7fc79373aca80d8f54b405956a911203 100644
+index b5a1560b55eab73d1cc98d2ebbbc35af5467a8f4..5ab134c58b0067ad037f2897026a491a38ccf34f 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 @@ -20,6 +20,7 @@ import reactor.core.publisher.Mono;

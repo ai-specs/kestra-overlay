@@ -620,3 +620,13 @@ outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
 `64c978d7e490ed7378b125a268bff56d19417295ceb53c0379ed0486ed2ff3c5`。
 新候选镜像门与 SDK949/几何64在独占 `final-candidate/` 目录重新执行；原报告保持
 原 image 绑定，不用于替代新候选结果。对应提交 CI、推广与正式发布仍须另行验证。
+
+## 首装事务参与者增量（2026-11-03，已接收，未发布）
+
+`OidcInitialAccountParticipantV1` 使用启动期发现的唯一 classpath bean，在宿主首个账号
+事务内借用同一连接初始化扩展。目录和 typed grants 留在插件；既有安装不补授。
+锁序为协议安全锁 → 首装锁 → 插件目录/策略锁 → 标准行锁；receipt 延至全部数据库
+写入成功后、commit 前创建。创建前回滚可重试，文件不确定状态仍锁存。
+缺 jar 仅刷新不能装载 Micronaut bean；补放后必须重启 JVM，setup 页仅自动等待服务
+恢复，不执行热加载或匿名重启。正常 jar 启动首装不重启。定稿与验收见
+`r-oidc-server.md` 的“首个账号事务参与者”节；本条不是发布证据。

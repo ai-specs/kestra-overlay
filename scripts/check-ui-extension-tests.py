@@ -5,6 +5,7 @@ import sys
 
 
 REQUIRED = {
+    "src/oidc-setup-wait.spec.ts": 4,
     "src/extensions/app-entry.spec.ts": 3,
     "src/extensions/entry.spec.ts": 36,
     "src/extensions/fallback-layout.spec.ts": 1,

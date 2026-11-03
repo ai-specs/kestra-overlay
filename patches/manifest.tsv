@@ -25,7 +25,7 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0132	0132-oidc-authentication-replacement.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 完整替换 Basic Auth UI/凭据/退出链;服务端验证认证状态,刷新与导航验收	13	新写;OIDC Core + RFC6749/7636/9110;2026-10-09 UI 认证例外	上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用
 0133	0133-oidc-first-install.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 首次引导/环境变量初始化;用户+bcrypt+UI client+数据库安装身份与独立凭据,删标记失败关闭/并发防重/CSRF/重启不覆盖	11	新写;OIDC Core+RFC6749/7636+OWASP CSRF+PG事务锁+持久化安装凭据	上游 OSS 提供等价 OIDC 首次安装与配置初始化或 R-OIDC-SERVER 弃用
 0134	0134-oidc-public-registration.patch	core	—（R-OIDC-SERVER 协议能力）	RFC7591 public client 动态注册;无secret+S256,开关/安全回调/元数据/并发注册总量限制	4	新写;RFC7591+OIDC Registration 1.0+RFC7636	上游 OSS 提供等价动态注册或 R-OIDC-SERVER 弃用
-0150	0150-oidc-owned-consent.patch	core	—（R-OIDC-SERVER patch 路线）	用户归属 pending→consent 原子绑定、scope收窄与旧client生命周期	16	公开机制在4b017f6通过CI39087229293并发布	上游 OSS 提供等价 owner/consent 生命周期或 R-OIDC-SERVER 弃用
+0150	0150-oidc-owned-consent.patch	core	—（R-OIDC-SERVER patch 路线）	用户归属 pending→consent 原子绑定、scope收窄与旧client生命周期	16	公开机制在4b017f6发布；setup构造注入锚由0390接管，顺序重放核对	上游 OSS 提供等价 owner/consent 生命周期或 R-OIDC-SERVER 弃用
 0160	0160-mcp-resource-bearer.patch	core	—（R-OIDC-SERVER/MCP认证面）	canonical MCP resource/audience、resource-bound code/token/refresh、Bearer、metadata、可信身份与缓存隔离；可信roles经认证/context传递	24	公开机制在4b017f6通过CI39087229293并发布	上游 OSS 提供等价 MCP OAuth2 资源认证或 R-OIDC-SERVER 弃用
 0170	0170-mcp-capability-authorizer.patch	core	ai-specs/kestra-plugin-rbac / MCP协议层	复合scope、typed授权、session隔离、runtime依赖计划、动态列表、安全诊断及同次MCP最小HTTP来源传播	18	原机制在4b017f6发布;异步来源修复本地12项定向测试通过;未发布	上游提供等价 MCP scope/执行授权或 R-EE-RBAC 衔接面弃用
 0180	0180-mcp-oauth-only.patch	core	—（MCP认证面）	MCP OAuth-only API/UI与非OIDC模式失败关闭	8	新写;维护者OAuth-only裁决	上游提供等价OAuth-only MCP或本需求弃用
@@ -34,9 +34,9 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0211	0211-oidc-pending-quota-status.patch	core	—（R-OIDC-SERVER）	pending quota明确429/非quotaDB故障503/PG并发饱和验收	2	新写;RFC7591+生产审计PG测试	上游提供等价注册quota错误语义或R-OIDC-SERVER弃用
 0220	0220-mcp-built-in-oidc-ui.patch	core	kestra-oidc-provider / MCP 管理 UI	MCP编辑页明确内置OIDC保护、隐藏外部provider空下拉、管理页不显示PWA安装横幅	3	手工适配;R-OIDC-SERVER UI例外	上游MCP UI原生表达内置OIDC且管理操作不被PWA横幅遮挡
 0230	0230-rbac-authorization-spi.patch	core	ai-specs/kestra-plugin-rbac	统一typed Authorizer/REST与MCP计划resolver、REST failclosed gate、roles/session/cache隔离、scope独立门与完整预授权	11	新写;R-EE-RBAC+Micronaut 4.10.26/security 4.15.2；首次改密精确路由修复以对应提交CI及推广为消费门	上游OSS提供等价统一授权SPI与失败关闭执行门
-0240	0240-exact-namespace-scope.patch	core	ai-specs/kestra-plugin-rbac	Exact与子树union、统一JDBC/log翻译、Namespace候选分页前过滤、MCP匹配与缓存兼容	7	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价Exact scope表达、统一查询翻译与Namespace候选过滤
-0250	0250-rbac-typed-operation-contract.patch	core	ai-specs/kestra-plugin-rbac	Versioned typed RBAC operation/query/aggregate contract、显式scope与交集、失败关闭执行门及专属探针	5	历史基础已发布；新增普通授权明确依赖503候选，兼容与完整本地门及两模式真实cookie503镜像门通过；对应提交CI和新正式发布待验证	上游提供等价稳定 typed 授权契约
-0260	0260-rbac-typed-host-adapter.patch	core	ai-specs/kestra-plugin-rbac	OSS matched route与实际owner适配、typed REST执行门、namespace/log查询ACL、精确资源读取、dashboard数据源授权与探针	23	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价typed适配及查询授权执行入口
+0240	0240-exact-namespace-scope.patch	core	ai-specs/kestra-plugin-rbac	Exact与子树union、统一JDBC/log翻译、Namespace候选分页前过滤、MCP匹配与缓存兼容	7	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价Exact scope表达、统一查询翻译与Namespace候选过滤；2026-11-03仅清理EOF空行，机制不变
+0250	0250-rbac-typed-operation-contract.patch	core	ai-specs/kestra-plugin-rbac	Versioned typed RBAC operation/query/aggregate contract、显式scope与交集、失败关闭执行门及专属探针	5	历史基础已发布；新增普通授权明确依赖503候选，兼容与完整本地门及两模式真实cookie503镜像门通过；对应提交CI和新正式发布待验证	上游提供等价稳定 typed 授权契约；2026-11-03仅清理EOF空行，机制不变
+0260	0260-rbac-typed-host-adapter.patch	core	ai-specs/kestra-plugin-rbac	OSS matched route与实际owner适配、typed REST执行门、namespace/log查询ACL、精确资源读取、dashboard数据源授权与探针	23	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价typed适配及查询授权执行入口；2026-11-03仅清理EOF空行，机制不变
 0261	0261-rbac-topology-query-scope.patch	core	ai-specs/kestra-plugin-rbac	依赖图SQL读取前对source/destination namespace应用已有ACL与H2探针	2	新写;R-EE-RBAC依赖图实际越权路径	上游OSS依赖图查询统一消费namespace ACL
 0270	0270-dashboard-query-authorization.patch	core	ai-specs/kestra-plugin-rbac	Dashboard实际查询前授权、KPI分子分母独立operation与SQL执行顺序探针	5	新写;typed KPI逐查询契约	上游OSS每个Dashboard实际查询提供等价授权激活点
 0280	0280-authorization-invocation-context.patch	core	ai-specs/kestra-plugin-rbac	HTTP来源传播、缺失上下文拒绝、宿主内部入口和queue标记与线程切换和真实H2探针	15	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价请求授权上下文传播和显式内部调用机制
@@ -57,3 +57,5 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0369	0369-system-theme-lifecycle.patch	core	ai-specs/kestra-plugin-rbac及宿主页面	通用主题生命周期跟随系统配色变化并卸载监听;显式主题不受影响	2	主控接收;前端64项通过;未发布	上游全局主题生命周期提供等价系统配色监听及清理
 0370	0370-oidc-protocol-projection.patch	core	ai-specs/kestra-plugin-rbac	只读应用组投影、标准协议及pending登记查询、事务锁与生命周期guard契约	7	5项纯契约及8项标准查询探针通过；职责迁移源码通过；真实数据库、HTTP及发布未通过	上游提供等价只读协议输入与标准身份生命周期公开机制
 0385	0385-public-favicon.patch	core	ai-specs/kestra-plugin-rbac及生产OIDC页面	精确GET/HEAD favicon真实静态映射归属判定及授权/失效会话激活	6	主控接收；HTTP红绿及完整本地、新镜像form/env各favicon26项通过；对应提交CI和正式发布待验证	上游OSS提供等价精确静态资源公开判定及全链认证回归
+0390	0390-oidc-initial-account-participant.patch	core	ai-specs/kestra-plugin-rbac	首个账号同连接事务参与者、receipt失败阶段重试、缺组件等待重启及配置UI selector合并	20	2026-11-03主控定稿；候选本地门通过，正式CI与发布待执行；翻译按0391单独验证	上游OSS提供等价同连接首装参与者、配置UI scope适配与安全失败重试机制
+0391	0391-oidc-onboarding-locales.patch	core	ai-specs/kestra-plugin-rbac及部署用户	首装12语言译文、中文实际文案及既有MCP缺译对齐	13	2026-11-03维护者允许直接翻译；新增132条及既有目录缺口修正；完整翻译检查通过；Ego/Chromium共21具名检查通过；正式CI待执行	上游提供等价首次安装本地化与内置OIDC文案

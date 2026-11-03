@@ -1,5 +1,130 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 2026-11-03 维护者翻译范围修订（当前优先状态）
+
+维护者明确允许直接翻译：中文和英文验证实际页面文案与交互，其他宿主语言仅检查
+key、非空值和插值参数，不要求翻译质量。Gemini不再是本次依赖，不要求提供API key。
+主控已实际补齐132条首装译文，并修正既有MCP缺译及3项过期源指纹；完整
+`npm run translations:check`通过（含编译与插值检查），没有修改或豁免检查规则。
+指纹由实际英文源计算，来源为直接编写，不声称Gemini生成。旧段落中的密钥阻塞
+仅为此前判断，已撤销。新输入尚需中文英文真实页面与产物复测，旧候选hash不能沿用。
+
+固定 BASE 的 `ui/scripts/translations/README.md` 规定非英文由 Gemini 生成、禁止手写。
+本次维护者明确裁定仅对本轮首装译文及既有 MCP 缺译采用直接编写例外；没有改写
+上游 README，没有调用 Gemini，也不把实际英文源指纹描述为 Gemini 生成证明。
+原有完整检查、编译检查和插值检查保持不变。其余语言的检查不代表人工翻译质量验收。
+
+### 同批浏览器 CI 门
+
+`scripts/onboarding-browser-cases.mjs` 是 Ego 与 CI Chromium 共用的 21 项顺序矩阵。
+它检查中英标题、等待文案、按钮、错误文案及交互，并保留四种主题、两种宽度和焦点检查。
+HTTP 服务使用本仓测试替身；`productionFirstInstallVerified=false`，不替代部署侧真实首装。
+`scripts/run-onboarding-browser.sh` 在 UI 与 executable 构建后运行，定向 HTTP 两项测试
+的 XML、HTML 和二进制报告写入独立目录，不覆盖完整后端矩阵。测试禁止缓存命中代替执行。
+CDP 诊断复用宿主 SDK 采集器，严格绑定请求与文档，仅允许两次字段错误提交对应的 400。
+未知 console、页面异常、请求失败、HTTP 错误和来源不明均使门失败；部分报告和截图保留。
+
+CI artifact 名称为 `onboarding-browser`，包含 `report.json`、`inputs.json`、
+`final-inputs.json`、诊断、HTTP 报告及失败截图。前后输入必须逐字节相等。
+`sourceCommit` 是 overlay 提交，不是上游 BASE；`patchsetSha256` 按字典序拼接每条
+`patch路径 + NUL + 文件SHA-256 + LF` 后计算。脚本哈希绑定共享 cases、runner、adapter、
+诊断规则、CDP 采集器、Gradle init、shell 入口、输入写入器和 checker。
+`uiAssets` 绑定实际测试 classpath 的独立认证入口和语言分块；英文内嵌于入口，中文为独立分块。
+正式发布仍要求对应提交的全部 CI 与镜像门成功，候选不得作为插件正式编译输入。
+
+
+## 首个账号事务参与者（2026-11-03，已接收，实施中，未发布）
+
+消费项目为 `kestra-plugin-rbac`。部署主控反馈空库 `/oidc/setup` 成功后插件目录和
+typed grants 未创建，首次授权返回 500；此前需离线 CLI 初始化。反馈尚未在本轮重测。
+按入口 B 接收最小公开参与者，按入口 C 修复已有首装事务的 receipt 时序；不迁入插件业务。
+`UserDirectoryV1/V2` 另有事务且不是首装回调；`TrustedIdentityV1/V2` 要求已认证主体；
+`ApplicationGroupProtocolProjectionV1/V2` 只读；`OidcProtocolStateV1.verifyInstallation`
+要求已完成安装；`IdentityLifecycleGuardV1/IdentityLifecycleParticipantV1` 面向已有身份
+变更，不能伪造匿名 actor。因此上述五类机制均不能代替首装参与者。
+
+公开 `io.kestra.webserver.oidc.OidcInitialAccountParticipantV1`：
+`initialize(Connection, InitialAccount) throws SQLException`；不可变上下文只含
+`issuer/installationId/configuredLoginClientId/subject`。值由宿主生成并验证，不接受表单
+角色、授权或 issuer。RBAC 与 application-groups 同时开启时，真正空安装必须有唯一
+参与者；缺失、重复、装配或执行异常失败关闭。关闭 RBAC 不调用；已有安装、已有用户
+兼容分支不补授旧账号。表单与环境变量 bootstrap 共用同一所有者事务。
+
+连接为宿主可写 READ_COMMITTED 事务；锁顺序为公开协议安全锁 1380073797 → 首装锁
+1330133 → 插件目录/策略锁 → 标准账号/client 行锁。参与者在标准写入前调用，负责自己的
+目录和 typed grants，不 commit/rollback/close，不另开连接或产生外部副作用。使用延迟
+BeanProvider，缺 jar 不阻断 JVM 启动；不调用要求安装已完成的 verifyInstallation。
+
+先校验配置与格式，再参与者初始化、标准账号/client/凭据/完成记录，最后 receipt.create
+及 commit。receipt 创建前且确认回滚的故障允许重新提交；部分文件、损坏或提交结果未知
+继续锁存，绝不自动删除凭据。原双凭据删除/不匹配拒绝保持不变。
+
+匿名写入口只有受 Origin/CSRF 保护的 POST `/oidc/setup`。缺参与者 GET 显示安全诊断与
+退避等待；补 jar 后须由部署侧重启 JVM，页面等待服务恢复并重新取得 CSRF，不存密码、
+不自动 POST、不提供匿名重启或插件初始化 API。正常带 jar 首装不需重启。
+真实浏览器首轮发现 setup filter 将独立认证 JS 重定向回 setup，导致翻译和等待脚本
+无法执行。修复只使规范 `/ui/assets/oidc-*.js` 的 GET/HEAD 不进入首装重定向，
+仍受原静态资源解析及认证/授权边界约束；其他资源、写方法和编码路径不获此例外。
+应用组模式为配置登录 OAuth2 client 自动追加 UI selector，保留其他显式 scopes，
+不改变外部 client 或关闭模式。页面复用独立认证主题和上游翻译加载图。
+
+测试使用宿主自有最小参与者：关闭零调用、缺失/重复及诊断、可信上下文、两种初始化、
+参与者/宿主写失败回滚与重试、并发单成功、历史不补授、CSRF/Origin/坏 body/404、
+receipt 故障锁存；真实浏览器检查等待/恢复、主题、中英文、窄屏和焦点。其他语言检查
+键、非空和插值；翻译生成及原有检查不能跳过。保留原 949/64 等门。
+本轮先做独占开发/重放树与有界定向门，不启动额外 PG；完整 local-ci 和独立镜像门由
+主控协调资源后执行。未运行检查不得计通过；禁止提交推送发布。
+
+以下为翻译修订前的历史阶段记录，本轮当前结果以本文开头与同批报告为准。
+
+有界本地结果：独占 `.work/onboarding-20261103/` 重放47补丁；定向后端45项通过，
+失败/跳过0，含新参与者12项真实PG与原首装13项。仅连接主控分配的独立测试数据库，
+未启动额外PG；测试基类可选 KESTRA_TEST_PG_URL/USER/PASSWORD，不设置时CI继续原
+Testcontainers路径，不按环境跳过。新增报告门要求这45项，UI原105项加等待4项共109项。
+真实Ego安全诊断/四主题/桌面窄屏/焦点/自动恢复14项通过，使用宿主最小服务替身恢复
+就绪状态，不证明真实补jar/JVM重启或插件生产首登。中文只验证原生语言偏好加载，
+新增中文文案未通过。初轮JS被setup重定向、焦点测试未进入键盘模式、测试进程信号
+未实时传达及后续SimpleHttpRequest修复的失败日志均保留，不计通过。
+翻译改动前基线已有3项stale与MCP语言缺口；新增11个英文源键，12种非英文生成及
+fingerprints缺GEMINI_API_KEY，未手工伪造，完整翻译检查仍失败。完整local-ci、镜像、
+SDK949/几何64及正式CI/发布尚未执行，不能宣称交付完成。
+
+完整local-ci追加授权后，首次外部测试库public残留导致非幂等迁移失败，原始299项中
+268通过、29失败、2镜像前置中止；第二轮全新schema运行438项，384通过、52失败、
+2中止，失败来自三个旧测试协作者直接访问未启动容器端口。已只将其连接统一到测试
+基类jdbcUrl/User/Password，不改业务断言；默认CI仍走原容器。两轮XML独立保留，
+第三轮用新schema重跑全部正式脚本，不拼接前轮通过报告。最终结果以同批报告为准。
+
+第三轮正式 `local-ci.sh` 在独占verify树完整执行，退出0：105份后端XML共438项，
+436通过、失败/错误0、2项原镜像专用前置中止；UI11文件109项全部通过。新增与原有
+精确数量门、完整UI构建、独立认证依赖图、executable和构建期零jar/Class-Path门通过。
+未将2项中止计通过；须由后续真实镜像执行。最终 executable SHA-256 为
+`f6bb41da9a8ee4ba776613598bb72e20edc6c84e1a9706279c8fc3514c7d789b`，含新SPI及
+`libs/kestra-rbac-authorizer.jar` manifest条目。当前0390为20文件，其中三个旧测试协作者
+只统一测试连接。47补丁触达346个源码文件与开发树逐字节一致；报告均保存于
+`.work/onboarding-20261103/local-ci-03-evidence/`。仅原PG容器持续运行，未启动额外PG、
+Ryuk或Compose。脚本ALL GREEN不能替代新增11×12翻译缺口、SDK949/几何64实际矩阵、
+镜像门、正式CI及发布；本阶段未建镜像、未提交推送发布。
+
+后续有界候选验收：本机arm64镜像
+`sha256:21e92461a5a36f3d2141be6c6257b22b6e07b93c36467e4ed55b81033c50d3f3`
+来自上述exe、原Dockerfile及固定IMAGE_BASE，未推送或推广。原classpath H2独立门、
+SDK949及几何64实际通过，源hash/静态输入/镜像公开SDK10文件绑定已复查。root暂停原PG
+保留卷后，按原OIDC→MCP→form→env串行执行，OIDC35通过，MCP四份各1项XML零跳过；
+最终form/env均含目录22、扩展7、主题26、已有登录/拒绝语言52、强改215、改密14、
+空资料26、favicon26、锁复查24与依赖503七项，全部完成。已有语言52不证明新增setup
+11×12文案完成。
+
+首次form整门末尾依赖503失败：旧本仓探针缺新首装参与者，bootstrap失败关闭，未取得
+JWT。失败目录完整保留；原trap已删临时服务，因此不伪称取得其日志。主控授权后仅给
+`scripts/tests/classpath-probe/Dependency503Probe.java` 补唯一参与者，验证issuer/client/
+subject/UUID及借用连接/安全锁，不建插件业务表；不改原凭据、脚本、断言或skip。
+新probe独立编译、Micronaut唯一性、6项负例及相关503两次七项通过，再完整重跑form/env，
+未拼接旧失败报告。宿主exe及SDK不变；后续服务日志由本owner采集脱敏留存。
+所有本机候选证据在 `.work/onboarding-20261103/candidate/`，总账stage-summary.json。
+自身容器/网络/卷已清理，保留候选image缓存；原PG由root恢复，本owner未操作原卷。
+该历史阶段新增翻译尚未通过；此阻塞已由0391解除。当前正式CI及发布仍未完成，候选不能作为插件正式编译输入。
+
 ## 普通授权依赖故障的明确503传播（2026-10-29，已接收，未发布）
 
 消费项目为`kestra-plugin-rbac`。部署主控round11重命名统一目录表后，生产管理GET
@@ -695,9 +820,9 @@ BASE 设计系统的必要颜色，不装载业务配置、身份或权限数据
 `scripts/auth-i18n-cases.mjs` 由本地与 CI 复用，核对全部 13 种语言在桌面和窄屏的
 实际文案、页面标题、语言标记和溢出。测试预期来自固定 BASE 的既有翻译，不作为产品资源。
 
-全量上游翻译检查另发现既有 MCP 定制键 `mcp.built_in_oidc_hint` 缺少非英文翻译，
+历史全量上游翻译检查曾发现既有 MCP 定制键 `mcp.built_in_oidc_hint` 缺少非英文翻译，
 且它与 `mcp.no_oauth_providers` 的生成指纹未同步。本次页面复用不新增此缺口；
-完整检查未通过不得表述为全量国际化检查通过。处理新增翻译需按上游生成机制执行。
+该历史缺口已随0391修正并通过完整检查；本轮直接翻译按本文开头的维护者例外执行。
 
 ## 1. 裁定记录（全部 2026-10-07，维护者）
 

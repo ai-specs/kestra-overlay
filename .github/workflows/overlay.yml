@@ -20,6 +20,8 @@ jobs:
         run: ./scripts/check-patches-fixture.sh
       - name: Executable manifest Class-Path harness regression tests
         run: python3 -m unittest discover -s scripts/tests -v
+      - name: Onboarding browser report gate regressions
+        run: node --test scripts/tests/check-onboarding-browser.test.mjs scripts/tests/onboarding-diagnostics.test.mjs
       - name: Verify thin patches apply cleanly on pinned BASE (no compile)
         run: ./scripts/build.sh --apply-only
   build-push:
@@ -70,6 +72,21 @@ jobs:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}
           RBAC_PROBE_OUTPUT: ${{ github.workspace }}/.work/host-extension-probe.jar
         run: bash ./scripts/blackbox-classpath.sh "${{ github.workspace }}/.work/verify" "${{ github.workspace }}/.work/verify/docker/app/kestra" "$CANDIDATE_IMAGE"
+      - name: Same21 onboarding browser cases through Chromium
+        env:
+          NODE_PATH: ${{ runner.temp }}/onboarding-browser/node_modules
+        run: |
+          npm install --prefix "$RUNNER_TEMP/onboarding-browser" playwright@1.61.1
+          "$RUNNER_TEMP/onboarding-browser/node_modules/.bin/playwright" install --with-deps chromium
+          bash scripts/run-onboarding-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/onboarding-browser"
+      - name: Preserve onboarding browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: onboarding-browser
+          path: .work/onboarding-browser/
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Preserve own-source inputs for the independent SDK browser job
         run: |
           mkdir -p .work/verify/sdk-ci-inputs

@@ -253,10 +253,10 @@ index 2ca4e4a071871b7a50962e9d48a39a951eb2e0a7..b4a147cd646614446f61583c725f23f2
          return PagedResults.of((ArrayListTotal<N>) namespaceSearchable.filter(allNamespaces, page, size, sort, filters));
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..41094d2e1bece7d2e02960a31009ea54404ae282
+index 0000000000000000000000000000000000000000..5f52cf63baa579ab38fc863aa8e6a4930f029bfc
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,157 @@
 +
 +package io.kestra.webserver.rbac;
 +
@@ -414,4 +414,3 @@ index 0000000000000000000000000000000000000000..41094d2e1bece7d2e02960a31009ea54
 +        }
 +    }
 +}
-+

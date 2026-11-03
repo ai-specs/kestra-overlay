@@ -1,0 +1,468 @@
+# 需求：REQ-0391 首次安装中文英文文案与上游语言目录对齐。
+# 消费扩展仓：ai-specs/kestra-plugin-rbac及零背景部署用户
+# 状态：core；直接翻译经维护者明确授权；中文英文需真实页面验证，其他语言仅键/非空/插值一致性，不声明Gemini生成。
+# 来源：维护者2026-11-03最新裁决；实际编写132条首装译文及修正既有MCP缺译；fingerprint由真实英文源计算。
+# 触达上游文件：12种非英文translations JSON及英文源fingerprints，共13文件。
+# 移除条件：上游提供等价首次安装本地化与MCP内置OIDC文案。
+diff --git a/ui/scripts/translations/fingerprints.json b/ui/scripts/translations/fingerprints.json
+index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27b1966185 100644
+--- a/ui/scripts/translations/fingerprints.json
++++ b/ui/scripts/translations/fingerprints.json
+@@ -921,6 +921,7 @@
+   "mcp|auth_type": "66880d2d8216",
+   "mcp|basic_auth": "f0a792cf36e6",
+   "mcp|bearer_token": "5c48c5679b6f",
++  "mcp|built_in_oidc_hint": "1026757859bb",
+   "mcp|client_setup": "4ba2b51d207d",
+   "mcp|connect_tab|auth_api_token_hint": "d3746cb933be",
+   "mcp|connect_tab|auth_basic_hint": "0ffeecfd762f",
+@@ -944,7 +945,7 @@
+   "mcp|instructions": "934652dce41d",
+   "mcp|main_tenant": "0d6e4079e367",
+   "mcp|managed_by_kestra": "2fdceed73c8e",
+-  "mcp|no_oauth_providers": "ef768a612e35",
++  "mcp|no_oauth_providers": "7ec71391371c",
+   "mcp|no_servers": "55437a872cd0",
+   "mcp|oauth": "27f8943c6eba",
+   "mcp|oauth_hint": "bc54a91c3914",
+@@ -1156,6 +1157,17 @@
+   "no_results|triggers": "a9140b65585f",
+   "no_tasks_running": "8a589a1720ad",
+   "of": "28391d3bc64e",
++  "oidcOnboarding|create": "798ca2ce18bf",
++  "oidcOnboarding|email": "6eea8608c452",
++  "oidcOnboarding|failed": "73530bd09f27",
++  "oidcOnboarding|invalid": "269a962d0ea1",
++  "oidcOnboarding|missing": "66e45799f66e",
++  "oidcOnboarding|name": "48b775163a1b",
++  "oidcOnboarding|rbac": "afb072a554e0",
++  "oidcOnboarding|restart": "7a86c03e1478",
++  "oidcOnboarding|retry": "fb7099ad8e81",
++  "oidcOnboarding|title": "cd65a4aabbcf",
++  "oidcOnboarding|waiting": "3fc154b953f5",
+   "ok": "565339bc4d33",
+   "onboarding|tour|actions|back": "76900f1bfd16",
+   "onboarding|tour|actions|dismiss": "33832e6712de",
+@@ -1937,6 +1949,7 @@
+   "triggers_tabs_manage": "5a23444828db",
+   "true": "3cbc87c7681f",
+   "type": "baaddf70fb5d",
++  "uiExtensions": "fe3436af86b4",
+   "unable to generate graph": "7f735a273899",
+   "undefined": "f02dfb7da82a",
+   "unlock": "4ac709aa58bc",
+@@ -1997,4 +2010,4 @@
+   "workerId": "283c035a5126",
+   "wrong labels": "f62b1e53b73f",
+   "yes": "85a39ab345d6"
+-}
+\ No newline at end of file
++}
+diff --git a/ui/src/translations/de.json b/ui/src/translations/de.json
+index a10ff7afa7290793d43f8d03bc4a24bb732a1d33..e52d18f7b714321bbd38c7ea1243dbe864a414a0 100644
+--- a/ui/src/translations/de.json
++++ b/ui/src/translations/de.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Fehlgeschlagen"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Kestra einrichten",
++      "name": "Anzeigename (optional)",
++      "email": "E-Mail (optional)",
++      "create": "Konto erstellen",
++      "rbac": "Die Zugriffskontrolle ist aktiviert. Beim Erstellen dieses Kontos wird auch die Erweiterung initialisiert.",
++      "missing": "Die Initialisierungskomponente ist nicht geladen. Laden Sie kestra-rbac-authorizer.jar aus der Plugin-CI nach deployment/libs/ (im Container /app/libs/) herunter und führen Sie docker compose restart kestra aus.",
++      "restart": "Die Erweiterungsdatei ist vorhanden, aber die Komponente ist nicht geladen. Prüfen Sie Version und Konfiguration und führen Sie docker compose restart kestra aus.",
++      "waiting": "Warten auf die Initialisierungskomponente. Diese Seite prüft automatisch erneut, auch während des Neustarts. Es wurde kein Konto erstellt.",
++      "retry": "Erneut prüfen",
++      "invalid": "Geben Sie gültige Kontodaten ein und konfigurieren Sie den UI-Client vor der Initialisierung.",
++      "failed": "Die Initialisierung wurde nicht normal abgeschlossen. Prüfen Sie erneut. Wenden Sie sich bei gesperrter Installation an den Betreiber; löschen Sie den Installationsnachweis nicht."
++    },
+     "setup": {
+       "login": "Anmelden",
+       "login_title": "Bei Kestra anmelden",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Unterstützte Scopes",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes, die im Protected-Resource-Metadata-Dokument dieses Servers angekündigt werden. Spezifikationskonforme MCP-Clients beschränken ihre Autorisierungsanfrage auf diese Liste. Leer lassen, um das Feld auszulassen und die vom IdP angekündigten Scopes zu verwenden.",
+-      "no_oauth_providers": "Keine OIDC-Anbieter in dieser Instanz konfiguriert",
++      "no_oauth_providers": "Keine externen OIDC-Anbieter in dieser Instanz konfiguriert",
++      "built_in_oidc_hint": "Durch den integrierten OIDC-Server dieser Instanz geschützt",
+       "delete_confirm": "Möchtest du diesen MCP-Server wirklich löschen?",
+       "no_servers": "Keine MCP-Server gefunden. Erstelle deinen ersten Server, um MCP-Tool-Trigger für externe AI-Agenten bereitzustellen.",
+       "server_id": "Server-ID",
+diff --git a/ui/src/translations/es.json b/ui/src/translations/es.json
+index e7af8bfaf38b95df06d156d57b6956cf3e0380e5..cc2f80b22d421d1e0f2062d944e5ade7362feaf8 100644
+--- a/ui/src/translations/es.json
++++ b/ui/src/translations/es.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Fallido"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Configurar Kestra",
++      "name": "Nombre para mostrar (opcional)",
++      "email": "Correo electrónico (opcional)",
++      "create": "Crear cuenta",
++      "rbac": "El control de acceso está activado. Al crear esta cuenta también se inicializa la extensión.",
++      "missing": "El componente de inicialización no está cargado. Descargue kestra-rbac-authorizer.jar desde el CI del complemento a deployment/libs/ (en el contenedor /app/libs/) y ejecute docker compose restart kestra.",
++      "restart": "El archivo existe, pero el componente no está disponible. Compruebe la versión y la configuración y ejecute docker compose restart kestra.",
++      "waiting": "Esperando el componente de inicialización. La página comprobará de nuevo automáticamente durante el reinicio. No se ha creado ninguna cuenta.",
++      "retry": "Comprobar de nuevo",
++      "invalid": "Introduzca datos de cuenta válidos y configure el cliente UI antes de inicializar.",
++      "failed": "La inicialización no terminó correctamente. Compruebe de nuevo antes de reintentar. Si está bloqueada, contacte con el operador; no elimine el comprobante de instalación."
++    },
+     "setup": {
+       "login": "Iniciar sesión",
+       "login_title": "Iniciar sesión en Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Scopes admitidos",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes anunciados en el documento Protected Resource Metadata de este servidor. Los clientes MCP que cumplen con la especificación limitan su solicitud de autorización a esta lista. Déjelo vacío para omitir el campo y dejar que los clientes utilicen los scopes anunciados por el IdP.",
+-      "no_oauth_providers": "No hay proveedores OIDC configurados en esta instancia",
++      "no_oauth_providers": "No hay proveedores OIDC externos configurados en esta instancia",
++      "built_in_oidc_hint": "Protegido por el servidor OIDC integrado de esta instancia",
+       "delete_confirm": "¿Está seguro de que desea eliminar este servidor MCP?",
+       "no_servers": "No se encontraron servidores MCP. Cree su primer servidor para exponer los triggers de la herramienta MCP a agentes de IA externos.",
+       "server_id": "ID del servidor",
+diff --git a/ui/src/translations/fr.json b/ui/src/translations/fr.json
+index 1b229eb6932b4fe7a7f3e351b72ca911eff7e34d..d1690243b6968deb46981aa32d1508f6597e9b45 100644
+--- a/ui/src/translations/fr.json
++++ b/ui/src/translations/fr.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Échoué"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Configurer Kestra",
++      "name": "Nom d’affichage (facultatif)",
++      "email": "Adresse e-mail (facultative)",
++      "create": "Créer un compte",
++      "rbac": "Le contrôle d’accès est activé. La création de ce compte initialise aussi l’extension.",
++      "missing": "Le composant d’initialisation n’est pas chargé. Téléchargez kestra-rbac-authorizer.jar depuis la CI du plugin dans deployment/libs/ (dans le conteneur /app/libs/), puis exécutez docker compose restart kestra.",
++      "restart": "Le fichier existe, mais le composant n’est pas disponible. Vérifiez la version et la configuration, puis exécutez docker compose restart kestra.",
++      "waiting": "En attente du composant d’initialisation. Cette page vérifiera automatiquement pendant le redémarrage. Aucun compte n’a été créé.",
++      "retry": "Vérifier à nouveau",
++      "invalid": "Saisissez des informations valides et configurez le client UI avant l’initialisation.",
++      "failed": "L’initialisation ne s’est pas terminée normalement. Vérifiez avant de réessayer. Si elle est verrouillée, contactez l’opérateur ; ne supprimez pas le justificatif d’installation."
++    },
+     "setup": {
+       "login": "Connexion",
+       "login_title": "Connectez-vous à Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Scopes pris en charge",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes annoncés dans le document Protected Resource Metadata de ce serveur. Les clients MCP conformes à la spécification limitent leur requête d'autorisation à cette liste. Laissez vide pour omettre le champ et laisser les clients utiliser les scopes annoncés par l'IdP.",
+-      "no_oauth_providers": "Aucun fournisseur OIDC configuré dans cette instance",
++      "no_oauth_providers": "Aucun fournisseur OIDC externe configuré dans cette instance",
++      "built_in_oidc_hint": "Protégé par le serveur OIDC intégré de cette instance",
+       "delete_confirm": "Êtes-vous sûr de vouloir supprimer ce serveur MCP ?",
+       "no_servers": "Aucun serveur MCP trouvé. Créez votre premier serveur pour exposer les triggers MCP Tool aux agents IA externes.",
+       "server_id": "ID du serveur",
+diff --git a/ui/src/translations/hi.json b/ui/src/translations/hi.json
+index 2acbb45e8ef2398c9796a3b57fa6db9bedc37319..31dd181fa5a682966fec7541af51983de91ef007 100644
+--- a/ui/src/translations/hi.json
++++ b/ui/src/translations/hi.json
+@@ -1972,6 +1972,19 @@
+         "failed": "विफल"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Kestra सेट अप करें",
++      "name": "प्रदर्शित नाम (वैकल्पिक)",
++      "email": "ईमेल (वैकल्पिक)",
++      "create": "खाता बनाएँ",
++      "rbac": "पहुँच नियंत्रण सक्षम है। यह खाता बनाने पर एक्सटेंशन भी प्रारंभ होगा।",
++      "missing": "आरंभीकरण घटक लोड नहीं हुआ है। प्लगइन CI से संगत kestra-rbac-authorizer.jar को deployment/libs/ (कंटेनर में /app/libs/) में रखें और docker compose restart kestra चलाएँ।",
++      "restart": "फ़ाइल मौजूद है, लेकिन घटक उपलब्ध नहीं है। संस्करण और कॉन्फ़िगरेशन जाँचें, फिर docker compose restart kestra चलाएँ।",
++      "waiting": "आरंभीकरण घटक की प्रतीक्षा है। पुनरारंभ के दौरान भी पेज अपने आप दोबारा जाँच करेगा। अभी कोई खाता नहीं बनाया गया है।",
++      "retry": "दोबारा जाँचें",
++      "invalid": "मान्य खाता जानकारी दें और आरंभीकरण से पहले UI क्लाइंट कॉन्फ़िगर करें।",
++      "failed": "आरंभीकरण सामान्य रूप से पूरा नहीं हुआ। दोबारा प्रयास से पहले जाँचें। स्थापना लॉक हो तो ऑपरेटर से संपर्क करें; स्थापना प्रमाण फ़ाइल न हटाएँ।"
++    },
+     "setup": {
+       "login": "लॉगिन",
+       "login_title": "Kestra में साइन इन करें",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "समर्थित scopes",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "इस सर्वर के Protected Resource Metadata दस्तावेज़ में विज्ञापित scopes। स्पेक-अनुपालक MCP क्लाइंट अपनी प्राधिकरण अनुरोध को इस सूची तक सीमित करते हैं। फ़ील्ड को छोड़ने और क्लाइंट को IdP के विज्ञापित scopes पर वापस जाने देने के लिए खाली छोड़ें।",
+-      "no_oauth_providers": "इस इंस्टेंस में कोई OIDC प्रदाता कॉन्फ़िगर नहीं है",
++      "no_oauth_providers": "इस इंस्टेंस में कोई बाहरी OIDC प्रदाता कॉन्फ़िगर नहीं है",
++      "built_in_oidc_hint": "इस इंस्टेंस के अंतर्निहित OIDC सर्वर द्वारा सुरक्षित",
+       "delete_confirm": "क्या आप वाकई इस MCP सर्वर को हटाना चाहते हैं?",
+       "no_servers": "कोई MCP सर्वर नहीं मिला। बाहरी AI एजेंट्स के लिए MCP Tool triggers को एक्सपोज़ करने के लिए अपना पहला सर्वर बनाएं।",
+       "server_id": "सर्वर ID",
+diff --git a/ui/src/translations/it.json b/ui/src/translations/it.json
+index 35cf020cab3be471c260bc26c9666a18b8cfb765..e31ebb63402b479bf8ff2c462d836d8cd4e9fd8f 100644
+--- a/ui/src/translations/it.json
++++ b/ui/src/translations/it.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Fallito"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Configura Kestra",
++      "name": "Nome visualizzato (facoltativo)",
++      "email": "Email (facoltativa)",
++      "create": "Crea account",
++      "rbac": "Il controllo degli accessi è attivo. La creazione di questo account inizializza anche l’estensione.",
++      "missing": "Il componente di inizializzazione non è caricato. Scarica kestra-rbac-authorizer.jar dal CI del plugin in deployment/libs/ (nel contenitore /app/libs/) ed esegui docker compose restart kestra.",
++      "restart": "Il file esiste, ma il componente non è disponibile. Verifica versione e configurazione ed esegui docker compose restart kestra.",
++      "waiting": "In attesa del componente. La pagina controllerà automaticamente anche durante il riavvio. Nessun account è stato creato.",
++      "retry": "Controlla di nuovo",
++      "invalid": "Inserisci dati validi e configura il client UI prima di inizializzare.",
++      "failed": "L’inizializzazione non è terminata normalmente. Controlla prima di riprovare. Se è bloccata, contatta il gestore; non eliminare la ricevuta di installazione."
++    },
+     "setup": {
+       "login": "Accedi",
+       "login_title": "Accedi a Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Scope supportati",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scope pubblicizzati nel documento Protected Resource Metadata di questo server. I client MCP conformi alle specifiche limitano la richiesta di autorizzazione a questo elenco. Lasciare vuoto per omettere il campo e consentire ai client di utilizzare gli scope pubblicizzati dall'IdP.",
+-      "no_oauth_providers": "Nessun provider OIDC configurato in questa istanza",
++      "no_oauth_providers": "Nessun provider OIDC esterno configurato in questa istanza",
++      "built_in_oidc_hint": "Protetto dal server OIDC integrato di questa istanza",
+       "delete_confirm": "Sei sicuro di voler eliminare questo server MCP?",
+       "no_servers": "Nessun server MCP trovato. Crea il tuo primo server per esporre i trigger dello strumento MCP agli agenti AI esterni.",
+       "server_id": "ID server",
+diff --git a/ui/src/translations/ja.json b/ui/src/translations/ja.json
+index e4c02a37b0888d1b8b9b9024a158a3ad872afca5..1145fe998533f18a2a0ad47d9f3177e7b73814dd 100644
+--- a/ui/src/translations/ja.json
++++ b/ui/src/translations/ja.json
+@@ -1972,6 +1972,19 @@
+         "failed": "失敗"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Kestra の設定",
++      "name": "表示名（任意）",
++      "email": "メールアドレス（任意）",
++      "create": "アカウントを作成",
++      "rbac": "アクセス制御が有効です。このアカウントの作成時に拡張機能も初期化されます。",
++      "missing": "初期化コンポーネントが読み込まれていません。プラグイン CI から互換性のある kestra-rbac-authorizer.jar を deployment/libs/（コンテナー内 /app/libs/）に配置し、docker compose restart kestra を実行してください。",
++      "restart": "ファイルはありますがコンポーネントを利用できません。バージョンと設定を確認し、docker compose restart kestra を実行してください。",
++      "waiting": "初期化コンポーネントを待っています。再起動中も自動的に再確認します。アカウントはまだ作成されていません。",
++      "retry": "再確認",
++      "invalid": "有効なアカウント情報を入力し、初期化前に UI クライアントを設定してください。",
++      "failed": "初期化が正常に完了しませんでした。再試行前に再確認してください。ロックされている場合は管理者に連絡し、インストール証明を削除しないでください。"
++    },
+     "setup": {
+       "login": "ログイン",
+       "login_title": "Kestraにサインイン",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "サポートされているscope",
+       "scopes_supported_placeholder": "openid、profile、email",
+       "scopes_supported_hint": "このサーバーのProtected Resource Metadataドキュメントに記載されたscope。仕様準拠のMCPクライアントは認可リクエストをこのリストに制限します。フィールドを省略してクライアントがIdPの公開scopeにフォールバックできるよう空のままにしてください。",
+-      "no_oauth_providers": "このインスタンスにOIDCプロバイダーが設定されていません",
++      "no_oauth_providers": "このインスタンスに外部 OIDC プロバイダーが設定されていません",
++      "built_in_oidc_hint": "このインスタンスの内蔵 OIDC サーバーで保護されています",
+       "delete_confirm": "このMCPサーバーを削除してもよろしいですか？",
+       "no_servers": "MCPサーバーが見つかりません。最初のサーバーを作成して、MCP Tool triggerを外部AIエージェントに公開してください。",
+       "server_id": "サーバー ID",
+diff --git a/ui/src/translations/ko.json b/ui/src/translations/ko.json
+index 05f854a44012723f62c4823735aa3f6668c3be1f..cbd7f15067a1a6cb906a922887ca15de2f141a60 100644
+--- a/ui/src/translations/ko.json
++++ b/ui/src/translations/ko.json
+@@ -1972,6 +1972,19 @@
+         "failed": "실패"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Kestra 설정",
++      "name": "표시 이름(선택 사항)",
++      "email": "이메일(선택 사항)",
++      "create": "계정 만들기",
++      "rbac": "접근 제어가 활성화되었습니다. 이 계정을 만들면 확장 기능도 초기화됩니다.",
++      "missing": "초기화 구성 요소가 로드되지 않았습니다. 플러그인 CI에서 호환되는 kestra-rbac-authorizer.jar를 deployment/libs/(컨테이너 /app/libs/)에 배치하고 docker compose restart kestra를 실행하세요.",
++      "restart": "파일은 있지만 구성 요소를 사용할 수 없습니다. 버전과 설정을 확인하고 docker compose restart kestra를 실행하세요.",
++      "waiting": "초기화 구성 요소를 기다리는 중입니다. 재시작 중에도 자동으로 확인합니다. 계정은 아직 생성되지 않았습니다.",
++      "retry": "다시 확인",
++      "invalid": "유효한 계정 정보를 입력하고 초기화 전에 UI 클라이언트를 구성하세요.",
++      "failed": "초기화가 정상적으로 완료되지 않았습니다. 재시도 전에 확인하세요. 설치가 잠겼다면 관리자에게 문의하고 설치 증명 파일을 삭제하지 마세요."
++    },
+     "setup": {
+       "login": "로그인",
+       "login_title": "Kestra에 로그인",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "지원되는 scope",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "이 서버의 Protected Resource Metadata 문서에 공개된 scope. 사양을 준수하는 MCP 클라이언트는 이 목록으로 인증 요청을 제한합니다. 필드를 생략하고 클라이언트가 IdP의 공개 scope로 대체할 수 있도록 비워 두세요.",
+-      "no_oauth_providers": "이 인스턴스에 구성된 OIDC 공급자가 없습니다",
++      "no_oauth_providers": "이 인스턴스에 외부 OIDC 공급자가 구성되지 않았습니다",
++      "built_in_oidc_hint": "이 인스턴스의 내장 OIDC 서버로 보호됩니다",
+       "delete_confirm": "이 MCP 서버를 삭제하시겠습니까?",
+       "no_servers": "MCP 서버를 찾을 수 없습니다. 외부 AI 에이전트에 MCP Tool trigger를 노출하기 위해 첫 번째 서버를 생성하세요.",
+       "server_id": "서버 ID",
+diff --git a/ui/src/translations/pl.json b/ui/src/translations/pl.json
+index 41c9923fa4bde75df456c42d0cb7ed240c6fe78b..346f4f89b66ce73f20c9ec26616d870ce068501c 100644
+--- a/ui/src/translations/pl.json
++++ b/ui/src/translations/pl.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Nieudane"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Skonfiguruj Kestra",
++      "name": "Nazwa wyświetlana (opcjonalnie)",
++      "email": "E-mail (opcjonalnie)",
++      "create": "Utwórz konto",
++      "rbac": "Kontrola dostępu jest włączona. Utworzenie konta zainicjuje także rozszerzenie.",
++      "missing": "Składnik inicjalizacji nie jest załadowany. Pobierz zgodny kestra-rbac-authorizer.jar z CI wtyczki do deployment/libs/ (w kontenerze /app/libs/) i uruchom docker compose restart kestra.",
++      "restart": "Plik istnieje, ale składnik nie jest dostępny. Sprawdź wersję i konfigurację, a następnie uruchom docker compose restart kestra.",
++      "waiting": "Oczekiwanie na składnik inicjalizacji. Strona sprawdzi ponownie automatycznie podczas restartu. Konto nie zostało utworzone.",
++      "retry": "Sprawdź ponownie",
++      "invalid": "Podaj poprawne dane konta i skonfiguruj klienta UI przed inicjalizacją.",
++      "failed": "Inicjalizacja nie zakończyła się prawidłowo. Sprawdź przed ponowieniem. Jeśli instalacja jest zablokowana, skontaktuj się z operatorem; nie usuwaj potwierdzenia instalacji."
++    },
+     "setup": {
+       "login": "Zaloguj się",
+       "login_title": "Zaloguj się do Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Obsługiwane scope'y",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scope'y ogłaszane w dokumencie Protected Resource Metadata tego serwera. Klienty MCP zgodne ze specyfikacją ograniczają swoje żądanie autoryzacji do tej listy. Pozostaw puste, aby pominąć to pole i pozwolić klientom skorzystać ze scope'ów ogłaszanych przez IdP.",
+-      "no_oauth_providers": "Brak skonfigurowanych dostawców OIDC w tej instancji",
++      "no_oauth_providers": "W tej instancji nie skonfigurowano zewnętrznych dostawców OIDC",
++      "built_in_oidc_hint": "Chronione przez wbudowany serwer OIDC tej instancji",
+       "delete_confirm": "Czy na pewno chcesz usunąć ten serwer MCP?",
+       "no_servers": "Nie znaleziono serwerów MCP. Utwórz swój pierwszy serwer, aby udostępnić Triggery MCP Tool zewnętrznym agentom AI.",
+       "server_id": "ID serwera",
+diff --git a/ui/src/translations/pt.json b/ui/src/translations/pt.json
+index ffd94279df144c776262e2abd800e3fdb45d5d7d..e0ba61f03be063142668b32a4f2c5e787df86c5d 100644
+--- a/ui/src/translations/pt.json
++++ b/ui/src/translations/pt.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Falhou"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Configurar Kestra",
++      "name": "Nome de apresentação (opcional)",
++      "email": "Email (opcional)",
++      "create": "Criar conta",
++      "rbac": "O controlo de acesso está ativo. Criar esta conta também inicializa a extensão.",
++      "missing": "O componente de inicialização não está carregado. Transfira kestra-rbac-authorizer.jar do CI do plugin para deployment/libs/ (no contentor /app/libs/) e execute docker compose restart kestra.",
++      "restart": "O ficheiro existe, mas o componente não está disponível. Verifique a versão e a configuração e execute docker compose restart kestra.",
++      "waiting": "A aguardar o componente de inicialização. A página verificará automaticamente durante o reinício. Não foi criada nenhuma conta.",
++      "retry": "Verificar novamente",
++      "invalid": "Introduza dados válidos e configure o cliente UI antes da inicialização.",
++      "failed": "A inicialização não terminou normalmente. Verifique antes de tentar novamente. Se estiver bloqueada, contacte o operador; não elimine o comprovativo de instalação."
++    },
+     "setup": {
+       "login": "Login",
+       "login_title": "Entrar no Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Scopes suportados",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes anunciados no documento Protected Resource Metadata deste servidor. Clientes MCP conformes com a especificação restringem o pedido de autorização a esta lista. Deixe vazio para omitir o campo e deixar os clientes recorrerem aos scopes anunciados pelo IdP.",
+-      "no_oauth_providers": "Nenhum provedor OIDC configurado nesta instância",
++      "no_oauth_providers": "Não há fornecedores OIDC externos configurados nesta instância",
++      "built_in_oidc_hint": "Protegido pelo servidor OIDC integrado desta instância",
+       "delete_confirm": "Tem certeza de que deseja excluir este servidor MCP?",
+       "no_servers": "Nenhum servidor MCP encontrado. Crie seu primeiro servidor para expor triggers da ferramenta MCP a agentes de IA externos.",
+       "server_id": "ID do servidor",
+diff --git a/ui/src/translations/pt_BR.json b/ui/src/translations/pt_BR.json
+index 52271c23b9e7d1e8f3b8d7eee81d2db3c8d77c3c..8c84c2d0b4be47d76572b15cc85f14b8a2b7272a 100644
+--- a/ui/src/translations/pt_BR.json
++++ b/ui/src/translations/pt_BR.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Falhou"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Configurar Kestra",
++      "name": "Nome de exibição (opcional)",
++      "email": "E-mail (opcional)",
++      "create": "Criar conta",
++      "rbac": "O controle de acesso está ativado. Criar esta conta também inicializa a extensão.",
++      "missing": "O componente de inicialização não foi carregado. Baixe kestra-rbac-authorizer.jar do CI do plugin para deployment/libs/ (no contêiner /app/libs/) e execute docker compose restart kestra.",
++      "restart": "O arquivo existe, mas o componente não está disponível. Verifique a versão e a configuração e execute docker compose restart kestra.",
++      "waiting": "Aguardando o componente de inicialização. A página verificará automaticamente durante a reinicialização. Nenhuma conta foi criada.",
++      "retry": "Verificar novamente",
++      "invalid": "Informe dados válidos e configure o cliente UI antes da inicialização.",
++      "failed": "A inicialização não terminou normalmente. Verifique antes de tentar novamente. Se estiver bloqueada, contate o operador; não exclua o comprovante de instalação."
++    },
+     "setup": {
+       "login": "Login",
+       "login_title": "Entrar no Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Scopes suportados",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes divulgados no documento Protected Resource Metadata deste servidor. Clientes MCP em conformidade com a especificação restringem sua solicitação de autorização a esta lista. Deixe vazio para omitir o campo e deixar os clientes recorrerem aos scopes divulgados pelo IdP.",
+-      "no_oauth_providers": "Nenhum provedor OIDC configurado nesta instância",
++      "no_oauth_providers": "Nenhum provedor OIDC externo configurado nesta instância",
++      "built_in_oidc_hint": "Protegido pelo servidor OIDC integrado desta instância",
+       "delete_confirm": "Tem certeza de que deseja excluir este servidor MCP?",
+       "no_servers": "Nenhum servidor MCP encontrado. Crie seu primeiro servidor para expor triggers da ferramenta MCP a agentes de IA externos.",
+       "server_id": "ID do servidor",
+diff --git a/ui/src/translations/ru.json b/ui/src/translations/ru.json
+index bdc97daa3973442d6bafadabd0a06d20a9719b67..98d2fe6b5b8bcc08375972c4712f596bbea66cbd 100644
+--- a/ui/src/translations/ru.json
++++ b/ui/src/translations/ru.json
+@@ -1972,6 +1972,19 @@
+         "failed": "Ошибка"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "Настройка Kestra",
++      "name": "Отображаемое имя (необязательно)",
++      "email": "Электронная почта (необязательно)",
++      "create": "Создать учётную запись",
++      "rbac": "Контроль доступа включён. Создание этой учётной записи также инициализирует расширение.",
++      "missing": "Компонент инициализации не загружен. Загрузите совместимый kestra-rbac-authorizer.jar из CI плагина в deployment/libs/ (в контейнере /app/libs/) и выполните docker compose restart kestra.",
++      "restart": "Файл существует, но компонент недоступен. Проверьте версию и настройки, затем выполните docker compose restart kestra.",
++      "waiting": "Ожидание компонента инициализации. Страница автоматически повторит проверку при перезапуске. Учётная запись ещё не создана.",
++      "retry": "Проверить снова",
++      "invalid": "Введите корректные данные и настройте клиент UI перед инициализацией.",
++      "failed": "Инициализация не завершилась нормально. Проверьте состояние перед повторной попыткой. Если установка заблокирована, обратитесь к оператору; не удаляйте подтверждение установки."
++    },
+     "setup": {
+       "login": "Войти",
+       "login_title": "Войти в Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "Поддерживаемые scopes",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "Scopes, объявленные в документе Protected Resource Metadata этого сервера. MCP-клиенты, соответствующие спецификации, ограничивают запрос авторизации этим списком. Оставьте пустым, чтобы пропустить поле и позволить клиентам использовать scopes, объявленные IdP.",
+-      "no_oauth_providers": "В этом экземпляре не настроены OIDC-провайдеры",
++      "no_oauth_providers": "В этом экземпляре не настроены внешние провайдеры OIDC",
++      "built_in_oidc_hint": "Защищено встроенным сервером OIDC этого экземпляра",
+       "delete_confirm": "Вы уверены, что хотите удалить этот MCP сервер?",
+       "no_servers": "Серверы MCP не найдены. Создайте первый сервер, чтобы предоставить триггеры MCP Tool внешним AI-агентам.",
+       "server_id": "ID сервера",
+diff --git a/ui/src/translations/zh_CN.json b/ui/src/translations/zh_CN.json
+index a3e62bd65c7a9ff2ced16062fe9e4fac6d727234..0585f669341bbd73665a7d8a66d63b491e81cc0e 100644
+--- a/ui/src/translations/zh_CN.json
++++ b/ui/src/translations/zh_CN.json
+@@ -1972,6 +1972,19 @@
+         "failed": "失败"
+       }
+     },
++    "oidcOnboarding": {
++      "title": "设置 Kestra",
++      "name": "显示名称（可选）",
++      "email": "邮箱（可选）",
++      "create": "创建账号",
++      "rbac": "已启用细粒度访问控制。创建此账号时，将自动初始化应用组及权限。",
++      "missing": "初始化组件尚未装载。请从插件 CI 下载兼容的 kestra-rbac-authorizer.jar，放入 deployment/libs/（容器挂载路径 /app/libs/），然后运行 docker compose restart kestra 重启。仅放置文件不会装载组件。",
++      "restart": "扩展文件已存在，但初始化组件尚不可用。请检查插件版本和配置，然后运行 docker compose restart kestra。仅刷新页面不能装载 Java 组件。",
++      "waiting": "正在等待初始化组件，页面会自动检查，包括等待 Kestra 重启恢复。尚未创建账号。",
++      "retry": "重新检查",
++      "invalid": "请填写有效的账号信息，并在初始化前配置 UI 客户端。",
++      "failed": "初始化未正常完成。请先重新检查，再决定是否重试。若安装已锁定，请联系部署维护者，不要删除安装凭据。"
++    },
+     "setup": {
+       "login": "登录",
+       "login_title": "登录 Kestra",
+@@ -2305,7 +2318,8 @@
+       "scopes_supported": "支持的 scope",
+       "scopes_supported_placeholder": "openid, profile, email",
+       "scopes_supported_hint": "此服务器 Protected Resource Metadata 文档中公告的 scope。符合规范的 MCP 客户端将其授权请求限制为此列表。留空以省略该字段，让客户端回退到 IdP 公告的 scope。",
+-      "no_oauth_providers": "此实例中未配置 OIDC 提供商",
++      "no_oauth_providers": "此实例未配置外部 OIDC 提供商",
++      "built_in_oidc_hint": "由此实例的内置 OIDC 服务器保护",
+       "delete_confirm": "您确定要删除此MCP服务器吗？",
+       "no_servers": "未找到MCP服务器。创建您的第一个服务器以向外部AI代理公开MCP Tool triggers。",
+       "server_id": "服务器 ID",

@@ -3,7 +3,19 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
+INITIAL_ACCOUNT_REQUIRED = {
+    "io.kestra.webserver.oidc.OidcInitialAccountContractTest": 2,
+    "io.kestra.webserver.oidc.OidcUiClientScopesTest": 4,
+    "io.kestra.webserver.oidc.OidcInitialAccountPageTest": 6,
+    "io.kestra.webserver.oidc.OidcInitialAccountPostgresTest": 12,
+    "io.kestra.webserver.oidc.OidcInitialAccountHttpTest": 2,
+    "io.kestra.webserver.oidc.OidcSetupServiceTest": 13,
+    "io.kestra.webserver.oidc.OidcSetupControllerTest": 4,
+    "io.kestra.webserver.oidc.OidcInstallationReceiptTest": 2,
+}
+
 REQUIRED = {
+    **INITIAL_ACCOUNT_REQUIRED,
     "io.kestra.webserver.oidc.AuthorizationIdentityClassificationTest": 5,
     "io.kestra.webserver.rbac.AuthorizationUnavailableHttpTest": 2,
     "io.kestra.webserver.rbac.AuthorizationUnavailableBoundaryTest": 2,
@@ -45,8 +57,8 @@ REQUIRED = {
 }
 
 
-def check(results):
-    for suite, expected in REQUIRED.items():
+def check(results, required=None):
+    for suite, expected in (REQUIRED if required is None else required).items():
         path = results / f"TEST-{suite}.xml"
         if not path.is_file():
             raise SystemExit(f"FAIL: missing required report: {suite}")
@@ -59,4 +71,9 @@ def check(results):
 
 
 if __name__ == "__main__":
-    check(pathlib.Path(sys.argv[1]))
+    if len(sys.argv) == 3 and sys.argv[2] == "--initial-account-only":
+        check(pathlib.Path(sys.argv[1]), INITIAL_ACCOUNT_REQUIRED)
+    elif len(sys.argv) == 2:
+        check(pathlib.Path(sys.argv[1]))
+    else:
+        raise SystemExit("Usage: check-application-project-tests.py RESULTS [--initial-account-only]")

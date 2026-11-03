@@ -372,3 +372,12 @@ outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
 `64c978d7e490ed7378b125a268bff56d19417295ceb53c0379ed0486ed2ff3c5`。
 新候选镜像门与 SDK949/几何64在独占 `final-candidate/` 目录重新执行；原报告保持
 原 image 绑定，不用于替代新候选结果。对应提交 CI、推广与正式发布仍须另行验证。
+
+## 2026-11-03 首装机制接收增量（实施中，未发布）
+
+归属 S6/S8、R-OIDC-SERVER 与 R-EE-RBAC，消费项目 `kestra-plugin-rbac`。
+空库 setup 成功却未建立插件目录/typed grants 的反馈，接收通用首个账号同连接参与者；
+插件业务不入宿主。按入口 C 修复 receipt 提前写入导致常规事务失败无法重试的时序，
+保留双凭据失败关闭。缺 jar 补放需 JVM 重启，页面自动等待；配置登录 client 自动追加
+应用组 selector，不影响其他 client。契约、锁序、兼容和独立测试见 r-oidc-server.md
+同日接收节；完整门与正式发布尚未执行。

@@ -257,6 +257,7 @@ index 0000000000000000000000000000000000000000..c684ab936f7839d22191174962873829
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 new file mode 100644
+index 0000000000000000000000000000000000000000..12070e1017743e2d746e53ce86f3f5ef1ad45b12
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 @@ -0,0 +1,37 @@
@@ -315,10 +316,10 @@ index 0000000000000000000000000000000000000000..213990f643e49b1c99bd09068635daf2
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..30ef4b73f5d3adbe77f8ec44ec042cd4a3a43bec
+index 0000000000000000000000000000000000000000..42f90ee0b321d7fd736496431e80479648d14bb0
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,123 @@
 +package io.kestra.webserver.rbac
 +;
 +
@@ -442,7 +443,6 @@ index 0000000000000000000000000000000000000000..30ef4b73f5d3adbe77f8ec44ec042cd4
 +        assertThat(tenant.allows("team", "server")).isFalse();
 +    }
 +}
-+
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
 new file mode 100644
 index 0000000000000000000000000000000000000000..773a35cb139ae3181c8a39da10ac71f3e547ca48

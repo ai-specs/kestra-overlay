@@ -698,10 +698,10 @@ index ae918e2..d7b4499 100644
                  }
                  connection.commit();
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
-index 8fa17d0..008f049 100644
+index 8fa17d0..14fb703 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSetupService.java
-@@ -24,12 +24,20 @@ public class OidcSetupService {
+@@ -24,12 +24,19 @@ public class OidcSetupService {
      private final OidcConfiguration configuration;
      private final Environment environment;
      private final OidcInstallationReceipt receipt;
@@ -712,7 +712,6 @@ index 8fa17d0..008f049 100644
 +        this(dataSource, configuration, environment, OidcClientSecretCodec.plaintext());
 +    }
 +
-+    @jakarta.inject.Inject
 +    public OidcSetupService(final DataSource dataSource, final OidcConfiguration configuration,
 +        final Environment environment, final OidcClientSecretCodec secretCodec) {
          this.dataSource = DelegatingDataSource.unwrapDataSource(dataSource);
@@ -722,7 +721,7 @@ index 8fa17d0..008f049 100644
          final String configuredPath = property("kestra.oidc.bootstrap.receipt-path");
          final String storagePath = property("kestra.storage.local.base-path");
          this.receipt = new OidcInstallationReceipt(configuredPath.isEmpty()
-@@ -58,6 +66,7 @@ public class OidcSetupService {
+@@ -58,6 +65,7 @@ public class OidcSetupService {
                          throw new IllegalStateException("OIDC installation identity mismatch");
                      }
                      receipt.create(storedIdentity.get());
@@ -730,7 +729,7 @@ index 8fa17d0..008f049 100644
                      connection.commit();
                      return form == null;
                  }
-@@ -159,29 +168,98 @@ public class OidcSetupService {
+@@ -159,29 +167,98 @@ public class OidcSetupService {
              throw new IllegalArgumentException("Configure the OIDC UI client ID, secret and public issuer before initialization");
          }
          final String callback = configuration.getIssuer().replaceAll("/+$", "") + "/oauth/callback/" + clientName;

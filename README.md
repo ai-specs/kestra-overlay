@@ -202,6 +202,27 @@ volumes:
 
 ### 首次安装：网页引导或环境变量
 
+**首个账号参与者候选（REQ-0390，2026-11-03，未发布）**：启用 RBAC 与应用组模式时，
+真正空安装要求唯一 `io.kestra.webserver.oidc.OidcInitialAccountParticipantV1`。
+宿主在标准账号写入前调用 `initialize(Connection, InitialAccount)`；上下文仅含
+issuer、installationId、configuredLoginClientId、subject。扩展用借用连接建立自己的
+目录及 typed grants，不提交、回滚、关闭连接或产生外部副作用。表单和 bootstrap 共用
+同一事务；既有安装/用户不补授。关闭 RBAC 不调用。
+
+缺少或重复组件时 setup 显示等待提示并阻止创建账号。扩展须放在约定的
+`/app/libs/kestra-rbac-authorizer.jar`，带兼容的 Micronaut bean 索引；文件存在不代表
+已经装载。补放后由部署方执行 `docker compose restart kestra`，页面退避等待服务恢复
+并重新取得 CSRF；正常带 jar 启动首装无需重启。页面不保存密码或自动重新提交。
+应用组模式自动为配置的 UI OAuth2 client 追加 selector，保留显式其他 scopes，不改变
+外部 client 或模式 A；下方手工 scopes 示例仍可使用，但本候选不再要求手工追加。
+
+锁顺序：协议安全锁 → 首装锁 → 扩展目录/策略锁 → 标准身份行锁；READ_COMMITTED。
+receipt 在所有数据库写入成功后、commit 前创建。创建前确认回滚的失败可以重新提交；
+部分文件、损坏或提交结果未知仍锁存，不自动删凭据。非英文文案已按维护者本轮例外
+直接编写，并通过完整翻译检查；中英共用浏览器21项实际文案与交互已通过。对应提交CI
+及正式发布仍未完成。本轮完整local-ci已封存，新候选镜像门正在验证；CI与正式发布
+完成前，候选不能作为插件正式编译输入。见能力文档同日接收节。
+
 首次引导使用双凭据：数据库安装身份与 `/app/storage/.oidc-installation`
 共同决定状态，删除单一标记不能重新开放；异常失败关闭。凭据卷须持久化。
 
