@@ -21,7 +21,7 @@ jobs:
       - name: Executable manifest Class-Path harness regression tests
         run: python3 -m unittest discover -s scripts/tests -v
       - name: Onboarding browser report gate regressions
-        run: node --test scripts/tests/check-onboarding-browser.test.mjs scripts/tests/onboarding-diagnostics.test.mjs
+        run: node --test scripts/tests/check-onboarding-browser.test.mjs scripts/tests/onboarding-diagnostics.test.mjs scripts/tests/auth-recovery-browser.test.mjs
       - name: Verify thin patches apply cleanly on pinned BASE (no compile)
         run: ./scripts/build.sh --apply-only
   build-push:
