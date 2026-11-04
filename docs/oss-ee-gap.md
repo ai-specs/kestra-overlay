@@ -1,5 +1,11 @@
 # OSS vs EE 架构能力差异表（kestra-overlay 立身依据）
 
+2026-11-04 按入口C接收R-OIDC-SERVER既有0131本地客户端适配缺陷：消费宿主UI与
+kestra-plugin-rbac，主控正式镜像新DB及新storage中旧JWT请求超时、去JWT立即重定向。
+框架userinfo回退递归进入自身认证；仅本地客户端关闭该回退，公开协议和外部issuer
+不变。定向真实框架HTTP旧实现超时、新实现6项通过；完整门及发布未完成。
+契约、独立探针及前端另行缺口见docs/r-oidc-server.md本轮调查，不放宽安装锁存。
+
 2026-10-31 按入口C接收既有REQ-0384 popup reference归属缺陷：消费插件独立CI
 41211531677的7份trace和本机稳定状态原生事件证实，同一trigger在mouseup被outside
 误关，随后click重新打开。仅修公开SDK当前popup/reference的同ShadowRoot精确关联，

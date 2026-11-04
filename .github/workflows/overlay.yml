@@ -79,6 +79,19 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/onboarding-browser" playwright@1.61.1
           "$RUNNER_TEMP/onboarding-browser/node_modules/.bin/playwright" install --with-deps chromium
           bash scripts/run-onboarding-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/onboarding-browser"
+      - name: Authentication recovery through real Chromium
+        env:
+          NODE_PATH: ${{ runner.temp }}/onboarding-browser/node_modules
+        run: |
+          mkdir -p .work/auth-recovery-browser
+          node scripts/auth-recovery-browser.mjs "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/auth-recovery-browser/report.json"
+      - name: Preserve authentication recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-recovery-browser
+          path: .work/auth-recovery-browser/
+          if-no-files-found: error
       - name: Preserve onboarding browser evidence
         if: always()
         uses: actions/upload-artifact@v4

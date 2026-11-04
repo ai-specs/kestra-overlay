@@ -1,17 +1,18 @@
 # 需求：REQ-0131 内置 IdP 的客户端 discovery 启动适配；HTTP 监听前直接使用生产
 #   discovery 元数据，避免同进程请求本机端口失败；外部 issuer 保留框架 discovery。
+#   本地客户端关闭递归远程 userinfo 验证回退，公开协议元数据保持标准。
 # 消费扩展仓：—（R-OIDC-SERVER patch 路线）
 # 状态：core
 # 来源：新写；依据 OIDC Discovery 1.0、micronaut-security-oauth2 4.15.2
 #   OpenIdProviderMetadataFetcher SPI；无客户耦合项。
-# 触达上游文件（2）：OidcLocalMetadataFetcherFactory + 验收测试。
+# 触达上游文件（3）：OidcLocalMetadataFetcherFactory + 验收测试。
 # 移除条件：上游原生支持同进程 OIDC discovery 或 R-OIDC-SERVER 弃用。
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLocalMetadataFetcherFactory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLocalMetadataFetcherFactory.java
 new file mode 100644
-index 0000000..0cc6d50
+index 0000000..ed7f37a
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLocalMetadataFetcherFactory.java
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,63 @@
 +package io.kestra.webserver.oidc.services;
 +
 +import com.fasterxml.jackson.databind.ObjectMapper;
@@ -69,21 +70,204 @@ index 0000000..0cc6d50
 +            public DefaultOpenIdProviderMetadata fetch() {
 +                final var metadata = mapper.convertValue(discovery.openIdConfiguration().body(), DefaultOpenIdProviderMetadata.class);
 +                metadata.setName(getName());
++                metadata.setUserinfoEndpoint(null);
 +                return metadata;
 +            }
 +        };
 +    }
 +}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcInvalidCookieRecoveryHttpTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcInvalidCookieRecoveryHttpTest.java
+new file mode 100644
+index 0000000..77a8b78
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcInvalidCookieRecoveryHttpTest.java
+@@ -0,0 +1,175 @@
++package io.kestra.webserver.oidc;
++
++import com.nimbusds.jose.JWSAlgorithm;
++import com.nimbusds.jose.JWSHeader;
++import com.nimbusds.jose.crypto.RSASSASigner;
++import com.nimbusds.jose.jwk.JWKSet;
++import com.nimbusds.jose.jwk.RSAKey;
++import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
++import com.nimbusds.jwt.JWTClaimsSet;
++import com.nimbusds.jwt.SignedJWT;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.kestra.webserver.oidc.services.OidcJwkService;
++import io.kestra.webserver.oidc.services.OidcSetupService;
++import io.kestra.webserver.oidc.services.OidcTokenService;
++import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
++import io.micronaut.context.annotation.Factory;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.runtime.server.EmbeddedServer;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.Date;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.oidc.enabled", value = "true")
++@Property(name = "kestra.oidc.issuer", value = "http://localhost:18997")
++@Property(name = "micronaut.server.port", value = "18997")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.authentication", value = "idtoken")
++@Property(name = "micronaut.security.redirect.unauthorized.url", value = "/oauth/login/kestra")
++@Property(name = "micronaut.security.oauth2.clients.kestra.client-id", value = "recovery-ui")
++@Property(name = "micronaut.security.oauth2.clients.kestra.client-secret", value = "test-secret")
++@Property(name = "micronaut.security.oauth2.clients.kestra.openid.issuer", value = "http://localhost:18997")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/oidc/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "micronaut.security.intercept-url-map[1].pattern", value = "/oauth/**")
++@Property(name = "micronaut.security.intercept-url-map[1].access[0]", value = "isAnonymous()")
++@Property(name = "micronaut.security.intercept-url-map[2].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[2].access[0]", value = "isAuthenticated()")
++@Property(name = "oidc.cookie-recovery.test", value = "true")
++class OidcInvalidCookieRecoveryHttpTest {
++    private static final String ISSUER = "http://localhost:18997";
++    private static final AtomicBoolean READY = new AtomicBoolean(true);
++    private static final AtomicBoolean CURRENT = new AtomicBoolean(true);
++    private static final AtomicInteger KEY_READS = new AtomicInteger();
++    private static final AtomicBoolean EMPTY_KEYS = new AtomicBoolean();
++    private static final RSAKey KEY = key("current");
++    @Inject EmbeddedServer server;
++
++    private static RSAKey key(String id) {
++        try { return new RSAKeyGenerator(2048).keyID(id).algorithm(JWSAlgorithm.RS256).generate(); }
++        catch (Exception failure) { throw new IllegalStateException(failure); }
++    }
++
++    private String token(RSAKey key, Instant expiry) throws Exception {
++        var claims = new JWTClaimsSet.Builder().issuer(ISSUER).subject("recovery-user")
++            .audience("recovery-ui").claim("client_id", "recovery-ui")
++            .expirationTime(Date.from(expiry)).issueTime(new Date()).build();
++        var jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(), claims);
++        jwt.sign(new RSASSASigner(key));
++        return jwt.serialize();
++    }
++
++    @BeforeEach void reset() {
++        READY.set(true);
++        CURRENT.set(true);
++        EMPTY_KEYS.set(false);
++        KEY_READS.set(0);
++    }
++
++    private HttpResponse<String> get(String path, String token, boolean bearer) throws Exception {
++        var request = HttpRequest.newBuilder(server.getURI().resolve(path)).timeout(Duration.ofSeconds(3))
++            .header("Accept", path.startsWith("/ui/") || path.equals("/oidc/setup") || path.startsWith("/oauth/") ? "text/html" : "application/json");
++        if (token != null) request.header(bearer ? "Authorization" : "Cookie", bearer ? "Bearer " + token : "JWT=" + token);
++        return HttpClient.newHttpClient().send(request.GET().build(), HttpResponse.BodyHandlers.ofString());
++    }
++
++    @Test void unknownKidWithEmptyKeysEndsAndUsesExistingSetupChain() throws Exception {
++        EMPTY_KEYS.set(true);
++        READY.set(false);
++        String stale = token(key("previous-installation"), Instant.now().plusSeconds(300));
++        var page = get("/ui/", stale, false);
++        assertEquals(307, page.statusCode());
++        assertTrue(page.headers().firstValue("location").orElseThrow().startsWith("/oauth/login/kestra"));
++        var oauth = get("/oauth/login/kestra", stale, false);
++        assertEquals(303, oauth.statusCode());
++        assertEquals("/oidc/setup", oauth.headers().firstValue("location").orElseThrow());
++        assertEquals(200, get("/oidc/setup", stale, false).statusCode());
++        assertEquals(401, get("/test/cookie-recovery", stale, false).statusCode());
++        assertTrue(KEY_READS.get() <= 8, "Key requests must remain bounded");
++    }
++
++    @Test void validCookieAndPublicUserinfoRemainAvailableAndExpiredTokenIsRejected() throws Exception {
++        String valid = token(KEY, Instant.now().plusSeconds(300));
++        assertEquals(200, get("/test/cookie-recovery", valid, false).statusCode());
++        assertEquals(200, get("/oidc/userinfo", valid, true).statusCode());
++        String expired = token(KEY, Instant.now().minusSeconds(300));
++        assertEquals(401, get("/test/cookie-recovery", expired, false).statusCode());
++        assertTrue(KEY_READS.get() <= 6, "Key requests must remain bounded");
++    }
++
++    @Test void revokedSessionRedirectsThroughExistingLogout() throws Exception {
++        String valid = token(KEY, Instant.now().plusSeconds(300));
++        assertEquals(200, get("/test/cookie-recovery", valid, false).statusCode());
++        CURRENT.set(false);
++        assertEquals(401, get("/test/cookie-recovery", valid, false).statusCode());
++        var page = get("/ui/", valid, false);
++        assertEquals(307, page.statusCode());
++        assertEquals("/oidc/logout", page.headers().firstValue("location").orElseThrow());
++    }
++
++    @Controller("/test/cookie-recovery")
++    @Requires(property = "oidc.cookie-recovery.test", value = "true")
++    static class Probe {
++        @Get Map<String, String> get() { return Map.of("result", "authenticated"); }
++    }
++
++    @Factory
++    @Requires(property = "oidc.cookie-recovery.test", value = "true")
++    static class Services {
++        @Singleton @Replaces(OidcJwkService.class) OidcJwkService keys() {
++            var keys = mock(OidcJwkService.class);
++            when(keys.publicJwkSet()).thenAnswer(invocation -> {
++                KEY_READS.incrementAndGet();
++                return EMPTY_KEYS.get() ? new JWKSet() : new JWKSet(KEY.toPublicJWK());
++            });
++            return keys;
++        }
++        @Singleton @Replaces(OidcSetupService.class) OidcSetupService setup() {
++            var setup = mock(OidcSetupService.class);
++            when(setup.ready()).thenAnswer(invocation -> READY.get());
++            return setup;
++        }
++        @Singleton @Replaces(OidcIdentityLifecycle.class) OidcIdentityLifecycle lifecycle() {
++            var lifecycle = mock(OidcIdentityLifecycle.class);
++            when(lifecycle.matches(anyString(), any())).thenAnswer(invocation -> CURRENT.get());
++            return lifecycle;
++        }
++        @Singleton @Replaces(OidcTrustedIdentity.class) OidcTrustedIdentity trusted() {
++            return mock(OidcTrustedIdentity.class);
++        }
++        @Singleton @Replaces(OidcTokenService.class) OidcTokenService tokens() {
++            var tokens = mock(OidcTokenService.class);
++            when(tokens.validateAccessToken(anyString())).thenAnswer(invocation -> {
++                var token = SignedJWT.parse((String) invocation.getArgument(0));
++                var claims = token.getJWTClaimsSet();
++                if (!token.verify(new com.nimbusds.jose.crypto.RSASSAVerifier(KEY.toPublicJWK()))
++                    || !claims.getExpirationTime().after(new Date()) || !CURRENT.get()) {
++                    throw new OidcException(com.nimbusds.oauth2.sdk.OAuth2Error.INVALID_GRANT);
++                }
++                return claims;
++            });
++            return tokens;
++        }
++    }
++}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcLocalMetadataFetcherFactoryTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLocalMetadataFetcherFactoryTest.java
 new file mode 100644
-index 0000000..0ab4b40
+index 0000000..aefcc5c
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcLocalMetadataFetcherFactoryTest.java
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,59 @@
 +package io.kestra.webserver.oidc;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
 +import static org.junit.jupiter.api.Assertions.assertInstanceOf;
++import static org.junit.jupiter.api.Assertions.assertNull;
 +import static org.mockito.Mockito.mock;
 +import static org.mockito.Mockito.verifyNoInteractions;
 +import static org.mockito.Mockito.when;
@@ -118,6 +302,9 @@ index 0000000..0ab4b40
 +        assertEquals(configuration.getIssuer() + "/oidc/authorize", metadata.getAuthorizationEndpoint());
 +        assertEquals(configuration.getIssuer() + "/oidc/token", metadata.getTokenEndpoint());
 +        assertEquals(configuration.getIssuer() + "/oidc/jwks", metadata.getJwksUri());
++        assertNull(metadata.getUserinfoEndpoint());
++        assertEquals(configuration.getIssuer() + "/oidc/userinfo",
++            new ObjectMapper().valueToTree(new OidcDiscoveryController(configuration).openIdConfiguration().body()).path("userinfo_endpoint").asText());
 +        verifyNoInteractions(http);
 +    }
 +

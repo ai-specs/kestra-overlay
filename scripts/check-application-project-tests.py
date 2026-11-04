@@ -15,6 +15,8 @@ INITIAL_ACCOUNT_REQUIRED = {
 }
 
 REQUIRED = {
+    "io.kestra.webserver.oidc.OidcInvalidCookieRecoveryHttpTest": 3,
+    "io.kestra.webserver.oidc.OidcLocalMetadataFetcherFactoryTest": 3,
     **INITIAL_ACCOUNT_REQUIRED,
     "io.kestra.webserver.oidc.AuthorizationIdentityClassificationTest": 5,
     "io.kestra.webserver.rbac.AuthorizationUnavailableHttpTest": 2,

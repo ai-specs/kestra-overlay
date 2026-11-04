@@ -1,5 +1,13 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## 本地 OIDC 认证回退边界（2026-11-04，候选未发布）
+
+Micronaut Security 4.15.2在JWT验证失败后使用userinfo远程验证同一token；内置issuer
+的userinfo也经过同一SecurityFilter，未知kid时可递归而非返回拒绝。0131本地元数据
+适配移除框架消费的userinfo endpoint，保留JWKS签名及claim验证。公开discovery、
+userinfo端点和外部issuer发现不变，不根据空JWKS推断安装状态。原setup服务继续
+核对数据库与独立凭据，失配失败关闭。定向红绿与剩余门见r-oidc-server.md本轮记录。
+
 ## 原生popup reference归属修复（2026-10-31，已接收，未发布）
 
 0384的window mouseup capture必须识别当前popup真实reference，而不只识别portal内

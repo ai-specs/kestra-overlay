@@ -8,7 +8,7 @@
 0382	0382-oidc-client-credentials.patch	core	ai-specs/kestra-plugin-rbac	公开client凭据状态与轮换、受限confidential登记与维护CLI	10	64c4498正式CI40523539018及推广通过；R20头3尾4；R25主控裁决，维护者可复核设计	上游提供等价凭据修订、脱敏提示及维护轮换
 0383	0383-oidc-resource-audience-v2.patch	core	ai-specs/kestra-plugin-rbac	V2资源audience允许空且不补clientId；精确登录与资源受众分离；借用复查的拒绝/故障分类	7	历史基础已发布；新增普通授权明确依赖503候选，兼容与完整本地门及两模式真实cookie503镜像门通过；对应提交CI和新正式发布待验证	上游提供等价版本化资源投影及签发与在线受众分离机制
 # reserved 行：patch文件列必须为 `-`，对应 docs/oss-ee-gap.md §4 登记簿。
-0384	0384-ui-sdk-shadow-navigation.patch	core	ai-specs/kestra-plugin-rbac	独立扩展四原生组件经公开helper的ShadowRoot隔离与规范query及异步导航守卫；不含业务UI	13	正式ff707ddd父输入；2026-10-31入口C同根精确popup reference修复候选；13文件；原949/60保留，新增4总64；UI单元105（shadow31），完整本地与CI发布状态另核	上游提供等价ShadowRoot弹层与原生popper隔离及可拒绝异步导航契约
+0384	0384-ui-sdk-shadow-navigation.patch	core	ai-specs/kestra-plugin-rbac	独立扩展四原生组件经公开helper的ShadowRoot隔离与规范query及异步导航守卫；不含业务UI	13	正式ff707ddd父输入；2026-10-31入口C同根精确popup reference修复候选；13文件；原949/60保留，新增4总64；UI单元105（shadow31），完整本地与CI发布状态另核;2026-11-04失效401恢复候选，runtime仅注入回调，最终门待完成	上游提供等价ShadowRoot弹层与原生popper隔离及可拒绝异步导航契约
 # 归因基线：2026-10-07 审计（fork merge-base f6dbbb49 定制 diff 为唯一事实源；见 AGENTS.md §5.2）。
 # 移除条件/触发条件一律形态绑定（禁止只写客户阶段号——AGENTS.md §3-6）；零 overlay 动作可补足的
 # 缝隙不入 reserved（登记收回规则见 docs/oss-ee-gap.md §4）。
@@ -21,8 +21,8 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0110	0110-oidc-directory-storage.patch	core	—（R-OIDC-SERVER patch 路线）	用户目录(bcrypt-only)+client 注册表(常数时间/redirect 精确匹配/public=PKCE)	7	参考 fork 逻辑重写(跨基,漂移核对完成);RFC6749,jbcrypt 0.4	同 0100
 0120	0120-oidc-authorization-server.patch	core	—（R-OIDC-SERVER patch 路线）	授权服务器协议端点:discovery/JWKS/authorize(PKCE)/token(3 grants,refresh 轮换)/userinfo/introspect/revoke+code/token 表	12	公开机制在4b017f6通过CI39087229293并发布	同 0100
 0130	0130-oidc-login-chain.patch	core	—（R-OIDC-SERVER patch 路线）	登录链(裁定②一体化):login 303/logout+AuthorizationException 处理器(配置 OIDC 客户端入口/API 401)+from 消毒	4	参考 fork 逻辑重写(跨基);RFC9110 POST 后 303 + 配置客户端入口	同 0100
-0131	0131-oidc-local-discovery.patch	core	—（R-OIDC-SERVER patch 路线）	内置 IdP 同进程 discovery 启动适配;外部 issuer 保留框架发现	2	新写;OIDC Discovery 1.0 + micronaut-security-oauth2 4.15.2 SPI	上游原生支持同进程 OIDC discovery 或 R-OIDC-SERVER 弃用
-0132	0132-oidc-authentication-replacement.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 完整替换 Basic Auth UI/凭据/退出链;服务端验证认证状态,刷新与导航验收	13	新写;OIDC Core + RFC6749/7636/9110;2026-10-09 UI 认证例外	上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用
+0131	0131-oidc-local-discovery.patch	core	—（R-OIDC-SERVER patch 路线）	内置 IdP 同进程 discovery 启动适配;外部 issuer 保留框架发现;本地userinfo递归回退关闭与真实框架HTTP恢复探针	3	新写;OIDC Discovery 1.0 + micronaut-security-oauth2 4.15.2 SPI	上游原生支持同进程 OIDC discovery 或 R-OIDC-SERVER 弃用
+0132	0132-oidc-authentication-replacement.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 完整替换 Basic Auth UI/凭据/退出链;服务端验证认证状态,刷新与导航验收	14	新写;OIDC Core + RFC6749/7636/9110;2026-10-09 UI 认证例外;2026-11-04失效401恢复候选，runtime仅注入回调，最终门待完成	上游 OSS 原生提供完整 OIDC UI 认证或 R-OIDC-SERVER 弃用
 0133	0133-oidc-first-install.patch	core	—（R-OIDC-SERVER patch 路线）	OIDC 首次引导/环境变量初始化;用户+bcrypt+UI client+数据库安装身份与独立凭据,删标记失败关闭/并发防重/CSRF/重启不覆盖	11	新写;OIDC Core+RFC6749/7636+OWASP CSRF+PG事务锁+持久化安装凭据	上游 OSS 提供等价 OIDC 首次安装与配置初始化或 R-OIDC-SERVER 弃用
 0134	0134-oidc-public-registration.patch	core	—（R-OIDC-SERVER 协议能力）	RFC7591 public client 动态注册;无secret+S256,开关/安全回调/元数据/并发注册总量限制	4	新写;RFC7591+OIDC Registration 1.0+RFC7636	上游 OSS 提供等价动态注册或 R-OIDC-SERVER 弃用
 0150	0150-oidc-owned-consent.patch	core	—（R-OIDC-SERVER patch 路线）	用户归属 pending→consent 原子绑定、scope收窄与旧client生命周期	16	公开机制在4b017f6发布；setup构造注入锚由0390接管，顺序重放核对	上游 OSS 提供等价 owner/consent 生命周期或 R-OIDC-SERVER 弃用
@@ -53,7 +53,7 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0365	0365-mcp-call-safe-diagnostic.patch	core	ai-specs/kestra-plugin-rbac	新增MCP安全异常诊断helper与真实Logback格式化探针	2	主控接收;本地候选未发布	上游提供等价MCP调用安全异常诊断
 0366	0366-mcp-async-identity-context.patch	core	ai-specs/kestra-plugin-rbac	独立V2和OidcTrustedIdentity跨线程输出允许、epoch及账号撤权、缺来源与主体错配探针	1	本地5项通过;与V1及身份回归共12项通过;未发布	上游提供等价MCP异步授权来源与撤权探针
 0367	0367-oauth-error-callback.patch	core	内置OIDC认证链及独立消费扩展	OAuth错误回调校验state与callback并清除临时cookie;固定同源失败重定向	2	主控接收;独立HTTP测试6项;最终重放和正式发布待验证	上游提供等价OAuth错误回调state校验和安全重定向
-0368	0368-extension-entry.patch	core	ai-specs/kestra-plugin-rbac及独立管理页面	认证descriptor和capability准入;业务配置403时通用扩展安全壳层;拒绝页发现入口;精确manifest逐项授权委派	16	历史基础已发布；新增普通授权明确依赖503候选，兼容与完整本地门及两模式真实cookie503镜像门通过；对应提交CI和新正式发布待验证	上游提供等价已认证扩展独立初始化及条件安全壳层
+0368	0368-extension-entry.patch	core	ai-specs/kestra-plugin-rbac及独立管理页面	认证descriptor和capability准入;业务配置403时通用扩展安全壳层;拒绝页发现入口;精确manifest逐项授权委派	16	历史基础已发布；新增普通授权明确依赖503候选，兼容与完整本地门及两模式真实cookie503镜像门通过；对应提交CI和新正式发布待验证;2026-11-04失效401恢复候选，runtime仅注入回调，最终门待完成	上游提供等价已认证扩展独立初始化及条件安全壳层
 0369	0369-system-theme-lifecycle.patch	core	ai-specs/kestra-plugin-rbac及宿主页面	通用主题生命周期跟随系统配色变化并卸载监听;显式主题不受影响	2	主控接收;前端64项通过;未发布	上游全局主题生命周期提供等价系统配色监听及清理
 0370	0370-oidc-protocol-projection.patch	core	ai-specs/kestra-plugin-rbac	只读应用组投影、标准协议及pending登记查询、事务锁与生命周期guard契约	7	5项纯契约及8项标准查询探针通过；职责迁移源码通过；真实数据库、HTTP及发布未通过	上游提供等价只读协议输入与标准身份生命周期公开机制
 0385	0385-public-favicon.patch	core	ai-specs/kestra-plugin-rbac及生产OIDC页面	精确GET/HEAD favicon真实静态映射归属判定及授权/失效会话激活	6	主控接收；HTTP红绿及完整本地、新镜像form/env各favicon26项通过；对应提交CI和正式发布待验证	上游OSS提供等价精确静态资源公开判定及全链认证回归

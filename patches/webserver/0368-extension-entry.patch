@@ -157,12 +157,13 @@ index 724cc46..28025b9 100644
              if (current === generation) {loading.value = false; await active.update(context());}
 diff --git a/ui/src/extensions/access.ts b/ui/src/extensions/access.ts
 new file mode 100644
-index 0000000..6989fb1
+index 0000000..d602491
 --- /dev/null
 +++ b/ui/src/extensions/access.ts
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,72 @@
 +import type {UiExtensionDescriptorV1} from "./protocol";
 +import {hostExtensionPath} from "./runtime";
++import {recoverUnauthorized} from "../utils/authentication";
 +
 +export class ExtensionAccessError extends Error {
 +    constructor(public readonly status: number) {super("Extension access unavailable");}
@@ -183,7 +184,10 @@ index 0000000..6989fb1
 +    const response = await fetch(hostExtensionPath(path), {
 +        credentials: "same-origin", redirect: "error", signal: signal ? AbortSignal.any([signal, bounded]) : bounded,
 +    });
-+    if (!response.ok) throw new ExtensionAccessError(response.status);
++    if (!response.ok) {
++        if (!signal?.aborted) recoverUnauthorized(response);
++        throw new ExtensionAccessError(response.status);
++    }
 +    return response.json();
 +}
 +
@@ -554,10 +558,10 @@ index 0000000..eed1d78
 +});
 diff --git a/ui/src/extensions/main-entry.spec.ts b/ui/src/extensions/main-entry.spec.ts
 new file mode 100644
-index 0000000..4cc0def
+index 0000000..6477dbf
 --- /dev/null
 +++ b/ui/src/extensions/main-entry.spec.ts
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,90 @@
 +import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 +import {useExtensionFallback, setExtensionFallback} from "./entry";
 +
@@ -575,7 +579,8 @@ index 0000000..4cc0def
 +}}));
 +vi.mock("../utils/kestraHttp", () => ({setupKestraHttp: () => ({interceptors: {request: {use: vi.fn()}}})}));
 +vi.mock("@kestra-io/kestra-sdk", () => ({useClient: () => ({})}));
-+vi.mock("../utils/authentication", () => ({configureOidc: vi.fn(), isOidc: () => true, isLoggedIn: () => true, setAuthenticated: probe.authenticated, login: probe.login}));
++vi.mock("../utils/authentication", () => ({configureOidc: vi.fn(), isOidc: () => true, isLoggedIn: () => true, setAuthenticated: probe.authenticated, login: probe.login,
++    authenticationStatus: (error: any) => error?.status ?? error?.response?.status, recoverUnauthorized: vi.fn()}));
 +vi.mock("../stores/core", () => ({useCoreStore: () => ({})}));
 +vi.mock("../stores/layout", () => ({useLayoutStore: () => ({})}));
 +vi.mock("../stores/unsavedChanges", () => ({useUnsavedChangesStore: () => ({})}));
@@ -625,6 +630,11 @@ index 0000000..4cc0def
 +        expect(await navigate()).toBe(false);
 +        expect(probe.login).toHaveBeenCalledOnce();
 +        expect(probe.configs).not.toHaveBeenCalled();
++    });
++    it("redirects a status-only SDK authentication failure", async () => {
++        probe.configs.mockRejectedValue({status: 401});
++        expect(await navigate(route("flows/list"))).toBe(false);
++        expect(probe.login).toHaveBeenCalledOnce();
 +    });
 +    it("denies an extension on network failure instead of continuing the route", async () => {
 +        vi.mocked(fetch).mockRejectedValue(new TypeError("Network unavailable"));

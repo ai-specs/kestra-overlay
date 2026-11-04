@@ -1,5 +1,80 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 失效认证恢复调查（2026-11-04，候选，未发布）
+
+消费方为宿主 UI 与 `kestra-plugin-rbac` 独立页面。部署反馈为保留旧 cookie 后重建
+数据库及存储，访问扩展深链时未进入认证。原问题文档的 userinfo 401 日志不能单独证明
+前端根因；正式 c4a1eb2/4a35 镜像生产复现由部署主控负责。本轮单独重置数据库而保留
+安装凭据产生 setup 500，属于既有双凭据失败关闭，不是本需求缺陷，不改变该保护。
+
+源码已确认的独立缺口：0132 `kestraHttp.withAuthRetry` 只在 `!isLoggedIn()` 时处理401，
+而 OIDC 登录状态为内存快照；成功加载后会话撤销不能触发恢复。扩展 `context.request`
+与描述/能力发现使用原生 fetch，不经过 SDK。初始 main 守卫已有401处理，不能称为
+缺少全局拦截器。守卫仅识别 response.status，需要同时覆盖 SDK 的 status 形状。
+
+候选最小契约复用宿主 authentication 模块：OIDC 请求明确401时仅启动一次现有认证链，
+清除内存认证状态，不重试原请求，不清全部 cookie 或 storage。SDK、扩展发现和合法的
+同源 context.request 共用该动作，原响应/异常继续交给调用者；403、503、网络故障不
+触发恢复，不推断 setup。服务端安装判定继续由既有 setup 服务负责；若需要清 HttpOnly
+cookie，只使用服务器原 cookie 配置，不由浏览器伪造删除。未初始化与已初始化分别
+进入现有 setup/OAuth 链，不增加插件业务接口或 SDK 类型，不降低授权与 SDK 检查门。
+
+主控追加生产差分：全新数据库及安装凭据下，匿名 setup 200；同一次 `/ui/` HTML
+请求保留旧 JWT 时5秒超时，只移除 JWT 则立即307到 OAuth。旧 JWT 值未写入证据。
+Micronaut Security 4.15.2 的 `UserInfoClientTokenValidator` 在 JWT 验签失败后向
+userinfo 发送同一 Bearer；内置端点又经过 SecurityFilter 的同一 token 验证链。因此
+未知 kid/空 JWKS 会递归调用自身，前端无法处理尚未返回的文档。空 keys 不是安装状态。
+主控已接收最小方向：0131 的本地客户端元数据适配只移除供框架消费的 userinfo endpoint，
+阻止本地远程回退；公开 discovery 和 userinfo 保持标准，外部 issuer 使用原框架发现。
+签名、claims、生命周期、组撤权及双凭据保护不降级；不调整 setup filter 顺序。
+独立 HTTP 测试复用真实框架与签名，存储服务使用宿主测试替身；不声称证明生产持久撤权。
+宿主独立验证使用当前 BASE 172dd0f3 加全部48补丁的新重放树，旧树仅只读调查。
+先运行无容器 UI 定向红绿测试，包含两种错误形状、并发去重、写请求单次发送和
+403/503/网络负例；不启动 PostgreSQL、Docker 或真实 UI 全矩阵。服务端和完整构建门
+须按最终实际变更补齐，生产首装、已有安装、失效文档与异步请求由主控组合验证。
+当前禁止提交、推送、发布；源码与定向通过不代表正式交付。
+
+服务器独立红绿：旧实现真实SecurityFilter下两项HTTP超时，元数据断言失败；一行本地
+metadata调整后6项通过。PG身份核对为数据库及角色`overlay_frontend_recovery_20261104`，
+外部模式源码全扫只有基类访问POSTGRES，设置URL后不启动容器。新schema定向30项通过。
+server-only完整local-ci为106份XML/441项，439通过、2项原镜像前置中止，UI109通过；
+server-only exe为`3cadb568823bfeaffbc77b232dea052be41d12546486fbcb2bf6572fd1bc9833`。
+此结果不证明后续前端增量。服务器输入触达348文件，其中6个dev文件已继续前端开发，
+其他342文件一致；不能把该比较称为最终全输入逐字节一致。
+
+前端保留原109具名测试，新增恢复5项、status-only守卫1项，正式数量门为115。
+runtime无authentication依赖，createExtensionRequest可选第4回调由ExtensionPage注入；
+第3fetcher及SDK独立输入图保持。SDK401先执行beforeLogout再恢复且不重放写请求；
+caller取消不恢复。`scripts/auth-recovery-browser.mjs`独立真实Chromium装载宿主源码，
+HTTP替身验证401/403/503并发GET+POST发送次数与单次跳转，共3项；保持原onboarding21
+报告格式，新增报告独立保存。该门已本地通过，不证明生产首装/旧JWT恢复。
+最终全输入完整local-ci、产物及组合门仍按同批证据记录，旧server-only不冒充最终通过。
+
+最终本地输入记录（2026-11-04）：`local-ci-final-03`在独占verify-final与新schema
+`recovery_full_final_03`退出0。106份XML共441项，439通过、失败/错误0、2项既有镜像
+前置中止（OidcSecondUserFixtureTest与McpSdkInstanceTest），UI115/115。349个触达
+源码文件与开发树逐字节一致，48份patch均可解析且顺序重放成功。最终exe SHA-256为
+`4b3c2f09091808382d635a4a208299f7109424a9c2593488de63a4aaf5749004`。
+正式CI相同tar范围的独立SDK输入构建通过；未把949/64浏览器矩阵计为本轮已运行。
+绑定最终源码的Chromium请求恢复3项通过，正式CI新增独立auth-recovery-browser
+artifact，不改onboarding21报告。脚本17项自检通过。早期patch归属apply失败、数量门
+仍109失败与Ego替身未就绪失败均保留，不计通过。
+
+本地最终candidate为`kestra-overlay:frontend-recovery-final-20261104`，image ID
+`sha256:d25b057102d3e8695f36d659708298eced07df4cda7bb15995c3448457239ecd`，
+owner=kestra-overlay-frontend-recovery、run=frontend-robustness-20261104-final。
+仅构建未发布，镜像专项尚待主控PG切换窗口。server-only候选的生产差分由主控实际
+确认：已初始化旧JWT请求立即OAuth/401，未初始化旧深链进入setup；不能替代最终镜像
+组合与正式CI。所有原始证据在本仓`.work/frontend-robustness-20261104/`。
+
+无PG追加门：最终candidate的classpath真实装载门通过；固定SDK独立dist的geometry64
+全部通过，444个dist文件hash未变。SDK949最终949/949通过，failures/notRun均0，
+completed/passedGate/driverPassed均true；Playwright为1.61.1，驱动未记录诊断错误。
+恢复Chromium runner
+通过NODE_PATH解析与CI前序安装相同的Playwright，强制精确1.61.1并将版本写入报告；
+不依赖tree解析出的另一版本浏览器。CI独立artifact保留源码前后hash及runner hash。
+此次仅更新runner/CI路径，不改变已构建candidate的宿主字节；镜像PG专项仍待协调窗口。
+
 ## 2026-11-03 维护者翻译范围修订（当前优先状态）
 
 维护者明确允许直接翻译：中文和英文验证实际页面文案与交互，其他宿主语言仅检查

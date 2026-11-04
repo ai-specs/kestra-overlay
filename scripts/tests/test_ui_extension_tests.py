@@ -25,7 +25,7 @@ class UiExtensionReportTest(unittest.TestCase):
             GATE.check(self.report())
 
     def test_requires_exact_added_shadow_tests(self):
-        self.assertEqual(sum(GATE.REQUIRED.values()), 109)
+        self.assertEqual(sum(GATE.REQUIRED.values()), 115)
         self.assertEqual(GATE.REQUIRED["src/oidc-setup-wait.spec.ts"], 4)
         self.assertEqual(GATE.REQUIRED["src/extensions/shadow-overlays.spec.ts"], 31)
         report = self.report()

@@ -8,11 +8,11 @@
 # 本轮来源: 正式parent27520a2/46完整重放；原0384前置树由Git反向应用生成；Git自动diff，空context仅格式规范化；未发布。
 # 本轮修复: 2026-10-31入口C；同根唯一ARIA reference归属，保留13文件；独占树Git tree diff生成，无提交；原949/60保留并新增4项至64，尚未发布。
 diff --git a/ui/src/components/extensions/ExtensionPage.vue b/ui/src/components/extensions/ExtensionPage.vue
-index 28025b9..b6f7f39 100644
+index 28025b9..0f94961 100644
 --- a/ui/src/components/extensions/ExtensionPage.vue
 +++ b/ui/src/components/extensions/ExtensionPage.vue
-@@ -7,12 +7,12 @@
-
+@@ -7,12 +7,13 @@
+ 
  <script setup lang="ts">
      import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
 -    import {useRoute, useRouter} from "vue-router";
@@ -22,11 +22,12 @@ index 28025b9..b6f7f39 100644
      import {SUPPORT_LOCALES} from "../../translations/languages";
      import {requireExtension} from "../../extensions/access";
 -    import {createExtensionRequest, extensionPath, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
++    import {recoverUnauthorized} from "../../utils/authentication";
 +    import {createExtensionRequest, extensionLocation, extensionRouteQuery, freezeExtensionQuery, guardExtensionNavigation, ExtensionLifecycle, hostExtensionPath} from "../../extensions/runtime";
      import type {UiExtensionContextV1, UiExtensionDescriptorV1, UiExtensionModuleV1} from "../../extensions/protocol";
      import TopNavBar from "../layout/TopNavBar.vue";
      import useRouteContext from "../../composables/useRouteContext";
-@@ -37,15 +37,19 @@
+@@ -37,17 +38,21 @@
          const assetBase = hostExtensionPath(`/ui-extensions/${encodeURIComponent(tenant)}/${encodeURIComponent(id)}/`);
          const path = Array.isArray(route.params.pathMatch) ? route.params.pathMatch.join("/") : String(route.params.pathMatch ?? "");
          const signal = lifecycle!.signal;
@@ -47,9 +48,12 @@ index 28025b9..b6f7f39 100644
 +                const failure = await router[options?.replace ? "replace" : "push"]({name: "extensions/page", params: {tenant, extensionId: id, pathMatch: safe.path.split("/")}, query: extensionRouteQuery(safe.query)});
 +                if (isNavigationFailure(failure)) throw new Error("Extension navigation rejected");
              },
-             request: createExtensionRequest(signal, hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`)),
+-            request: createExtensionRequest(signal, hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`)),
++            request: createExtensionRequest(signal, hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`), fetch, recoverUnauthorized),
          });
-@@ -79,5 +83,6 @@
+     }
+ 
+@@ -79,5 +84,6 @@
          observer.observe(document.documentElement, {attributes: true, attributeFilter: ["class"]});
          void load();
      });
@@ -209,7 +213,7 @@ index 30ca573..b76f182 100644
      contractVersion: 1;
      mount(container: HTMLElement, context: UiExtensionContextV1): Promise<MountedUiExtensionV1> | MountedUiExtensionV1;
 diff --git a/ui/src/extensions/runtime.ts b/ui/src/extensions/runtime.ts
-index 5b9f469..a3fddd7 100644
+index 5b9f469..872f001 100644
 --- a/ui/src/extensions/runtime.ts
 +++ b/ui/src/extensions/runtime.ts
 @@ -1,4 +1,6 @@
@@ -218,12 +222,13 @@ index 5b9f469..a3fddd7 100644
 +import {parseQuery, stringifyQuery} from "vue-router";
 +import type {LocationQuery, Router} from "vue-router";
  import {getCsrfToken} from "../utils/csrf";
-
+ 
  export function hostExtensionPath(path: string): string {
-@@ -13,6 +15,37 @@ export function extensionPath(path: string): string {
+@@ -13,7 +15,38 @@ export function extensionPath(path: string): string {
      return path;
  }
-
+ 
+-export function createExtensionRequest(signal: AbortSignal, apiBase: string, fetcher: typeof fetch = fetch) {
 +export function extensionLocation(value: string) {
 +    const separator = value.indexOf("?");
 +    const path = extensionPath(separator < 0 ? value : value.slice(0, separator));
@@ -255,19 +260,31 @@ index 5b9f469..a3fddd7 100644
 +    });
 +}
 +
- export function createExtensionRequest(signal: AbortSignal, apiBase: string, fetcher: typeof fetch = fetch) {
++export function createExtensionRequest(signal: AbortSignal, apiBase: string, fetcher: typeof fetch = fetch, onUnauthorized?: (response: Response) => void) {
      return async (path: string, options: RequestInit = {}): Promise<Response> => {
          const url = new URL(path, window.location.origin);
-@@ -41,6 +74,8 @@ export class ExtensionLifecycle {
+         const base = new URL(apiBase, window.location.origin);
+@@ -31,7 +64,9 @@ export function createExtensionRequest(signal: AbortSignal, apiBase: string, fet
+             if (!token) throw new Error("CSRF token is unavailable");
+             headers.set("X-CSRF-TOKEN", token);
+         }
+-        return fetcher(url, {...options, method, headers, credentials: "same-origin", redirect: "error", signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal});
++        const response = await fetcher(url, {...options, method, headers, credentials: "same-origin", redirect: "error", signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal});
++        if (response.status === 401 && !signal.aborted && !options.signal?.aborted) onUnauthorized?.(response);
++        return response;
+     };
+ }
+ 
+@@ -41,6 +76,8 @@ export class ExtensionLifecycle {
      private serial: Promise<void> = Promise.resolve();
      private disposed = false;
      private latest?: UiExtensionContextV1;
 +    private navigating = false;
 +    private ready = false;
-
+ 
      constructor(private container: HTMLElement, private onError: (error: unknown) => void) {}
-
-@@ -59,11 +94,34 @@ export class ExtensionLifecycle {
+ 
+@@ -59,11 +96,34 @@ export class ExtensionLifecycle {
              if (this.disposed) return;
              this.mounted = mounted;
              await this.update(this.latest);
@@ -276,7 +293,7 @@ index 5b9f469..a3fddd7 100644
              if (!this.disposed) {this.onError(error); void this.dispose();}
          }
      }
-
+ 
 +    async beforeNavigate(target: UiExtensionNavigationV1): Promise<boolean> {
 +        if (this.disposed || !this.ready || this.navigating) return false;
 +        if (!this.mounted?.beforeNavigate) return true;
