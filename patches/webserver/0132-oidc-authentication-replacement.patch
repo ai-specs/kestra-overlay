@@ -293,10 +293,10 @@ index 0000000..87b39ac
 +})
 diff --git a/ui/src/utils/authentication.ts b/ui/src/utils/authentication.ts
 new file mode 100644
-index 0000000..03ef35d
+index 0000000..475edf2
 --- /dev/null
 +++ b/ui/src/utils/authentication.ts
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,50 @@
 +import * as VanillaAuth from "./basicAuth"
 +
 +let oidcEnabled = false
@@ -341,6 +341,7 @@ index 0000000..03ef35d
 +export async function logout() {
 +    authenticated = false
 +    if (oidcEnabled) {
++        recovering = true
 +        window.location.assign("/oidc/logout")
 +        return true
 +    }
@@ -585,10 +586,10 @@ index 041d3c8..631ae99 100644
      @Test
 diff --git a/ui/src/utils/authentication-recovery.spec.ts b/ui/src/utils/authentication-recovery.spec.ts
 new file mode 100644
-index 0000000..455c5ab
+index 0000000..f56c752
 --- /dev/null
 +++ b/ui/src/utils/authentication-recovery.spec.ts
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,91 @@
 +import {afterEach, beforeEach, describe, expect, it, vi} from "vitest"
 +import * as Authentication from "./authentication"
 +import {createExtensionRequest} from "../extensions/runtime"
@@ -613,6 +614,20 @@ index 0000000..455c5ab
 +afterEach(() => {vi.unstubAllGlobals(); document.head.replaceChildren()})
 +
 +describe("OIDC request recovery", () => {
++    it("preserves explicit logout when an earlier capability request returns 401", async () => {
++        let reject!: (error: unknown) => void
++        probe.request.mockImplementationOnce(() => new Promise((_, fail) => {reject = fail}))
++        const client = setupKestraHttp({}, {isLoggedIn: () => true})
++        const failure = {status: 401}
++        const pending = client.request("/api/v1/main/extensions/probe/capabilities")
++        const rejected = expect(pending).rejects.toBe(failure)
++        await Authentication.logout()
++        reject(failure)
++        await rejected
++        Authentication.recoverUnauthorized({response: {status: 401}})
++        expect(window.location.assign).toHaveBeenCalledExactlyOnceWith("/oidc/logout")
++        expect(Authentication.isLoggedIn()).toBe(false)
++    })
 +    it("recovers concurrent SDK failures after login once without replaying a write", async () => {
 +        probe.request.mockRejectedValue({status: 401})
 +        const beforeLogout = vi.fn()

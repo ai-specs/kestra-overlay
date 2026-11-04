@@ -17,8 +17,8 @@ export function completedFetcher(fetcher) {
   return response;
  };
 }
-export function validateDiagnostics(events, base, status, documentId) {
- const url=base+'/api/v1/main/probe?status='+status;
+export function validateDiagnostics(events, base, status, documentId, suffix='') {
+ const url=base+'/api/v1/main/probe?status='+status+suffix;
  const responses=events.filter(event=>event.kind==='response'&&event.status>=400);
  if(responses.length!==2||!['GET','POST'].every(method=>responses.filter(event=>event.url===url&&event.status===status&&event.method===method&&event.resourceType==='fetch').length===1))throw Error('Unexpected HTTP response diagnostics');
  for(const response of responses){
@@ -52,14 +52,19 @@ if(playwrightVersion!=='1.61.1')throw Error('Authentication recovery requires Pl
 const {chromium}=playwright;
 temp=await mkdtemp(join(tmpdir(),'host-auth-recovery-'));
 const counts={writes:0,reads:0,logins:0};
+let delayed=[],logoutResponse,logoutRequests=0;
 server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost');res.setHeader('Cache-Control','no-store');
+ if(url.pathname==='/oidc/logout'){logoutRequests++;logoutResponse=res;for(const pending of delayed){pending.writeHead(401);pending.end();}return;}
+ if(url.pathname==='/settled'){res.end('settled');return;}
+ if(url.pathname.startsWith('/api/')&&url.searchParams.has('delayed')){counts[req.method==='POST'?'writes':'reads']++;delayed.push(res);return;}
+ if(url.pathname==='/ready'){res.end(String(delayed.length));return;}
  if(url.pathname==='/bundle.js'){res.setHeader('Content-Type','text/javascript');res.end(await readFile(join(temp,'bundle.js')));return;}
  if(url.pathname==='/oauth/login/kestra'){counts.logins++;res.end('<h1>Existing OAuth entry</h1>');return;}
  if(url.pathname.startsWith('/api/')){counts[req.method==='POST'?'writes':'reads']++;res.writeHead(Number(url.searchParams.get('status')));res.end();return;}
  res.setHeader('Content-Type','text/html');res.end('<meta name="csrf-token" content="test-csrf"><button>Send request</button><script type="module" src="/bundle.js"></script>');
 });
- await build({stdin:{contents:`import {configureOidc,setAuthenticated,recoverUnauthorized} from ${JSON.stringify(join(tree,'ui/src/utils/authentication.ts'))};import {createExtensionRequest} from ${JSON.stringify(join(tree,'ui/src/extensions/runtime.ts'))};configureOidc(true);setAuthenticated(true);const status=Number(new URL(location.href).searchParams.get('status'));const fetcher=(${completedFetcher.toString()})(fetch);const request=createExtensionRequest(new AbortController().signal,'/api/v1/main',fetcher,recoverUnauthorized);document.querySelector('button').addEventListener('click',async()=>{await Promise.allSettled([request('/api/v1/main/probe?status='+status,{method:'POST'}),request('/api/v1/main/probe?status='+status)]);document.body.dataset.done='true'});window.recoveryReady=true;`,resolveDir:tree,loader:'ts'},bundle:true,format:'esm',outfile:join(temp,'bundle.js'),alias:{override:join(tree,'ui/src/override')},define:{'import.meta.env.VITE_APP_API_URL':'""'}});
+ await build({stdin:{contents:`import {configureOidc,setAuthenticated,recoverUnauthorized,logout} from ${JSON.stringify(join(tree,'ui/src/utils/authentication.ts'))};import {createExtensionRequest} from ${JSON.stringify(join(tree,'ui/src/extensions/runtime.ts'))};configureOidc(true);setAuthenticated(true);const status=Number(new URL(location.href).searchParams.get('status'));const fetcher=(${completedFetcher.toString()})(fetch);const request=createExtensionRequest(new AbortController().signal,'/api/v1/main',fetcher,recoverUnauthorized);document.querySelector('button').addEventListener('click',async()=>{if(new URL(location.href).searchParams.has('logoutRace')){const pending=Promise.allSettled([request('/api/v1/main/probe?status=401&delayed=1',{method:'POST'}),request('/api/v1/main/probe?status=401&delayed=1')]);while(await (await fetch('/ready')).text()!=='2')await new Promise(resolve=>setTimeout(resolve,10));logout();await pending;await (await fetch('/settled')).arrayBuffer();document.body.dataset.logoutSettled='true';return;}await Promise.allSettled([request('/api/v1/main/probe?status='+status,{method:'POST'}),request('/api/v1/main/probe?status='+status)]);document.body.dataset.done='true'});window.recoveryReady=true;`,resolveDir:tree,loader:'ts'},bundle:true,format:'esm',outfile:join(temp,'bundle.js'),alias:{override:join(tree,'ui/src/override')},define:{'import.meta.env.VITE_APP_API_URL':'""'}});
  await new Promise(done=>server.listen(0,'127.0.0.1',done));const base='http://127.0.0.1:'+server.address().port;
  browser=await chromium.launch({headless:true});const page=await browser.newPage();
  let documentSequence=0,requestSequence=0;const requests=new WeakMap();
@@ -82,6 +87,20 @@ server=http.createServer(async(req,res)=>{
   validateDiagnostics(diagnostics.slice(start),base,status,documentId);
   checks.push({name:'host-context-request-'+status+'-single-write',status,counts:{...counts},passed:true});
  }
+ const start=diagnostics.length;counts.writes=counts.reads=counts.logins=0;
+ await page.goto(base+'/?status=401&logoutRace=1');const documentId=documentSequence;
+ await page.waitForFunction(()=>window.recoveryReady===true);await page.click('button');
+ await page.waitForFunction(()=>document.body.dataset.logoutSettled==='true');
+ const finishedDeadline=Date.now()+5000;
+ const completedRaceRequests=()=>{const events=diagnostics.slice(start);const responses=events.filter(event=>event.kind==='response'&&[base+'/api/v1/main/probe?status=401&delayed=1',base+'/settled'].includes(event.url));return responses.length===3&&responses.every(response=>events.some(event=>event.kind==='requestfinished'&&event.requestId===response.requestId&&event.documentId===response.documentId));};
+ while(!completedRaceRequests()&&Date.now()<finishedDeadline)await new Promise(resolve=>setTimeout(resolve,10));
+ if(!completedRaceRequests()||!logoutResponse)throw Error('Logout handshake requests did not complete');
+ logoutResponse.end('<h1>Logout completed</h1>');
+ await page.waitForURL(base+'/oidc/logout');
+ const events=diagnostics.slice(start),url=base+'/api/v1/main/probe?status=401&delayed=1';
+ validateDiagnostics(events,base,401,documentId,'&delayed=1');
+ if(logoutRequests!==1||counts.logins!==0||counts.writes!==1||counts.reads!==1)throw Error('Logout was superseded by stale authentication recovery');
+ checks.push({name:'logout-pending-401',status:401,counts:{...counts},logoutRequests,passed:true});
  finalInputs=await hashes();if(JSON.stringify(inputs)!==JSON.stringify(finalInputs))throw Error('Source inputs changed during browser checks');
 } catch(error){failure=error;errors.push(String(error));}
 finally{

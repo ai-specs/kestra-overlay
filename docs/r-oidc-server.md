@@ -1,5 +1,27 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 显式退出与迟到401竞争（2026-11-05，候选未发布）
+
+组合CI41848443854的拒绝页实际button调用Authentication.logout。用户开始退出后，
+旧可见扩展capability返回401，恢复又发起OAuth导航，取消正在进行的退出链。
+最小0132修复只在OIDC logout分支、location.assign之前同步置recovering=true。
+旧请求仍拒绝，不覆盖退出；新文档重新初始化模块状态。不改拒绝页布局、授权或服务端
+退出，不新增监听，不放宽abort诊断。消费方为宿主拒绝页与kestra-plugin-rbac扩展入口。
+
+独占dev新增延迟401/显式logout并发测试：旧实现1失败/5通过，新实现6通过。
+原UI115保留，新增1项后门为116。Chromium原3名称及顺序保留，第4为logout-pending-401，
+测试替身在退出文档待提交时释放旧401，核对旧请求完成且没有额外OAuth导航；尚待主控
+真实Chromium执行。48补丁独立BASE重放成功，349触达文件与dev逐字节一致。
+完整local-ci、新镜像专项、组合CI与正式发布均须重新通过，不能沿用旧候选结果。
+
+无PG收尾：独占logout-final-replay从BASE顺序应用48补丁，349触达文件与dev逐字节
+一致，源码及patch哈希见logout-final-source-freeze.json。准确具名UI12文件116项通过，
+checker通过；Python17项通过。Node全集53项中52通过，静态HTTP测试因当前沙箱listen
+EPERM失败，未记全绿；runner自身7项在其中通过。主控真实Chromium报告
+logout-race-chromium-main-02.json显示原3加logout-pending-401共4项通过、errors为空。
+旧15436/test.env已失效，本轮未使用。完整local-ci须由主控配置新外部PG及新schema，
+禁止以旧连接触发Testcontainers回退；此处仍不表示新exe、镜像门或CI通过。
+
 ## 失效认证恢复调查（2026-11-04，候选，未发布）
 
 消费方为宿主 UI 与 `kestra-plugin-rbac` 独立页面。部署反馈为保留旧 cookie 后重建

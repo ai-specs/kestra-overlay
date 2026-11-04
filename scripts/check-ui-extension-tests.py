@@ -5,7 +5,7 @@ import sys
 
 
 REQUIRED = {
-    "src/utils/authentication-recovery.spec.ts": 5,
+    "src/utils/authentication-recovery.spec.ts": 6,
     "src/oidc-setup-wait.spec.ts": 4,
     "src/extensions/app-entry.spec.ts": 3,
     "src/extensions/entry.spec.ts": 36,
