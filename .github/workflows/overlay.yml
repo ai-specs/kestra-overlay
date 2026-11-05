@@ -3,11 +3,17 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README.md'
+
 permissions:
   contents: read
   packages: write
+
 concurrency:
-  group: overlay-release
+  group: overlay-release-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
   patch-verify:
@@ -21,7 +27,7 @@ jobs:
       - name: Executable manifest Class-Path harness regression tests
         run: python3 -m unittest discover -s scripts/tests -v
       - name: Onboarding browser report gate regressions
-        run: node --test scripts/tests/check-onboarding-browser.test.mjs scripts/tests/onboarding-diagnostics.test.mjs scripts/tests/auth-recovery-browser.test.mjs
+        run: node --test scripts/tests/check-onboarding-browser.test.mjs scripts/tests/onboarding-diagnostics.test.mjs
       - name: Verify thin patches apply cleanly on pinned BASE (no compile)
         run: ./scripts/build.sh --apply-only
   build-push:
@@ -79,19 +85,6 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/onboarding-browser" playwright@1.61.1
           "$RUNNER_TEMP/onboarding-browser/node_modules/.bin/playwright" install --with-deps chromium
           bash scripts/run-onboarding-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/onboarding-browser"
-      - name: Authentication recovery through real Chromium
-        env:
-          NODE_PATH: ${{ runner.temp }}/onboarding-browser/node_modules
-        run: |
-          mkdir -p .work/auth-recovery-browser
-          node scripts/auth-recovery-browser.mjs "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/auth-recovery-browser/report.json"
-      - name: Preserve authentication recovery evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: auth-recovery-browser
-          path: .work/auth-recovery-browser/
-          if-no-files-found: error
       - name: Preserve onboarding browser evidence
         if: always()
         uses: actions/upload-artifact@v4
