@@ -1,5 +1,15 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+2026-11-11 最新本地候选为第二候选（未提交/未发布）：源内 SSE 授权 helper，
+49 patch 重放17/0、356触达文件字节一致；完整local-ci后端453项中451通过、0失败、
+2镜像专用跳过，UI126通过。候选镜像2e2895e6、executable ef2992e4已内容核对。
+主控真实Ego十次生产创建保存执行、数据库SUCCESS及SSE id=end通过，通知零；加载失败
+语义、八秒关闭和路由清理已实测。宿主classpath、onboarding21、auth-recovery4、OIDC35、
+MCP四XML各1/0/0/0、form/env整脚本含dependency503各七项、SDK949和geometry64均已通过。
+SDK949具名ID顺序、source hash及buildId已核对，零失败/跳过/未运行及诊断错误。
+正式CI、镜像推广及最终组合交付仍待主控审查。
+
+
 ## 原生 popup reference 被误判外部点击（2026-10-31，入口C已接收，未发布）
 
 消费项目：`kestra-plugin-rbac`。其独立真实Chromium门在正式宿主`ff707ddd`、镜像
@@ -1341,3 +1351,64 @@ SDK 修复后的额外 Java 复测失败为
 `response-completion-fix/focused-green/`、`cancellation-green/`、`complete-backend/`
 及 `local-ci.log`，不覆盖旧失败。最终唯一新候选的实际产物门报告位于
 `final-candidate/`；正式交付仍取决于匹配提交 CI 与发布证据。
+
+## 2026-11-11 执行 follow 授权生命周期与通知候选（未发布）
+
+消费项目为 kestra-plugin-rbac。主控真实 Ego 创建并查看
+6Okvt87vgB8dJiLhq2r3DK（company.consistency/consistency_repro_01）时出现不存在通知。
+部署方 browser-repro-01-server.log 记录普通执行 GET 200，follow 的 Await 条件十秒
+始终返回 null；数据库 SUCCESS 是主控组合证据。后续刷新也出现 follow 200 头后断流。
+这些证据不表示缺少首账号授权，也不改变缺身份/缺权限返回 403 的既有规则。
+
+正式 BASE 的 TenantService 固定返回 main，core/utils/Await.await 已设置
+pollInSameThread。真实 controller 直接订阅测试保留来源、evaluation 和 query 上下文。
+裸 Awaitility 默认 executor 的丢失探针不能用于解释生产调用，候选不修改 Await 或
+ExecutionController。TypedQueryDomains 只解释用户筛选，不负责上下文传播。
+
+持久 ExecutionFollowContextTest 把实际 follow body 放入 HTTP response：filter
+返回 200 并关闭原 evaluation 后，再订阅 body。repository 的带 ACL findById 使用实际
+TypedNamespaceAccessControl 判断可见域；旧实现十秒超时并报找不到 execution。
+因此按入口 C 修复 0330 response 与延迟 SSE body 的授权生命周期边界；入口 B 的
+消费需求归 R-EE-RBAC，不新增 SPI、业务模型或账号特例。主控已授权该最小实施。
+
+0330 候选在 body 订阅时建立独立 evaluation，重新检查原操作；完成、异常或取消时
+独立关闭。缺来源仍拒绝，订阅前撤权不得读取 repository，非 SSE 保持原单次边界。
+宿主负责 HTTP 来源、生命周期和查询 ACL 激活；插件继续通过现有公开 SPI 负责业务策略。
+端点和事件格式不变，未使用新的 WithoutAcl 查找或放宽首账号权限。
+
+0393 候选复用既有 ErrorToast 与翻译键：401/403/404 按真实响应状态展示；SSE 200 头后
+失败或无状态网络错误不推断为不存在。所属通知八秒关闭，恢复/再次 follow/卸载只清除
+本次消息，保留其他全局错误；关闭订阅取消遗留 throttle。SDK fetch wrapper 完整转发
+input/init，不修改认证与重试策略。去重只证明单 SSE 终结一次；REST 与 follow 同时
+403 的跨请求去重尚未由真实候选镜像验证，不能抑制真实拒绝来获得通过。
+
+以下为第一候选历史本地结果；该候选随后真实组合失败，不代表当前能力。
+2026-11-11 历史本地证据位于 .work/first-account-20261111：旧延迟 body 定向红例失败，
+候选实际 controller/ACL 六项与既有 REST 两项通过；前端旧实现六项失败，候选十项通过。
+49 patch 干净 BASE 顺序重放、354 触达文件 SHA-256 一致，结构17/0，diff检查通过。
+独占 verify-full 的原 local-ci 通过：后端447项中445通过、0失败/错误、2镜像专用跳过；
+UI126项零失败/跳过；翻译与 executable 构建通过。XML、UI报告、日志及 executable
+封存在 .work/first-account-20261111/evidence。镜像专用跳过不计通过。
+
+剩余门：主控审查本地候选镜像、镜像专用四XML、生产登录连续十次创建执行查看、SSE
+id=end、数据库SUCCESS、拒绝/撤权及副作用、断网/断流和REST+follow同时失败通知。
+实际浏览器证据仍归部署仓。对应提交CI、镜像推广、插件正式消费和Compose验收未完成；
+本地候选不能作为插件正式编译输入，不能把定向探针当作已发布镜像的浏览器通过。
+
+### 第二候选：源内激活（已接收，待重新验收）
+
+第一候选虽然本地完整门通过，真实组合仍在200头后十秒超时，不得发布。完整旧产物和
+报告已冻结于本轮 candidate1-freeze 与 evidence/full；verify-full 已重用于第二候选，
+不是旧候选冻结目录。Micronaut 4.10.28
+RouteExecutor.processPublisherBody 在实际流外层固定旧 PropagatedContext，内层
+contextWrite/ReactivePropagation 会覆盖 filter 新边界。补上该真实框架包装的永久
+回归后，第一候选明确失败；原裸 HttpResponse<Flux> 绿例不足以证明生产修复。
+
+主控接收在 SseConnectionMetrics.track 的 execution/logs/dependencies 共用入口增加
+极小包装钩子，解析与重授权由独立宿主 SseAuthorization helper负责，移除filter外包。
+filter只在全部operation允许后保存已求交用户查询限制的不可变restPlan。
+helper在流源订阅时用必要HTTP来源、主体、tenant和该计划开启新evaluation，原计划
+逐项重授权后才读取源；不捕获旧owner、连接或事务。完成/异常/取消恰好关闭一次。
+指标类生产注入必须有非空helper，单参构造仅兼容隔离指标测试；关闭RBAC不读取插件bean。
+新增源内日志/依赖、关闭功能、缺来源、实际bean唯一发现、精确关闭与非SSE回归，必须
+重新通过定向、顺序重放、完整local-ci和真实候选组合，第一候选结果不计为第二候选通过。

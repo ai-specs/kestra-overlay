@@ -2,7 +2,7 @@
 # 消费扩展仓: kestra-plugin-rbac
 # 状态: core；HTTP来源显式绑定已接收、本地候选；独立红绿与受影响后端通过，完整本地门及CI/发布待验收
 # 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档；2026-10-30入口C事件循环阻塞证据，初始化仅传播请求来源；2026-10-31入口B接收真实HTTP边界最小来源绑定
-# 触达上游文件: 20 个（通用生命周期、typed gate、引用桥接与独立探针）
+# 触达上游文件: 23 个（通用生命周期、typed gate、引用桥接与独立探针）
 # 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
 # 测试消费修复: 2026-11-01主控授权；两条REST完整响应测试用Flux.single及10秒有界block等待终结；保留全部断言与取消专项门，不改生产Java；20文件不扩面。
 diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationEvaluationContext.java
@@ -80,7 +80,7 @@ index 685d8f4..d1e6ba5 100644
 -            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
 +            .collectMap(Map.Entry::getKey, Map.Entry::getValue));
      }
- 
+
      private static boolean acceptsFileUpload(Type type) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluationProviderV1.java
 new file mode 100644
@@ -113,10 +113,10 @@ index 0000000..5471c85
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
 new file mode 100644
-index 0000000..b1822cd
+index 0000000..0c3bf4c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,232 @@
 +package io.kestra.webserver.rbac;
 +
 +import java.time.Duration;
@@ -256,6 +256,7 @@ index 0000000..b1822cd
 +        final RbacAuthorizer.Principal principal;
 +        final String tenant;
 +        final ConcurrentHashMap<String, TypedAuthorization.QueryDomain> domains = new ConcurrentHashMap<>();
++        volatile List<TypedAuthorization.Operation> restPlan = List.of();
 +        private final CompletableFuture<AuthorizationEvaluationV1> ready = new CompletableFuture<>();
 +        private final CompletableFuture<Void> released = new CompletableFuture<>();
 +        private AuthorizationEvaluationV1 evaluation;
@@ -414,11 +415,14 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization
                      if (!decision.allowed()) return Decision.deny(decision.reason());
                      QueryDomain effective = operation.queryDomain().intersect(decision.scope());
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-index 06722d6..b90943c 100644
+index 06722d6..6696616 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-@@ -47,2 +47,20 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+@@ -45,10 +45,28 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+         if (!configuration.enabled() || RestRbacFilter.protocol(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
          if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
+-        return Mono.defer(() -> {
 +        var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
 +        var route = RouteAttributes.getRouteMatch(request).orElse(null);
 +        String tenant = route == null ? "main" : (String) route.getVariableValues().getOrDefault("tenant", "main");
@@ -437,18 +441,37 @@ index 06722d6..b90943c 100644
 +    }
 +
 +    private Mono<Boolean> authorize(HttpRequest<?> request, RbacAuthorizer.Principal principal) {
-         return Mono.defer(() -> {
-@@ -50,3 +68,2 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
++        return Mono.deferContextual(context -> {
++            var owner = AuthorizationEvaluations.current(context);
+             var route = RouteAttributes.getRouteMatch(request).orElse(null);
              if (!(route instanceof MethodBasedRouteMatch<?, ?> methodRoute)) return Mono.just(false);
 -            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
              Map<String, List<String>> query = new LinkedHashMap<>();
-@@ -68,5 +85,3 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+             request.getParameters().names().forEach(name -> query.put(name, List.copyOf(request.getParameters().getAll(name))));
+             return body(request).flatMap(bytes -> {
+@@ -59,16 +77,16 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+                 if (operations.isEmpty()) return Mono.just(false);
+                 var filters = io.kestra.webserver.converters.QueryFilterFormatBinder.getQueryFilters(query, 3, 20);
+                 var requestedDomain = TypedQueryDomains.fromFilters(filters, true);
+-                return Flux.fromIterable(operations).concatMap(operation -> gate.authorize(principal,
++                var planned = operations.stream().map(operation ->
+                     operation.coverage() == TypedAuthorization.Coverage.COMPLETE_QUERY
+                         ? new TypedAuthorization.Operation(operation.contractVersion(), operation.source(), operation.resource(), operation.action(),
+                             operation.tenant(), operation.namespace(), operation.resourceId(), operation.queryDomain().intersect(requestedDomain),
+-                            operation.coverage(), operation.aggregate(), operation.sideEffect()) : operation))
+-                    .all(TypedAuthorization.Decision::allowed);
++                            operation.coverage(), operation.aggregate(), operation.sideEffect()) : operation).toList();
++                return Flux.fromIterable(planned).concatMap(operation -> gate.authorize(principal, operation))
++                    .all(TypedAuthorization.Decision::allowed)
++                    .doOnNext(allowed -> { if (allowed && owner != null) owner.restPlan = List.copyOf(planned); });
              });
 -        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).timeout(Duration.ofSeconds(10))
 -            .defaultIfEmpty(false).onErrorReturn(false)
 -            .flatMapMany(allowed -> allowed ? chain.proceed(request) : Mono.just(error(request, HttpStatus.FORBIDDEN)));
 +        });
      }
+
+     private Mono<byte[]> body(HttpRequest<?> request) {
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 new file mode 100644
 index 0000000..415af8f
@@ -2096,5 +2119,276 @@ index 0000000..3b167df
 +            assertThat(response.code()).isEqualTo(failure instanceof AuthorizationUnavailableException ? 503 : 403);
 +            assertThat(begins).hasValue(0); assertThat(effects).hasValue(0);
 +        }
++    }
++}
+
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java b/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
+index a024e78..2edf622 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
+@@ -26,11 +26,19 @@ import reactor.core.publisher.Flux;
+ @Singleton
+ public class SseConnectionMetrics {
+     private final MetricRegistry metricRegistry;
++    private final io.kestra.webserver.rbac.SseAuthorization authorization;
+     private final Map<String, AtomicInteger> activeByType = new ConcurrentHashMap<>();
+
+-    @Inject
++    /** Compatibility for isolated metrics tests; production uses the required injected helper. */
+     public SseConnectionMetrics(MetricRegistry metricRegistry) {
+         this.metricRegistry = metricRegistry;
++        this.authorization = null;
++    }
++
++    @Inject
++    public SseConnectionMetrics(MetricRegistry metricRegistry, io.kestra.webserver.rbac.SseAuthorization authorization) {
++        this.metricRegistry = metricRegistry;
++        this.authorization = java.util.Objects.requireNonNull(authorization);
+     }
+
+     /**
+@@ -47,7 +55,7 @@ public class SseConnectionMetrics {
+      */
+     public <T> Flux<Event<T>> track(Flux<Event<T>> flux, String type, Runnable onClose) {
+         AtomicInteger active = active(type);
+-        return flux
++        return (authorization == null ? flux : authorization.bind(flux))
+             .doOnSubscribe(subscription ->
+             {
+                 active.incrementAndGet();
+
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+new file mode 100644
+index 0000000..7b06505
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+@@ -0,0 +1,33 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import jakarta.inject.Singleton;
++import java.util.List;
++import reactor.core.publisher.Flux;
++
++/** Fresh authorization at the stream source, inside framework-captured response context. */
++@Singleton
++public final class SseAuthorization {
++    private final TypedAuthorizationGate gate;
++    public SseAuthorization(TypedAuthorizationGate gate) { this.gate = gate; }
++
++    public <T> Flux<T> bind(Flux<T> source) {
++        if (!gate.evaluationEnabled()) return source;
++        var owner = AuthorizationEvaluations.current();
++        var request = AuthorizationInvocationContext.currentRequest().orElse(null);
++        if (owner == null || request == null || AuthorizationInvocationContext.isInternal() || owner.restPlan.isEmpty())
++            return Flux.error(AuthorizationEvaluations.denied());
++        // Capture immutable requirements and HTTP origin, never the old owner, connection or transaction.
++        var principal = owner.principal;
++        String tenant = owner.tenant;
++        var plan = List.copyOf(owner.restPlan);
++        var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
++        return gate.boundary(principal, tenant, () -> Flux.fromIterable(plan)
++            .concatMap(operation -> gate.authorize(principal, operation))
++            .all(TypedAuthorization.Decision::allowed)
++            .flatMapMany(allowed -> allowed ? source : Flux.error(AuthorizationEvaluations.denied())))
++            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, origin));
++    }
++}
+
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+new file mode 100644
+index 0000000..f1a7560
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+@@ -0,0 +1,189 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.*;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.webserver.controllers.api.ExecutionController;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpRequest;
++import org.junit.jupiter.api.Test;
++import java.lang.reflect.Field;
++import java.util.Optional;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class ExecutionFollowContextTest {
++    @Test void followKeepsInvocationEvaluationAndQueryDuringRepositoryPolling() throws Exception {
++        var repository=mock(ExecutionRepositoryInterface.class);
++        var controller=mock(ExecutionController.class, CALLS_REAL_METHODS);
++        inject(controller,"executionRepository",repository);
++        inject(controller,"tenantService",new TenantService());
++        var metrics=mock(io.kestra.webserver.services.SseConnectionMetrics.class);
++        when(metrics.track(any(),anyString(),any())).thenAnswer(call->call.getArgument(0));
++        inject(controller,"sseConnectionMetrics",metrics);
++        var request=HttpRequest.GET("/api/v1/main/executions/test/follow");
++        var owner=new Object(); var query=new Object();
++        var observed=new java.util.concurrent.atomic.AtomicBoolean();
++        var context=PropagatedContext.empty().plus(new AuthorizationInvocationContext(request,false))
++            .plus(new AuthorizationEvaluationContext(owner)).plus(new AuthorizationQueryContext(query));
++        // Throw a sentinel only after observing all contexts. This stops before flow lookup/subscription.
++        when(repository.findById("main","test")).thenAnswer(call -> {
++            assertSame(request,AuthorizationInvocationContext.currentRequest().orElse(null));
++            assertSame(owner,AuthorizationEvaluationContext.current().orElseThrow().reference());
++            assertSame(query,PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class).orElseThrow().reference());
++            observed.set(true);
++            throw new IllegalStateException("context-probe-complete");
++        });
++        try(var ignored=context.propagate()) {
++            assertThrows(Exception.class,()->controller.followExecution("test").collectList().block());
++        }
++        assertTrue(observed.get(),"Awaitility polling must retain the request authorization context");
++        verify(repository).findById("main","test");
++        assertTrue(AuthorizationInvocationContext.current().isEmpty());
++    }
++    @Test void missingOriginStillDeniesRatherThanBecomingInternal() {
++        var gate=mock(TypedAuthorizationGate.class);when(gate.evaluationEnabled()).thenReturn(true);
++        var acl=new TypedNamespaceAccessControl(gate);
++        assertEquals(TypedAuthorization.QueryDomain.empty(),acl.domain(QueryFilter.Resource.EXECUTION));
++        assertFalse(AuthorizationInvocationContext.isInternal());verifyNoInteractionsExceptConfiguration(gate);
++    }
++
++    @Test void deferredFollowBodyKeepsRealRepositoryAclAfterResponseCompletes() throws Exception {
++        deferredBody(false);
++    }
++    @Test void deferredFollowBodyRechecksRevokedGrantBeforeReading() throws Exception {
++        deferredBody(true);
++    }
++    @Test void deferredBodyCancellationClosesItsOwnEvaluation() throws Exception {
++        var policy=new AuthorizationEvaluationTest.Policy();var gate=AuthorizationEvaluationTest.gate(policy);
++        var adapter=mock(OssRestOperationAdapter.class);
++        when(adapter.resolve(any())).thenReturn(java.util.List.of(AuthorizationEvaluationTest.operation(TypedAuthorization.Resource.EXECUTION,"team.a")));
++        var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,mock(io.kestra.webserver.errors.ProblemFactory.class));
++        var response=reactor.core.publisher.Flux.from(filter.doFilter(AuthorizationEvaluationRestTest.request(),ignored->reactor.core.publisher.Mono.just(
++            io.micronaut.http.HttpResponse.ok(io.micronaut.core.async.propagation.ReactivePropagation.propagate(
++                io.micronaut.core.propagation.PropagatedContext.getOrEmpty(), metrics(gate).track(
++                    reactor.core.publisher.Flux.<io.micronaut.http.sse.Event<Object>>never(), "execution", () -> {}))).contentType(io.micronaut.http.MediaType.TEXT_EVENT_STREAM_TYPE))))
++            .single().block(java.time.Duration.ofSeconds(5));
++        var subscription=reactor.core.publisher.Flux.from((org.reactivestreams.Publisher<?>)response.body()).subscribe();
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->policy.begins.get()==2);
++        subscription.dispose();
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->policy.closes.get()==2);
++    }
++    @Test void nonEventStreamKeepsSingleResponseEvaluation() {
++        var policy=new AuthorizationEvaluationTest.Policy();var gate=AuthorizationEvaluationTest.gate(policy);
++        var adapter=mock(OssRestOperationAdapter.class);
++        when(adapter.resolve(any())).thenReturn(java.util.List.of(AuthorizationEvaluationTest.operation(TypedAuthorization.Resource.EXECUTION,"team.a")));
++        var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,mock(io.kestra.webserver.errors.ProblemFactory.class));
++        var response=reactor.core.publisher.Flux.from(filter.doFilter(AuthorizationEvaluationRestTest.request(),ignored->reactor.core.publisher.Mono.just(
++            io.micronaut.http.HttpResponse.ok("unchanged").contentType(io.micronaut.http.MediaType.APPLICATION_JSON_TYPE))))
++            .single().block(java.time.Duration.ofSeconds(5));
++        assertEquals("unchanged",response.body());assertEquals(1,policy.begins.get());assertEquals(1,policy.closes.get());
++    }
++    @Test void logSourceSurvivesFrameworkCapturedContext() { sourceCoverage("logs",TypedAuthorization.Resource.LOG,QueryFilter.Resource.LOG); }
++    @Test void dependencySourceSurvivesFrameworkCapturedContext() { sourceCoverage("dependencies",TypedAuthorization.Resource.EXECUTION,QueryFilter.Resource.EXECUTION); }
++    @Test void disabledAuthorizationLeavesStreamUnchanged() {
++        var gate=mock(TypedAuthorizationGate.class);var source=reactor.core.publisher.Flux.just("event");
++        assertSame(source,new SseAuthorization(gate).bind(source));
++        verify(gate).evaluationEnabled();verifyNoMoreInteractions(gate);
++    }
++    @Test void missingOriginAtSourceFailsClosed() {
++        var gate=mock(TypedAuthorizationGate.class);when(gate.evaluationEnabled()).thenReturn(true);
++        assertThrows(Exception.class,()->new SseAuthorization(gate).bind(reactor.core.publisher.Flux.just("event")).blockLast());
++        verify(gate).evaluationEnabled();verifyNoMoreInteractions(gate);
++    }
++    @Test void productionConstructorRequiresAndInvokesAuthorizationHelperExactlyOnce() throws Exception {
++        var registry=mock(io.kestra.core.metrics.MetricRegistry.class,RETURNS_DEEP_STUBS);
++        assertThrows(NullPointerException.class,()->new io.kestra.webserver.services.SseConnectionMetrics(registry,null));
++        assertTrue(io.kestra.webserver.services.SseConnectionMetrics.class
++            .getConstructor(io.kestra.core.metrics.MetricRegistry.class,SseAuthorization.class)
++            .isAnnotationPresent(jakarta.inject.Inject.class));
++        var helper=mock(SseAuthorization.class);when(helper.bind(any())).thenAnswer(call->call.getArgument(0));
++        var metrics=new io.kestra.webserver.services.SseConnectionMetrics(registry,helper);
++        var closed=new java.util.concurrent.atomic.AtomicInteger();
++        metrics.track(reactor.core.publisher.Flux.just(io.micronaut.http.sse.Event.of("event")),"execution",closed::incrementAndGet).blockLast();
++        verify(helper,times(1)).bind(any());assertEquals(1,closed.get());
++    }
++    @Test void micronautDiscoversOneHelperAndInjectsItWithRbacDisabled() throws Exception {
++        var gate=mock(TypedAuthorizationGate.class);
++        var registry=mock(io.kestra.core.metrics.MetricRegistry.class,RETURNS_DEEP_STUBS);
++        try(var context=io.micronaut.context.ApplicationContext.builder().environments("test").properties(java.util.Map.of("kestra.rbac.enabled",false,"kestra.rbac.typed.enabled",false,"kestra.rbac.evaluation.enabled",false,"micronaut.server.enabled",false,"kestra.repository.type","memory")).build()) {
++            context.registerSingleton(TypedAuthorizationGate.class,gate);
++            context.registerSingleton(io.kestra.core.metrics.MetricRegistry.class,registry);
++            context.start();
++            assertEquals(1,context.getBeansOfType(SseAuthorization.class).size());
++            var helper=context.getBean(SseAuthorization.class);
++            var metrics=context.getBean(io.kestra.webserver.services.SseConnectionMetrics.class);
++            var field=io.kestra.webserver.services.SseConnectionMetrics.class.getDeclaredField("authorization");field.setAccessible(true);
++            assertSame(helper,field.get(metrics));
++            assertEquals("event",metrics.track(reactor.core.publisher.Flux.just(io.micronaut.http.sse.Event.of("event")),"execution",()->{}).blockLast().getData());
++            verify(gate).evaluationEnabled();verifyNoMoreInteractions(gate);
++        }
++    }
++    private static io.kestra.webserver.services.SseConnectionMetrics metrics(TypedAuthorizationGate gate) {
++        return new io.kestra.webserver.services.SseConnectionMetrics(
++            mock(io.kestra.core.metrics.MetricRegistry.class,RETURNS_DEEP_STUBS),new SseAuthorization(gate));
++    }
++    private void sourceCoverage(String type,TypedAuthorization.Resource resource,QueryFilter.Resource queryResource) {
++        var policy=new AuthorizationEvaluationTest.Policy();var gate=AuthorizationEvaluationTest.gate(policy);
++        var acl=new TypedNamespaceAccessControl(gate);var closed=new java.util.concurrent.atomic.AtomicInteger();
++        var adapter=mock(OssRestOperationAdapter.class);
++        when(adapter.resolve(any())).thenReturn(java.util.List.of(AuthorizationEvaluationTest.operation(resource,"team.a")));
++        var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,mock(io.kestra.webserver.errors.ProblemFactory.class));
++        var response=reactor.core.publisher.Flux.from(filter.doFilter(AuthorizationEvaluationRestTest.request(),ignored-> {
++            var source=reactor.core.publisher.Flux.defer(()-> {
++                assertTrue(acl.domain(queryResource).contains("team.a"));
++                return reactor.core.publisher.Flux.just(io.micronaut.http.sse.Event.of("visible").id("end"));
++            });
++            return reactor.core.publisher.Mono.just(io.micronaut.http.HttpResponse.ok(
++                io.micronaut.core.async.propagation.ReactivePropagation.propagate(
++                    io.micronaut.core.propagation.PropagatedContext.getOrEmpty(),metrics(gate).track(source,type,closed::incrementAndGet)))
++                .contentType(io.micronaut.http.MediaType.TEXT_EVENT_STREAM_TYPE));
++        })).single().block(java.time.Duration.ofSeconds(5));
++        assertEquals(1,policy.closes.get());
++        assertEquals(1,reactor.core.publisher.Flux.from((org.reactivestreams.Publisher<?>)response.body()).collectList().block().size());
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->policy.closes.get()==2);
++        assertEquals(2,policy.begins.get());assertEquals(1,closed.get());
++    }
++    private void deferredBody(boolean revoke)throws Exception {
++        var policy=new AuthorizationEvaluationTest.Policy();
++        var gate=AuthorizationEvaluationTest.gate(policy);
++        var acl=new TypedNamespaceAccessControl(gate);
++        var repository=mock(ExecutionRepositoryInterface.class);
++        var controller=mock(ExecutionController.class,CALLS_REAL_METHODS);
++        inject(controller,"executionRepository",repository);inject(controller,"tenantService",new TenantService());
++        inject(controller,"flowRepository",mock(FlowRepositoryInterface.class));
++        var streaming=mock(io.kestra.core.services.ExecutionStreamingService.class);
++        when(streaming.isStopFollow(any(),any())).thenReturn(true);inject(controller,"streamingService",streaming);
++        var metrics=metrics(gate);
++        inject(controller,"sseConnectionMetrics",metrics);
++        when(repository.findById("main","test")).thenAnswer(call-> acl.domain(QueryFilter.Resource.EXECUTION).contains("team.a")
++            ?Optional.of(Execution.builder().id("test").tenantId("main").namespace("team.a").flowId("flow").build()):Optional.empty());
++        var adapter=mock(OssRestOperationAdapter.class);
++        when(adapter.resolve(any())).thenReturn(java.util.List.of(new TypedAuthorization.Operation(1,TypedAuthorization.Source.REST,
++            TypedAuthorization.Resource.EXECUTION,TypedAuthorization.Action.READ,"main","team.a","test",TypedAuthorization.QueryDomain.unrestricted(),
++            TypedAuthorization.Coverage.SINGLE,TypedAuthorization.Aggregate.NONE,TypedAuthorization.SideEffect.READ_ONLY)));
++        var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,mock(io.kestra.webserver.errors.ProblemFactory.class));
++        var request=AuthorizationEvaluationRestTest.request();
++        var response=reactor.core.publisher.Flux.from(filter.doFilter(request,ignored->reactor.core.publisher.Mono.just(
++            io.micronaut.http.HttpResponse.ok(io.micronaut.core.async.propagation.ReactivePropagation.propagate(
++                io.micronaut.core.propagation.PropagatedContext.getOrEmpty(), controller.followExecution("test"))).contentType(io.micronaut.http.MediaType.TEXT_EVENT_STREAM_TYPE))))
++            .single().block(java.time.Duration.ofSeconds(5));
++        assertEquals(200,response.code());assertEquals(1,policy.closes.get());
++        if(revoke)policy.grants.set(java.util.Set.of("other"));
++        var body=reactor.core.publisher.Flux.from((org.reactivestreams.Publisher<?>)response.body()).collectList();
++        if(revoke){assertThrows(Exception.class,()->body.block(java.time.Duration.ofSeconds(12)));verifyNoInteractions(repository);}
++        else {assertEquals(2,body.block(java.time.Duration.ofSeconds(12)).size());verify(repository).findById("main","test");}
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->policy.closes.get()==2);
++        assertEquals(2,policy.begins.get());assertEquals(2,policy.closes.get());
++    }
++    private static void verifyNoInteractionsExceptConfiguration(TypedAuthorizationGate gate) {
++        verify(gate).evaluationEnabled();verifyNoMoreInteractions(gate);
++    }
++    private static void inject(Object target,String name,Object value)throws Exception {
++        Class<?> type=ExecutionController.class;
++        while(type!=null){try {Field f=type.getDeclaredField(name);f.setAccessible(true);f.set(target,value);return;}
++            catch(NoSuchFieldException ignored){type=type.getSuperclass();}}
++        throw new NoSuchFieldException(name);
 +    }
 +}

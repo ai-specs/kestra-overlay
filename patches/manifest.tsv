@@ -44,7 +44,7 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0300	0300-rbac-ui-usage-and-mcp-reads.patch	core	ai-specs/kestra-plugin-rbac	规范tenant登录路径、零授权退出页面、usage与MCP工具列表实际查询域及宿主探针	7	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价登录路径、拒绝退出入口与usage/MCP查询授权
 0310	0310-access-denied-login-style.patch	core	ai-specs/kestra-plugin-rbac	认证页面兼容宿主主题与窄屏，拒绝页移除K字母标志	1	新写;用户认证页面风格要求	上游OSS提供与登录页一致的独立拒绝页面
 0320	0320-oidc-upstream-i18n-entry.patch	core	ai-specs/kestra-plugin-rbac	独立登录页复用上游vue-i18n语言目录与现有翻译键	4	新写;用户国际化要求	上游OSS提供同等独立认证页面国际化入口
-0330	0330-authorization-evaluation-lifecycle.patch	core	ai-specs/kestra-plugin-rbac	版本化授权评估生命周期、唯一所有者、阻塞初始化与关闭工厂隔离及最小上下文传播、HTTP入口显式请求来源绑定	20	初始化及close工厂隔离已在48946d6/CI41007119467独立发布；本地407/UI95、镜像与SDK949/几何60及实际正式产物已核；后续提交仍须自身CI与推广，组合另验；2026-10-31入口B接收HTTP来源绑定，本地5具名门及受影响后端42项通过，完整local-ci412/UI95及全部本地镜像/SDK949/几何60已通过；正式消费另核匹配提交CI和推广，历史T6同源未证明；2026-11-01主控授权仅两条REST测试等待完整终结，单响应与10秒上限，保留全部断言和取消门；相关2项及取消18项通过，完整local-ci412/UI105通过；最终新exe/image产物门与CI另核	上游OSS提供等价完整评估生命周期与安全上下文传播
+0330	0330-authorization-evaluation-lifecycle.patch	core	ai-specs/kestra-plugin-rbac	版本化授权评估生命周期、唯一所有者、阻塞初始化与关闭工厂隔离及最小上下文传播、HTTP入口显式请求来源绑定	23	2026-11-11第二候选源内SSE重授权;真实旧context包装红例;完整门与组合待验收	上游OSS提供等价完整评估生命周期与安全上下文传播
 0340	0340-independent-management-pages.patch	core	ai-specs/kestra-plugin-rbac	独立ESM管理页面描述和资源及菜单根与偏好生命周期桥接并发布UI消费SDK	36	公开机制在4b017f6通过CI39087229293并发布	上游OSS提供等价独立管理页面注册与隔离生命周期及偏好公开契约
 0350	0350-oidc-public-user-directory.patch	core	ai-specs/kestra-plugin-rbac	公开账号目录及账号/client同连接生命周期guard测试、认证版本失效；资料可空保CAS；client机制归0190	14	历史标准机制已发布；新目录PG14项及完整本地门通过；消费须对应提交CI和正式镜像推广成功	上游OSS提供等价公开账号目录与完整认证生命周期失效机制
 0360	0360-application-project.patch	core	ai-specs/kestra-plugin-rbac	只保留声明展示、可信身份及独立授权评估契约；删除宿主可写组目录与业务管理SPI	4	破坏性契约候选；旧组业务已退役；正式CI与发布未通过	上游提供等价公开应用组身份与授权评估契约
@@ -59,3 +59,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0385	0385-public-favicon.patch	core	ai-specs/kestra-plugin-rbac及生产OIDC页面	精确GET/HEAD favicon真实静态映射归属判定及授权/失效会话激活	6	主控接收；HTTP红绿及完整本地、新镜像form/env各favicon26项通过；对应提交CI和正式发布待验证	上游OSS提供等价精确静态资源公开判定及全链认证回归
 0390	0390-oidc-initial-account-participant.patch	core	ai-specs/kestra-plugin-rbac	首个账号同连接事务参与者、receipt失败阶段重试、缺组件等待重启及配置UI selector合并	20	2026-11-03主控定稿；候选本地门通过，正式CI与发布待执行；翻译按0391单独验证	上游OSS提供等价同连接首装参与者、配置UI scope适配与安全失败重试机制
 0391	0391-oidc-onboarding-locales.patch	core	ai-specs/kestra-plugin-rbac及部署用户	首装12语言译文、中文实际文案及既有MCP缺译对齐	13	2026-11-03维护者允许直接翻译；新增132条及既有目录缺口修正；完整翻译检查通过；Ego/Chromium共21具名检查通过；正式CI待执行	上游提供等价首次安装本地化与内置OIDC文案
+0393	0393-execution-follow-notifications.patch	core	ai-specs/kestra-plugin-rbac	执行follow真实状态分类与所属通知恢复卸载和有界关闭	4	2026-11-11候选;定向红绿;完整local-ci与发布待主控审查	上游提供等价执行follow准确错误语义与所属通知生命周期

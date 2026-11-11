@@ -1,0 +1,204 @@
+# 需求: REQ-0393 执行follow真实状态分类与所属通知恢复卸载和有界关闭
+# 消费扩展仓: ai-specs/kestra-plugin-rbac及宿主执行页面
+# 状态: core；主控授权候选，定向门验证中，未发布
+# 来源: 新写；基于正式BASE生产SSE故障及定向生命周期红例，不引入插件业务模型
+# 触达上游文件: 4 个
+# 移除条件: 上游提供等价执行follow准确错误语义与所属通知生命周期
+diff --git a/ui/src/stores/executions.ts b/ui/src/stores/executions.ts
+index 78d3505..7ad18b3 100644
+--- a/ui/src/stores/executions.ts
++++ b/ui/src/stores/executions.ts
+@@ -1,5 +1,5 @@
+ import {defineStore} from "pinia"
+-import {ref, watch} from "vue"
++import {ref, watch, toRaw} from "vue"
+ import {apiUrl} from "override/utils/route"
+ import * as Utils from "../utils/utils"
+ import {useCoreStore} from "./core"
+@@ -412,7 +412,18 @@ export const useExecutionsStore = defineStore("executions", () => {
+     // Closing it aborts the underlying stream (see subscribeToExecution).
+     const executionSubscription = ref<{ close: () => void } | undefined>(undefined)
+ 
++    let followMessage: typeof coreStore.message
++    let followMessageTimer: ReturnType<typeof setTimeout> | undefined
++    function clearFollowMessage() {
++        if (followMessageTimer) clearTimeout(followMessageTimer)
++        followMessageTimer = undefined
++        if (followMessage && toRaw(coreStore.message) === followMessage) coreStore.message = undefined
++        followMessage = undefined
++    }
++
+     function closeSSE() {
++        clearFollowMessage()
++        throttledExecutionUpdate.cancel()
+         executionSubscription.value?.close()
+         executionSubscription.value = undefined
+     }
+@@ -458,7 +469,7 @@ export const useExecutionsStore = defineStore("executions", () => {
+         executionId: string,
+         handlers: {
+             onExecution: (execution: Execution) => void;
+-            onError?: () => void;
++            onError?: (status?: number) => void;
+             onEnd?: () => void;
+         },
+     ): { close: () => void } {
+@@ -468,11 +479,12 @@ export const useExecutionsStore = defineStore("executions", () => {
+         // The server closes the stream with an "end" event on normal completion; a
+         // termination without it means the connection dropped or the execution was not found.
+         let receivedEnd = false
++        let responseStatus: number | undefined
+ 
+         const finish = (errored: boolean) => {
+             if (finished || closed) return
+             finished = true
+-            if (errored) handlers.onError?.()
++            if (errored) handlers.onError?.(responseStatus)
+             handlers.onEnd?.()
+         }
+ 
+@@ -486,6 +498,11 @@ export const useExecutionsStore = defineStore("executions", () => {
+             {executionId},
+             {
+                 signal: controller.signal,
++                fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
++                    const response = await globalThis.fetch(...args)
++                    responseStatus = response.status
++                    return response
++                },
+                 // Do not auto-reconnect on a dropped connection: each reconnect opened a
+                 // fresh server-side SSE connection whose Netty direct buffers were not
+                 // promptly reclaimed, leaking off-heap memory over time (kestra-io/kestra#16982).
+@@ -520,25 +537,33 @@ export const useExecutionsStore = defineStore("executions", () => {
+         closeSSE()
+ 
+         executionSubscription.value = subscribeToExecution(options.id, {
+-            onExecution: (parsedExecution) => throttledExecutionUpdate(parsedExecution),
+-            // The follow emitter can only fail with a 404, so a still-undefined execution
+-            // means the flow or execution was not found; otherwise the connection was lost.
+-            onError: () => {
+-                coreStore.message = !execution.value
+-                    ? {
+-                        variant: "error",
+-                        title: translate("error"),
+-                        content: translate("errors.404.flow or execution"),
+-                    }
+-                    : {
+-                        variant: "error",
+-                        title: translate("something_went_wrong.connection_lost.title"),
+-                        content: translate("something_went_wrong.connection_lost.message"),
+-                    }
++            onExecution: (parsedExecution) => {
++                clearFollowMessage()
++                throttledExecutionUpdate(parsedExecution)
++            },
++            onError: (status) => {
++                // A 200 SSE header does not prove that the stream delivered an execution.
++                const code = status && [401, 403, 404].includes(status) ? status : undefined
++                const message = {
++                    variant: "error" as const,
++                    status: code,
++                    duration: 8000,
++                    title: translate(code ? `errors.${code}.title` : execution.value
++                        ? "something_went_wrong.connection_lost.title" : "errors.generic.title"),
++                    content: translate(code === 404 ? "errors.404.flow or execution" : code
++                        ? `errors.${code}.content` : execution.value
++                            ? "something_went_wrong.connection_lost.message" : "something_went_wrong.loading_execution"),
++                }
++                clearFollowMessage()
++                followMessage = message
++                coreStore.message = message
++                followMessageTimer = setTimeout(clearFollowMessage, 8000)
+             },
+             onEnd: () => {
+                 throttledExecutionUpdate.flush()
+-                closeSSE()
++                // Preserve an error until its timer/recovery/unmount; abort only this stream.
++                executionSubscription.value?.close()
++                executionSubscription.value = undefined
+             },
+         })
+     }
+diff --git a/ui/src/components/ErrorToast.vue b/ui/src/components/ErrorToast.vue
+index 0512896..c355ebc 100644
+--- a/ui/src/components/ErrorToast.vue
++++ b/ui/src/components/ErrorToast.vue
+@@ -98,7 +98,7 @@
+             }),
+             position: "bottom-right",
+             type: props.message.variant || "error",
+-            duration: 0,
++            duration: props.message.duration ?? 0,
+             dangerouslyUseHTMLString: true,
+             customClass: isLargeNotification.value ? "error-notification kel-notification__large" : "error-notification",
+         })
+diff --git a/ui/src/utils/problem.ts b/ui/src/utils/problem.ts
+index b5de9d3..f0174cd 100644
+--- a/ui/src/utils/problem.ts
++++ b/ui/src/utils/problem.ts
+@@ -22,6 +22,8 @@ type TranslateExists = (key: string) => boolean
+  * already localized something itself.
+  */
+ export interface ToastMessage {
++    /** Optional bounded lifetime for a caller-owned notification. */
++    duration?: number
+     variant?: "success" | "warning" | "info" | "error" | "primary"
+     /** Pre-localized title. Wins over anything derived from `problem`. */
+     title?: string
+diff --git a/ui/tests/unit/stores/executionsFollow.spec.ts b/ui/tests/unit/stores/executionsFollow.spec.ts
+index 1c0fa49..9113089 100644
+--- a/ui/tests/unit/stores/executionsFollow.spec.ts
++++ b/ui/tests/unit/stores/executionsFollow.spec.ts
+@@ -122,3 +122,52 @@ describe("executions store follow stream", () => {
+         expect(onEnd).not.toHaveBeenCalled()
+     })
+ })
++
++const {useCoreStore} = await import("../../../src/stores/core")
++describe("follow notification ownership", () => {
++    beforeEach(() => {setActivePinia(createPinia());followExecutionMock.mockReset()})
++    it.each([401, 403, 404, undefined])("classifies actual follow status %s", async status => {
++        followExecutionMock.mockImplementation(async (_params, options) => {
++            if(status) await options.fetch(new Request("http://localhost/follow"))
++            throw new Error("stream failed")
++        })
++        const fetchMock=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(null,{status:status ?? 200}))
++        const store=useExecutionsStore();const core=useCoreStore()
++        store.followExecution({id:"exec-1"}, key=>key)
++        await vi.waitFor(()=>expect(core.message).toBeDefined())
++        expect(core.message?.content).toBe(status === 404 ? "errors.404.flow or execution" : status ? `errors.${status}.content` : "something_went_wrong.loading_execution")
++        store.closeSSE();expect(core.message).toBeUndefined();fetchMock.mockRestore()
++    })
++    it("cleans only the owned error on unmount",async()=>{
++        followExecutionMock.mockRejectedValue(new Error("offline"))
++        const store=useExecutionsStore();const core=useCoreStore()
++        store.followExecution({id:"exec-1"},key=>key)
++        await vi.waitFor(()=>expect(core.message).toBeDefined())
++        core.message={title:"another error"};store.closeSSE()
++        expect(core.message?.title).toBe("another error")
++    })
++    it("expires only its own error within eight seconds", async()=>{
++        vi.useFakeTimers()
++        try {
++            followExecutionMock.mockRejectedValue(new Error("offline"))
++            const store=useExecutionsStore();const core=useCoreStore()
++            store.followExecution({id:"exec-1"},key=>key)
++            await vi.advanceTimersByTimeAsync(0)
++            expect(core.message?.duration).toBe(8000)
++            await vi.advanceTimersByTimeAsync(8000)
++            expect(core.message).toBeUndefined()
++            store.closeSSE()
++        } finally {vi.useRealTimers()}
++    })
++    it("clears an owned error when following again",async()=>{
++        followExecutionMock.mockRejectedValue(new Error("offline"))
++        const store=useExecutionsStore();const core=useCoreStore()
++        store.followExecution({id:"exec-1"},key=>key)
++        await vi.waitFor(()=>expect(core.message).toBeDefined())
++        followExecutionMock.mockImplementation(fakeFollowStream([{sseId:"end",execution:{id:"exec-1",state:{current:"SUCCESS"}}}]))
++        store.followExecution({id:"exec-1"},key=>key)
++        await vi.waitFor(()=>expect(core.message).toBeUndefined())
++        store.closeSSE()
++    })
++
++})

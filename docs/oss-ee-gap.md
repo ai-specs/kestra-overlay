@@ -1,5 +1,13 @@
 # OSS vs EE 架构能力差异表（kestra-overlay 立身依据）
 
+2026-11-11 R-EE-RBAC / REQ-0330 SSE body 授权生命周期候选修复（入口 C，未发布）：
+消费 kestra-plugin-rbac 的生产执行 follow 在200头后报不存在。定向真实controller与ACL
+复现HTTP response结束后延迟订阅body丢失evaluation；BASE Await已同线程，排除默认
+Awaitility executor为生产原因。候选在body订阅重新授权，独立关闭并验证订阅前撤权、
+缺来源拒绝与取消。前端准确提示及所属通知生命周期另列0393；不改路由403或首账号授权。
+证据和发布/组合门见docs/r-ee-rbac.md“2026-11-11 执行 follow”节。
+
+
 2026-11-04 按入口C接收R-OIDC-SERVER既有0131本地客户端适配缺陷：消费宿主UI与
 kestra-plugin-rbac，主控正式镜像新DB及新storage中旧JWT请求超时、去JWT立即重定向。
 框架userinfo回退递归进入自身认证；仅本地客户端关闭该回退，公开协议和外部issuer

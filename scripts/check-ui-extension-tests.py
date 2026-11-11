@@ -5,6 +5,7 @@ import sys
 
 
 REQUIRED = {
+    "tests/unit/stores/executionsFollow.spec.ts": 10,
     "src/utils/authentication-recovery.spec.ts": 6,
     "src/oidc-setup-wait.spec.ts": 4,
     "src/extensions/app-entry.spec.ts": 3,

@@ -1,5 +1,12 @@
 # kestra-overlay
 
+2026-11-11 本地未发布第二候选：执行 follow 源内授权生命周期与通知修复已通过独立
+local-ci（后端451通过/2镜像专用跳过、UI126）和当前镜像门；主控真实生产十次流程
+通过。SDK949、geometry64及全部相关本地镜像门已通过；正式CI、推广与最终交付
+未完成。该候选不能作为插件正式
+编译输入。最新状态和历史失败候选边界见 docs/r-ee-rbac.md 的本轮记录。
+
+
 0384当前公开契约输入为2f2984a：contract.json的overlayCompatibility与内置SDK README
 一致，仅支持KsDrawer/KsDialog/KsSelect/KsFilter经公开helper和owned renderer使用。
 原始未适配弹层、popover、未列出的复杂下拉和KsPagination仍不支持。新13文件输入
