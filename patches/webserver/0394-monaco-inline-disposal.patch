@@ -1,0 +1,89 @@
+# 需求: REQ-0394 锁定Monaco公开inline provider释放接口兼容
+# 消费扩展仓: ai-specs/kestra-plugin-rbac及宿主原生flow编辑器
+# 状态: core；主控入口C接收；候选未发布
+# 来源: 新写；CI43023388148四次实际page-error，0.56.0公开provider接口与旧回调不匹配
+# 触达上游文件: 2 个
+# 移除条件: 上游YAML inline provider实现锁定Monaco公开释放接口并具备生命周期回归
+diff --git a/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts b/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts
+index ea0cfb5..ce57139 100644
+--- a/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts
++++ b/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts
+@@ -580,6 +580,7 @@ export class YamlLanguageConfigurator extends AbstractLanguageConfigurator {
+                                 ),
+                                 command: {
+                                     id: "moveCursor",
++                                    title: "Move cursor",
+                                     arguments: [
+                                         {
+                                             lineNumber: position.lineNumber,
+@@ -596,9 +597,9 @@ export class YamlLanguageConfigurator extends AbstractLanguageConfigurator {
+                 },
+                 handlePartialAccept() {
+                 },
+-                freeInlineCompletions() {
++                disposeInlineCompletions() {
+                 },
+-            } as any),
++            }),
+         )
+
+         registerPebbleAutocompletion(
+diff --git a/ui/src/extensions/monaco-inline-disposal.spec.ts b/ui/src/extensions/monaco-inline-disposal.spec.ts
+new file mode 100644
+index 0000000..7bf0dbd
+--- /dev/null
++++ b/ui/src/extensions/monaco-inline-disposal.spec.ts
+@@ -0,0 +1,53 @@
++import {describe, it, expect, vi} from "vitest"
++import fs from "node:fs"
++import ts from "typescript"
++import {createRequire} from "node:module"
++
++// Load the locked Monaco class verbatim; the unit Vite config aliases Monaco to a stub.
++const require = createRequire(import.meta.url)
++const monacoSource = fs.readFileSync(require.resolve("monaco-editor/editor/contrib/inlineCompletions/browser/model/provideInlineCompletions.js"), "utf8")
++const monacoAst = ts.createSourceFile("monaco.js", monacoSource, ts.ScriptTarget.Latest, true)
++const declaration = monacoAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === "InlineSuggestionList")
++if (!declaration) throw new Error("Locked Monaco InlineSuggestionList missing")
++const InlineSuggestionList = new Function(`${declaration.getText(monacoAst)}; return InlineSuggestionList`)()
++
++// Extract the actual registration expression, rather than duplicating the provider in the test.
++function registeredProvider() {
++    const filename = "src/composables/monaco/languages/yamlLanguageConfigurator.ts"
++    const source = ts.createSourceFile("provider.ts", fs.readFileSync(filename, "utf8"), ts.ScriptTarget.Latest, true)
++    let expression: ts.Expression | undefined
++    function visit(node: ts.Node) {
++        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
++            && node.expression.name.text === "registerInlineCompletionsProvider") expression = node.arguments[1]
++        ts.forEachChild(node, visit)
++    }
++    visit(source)
++    if (!expression) throw new Error("Actual YAML provider registration missing")
++    const js = ts.transpileModule(`const provider = ${expression.getText(source)};`, {
++        compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None},
++    }).outputText
++    return new Function(`${js}; return provider`)()
++}
++
++describe("actual YAML inline provider disposal", () => {
++    it("releases the actual empty completion through Monaco removeRef", async () => {
++        const provider = registeredProvider()
++        const completions = await provider.provideInlineCompletions({uri: {path: "other.yaml"}}, {lineNumber: 1, column: 1})
++        const list = new InlineSuggestionList(completions, [], provider)
++        list.addRef()
++        expect(() => list.removeRef()).not.toThrow()
++        expect(completions.items).toEqual([])
++    })
++    it("disposes only after the final reference, preserving Monaco's reason", () => {
++        const provider = registeredProvider()
++        expect(typeof provider.disposeInlineCompletions).toBe("function")
++        const dispose = vi.spyOn(provider, "disposeInlineCompletions")
++        const completions = {items: []}
++        const list = new InlineSuggestionList(completions, [], provider)
++        list.addRef(); list.addRef(); list.removeRef()
++        expect(dispose).not.toHaveBeenCalled()
++        const reason = {kind: "other" as const}
++        list.removeRef(reason)
++        expect(dispose).toHaveBeenCalledExactlyOnceWith(completions, reason)
++    })
++})

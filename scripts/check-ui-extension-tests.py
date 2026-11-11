@@ -5,6 +5,7 @@ import sys
 
 
 REQUIRED = {
+    "src/extensions/monaco-inline-disposal.spec.ts": 2,
     "tests/unit/stores/executionsFollow.spec.ts": 10,
     "src/utils/authentication-recovery.spec.ts": 6,
     "src/oidc-setup-wait.spec.ts": 4,

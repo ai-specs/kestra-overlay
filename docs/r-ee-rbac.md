@@ -1412,3 +1412,27 @@ helper在流源订阅时用必要HTTP来源、主体、tenant和该计划开启�
 指标类生产注入必须有非空helper，单参构造仅兼容隔离指标测试；关闭RBAC不读取插件bean。
 新增源内日志/依赖、关闭功能、缺来源、实际bean唯一发现、精确关闭与非SSE回归，必须
 重新通过定向、顺序重放、完整local-ci和真实候选组合，第一候选结果不计为第二候选通过。
+
+## 2026-11-11 Monaco inline completion 释放兼容候选（入口 C，未发布）
+
+根仓CI43023388148十次真实创建执行通过，但onboarding-normal诊断记录四次
+page-error：`this.provider.disposeInlineCompletions is not a function`，来源为flow新建页
+Monaco removeRef释放路径。消费为宿主原生编辑器及kestra-plugin-rbac生产组合。
+锁定monaco-editor 0.56.0公开InlineCompletionsProvider要求disposeInlineCompletions；
+YAML注册provider仍使用旧freeInlineCompletions且as any隐藏类型不兼容。
+主控按入口C接收最小兼容修复：只替换释放回调并恢复公开provider类型检查，不更换
+依赖、不扩其他编辑器、不回移上游功能、不豁免page-error。持久红例必须从实际注册
+源码取得provider，经真实Monaco引用释放路径验证；定向/重放后另行执行完整门与
+真实浏览器验证，当前不宣称已发布或生产修复通过。
+
+
+本轮本地候选0394验证：实际生产provider对象经锁定Monaco原removeRef实现，旧实现两项
+失败、新实现两项通过；provider公开接口定向类型检查通过。50 patch重放17/0、358触达
+文件字节一致；原完整local-ci后端453项零失败/错误、2受控镜像专用跳过，UI128通过。
+candidate3本机arm64 executable为8af6608ee58e0b61627bc97b6db7aab340dd4a7bd9c1ca1c768cd8177c4cd1ed。
+classpath、onboarding21、auth-recovery4、OIDC35、MCP四XML各1/0/0/0、form/env含
+依赖503各七项、SDK949与geometry64全部本地通过；SDK精确ID顺序、source hash及零诊断
+错误已核。证据入口为.work/first-account-20261111/monaco-compat。
+Ego两次原生执行对话框提交等待超时已保留，不记十次通过；主控CI adapter十次业务/SSE
+通过且Monaco page-error0，但其初始dashboard导航四个未知取消诊断仍需最终生产门核对，
+不豁免。未提交、正式CI及镜像发布仍未通过本轮最终版本验证。

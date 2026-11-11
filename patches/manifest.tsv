@@ -60,3 +60,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0390	0390-oidc-initial-account-participant.patch	core	ai-specs/kestra-plugin-rbac	首个账号同连接事务参与者、receipt失败阶段重试、缺组件等待重启及配置UI selector合并	20	2026-11-03主控定稿；候选本地门通过，正式CI与发布待执行；翻译按0391单独验证	上游OSS提供等价同连接首装参与者、配置UI scope适配与安全失败重试机制
 0391	0391-oidc-onboarding-locales.patch	core	ai-specs/kestra-plugin-rbac及部署用户	首装12语言译文、中文实际文案及既有MCP缺译对齐	13	2026-11-03维护者允许直接翻译；新增132条及既有目录缺口修正；完整翻译检查通过；Ego/Chromium共21具名检查通过；正式CI待执行	上游提供等价首次安装本地化与内置OIDC文案
 0393	0393-execution-follow-notifications.patch	core	ai-specs/kestra-plugin-rbac	执行follow真实状态分类与所属通知恢复卸载和有界关闭	4	2026-11-11候选;定向红绿;完整local-ci与发布待主控审查	上游提供等价执行follow准确错误语义与所属通知生命周期
+0394	0394-monaco-inline-disposal.patch	core	ai-specs/kestra-plugin-rbac及宿主编辑器	Monaco0.56公开inline provider释放接口与持久回归	2	2026-11-11入口C候选;红例2失败绿例待验证	上游实现等价公开释放接口及生命周期回归
