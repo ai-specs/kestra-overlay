@@ -82,6 +82,7 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/onboarding-browser/node_modules
         run: |
+          sudo python3 scripts/prepare-browser-apt.py
           npm install --prefix "$RUNNER_TEMP/onboarding-browser" playwright@1.61.1
           "$RUNNER_TEMP/onboarding-browser/node_modules/.bin/playwright" install --with-deps chromium
           bash scripts/run-onboarding-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/onboarding-browser"
@@ -188,6 +189,7 @@ jobs:
           NODE_PATH: ${{ runner.temp }}/oidc-browser/node_modules
           CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
         run: |
+          sudo python3 scripts/prepare-browser-apt.py
           npm install --prefix "$RUNNER_TEMP/oidc-browser" playwright@1.61.1
           "$RUNNER_TEMP/oidc-browser/node_modules/.bin/playwright" install --with-deps chromium
           bash ./scripts/blackbox-ui-oidc.sh "$CANDIDATE_IMAGE"
@@ -241,6 +243,7 @@ jobs:
           CANDIDATE_IMAGE: ${{ needs.build-push.outputs.image }}
           NODE_PATH: ${{ runner.temp }}/sdk-browser/node_modules
         run: |
+          sudo python3 scripts/prepare-browser-apt.py
           npm install --prefix "$RUNNER_TEMP/sdk-browser" playwright@1.61.1
           "$RUNNER_TEMP/sdk-browser/node_modules/.bin/playwright" install --with-deps chromium
           node ./scripts/blackbox-ui-sdk.cjs
