@@ -2,6 +2,9 @@
 """Use signed official Ubuntu sources instead of the hosted runner mirror list."""
 import pathlib
 import re
+import subprocess
+
+FALLBACK = "https://mirrors.edge.kernel.org/ubuntu"
 
 
 def official_sources(text):
@@ -20,6 +23,26 @@ def official_sources(text):
     return updated
 
 
+def fallback_sources(text):
+    return re.sub(r"^URIs: https://(?:archive|security)\.ubuntu\.com/ubuntu$",
+                  "URIs: " + FALLBACK, text, flags=re.M)
+
+
+def update_indexes(path, update=subprocess.run):
+    # apt otherwise exits zero for failed index downloads and uses stale indexes.
+    command = ["apt-get", "-o", "APT::Update::Error-Mode=any", "-o", "Acquire::Retries=0", "update"]
+    result = update(command, check=False)
+    if result.returncode == 0:
+        return
+    current = path.read_text()
+    fallback = fallback_sources(current)
+    if fallback == current:
+        raise RuntimeError("Ubuntu index update failed and no supported official source can use the fallback")
+    print("Official Ubuntu index update failed; trying kernel.org Ubuntu mirror with unchanged Signed-By", flush=True)
+    path.write_text(fallback)
+    update(command, check=True)
+
+
 def main():
     path = pathlib.Path("/etc/apt/sources.list.d/ubuntu.sources")
     if not path.is_file():
@@ -28,6 +51,7 @@ def main():
     updated = official_sources(original)
     path.write_text(updated)
     print("Ubuntu browser dependencies: hosted mirror URIs absent; suites/components/signatures retained")
+    update_indexes(path)
 
 
 if __name__ == "__main__":
