@@ -18,7 +18,7 @@ index 78d3505..7ad18b3 100644
 @@ -412,7 +412,18 @@ export const useExecutionsStore = defineStore("executions", () => {
      // Closing it aborts the underlying stream (see subscribeToExecution).
      const executionSubscription = ref<{ close: () => void } | undefined>(undefined)
- 
+
 +    let followMessage: typeof coreStore.message
 +    let followMessageTimer: ReturnType<typeof setTimeout> | undefined
 +    function clearFollowMessage() {
@@ -48,7 +48,7 @@ index 78d3505..7ad18b3 100644
          // termination without it means the connection dropped or the execution was not found.
          let receivedEnd = false
 +        let responseStatus: number | undefined
- 
+
          const finish = (errored: boolean) => {
              if (finished || closed) return
              finished = true
@@ -56,7 +56,7 @@ index 78d3505..7ad18b3 100644
 +            if (errored) handlers.onError?.(responseStatus)
              handlers.onEnd?.()
          }
- 
+
 @@ -486,6 +498,11 @@ export const useExecutionsStore = defineStore("executions", () => {
              {executionId},
              {
@@ -71,7 +71,7 @@ index 78d3505..7ad18b3 100644
                  // promptly reclaimed, leaking off-heap memory over time (kestra-io/kestra#16982).
 @@ -520,25 +537,33 @@ export const useExecutionsStore = defineStore("executions", () => {
          closeSSE()
- 
+
          executionSubscription.value = subscribeToExecution(options.id, {
 -            onExecution: (parsedExecution) => throttledExecutionUpdate(parsedExecution),
 -            // The follow emitter can only fail with a 404, so a still-undefined execution
