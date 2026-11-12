@@ -1,0 +1,81 @@
+# 需求: REQ-0395 可选原生feeds调用错误边界
+# 消费扩展仓: ai-specs/kestra-plugin-rbac及宿主原生页面
+# 状态: core；主控入口C接收；候选未发布
+# 来源: 新写；两轮生产feeds失败及App未处理Promise证据
+# 触达上游文件: 2 个
+# 移除条件: 上游App具备等价可选feeds失败边界与成功拒绝回归
+diff --git a/ui/src/App.vue b/ui/src/App.vue
+index 5a8fc13..d5deeb8 100644
+--- a/ui/src/App.vue
++++ b/ui/src/App.vue
+@@ -97,6 +97,8 @@
+             version: config.version,
+             iid: config.uuid,
+             uid: uid,
++        }).catch((error: unknown) => {
++            console.warn("Failed to load optional news feeds:", error)
+         })
+
+         void initPosthogIfEnabled(config)
+diff --git a/ui/src/extensions/app-entry.spec.ts b/ui/src/extensions/app-entry.spec.ts
+index e0f8a8a..6585032 100644
+--- a/ui/src/extensions/app-entry.spec.ts
++++ b/ui/src/extensions/app-entry.spec.ts
+@@ -4,6 +4,8 @@ import {createPinia, setActivePinia} from "pinia";
+ import {createMemoryHistory, createRouter} from "vue-router";
+ import App from "../App.vue";
+ import {setExtensionFallback} from "./entry";
++import axios from "axios";
++import {useApiStore} from "../stores/api";
+ import {useMiscStore} from "override/stores/misc";
+
+ vi.mock("../styles/vendor.scss", () => ({}));
+@@ -14,7 +16,7 @@ vi.mock("override/stores/misc", async () => {
+         loadConfigs: vi.fn(async () => ({version: "2.0.5", uuid: "probe"})),
+     }})};
+ });
+-vi.mock("../stores/api", () => ({useApiStore: () => ({loadFeeds: vi.fn()})}));
++vi.mock("axios", () => ({default: {get: vi.fn()}}));
+ vi.mock("../stores/layout", () => ({useLayoutStore: () => ({envName: ""})}));
+ vi.mock("../stores/core", () => ({useCoreStore: () => ({})}));
+ vi.mock("../stores/doc", () => ({useDocStore: () => ({initResourceUrlTemplate: vi.fn()})}));
+@@ -37,7 +39,7 @@ vi.mock("../components/PwaInstallPrompt.vue", () => ({default: {template: '<div
+ vi.mock("../components/extensions/ExtensionFallbackLayout.vue", () => ({default: {template: '<div data-test="fallback-layout"><slot /></div>'}}));
+
+ let wrapper: ReturnType<typeof mount>;
+-beforeEach(() => {setExtensionFallback(); localStorage.clear();});
++beforeEach(() => {setExtensionFallback(); localStorage.clear(); vi.mocked(axios.get).mockReset(); vi.mocked(axios.get).mockResolvedValue({data: {feeds: []}});});
+ afterEach(() => {wrapper?.unmount(); localStorage.clear();});
+
+ async function render(reduced: boolean) {
+@@ -57,6 +59,30 @@ async function render(reduced: boolean) {
+ }
+
+ describe("App extension shell initialization", () => {
++    it("contains optional feeds rejection without an unhandled promise", async () => {
++        const failure = new Error("feeds network unavailable");
++        vi.mocked(axios.get).mockRejectedValueOnce(failure);
++        const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
++        try {
++            await render(false);
++            expect(axios.get).toHaveBeenCalledOnce();
++            expect(warning).toHaveBeenCalledWith("Failed to load optional news feeds:", failure);
++            expect(wrapper.find('[data-test="full-layout"]').exists()).toBe(true);
++        } finally {
++            warning.mockRestore();
++        }
++    });
++
++    it("preserves successful feeds in the actual store", async () => {
++        const feeds = [{id: "news-1", publicationDate: "2026-11-12", title: "News"}];
++        vi.mocked(axios.get).mockResolvedValueOnce({data: {feeds}});
++        await render(false);
++        expect(useApiStore().feeds).toEqual(feeds);
++        expect(axios.get).toHaveBeenCalledWith("https://api.kestra.io/v1/feeds", {
++            withCredentials: true, params: {version: "2.0.5", iid: "probe", uid: "probe"},
++        });
++    });
++
+     it("mounts the fallback without any general resources or business shell components", async () => {
+         const {misc} = await render(true);
+         expect(misc.loadConfigs).not.toHaveBeenCalled();

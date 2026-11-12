@@ -1436,3 +1436,27 @@ classpath、onboarding21、auth-recovery4、OIDC35、MCP四XML各1/0/0/0、form/
 Ego两次原生执行对话框提交等待超时已保留，不记十次通过；主控CI adapter十次业务/SSE
 通过且Monaco page-error0，但其初始dashboard导航四个未知取消诊断仍需最终生产门核对，
 不豁免。未提交、正式CI及镜像发布仍未通过本轮最终版本验证。
+
+
+### REQ-0395 可选原生 feeds 错误边界（2026-11-12，入口 C，已接收未发布）
+
+消费项目为 kestra-plugin-rbac；根仓正式组合两轮复现原生 feeds 请求失败，
+第二轮首装及12项业务检查通过，但外部 feeds 错误使诊断剩余2项。首轮证据为
+`/var/folders/g4/qy4zrl7x6kx0d2n_d_4dx_l40000gn/T/application-projects-bb-EpOdbZ/frozen-browser/browser-report.json`：
+event321 为 api.kestra.io/v1/feeds ERR_CONNECTION_CLOSED，322为相同requestId网络console，
+323为同文档1毫秒后AxiosError/h.onerror。323与feeds关联有强证据但报告无异常requestId，
+不宣称一对一运行时绑定。源码确定App.loadGeneralResources未等待或捕获loadFeeds返回的
+Promise，外层watch的try/catch不能接住该拒绝。既有统计关闭配置不控制feeds。
+
+主控裁决只修既有原生App可选feeds调用边界：单独捕获并以console.warn保留失败信息，
+不阻塞正常通用资源初始化，不改变store成功数据与拒绝契约、不改权限或全局Axios、
+不增加配置或诊断豁免。归属0368既有App初始化生命周期，新0395单独记录失效修复。
+持久回归从实际App挂载验证拒绝无unhandled及成功数据保留；原代码必须红、新代码绿。
+宿主负责独立UI/结构/重放验证，根仓负责最终生产浏览器与零未知诊断验收。
+本地验证：旧实际App+真实api store在Axios拒绝时1项失败、4项通过并报告1个
+unhandled rejection；新实现5项通过，无unhandled。原local-ci相同UI选择范围14文件
+130项全过，数量门与自身5项测试通过。51个patch从正式BASE顺序重放，358触达文件
+与独占dev字节一致；结构15/0。vue-tsc app检查仍返回既有错误，新旧24行诊断
+逐字一致，无新增诊断，不记类型全绿。证据位于
+`.work/first-account-20261111/feeds-compat`。未运行完整local-ci、镜像或浏览器门，
+未提交、CI或发布；不扩大SSE或其他外部请求范围。
