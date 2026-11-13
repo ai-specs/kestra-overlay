@@ -196,10 +196,10 @@ index c8d3137c4959c266143a3679d1180213f6fabe07..e0091f6affd950ef646bc42702bb9edb
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e834aa685 100644
+index 1e6fd7d..d0e6849 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-@@ -58,13 +58,16 @@ public class McpSessionService {
+@@ -58,13 +58,13 @@ public class McpSessionService {
              boolean isNewOwner = McpSessionEventType.OWNERSHIP_CHANGED == event.type()
                  && ServerInstance.INSTANCE_ID.equals(session.sseNode());
              if (!isNewOwner && (event.type() == McpSessionEventType.DELETED || event.type() == McpSessionEventType.OWNERSHIP_CHANGED)) {
@@ -210,20 +210,17 @@ index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e
 -                    .build();
 -                Optional.ofNullable(streamableSessions.remove(context))
 -                    .ifPresent(McpStreamableServerSession::delete);
-+                streamableSessions.entrySet().removeIf(entry -> {
-+                    final var context = entry.getKey();
++                streamableSessions.forEach((context, localSession) -> {
 +                    if (java.util.Objects.equals(context.getTenantId(), session.tenantId())
 +                        && java.util.Objects.equals(context.getServerId(), session.serverId())
 +                        && java.util.Objects.equals(context.getSessionId(), session.sessionId())) {
-+                        entry.getValue().delete();
-+                        return true;
++                        closeDeletedSession(context, localSession);
 +                    }
-+                    return false;
 +                });
              }
          });
      }
-@@ -90,7 +93,7 @@ public class McpSessionService {
+@@ -90,7 +90,7 @@ public class McpSessionService {
      public boolean sessionExists(KestraMcpTransportContext context) {
          return sessionRepository.find(
              context.getTenantId(), context.getServerId(), context.getSessionId()
@@ -232,7 +229,7 @@ index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e
      }
 
      Optional<McpStreamableServerSession> findMcpStreamableServerSession(KestraMcpTransportContext context) {
-@@ -107,7 +110,7 @@ public class McpSessionService {
+@@ -107,7 +107,7 @@ public class McpSessionService {
          }
          McpSession session = new McpSession(
              context.getTenantId(), context.getServerId(),
@@ -241,7 +238,7 @@ index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e
          );
          sessionRepository.save(session);
          streamableSessions.put(context, mcpStreamableServerSession);
-@@ -129,7 +132,7 @@ public class McpSessionService {
+@@ -129,7 +129,7 @@ public class McpSessionService {
      public void takeSseOwnership(KestraMcpTransportContext context, McpStreamableServerSession session) {
          McpSession updated = new McpSession(
              context.getTenantId(), context.getServerId(),
@@ -250,7 +247,7 @@ index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e
          );
          sessionRepository.save(updated);
          streamableSessions.put(context, session);
-@@ -155,6 +158,7 @@ public class McpSessionService {
+@@ -155,6 +155,7 @@ public class McpSessionService {
       */
      public void close(KestraMcpTransportContext context) {
          sessionRepository.find(context.getTenantId(), context.getServerId(), context.getSessionId())
@@ -258,7 +255,7 @@ index 1e6fd7daf4959072e92cde0c91b898b40db0966f..d0b340d368194b6dc697a63d4e7a4b2e
              .ifPresent(session ->
              {
                  sessionRepository.delete(context.getTenantId(), context.getSessionId());
-@@ -169,4 +173,11 @@ public class McpSessionService {
+@@ -169,4 +170,11 @@ public class McpSessionService {
              log.error("Failed to emit MCP session event {} for session {}: {}", event.type(), event.session().sessionId(), e.getMessage(), e);
          }
      }

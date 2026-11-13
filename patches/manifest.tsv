@@ -62,3 +62,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0393	0393-execution-follow-notifications.patch	core	ai-specs/kestra-plugin-rbac	执行follow真实状态分类与所属通知恢复卸载和有界关闭	4	2026-11-11候选;定向红绿;完整local-ci与发布待主控审查	上游提供等价执行follow准确错误语义与所属通知生命周期
 0394	0394-monaco-inline-disposal.patch	core	ai-specs/kestra-plugin-rbac及宿主编辑器	Monaco0.56公开inline provider释放接口与持久回归	2	2026-11-11入口C候选;红例2失败绿例待验证	上游实现等价公开释放接口及生命周期回归
 0395	0395-optional-feeds-boundary.patch	core	ai-specs/kestra-plugin-rbac及宿主页面	可选原生feeds调用失败边界与实际App回归	2	2026-11-12入口C候选;旧实现unhandled红新实现5项绿;未发布	上游提供等价可选feeds失败处理与生命周期回归
+0396	0396-mcp-session-lifecycle.patch	core	ai-specs/kestra-plugin-rbac及MCP客户端	监听保活隔离、受管理异步删除与GET流实例注销	4	2026-11-13入口C候选;持久原三红;stop拒绝登记新增红转绿;13及15整套绿;增跨节点两项原/新各绿;最终17待Gradle;52重放359字节一致;完整门待审查;未发布	上游提供等价会话监听与关闭生命周期

@@ -3,6 +3,46 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
+MCP_LIFECYCLE_REQUIRED = {
+    "deletedEventReleasesRealSdkListenerAndPendingRequest",
+    "postOnlySessionDoesNotProduceRepeatedMissingStreamWarnings",
+    "oldGetDisposeCannotRemoveNewListener",
+    "getDisconnectKeepsPersistentSessionAndReconnects",
+    "activeGetStillReceivesProductionSchedulerPingAndShutdownStopsIt",
+    "deletedSessionCloseFailureIsObservable",
+    "serviceStopCancelsManagedCloseWithoutBlockingQueue",
+    "deletingOneSessionDoesNotCloseAnotherListener",
+    "delayedOldGetAfterDeleteCannotResurrectSession",
+    "oldAsyncCloseCannotCloseNewOwnerListener",
+    "queueCallbackRaceClosesCapturedOldSessionWithoutRemovingNewOwner",
+    "deletedSessionTimeoutReleasesActualGetAndPending",
+    "stoppedCloseRegistryStillReleasesCapturedGetAndPending",
+    "tenantScopedDeleteCannotCloseSameIdListenerInAnotherTenant",
+    "wrongSubjectClientOrResourceDeleteCannotCloseActiveOwnerListener",
+    "remoteToolCallUsesRealEphemeralHandlerAndPayload",
+    "remoteToolsListUsesVisibilityProviderWithoutEphemeralSession",
+}
+
+MCP_TRANSPORT_REQUIRED = {
+    "shouldRejectRequestWhenServerIsShuttingDown",
+    "shouldReturnMethodNotAllowedWhenUnsupportedHttpMethodReceived",
+    "shouldRejectRequestWhenRequestHasInvalidResponseType",
+    "shouldRejectRequestWhenPostRequestHasEmptyBody",
+    "shouldRejectRequestWhenPostRequestHasInvalidBody",
+    "shouldReturnSessionIdsWhenInitializeRequestReceived",
+    "shouldAcceptRequestWhenNotificationRequestReceived",
+    "shouldAcceptRequestWhenPersistentSseConnectionIsOnSeparateInstance",
+    "shouldHandleToolCallByEphemeralSessionWhenSseConnectionIsOnSeparateInstance",
+    "shouldListVisibleToolsForRemoteSessionWithoutCreatingEphemeralSession",
+    "shouldNotifyOnlyLocalSessionsWhenNotifyClientsIsCalled",
+    "shouldDeleteSessionAndEmitBroadcastWhenDeleteReceivedForRemoteSseSession",
+    "shouldTransferSseOwnershipToThisNodeWhenGetReceivedForRemoteSseSession",
+    "shouldRemoveSessionFromLocalStateWhenOwnershipTransferBroadcastReceived",
+    "shouldRemoveSessionFromLocalStateWhenDeleteBroadcastReceived",
+    "shouldBroadcastCreatedEventWhenSessionInitialized",
+    "shouldKeepSessionInLocalStateWhenOwnershipChangedToThisNode",
+}
+
 INITIAL_ACCOUNT_REQUIRED = {
     "io.kestra.webserver.oidc.OidcInitialAccountContractTest": 2,
     "io.kestra.webserver.oidc.OidcUiClientScopesTest": 4,
@@ -15,6 +55,8 @@ INITIAL_ACCOUNT_REQUIRED = {
 }
 
 REQUIRED = {
+    "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest": len(MCP_TRANSPORT_REQUIRED),
+    "io.kestra.mcp.McpSessionLifecycleTest": len(MCP_LIFECYCLE_REQUIRED),
     "io.kestra.webserver.oidc.OidcInvalidCookieRecoveryHttpTest": 3,
     "io.kestra.webserver.oidc.OidcLocalMetadataFetcherFactoryTest": 3,
     **INITIAL_ACCOUNT_REQUIRED,
@@ -69,6 +111,14 @@ def check(results, required=None):
             int(report.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
         ):
             raise SystemExit(f"FAIL: {suite} must execute {expected} tests without failures or skips")
+        if suite == "io.kestra.mcp.McpSessionLifecycleTest":
+            names = [case.get("name", "").removesuffix("()") for case in report.findall("testcase")]
+            if len(names) != len(MCP_LIFECYCLE_REQUIRED) or set(names) != MCP_LIFECYCLE_REQUIRED:
+                raise SystemExit("FAIL: MCP lifecycle must execute all seventeen exact named cases")
+        if suite == "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest":
+            names = [case.get("name", "").removesuffix("()") for case in report.findall("testcase")]
+            if len(names) != len(MCP_TRANSPORT_REQUIRED) or set(names) != MCP_TRANSPORT_REQUIRED:
+                raise SystemExit("FAIL: MCP transport must execute all seventeen exact named cases")
         print(f"PASS: {suite}: {expected} tests executed, no failures or skips")
 
 

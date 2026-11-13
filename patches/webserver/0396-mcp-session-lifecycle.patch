@@ -1,0 +1,782 @@
+# 需求: REQ-0396 MCP监听保活与受管理会话关闭
+# 消费扩展仓: ai-specs/kestra-plugin-rbac及正式MCP客户端
+# 状态: core；主控入口C接收；候选未发布
+# 来源: 新写；锁定SDK1.1.3原实现删除/保活/旧GET注销分别实际红例
+# 触达上游文件: 4 个
+# 移除条件: 上游提供等价监听保活隔离、受管理异步关闭及流实例条件注销
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
+index d0e6849..8b1a8ac 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
+@@ -18,6 +18,12 @@ import io.kestra.core.queues.QueueSubscriber;
+ import io.kestra.core.server.ServerInstance;
+
+ import io.modelcontextprotocol.spec.McpStreamableServerSession;
++import reactor.core.Disposable;
++import reactor.core.Disposables;
++import reactor.core.publisher.BaseSubscriber;
++import reactor.core.publisher.Mono;
++import reactor.core.publisher.SignalType;
++import reactor.core.scheduler.Schedulers;
+ import jakarta.annotation.PostConstruct;
+ import jakarta.annotation.PreDestroy;
+ import jakarta.inject.Inject;
+@@ -30,6 +36,10 @@ public class McpSessionService {
+     private final McpSessionRepositoryInterface sessionRepository;
+     private final BroadcastQueueInterface<McpSessionEvent> mcpSessionQueue;
+     private final Map<KestraMcpTransportContext, McpStreamableServerSession> streamableSessions = new ConcurrentHashMap<>();
++    private record ListeningSession(McpStreamableServerSession session,
++        McpStreamableServerSession.McpStreamableServerSessionStream stream) {}
++    private final Map<KestraMcpTransportContext, ListeningSession> listeningSessions = new ConcurrentHashMap<>();
++    private final Disposable.Composite closingSessions = Disposables.composite();
+     private QueueSubscriber<McpSessionEvent> sessionSubscriber;
+
+     static final Duration SESSION_PURGE_AGE = Duration.ofHours(48);
+@@ -74,13 +84,64 @@ public class McpSessionService {
+         if (sessionSubscriber != null) {
+             sessionSubscriber.close();
+         }
++        closingSessions.dispose();
++    }
++
++    private void closeDeletedSession(KestraMcpTransportContext context, McpStreamableServerSession session) {
++        var listener = new java.util.concurrent.atomic.AtomicReference<ListeningSession>();
++        listeningSessions.compute(context, (key, current) -> {
++            streamableSessions.remove(key, session);
++            if (current != null && current.session() == session) {
++                listener.set(current);
++                return null;
++            }
++            return current;
++        });
++        Runnable releaseListener = () -> {
++            var captured = listener.getAndSet(null);
++            if (captured != null) {
++                captured.stream().close();
++            }
++        };
++        BaseSubscriber<Void> closing = new BaseSubscriber<>() {
++            @Override
++            protected void hookOnError(Throwable failure) {
++                log.warn("Failed to close deleted MCP session {}", session.getId(), failure);
++            }
++
++            @Override
++            protected void hookFinally(SignalType type) {
++                try {
++                    if (type != SignalType.ON_COMPLETE) {
++                        releaseListener.run();
++                    }
++                } finally {
++                    closingSessions.remove(this);
++                }
++            }
++        };
++        // Register before subscribing: synchronous completion and concurrent service shutdown are both safe.
++        if (closingSessions.add(closing)) {
++            Mono.defer(session::delete)
++                .timeout(Duration.ofSeconds(5))
++                .subscribeOn(Schedulers.boundedElastic())
++                .subscribe(closing);
++        } else {
++            // A pre-subscription cancellation need not invoke BaseSubscriber.hookFinally.
++            releaseListener.run();
++        }
+     }
+
+     public Collection<McpStreamableServerSession> listMcpStreamableServerSession() {
+         return streamableSessions.values();
+     }
+
++    public Collection<McpStreamableServerSession> listListeningMcpStreamableServerSession() {
++        return listeningSessions.values().stream().map(ListeningSession::session).toList();
++    }
++
+     public void clear() {
++        listeningSessions.clear();
+         streamableSessions.clear();
+     }
+
+@@ -121,7 +182,7 @@ public class McpSessionService {
+      * supplied session locally, and broadcasts the change so the previous owning node can
+      * release its in-memory state.
+      * <p>
+-     * Call {@link #deregisterSseSession(KestraMcpTransportContext)} when the SSE connection closes.
++     * Call {@link #deregisterSseSession(KestraMcpTransportContext, McpStreamableServerSession.McpStreamableServerSessionStream)} when the SSE connection closes.
+      *
+      * @param context the transport context identifying the session
+      * @param session the local session that will serve the SSE stream
+@@ -143,8 +204,31 @@ public class McpSessionService {
+      *
+      * @param context the transport context identifying the session
+      */
+-    public void deregisterSseSession(KestraMcpTransportContext context) {
+-        streamableSessions.remove(context);
++    public McpStreamableServerSession.McpStreamableServerSessionStream registerSseSession(
++        KestraMcpTransportContext context, McpStreamableServerSession session,
++        io.modelcontextprotocol.spec.McpStreamableServerTransport transport) {
++        boolean sessionValid = sessionExists(context);
++        var registered = new java.util.concurrent.atomic.AtomicReference<McpStreamableServerSession.McpStreamableServerSessionStream>();
++        listeningSessions.compute(context, (key, previous) -> {
++            if (streamableSessions.get(key) != session || !sessionValid) {
++                return previous;
++            }
++            var stream = session.listeningStream(transport);
++            registered.set(stream);
++            return new ListeningSession(session, stream);
++        });
++        return registered.get();
++    }
++
++    public void deregisterSseSession(KestraMcpTransportContext context,
++        McpStreamableServerSession.McpStreamableServerSessionStream stream) {
++        listeningSessions.computeIfPresent(context, (key, current) -> {
++            if (current.stream() != stream) {
++                return current;
++            }
++            streamableSessions.remove(key, current.session());
++            return null;
++        });
+     }
+
+     /**
+diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
+index bdf3d4c..1262415 100644
+--- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
++++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
+@@ -55,7 +55,7 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+         this.mcpErrorResponseMapper = mcpErrorResponseMapper;
+         this.mcpSessionService = mcpSessionService;
+         this.keepAliveScheduler = KeepAliveScheduler
+-            .builder(() -> (isClosing.get()) ? Flux.empty() : Flux.fromIterable(this.mcpSessionService.listMcpStreamableServerSession()))
++            .builder(() -> (isClosing.get()) ? Flux.empty() : Flux.fromIterable(this.mcpSessionService.listListeningMcpStreamableServerSession()))
+             .initialDelay(KEEP_ALIVE_INTERVAL)
+             .interval(KEEP_ALIVE_INTERVAL)
+             .build();
+@@ -172,12 +172,16 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+         Flux<Event<?>> serverSentEvent = Flux.<Event<?>> create(sink ->
+         {
+             FluxStreamableMcpSessionTransport sessionTransport = new FluxStreamableMcpSessionTransport(sink);
+-            McpStreamableServerSession.McpStreamableServerSessionStream listeningStream = resolvedSession
+-                .listeningStream(sessionTransport);
++            McpStreamableServerSession.McpStreamableServerSessionStream listeningStream = mcpSessionService
++                .registerSseSession(transportContext, resolvedSession, sessionTransport);
++            if (listeningStream == null) {
++                sink.error(new IllegalStateException("MCP session is no longer local"));
++                return;
++            }
+             sink.onDispose(() ->
+             {
+                 listeningStream.close();
+-                mcpSessionService.deregisterSseSession(transportContext);
++                mcpSessionService.deregisterSseSession(transportContext, listeningStream);
+             });
+         }).contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
+
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpSessionLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpSessionLifecycleTest.java
+new file mode 100644
+index 0000000..4a829a5
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpSessionLifecycleTest.java
+@@ -0,0 +1,559 @@
++package io.kestra.mcp;
++
++import ch.qos.logback.classic.Logger;
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.core.AppenderBase;
++import io.kestra.core.exceptions.DeserializationException;
++import io.kestra.core.mcp.models.McpSession;
++import io.kestra.core.mcp.models.McpSessionEvent;
++import io.kestra.core.mcp.repositories.McpSessionRepositoryInterface;
++import io.kestra.core.queues.BroadcastQueueInterface;
++import io.kestra.core.queues.QueueSubscriber;
++import io.kestra.core.utils.Either;
++import io.micronaut.http.*;
++import io.modelcontextprotocol.json.TypeRef;
++import io.modelcontextprotocol.spec.*;
++import org.slf4j.LoggerFactory;
++import reactor.core.Disposable;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++import java.lang.reflect.Proxy;
++import java.time.Duration;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.*;
++import java.util.function.Consumer;
++import java.util.function.Supplier;
++import org.junit.jupiter.api.Test;
++
++/** No application context, database or network. Real host service/provider and SDK 1.1.3. */
++public final class McpSessionLifecycleTest {
++    static void require(boolean condition, String message) {
++        if (!condition) throw new AssertionError(message);
++    }
++    @SuppressWarnings("unchecked")
++    static <T> T fake(Class<T> type, java.lang.reflect.InvocationHandler handler) {
++        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, handler);
++    }
++    static final class QueueAndRepository {
++        record RepositoryKey(String tenant, String session) {}
++        static RepositoryKey key(String tenant, String session) {return new RepositoryKey(tenant,session);}
++        // Match the published JDBC key (tenant, sessionId); find additionally checks serverId.
++        final Map<RepositoryKey, McpSession> records = new ConcurrentHashMap<>();
++        final AtomicReference<Consumer<Either<McpSessionEvent, DeserializationException>>> receiver = new AtomicReference<>();
++        final AtomicInteger deliveredDeletes = new AtomicInteger();
++        final QueueSubscriber<McpSessionEvent> subscriber = fake(QueueSubscriber.class, (p,m,a) -> {
++            if (m.getName().equals("subscribe")) { receiver.set((Consumer<Either<McpSessionEvent, DeserializationException>>) a[0]); return p; }
++            return null;
++        });
++        final BroadcastQueueInterface<McpSessionEvent> queue = fake(BroadcastQueueInterface.class, (p,m,a) -> {
++            if (m.getName().equals("subscriber")) return subscriber;
++            if (m.getName().equals("emit")) {
++                McpSessionEvent event = (McpSessionEvent) a[0];
++                receiver.get().accept(Either.left(event));
++                if (event.type() == McpSessionEvent.McpSessionEventType.DELETED) deliveredDeletes.incrementAndGet();
++            }
++            return null;
++        });
++        final McpSessionRepositoryInterface repository = fake(McpSessionRepositoryInterface.class, (p,m,a) -> {
++            return switch (m.getName()) {
++                case "purgeOlderThan" -> 0;
++                case "find" -> Optional.ofNullable(records.get(key((String)a[0],(String)a[2])))
++                    .filter(record -> Objects.equals(record.serverId(),a[1]));
++                case "save" -> { McpSession value=(McpSession)a[0]; records.put(key(value.tenantId(),value.sessionId()),value); yield value; }
++                case "delete" -> Optional.ofNullable(records.remove(key((String)a[0],(String)a[1])));
++                default -> throw new UnsupportedOperationException(m.toString());
++            };
++        });
++    }
++    static KestraMcpTransportContext identity(String id) {
++        return KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId(id)
++            .userId("alice").clientId("client").resource("resource").roles(List.of()).scopes(List.of()).build();
++    }
++    static McpStreamableServerSession session(String id, AtomicInteger onCloseSubscriptions) {
++        return new McpStreamableServerSession(id, new McpSchema.ClientCapabilities(null,null,null,null),
++            new McpSchema.Implementation("probe", "1"), Duration.ofMinutes(5), Map.of("probe/echo", (io.modelcontextprotocol.server.McpRequestHandler<Object>)(exchange, params) -> Mono.just(Map.of("ok",true))), Map.of(),
++            () -> Mono.fromRunnable(onCloseSubscriptions::incrementAndGet));
++    }
++    static HttpRequest<String> get(String id) {
++        return HttpRequest.<String>GET("/api/v1/main/mcp/default").accept(MediaType.TEXT_EVENT_STREAM_TYPE)
++            .header("Mcp-Session-Id",id);
++    }
++    static HttpRequest<String> delete(String id) {
++        return HttpRequest.<String>DELETE("/api/v1/main/mcp/default").accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE)
++            .header("Mcp-Session-Id",id);
++    }
++    static HttpRequest<String> initialize() {
++        return HttpRequest.POST("/api/v1/main/mcp/default", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"1\"}}}")
++            .accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE);
++    }
++    static void deletedMustReleaseRealListeningAndPending() throws Exception {
++        var environment = new QueueAndRepository();
++        var service = new McpSessionService(environment.repository, environment.queue); service.start();
++        var provider = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var closes = new AtomicInteger(); var realSession = session("deleted-real-sdk",closes);
++        var context=identity(realSession.getId());
++        var streamCompleted = new AtomicBoolean(); var pendingErrors = new AtomicInteger();
++        var released = new CountDownLatch(2);
++        Disposable stream = null, pending = null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,realSession);
++            var response=provider.handleRequest(get(realSession.getId()),context).block(Duration.ofSeconds(2));
++            require(response.code()==200,"GET precondition: 200");
++            stream=Flux.from((org.reactivestreams.Publisher<?>)response.body()).subscribe(v -> {},e -> { throw new AssertionError(e); },() -> {streamCompleted.set(true);released.countDown();});
++            pending=realSession.sendRequest("probe/pending",null,new TypeRef<Object>(){}).subscribe(v -> {},e -> {pendingErrors.incrementAndGet();released.countDown();});
++            require(!streamCompleted.get() && pendingErrors.get()==0,"must start with real active GET and unresolved pending SDK request");
++            var deleted=provider.handleRequest(delete(realSession.getId()),context).block(Duration.ofSeconds(2));
++            require(deleted.code()==200,"DELETE response");
++            require(environment.deliveredDeletes.get()==1 && environment.records.isEmpty() && service.listMcpStreamableServerSession().isEmpty(),"real service must consume DELETED and remove persistent/local entries");
++            released.await(2,TimeUnit.SECONDS);
++            System.out.printf("OBSERVED deleted delivered=1 records=0 local=0 closeSubscriptions=%d GETcompleted=%s pendingErrors=%d%n",closes.get(),streamCompleted.get(),pendingErrors.get());
++            require(closes.get()==1 && streamCompleted.get() && pendingErrors.get()==1,
++                "DELETED removed maps but did not subscribe real SDK delete: expected onClose=1, GET completion=true, pending error=1");
++        } finally {
++            // Probe cleanup deliberately independent of production delete, never counted as its result.
++            realSession.close(); if (pending!=null) pending.dispose(); if (stream!=null) stream.dispose();
++            provider.closeGracefully().block(Duration.ofSeconds(2)); service.stop();
++        }
++    }
++    static void postOnlyMustNotRepeatMissingStreamWarnings() throws Exception {
++        var environment = new QueueAndRepository();
++        var service = new McpSessionService(environment.repository,environment.queue); service.start();
++        var closes=new AtomicInteger(); var realSession=session("post-only-real-sdk",closes);
++        var log=(Logger)LoggerFactory.getLogger("io.modelcontextprotocol.util.KeepAliveScheduler");
++        var warnings=new CopyOnWriteArrayList<String>(); var twoTicks=new CountDownLatch(2);
++        var appender=new AppenderBase<ILoggingEvent>() {
++            protected void append(ILoggingEvent e) {
++                if (e.getFormattedMessage().contains("Failed to send keep-alive ping") && e.getFormattedMessage().contains(realSession.getId())) {
++                    warnings.add(e.getFormattedMessage()); twoTicks.countDown();
++                }
++            }
++        };appender.start();log.addAppender(appender);
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        provider.setSessionFactory(request -> new McpStreamableServerSession.McpStreamableServerSessionInit(realSession,
++            Mono.just(new McpSchema.InitializeResult("2025-06-18",null,new McpSchema.Implementation("probe-server","1"),null))));
++        try {
++            var response=provider.handleRequest(initialize(),identity(realSession.getId())).block(Duration.ofSeconds(2));
++            require(response.code()==200 && environment.records.size()==1 && service.listMcpStreamableServerSession().size()==1,"real initialize must register persistent/local session");
++            // Complete and cancel a genuine POST SSE response, just as root's rpc reader does.
++            var rpc = HttpRequest.POST("/api/v1/main/mcp/default", "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"probe/echo\",\"params\":{}}")
++                .accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",realSession.getId());
++            var post = provider.handleRequest(rpc,identity(realSession.getId())).block(Duration.ofSeconds(2));
++            require(post.code()==200,"real POST response precondition");
++            var payloads = Flux.from((org.reactivestreams.Publisher<?>)post.body()).take(1).collectList().block(Duration.ofSeconds(2));
++            require(payloads.size()==1 && environment.records.size()==1 && service.listMcpStreamableServerSession().size()==1,
++                "POST response cancellation must preserve protocol session");
++            System.out.println("OBSERVED actual POST response received then take(1) canceled body; no GET opened; session remains registered");
++            twoTicks.await(65,TimeUnit.SECONDS); // Fixed implementation may emit no warning; the timeout is an observation bound, not a required failure.
++            System.out.printf("OBSERVED POST-only real scheduler WARN count=%d records=%d local=%d messages=%s%n",warnings.size(),environment.records.size(),service.listMcpStreamableServerSession().size(),warnings);
++            require(warnings.isEmpty(),"POST-only valid session must not be repeatedly pinged through MissingMcpTransportSession");
++        } finally {
++            provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();log.detachAppender(appender);appender.stop();
++        }
++    }
++    static void lateOldGetDisposeMustKeepNewListener() {
++        var environment = new QueueAndRepository();
++        var service = new McpSessionService(environment.repository, environment.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var realSession=session("overlapping-get-real-sdk",new AtomicInteger());
++        var context=identity(realSession.getId());
++        Disposable first=null, second=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,realSession);
++            var a=provider.handleRequest(get(realSession.getId()),context).block(Duration.ofSeconds(2));
++            first=Flux.from((org.reactivestreams.Publisher<?>)a.body()).subscribe();
++            var b=provider.handleRequest(get(realSession.getId()),context).block(Duration.ofSeconds(2));
++            var seen=new AtomicInteger();
++            second=Flux.from((org.reactivestreams.Publisher<?>)b.body()).subscribe(event -> seen.incrementAndGet());
++            first.dispose();
++            realSession.sendNotification("probe/new-listener", Map.of()).block(Duration.ofSeconds(2));
++            require(seen.get()==1,"SDK CAS must preserve the newer listening stream");
++            System.out.printf("OBSERVED overlapping GET old disposed; new listener received=%d local=%d persistent=%d%n",seen.get(),service.listMcpStreamableServerSession().size(),environment.records.size());
++            require(service.findMcpStreamableServerSession(context).isPresent(),"old GET dispose must not remove newer GET registration");
++        } finally {
++            if(second!=null)second.dispose();if(first!=null)first.dispose();realSession.close();
++            provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();
++        }
++    }
++    @Test void deletedEventReleasesRealSdkListenerAndPendingRequest() throws Exception { deletedMustReleaseRealListeningAndPending(); }
++    @Test void postOnlySessionDoesNotProduceRepeatedMissingStreamWarnings() throws Exception { postOnlyMustNotRepeatMissingStreamWarnings(); }
++    @Test void oldGetDisposeCannotRemoveNewListener() { lateOldGetDisposeMustKeepNewListener(); }
++
++    @Test void getDisconnectKeepsPersistentSessionAndReconnects() {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var first=session("reconnect",new AtomicInteger());var context=identity(first.getId());
++        Disposable a=null,b=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,first);
++            var response=provider.handleRequest(get(first.getId()),context).block(Duration.ofSeconds(2));
++            a=Flux.from((org.reactivestreams.Publisher<?>)response.body()).subscribe();a.dispose();
++            require(e.records.size()==1 && service.listMcpStreamableServerSession().isEmpty(),"GET disconnect removes local ownership but preserves protocol session");
++            var next=session(first.getId(),new AtomicInteger());
++            provider.setSessionFactory(request -> new McpStreamableServerSession.McpStreamableServerSessionInit(next,Mono.empty()));
++            var resumed=provider.handleRequest(get(first.getId()),context).block(Duration.ofSeconds(2));
++            var events=new AtomicInteger();b=Flux.from((org.reactivestreams.Publisher<?>)resumed.body()).subscribe(v -> events.incrementAndGet());
++            next.sendNotification("probe/resumed",Map.of()).block(Duration.ofSeconds(2));
++            require(events.get()==1 && service.listListeningMcpStreamableServerSession().size()==1,"same persistent session must reconnect and receive events");
++            b.dispose();require(e.records.size()==1 && service.listListeningMcpStreamableServerSession().isEmpty(),"second GET disconnect keeps protocol session");
++            next.close();
++        } finally {if(a!=null)a.dispose();if(b!=null)b.dispose();first.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void activeGetStillReceivesProductionSchedulerPingAndShutdownStopsIt() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var real=session("active-ping",new AtomicInteger());var context=identity(real.getId());
++        var received=new CountDownLatch(1);Disposable stream=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,real);
++            var response=provider.handleRequest(get(real.getId()),context).block(Duration.ofSeconds(2));
++            stream=Flux.from((org.reactivestreams.Publisher<io.micronaut.http.sse.Event<?>>)response.body()).subscribe(event -> {
++                String data=String.valueOf(event.getData());
++                if(data.contains("\"method\":\"ping\"")) {
++                    var id=java.util.regex.Pattern.compile("\"id\":\"([^\"]+)\"").matcher(data);
++                    require(id.find(),"real ping has ID");
++                    real.accept(new McpSchema.JSONRPCResponse("2.0",id.group(1),Map.of(),null)).block(Duration.ofSeconds(2));received.countDown();
++                }
++            });
++            require(received.await(35,TimeUnit.SECONDS),"active GET must receive an actual original 30s scheduler ping");
++            provider.closeGracefully().block(Duration.ofSeconds(2));
++            require(service.listMcpStreamableServerSession().isEmpty() && service.listListeningMcpStreamableServerSession().isEmpty(),"shutdown clears local registrations");
++            var field=KestraFluxStreamableServerTransportProvider.class.getDeclaredField("keepAliveScheduler");field.setAccessible(true);
++            var scheduler=field.get(provider);var running=scheduler.getClass().getDeclaredField("isRunning");running.setAccessible(true);
++            require(!((AtomicBoolean)running.get(scheduler)).get(),"production scheduler must actually stop");
++        } finally {if(stream!=null)stream.dispose();real.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    static void assertSdkListenerStateCleared(McpStreamableServerSession session) throws Exception {
++        var pending=McpStreamableServerSession.class.getDeclaredField("requestIdToStream");pending.setAccessible(true);
++        require(((Map<?,?>)pending.get(session)).isEmpty(),"actual SDK requestIdToStream must be empty");
++        var listener=McpStreamableServerSession.class.getDeclaredField("listeningStreamRef");listener.setAccessible(true);
++        var actual=((AtomicReference<?>)listener.get(session)).get();
++        require(actual.getClass().getName().equals("io.modelcontextprotocol.spec.MissingMcpTransportSession"),"actual SDK must no longer retain the closed listening stream");
++    }
++
++    static Object sdkListeningStream(McpStreamableServerSession session) throws Exception {
++        var field=McpStreamableServerSession.class.getDeclaredField("listeningStreamRef");field.setAccessible(true);
++        return ((AtomicReference<?>)field.get(session)).get();
++    }
++
++    static void assertActualPendingCount(Object stream,int expected) throws Exception {
++        var field=stream.getClass().getDeclaredField("pendingResponses");field.setAccessible(true);
++        require(((Map<?,?>)field.get(stream)).size()==expected,"actual SDK listening pendingResponses must contain "+expected+" entries");
++    }
++
++    static final class ControlledCloseTransport implements McpStreamableServerTransport {
++        final Supplier<Mono<Void>> close;
++        final CountDownLatch directlyClosed=new CountDownLatch(1);
++        ControlledCloseTransport(Supplier<Mono<Void>> close) {this.close=close;}
++        public Mono<Void> sendMessage(McpSchema.JSONRPCMessage message) {return Mono.empty();}
++        public Mono<Void> sendMessage(McpSchema.JSONRPCMessage message,String id) {return Mono.empty();}
++        public <T>T unmarshalFrom(Object data,TypeRef<T> type) {throw new UnsupportedOperationException();}
++        public Mono<Void> closeGracefully(){return close.get();}
++        public void close(){directlyClosed.countDown();}
++    }
++
++    @Test void deletedSessionCloseFailureIsObservable() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var real=session("close-failure",new AtomicInteger());var context=identity(real.getId());
++        var errorSeen=new CountDownLatch(1);var logger=(Logger)LoggerFactory.getLogger(McpSessionService.class);
++        var appender=new AppenderBase<ILoggingEvent>() {protected void append(ILoggingEvent event){
++            if(event.getFormattedMessage().contains("Failed to close deleted MCP session close-failure") && event.getThrowableProxy()!=null)errorSeen.countDown();
++        }};appender.start();logger.addAppender(appender);
++        try {
++            service.addProxyForMcpStreamableServerSession(context,real);
++            var transport=new ControlledCloseTransport(() -> Mono.error(new IllegalStateException("controlled transport close failure")));
++            var sdkStream=service.registerSseSession(context,real,transport);
++            var pendingEnded=new CountDownLatch(1);
++            var pending=real.sendRequest("probe/pending",null,new TypeRef<Object>(){}).subscribe(v->{},failure->pendingEnded.countDown());
++            try {
++                assertActualPendingCount(sdkStream,1);
++                service.close(context);
++                require(errorSeen.await(2,TimeUnit.SECONDS),"real SDK close failure must be observed by managed subscriber");
++                require(pendingEnded.await(2,TimeUnit.SECONDS) && transport.directlyClosed.await(2,TimeUnit.SECONDS),"error path must release actual SDK pending and close its transport");
++                assertSdkListenerStateCleared(real);
++                assertActualPendingCount(sdkStream,0);
++            } finally {pending.dispose();}
++        } finally {service.stop();real.close();logger.detachAppender(appender);appender.stop();}
++    }
++
++    @Test void serviceStopCancelsManagedCloseWithoutBlockingQueue() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var subscribed=new CountDownLatch(1);var cancelled=new CountDownLatch(1);
++        var streamEnded=new CountDownLatch(1);var pendingReleased=new CountDownLatch(1);
++        var real=new McpStreamableServerSession("cancel-close",new McpSchema.ClientCapabilities(null,null,null,null),
++            new McpSchema.Implementation("probe","1"),Duration.ofMinutes(5),Map.of(),Map.of(),
++            () -> Mono.<Void>never().doOnSubscribe(v -> subscribed.countDown()).doOnCancel(cancelled::countDown));
++        var context=identity(real.getId());Disposable stream=null,pending=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,real);
++            stream=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(real.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->{},e1->{},streamEnded::countDown);
++            pending=real.sendRequest("probe/pending",null,new TypeRef<Object>(){}).subscribe(v->{},e1->pendingReleased.countDown());
++            var sdkStream=sdkListeningStream(real);assertActualPendingCount(sdkStream,1);
++            long started=System.nanoTime();service.close(context);
++            require(System.nanoTime()-started < TimeUnit.SECONDS.toNanos(1),"queue delivery must not wait for close completion");
++            require(subscribed.await(2,TimeUnit.SECONDS),"real async close must start");service.stop();
++            require(cancelled.await(2,TimeUnit.SECONDS),"service lifecycle must cancel its in-flight SDK close");
++            require(streamEnded.await(2,TimeUnit.SECONDS) && pendingReleased.await(2,TimeUnit.SECONDS),"cancellation must also release actual GET and pending request");
++            assertSdkListenerStateCleared(real);
++            assertActualPendingCount(sdkStream,0);
++        } finally {if(stream!=null)stream.dispose();if(pending!=null)pending.dispose();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void deletedSessionTimeoutReleasesActualGetAndPending() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var cancelled=new CountDownLatch(1);var ended=new CountDownLatch(1);var pendingEnded=new CountDownLatch(1);
++        var real=new McpStreamableServerSession("timeout-close",new McpSchema.ClientCapabilities(null,null,null,null),
++            new McpSchema.Implementation("probe","1"),Duration.ofMinutes(5),Map.of(),Map.of(),
++            () -> Mono.<Void>never().doOnCancel(cancelled::countDown));
++        var context=identity(real.getId());Disposable stream=null,pending=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,real);
++            stream=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(real.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->{},error->{},ended::countDown);
++            pending=real.sendRequest("probe/pending",null,new TypeRef<Object>(){}).subscribe(v->{},error->pendingEnded.countDown());
++            var sdkStream=sdkListeningStream(real);assertActualPendingCount(sdkStream,1);
++            service.close(context);
++            require(ended.await(7,TimeUnit.SECONDS) && pendingEnded.await(2,TimeUnit.SECONDS) && cancelled.await(2,TimeUnit.SECONDS),"actual 5s timeout must cancel close callback and release GET plus real pending request");
++            assertSdkListenerStateCleared(real);
++            assertActualPendingCount(sdkStream,0);
++        } finally {if(stream!=null)stream.dispose();if(pending!=null)pending.dispose();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void stoppedCloseRegistryStillReleasesCapturedGetAndPending() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var subscriptions=new AtomicInteger();var real=session("late-after-stop",subscriptions);var context=identity(real.getId());
++        var ended=new CountDownLatch(1);var pendingEnded=new CountDownLatch(1);Disposable stream=null,pending=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,real);
++            stream=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(real.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->{},error->{},ended::countDown);
++            pending=real.sendRequest("probe/pending",null,new TypeRef<Object>(){}).subscribe(v->{},error->pendingEnded.countDown());
++            var sdkStream=sdkListeningStream(real);assertActualPendingCount(sdkStream,1);
++            // Capture an already dispatched callback, then let stop win before it executes.
++            var inFlight=e.receiver.get();var record=e.records.remove(QueueAndRepository.key(context.getTenantId(),real.getId()));service.stop();
++            inFlight.accept(Either.left(new McpSessionEvent(record,McpSessionEvent.McpSessionEventType.DELETED)));
++            require(ended.await(2,TimeUnit.SECONDS) && pendingEnded.await(2,TimeUnit.SECONDS),"Composite.add false must release actual GET and real pending request");
++            require(subscriptions.get()==0,"disposed registry must not start another SDK onClose subscription");
++            assertSdkListenerStateCleared(real);
++            assertActualPendingCount(sdkStream,0);
++        } finally {if(stream!=null)stream.dispose();if(pending!=null)pending.dispose();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void delayedOldGetAfterDeleteCannotResurrectSession() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var real=session("deleted-before-subscribe",new AtomicInteger());var context=identity(real.getId());
++        try {
++            service.addProxyForMcpStreamableServerSession(context,real);
++            var stale=provider.handleRequest(get(real.getId()),context).block(Duration.ofSeconds(2));
++            provider.handleRequest(delete(real.getId()),context).block(Duration.ofSeconds(2));
++            var rejected=new CountDownLatch(1);var emitted=new AtomicInteger();
++            var subscription=Flux.from((org.reactivestreams.Publisher<?>)stale.body()).subscribe(v->emitted.incrementAndGet(),error->rejected.countDown());
++            try {require(rejected.await(2,TimeUnit.SECONDS) && emitted.get()==0,"previously constructed GET must reject delayed subscription after DELETE");}
++            finally {subscription.dispose();}
++            var missing=provider.handleRequest(get(real.getId()),context).block(Duration.ofSeconds(2));
++            require(missing.code()==404 && !service.sessionExists(context) && service.listMcpStreamableServerSession().isEmpty(),"old session after DELETE must remain unavailable");
++        } finally {real.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void oldAsyncCloseCannotCloseNewOwnerListener() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var closingStarted=new CountDownLatch(1);var release=new CompletableFuture<Void>();var oldEnded=new CountDownLatch(1);
++        var old=new McpStreamableServerSession("new-owner",new McpSchema.ClientCapabilities(null,null,null,null),
++            new McpSchema.Implementation("probe","1"),Duration.ofMinutes(5),Map.of(),Map.of(),
++            () -> Mono.defer(() -> {closingStarted.countDown();return Mono.fromFuture(release);}));
++        var context=identity(old.getId());var fresh=session(old.getId(),new AtomicInteger());Disposable a=null,b=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,old);
++            a=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(old.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->{},error->{},oldEnded::countDown);
++            var previous=e.records.get(QueueAndRepository.key(context.getTenantId(),old.getId()));
++            var remote=new McpSession(previous.tenantId(),previous.serverId(),previous.sessionId(),"remote-node",previous.userId(),false,previous.clientId(),previous.resource(),previous.roles());
++            e.records.put(QueueAndRepository.key(remote.tenantId(),remote.sessionId()),remote);e.receiver.get().accept(Either.left(new McpSessionEvent(remote,McpSessionEvent.McpSessionEventType.OWNERSHIP_CHANGED)));
++            require(closingStarted.await(2,TimeUnit.SECONDS),"old owner async close has begun but not completed");
++            service.takeSseOwnership(context,fresh);
++            var newDone=new AtomicBoolean();var received=new AtomicInteger();
++            b=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(fresh.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->received.incrementAndGet(),error->{},()->newDone.set(true));
++            release.complete(null);require(oldEnded.await(2,TimeUnit.SECONDS),"old listening stream must actually close");
++            fresh.sendNotification("probe/new-owner",Map.of()).block(Duration.ofSeconds(2));
++            require(!newDone.get() && received.get()==1 && service.findMcpStreamableServerSession(context).orElseThrow()==fresh,"old close must not close/remove new owner");
++        } finally {release.complete(null);if(a!=null)a.dispose();if(b!=null)b.dispose();fresh.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void queueCallbackRaceClosesCapturedOldSessionWithoutRemovingNewOwner() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var captured=new CountDownLatch(1);var resume=new CountDownLatch(1);var oldEnded=new CountDownLatch(1);
++        var context=new KestraMcpTransportContext("main","default","alice","client","resource",List.of(),List.of(),"callback-race") {
++            @Override public String getTenantId() {
++                if(Thread.currentThread().getName().equals("probe-queue-callback")) {
++                    captured.countDown();
++                    try {require(resume.await(2,TimeUnit.SECONDS),"callback race bounded release");}catch(InterruptedException error){Thread.currentThread().interrupt();throw new AssertionError(error);}
++                }
++                return super.getTenantId();
++            }
++        };
++        var old=session(context.getSessionId(),new AtomicInteger());var fresh=session(context.getSessionId(),new AtomicInteger());
++        var executor=Executors.newSingleThreadExecutor(r -> new Thread(r,"probe-queue-callback"));Disposable a=null,b=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(context,old);
++            a=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(old.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->{},error->{},oldEnded::countDown);
++            var previous=e.records.get(QueueAndRepository.key(context.getTenantId(),old.getId()));
++            var remote=new McpSession(previous.tenantId(),previous.serverId(),previous.sessionId(),"remote-node",previous.userId(),false,previous.clientId(),previous.resource(),previous.roles());
++            var delivered=executor.submit(() -> e.receiver.get().accept(Either.left(new McpSessionEvent(remote,McpSessionEvent.McpSessionEventType.OWNERSHIP_CHANGED))));
++            require(captured.await(2,TimeUnit.SECONDS),"callback must capture the old local entry before takeover");
++            service.takeSseOwnership(context,fresh);
++            var seen=new AtomicInteger();var newEnded=new AtomicBoolean();
++            b=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(fresh.getId()),context).block(Duration.ofSeconds(2)).body()).subscribe(v->seen.incrementAndGet(),error->{},()->newEnded.set(true));
++            resume.countDown();delivered.get(2,TimeUnit.SECONDS);
++            fresh.sendNotification("probe/new-owner-after-callback",Map.of()).block(Duration.ofSeconds(2));
++            require(seen.get()==1 && !newEnded.get() && service.findMcpStreamableServerSession(context).orElseThrow()==fresh,"captured old queue callback must not close or remove new owner");
++            require(oldEnded.await(2,TimeUnit.SECONDS),"captured old owner must still be released when compare-remove sees a replacement");
++        } finally {resume.countDown();executor.shutdownNow();if(a!=null)a.dispose();if(b!=null)b.dispose();old.close();fresh.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void deletingOneSessionDoesNotCloseAnotherListener() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var one=session("one",new AtomicInteger());var two=session("two",new AtomicInteger());
++        Disposable a=null,b=null;var stopped=new CountDownLatch(1);var twoDone=new AtomicBoolean();
++        try {
++            service.addProxyForMcpStreamableServerSession(identity("one"),one);service.addProxyForMcpStreamableServerSession(identity("two"),two);
++            a=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get("one"),identity("one")).block(Duration.ofSeconds(2)).body()).subscribe(v->{},e1->{},stopped::countDown);
++            b=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get("two"),identity("two")).block(Duration.ofSeconds(2)).body()).subscribe(v->{},e1->{},()->twoDone.set(true));
++            service.close(identity("one"));require(stopped.await(2,TimeUnit.SECONDS),"deleted GET must stop");
++            require(!twoDone.get() && service.sessionExists(identity("two")) && service.findMcpStreamableServerSession(identity("two")).isPresent(),"unrelated protocol/listener must remain");
++        } finally {if(a!=null)a.dispose();if(b!=null)b.dispose();one.close();two.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++    @Test void tenantScopedDeleteCannotCloseSameIdListenerInAnotherTenant() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var aSession=session("tenant-shared-id",new AtomicInteger());var bSession=session("tenant-shared-id",new AtomicInteger());
++        var aContext=KestraMcpTransportContext.builder().tenantId("tenant-a").serverId("default").sessionId(aSession.getId()).userId("alice").clientId("client").resource("resource").roles(List.of()).scopes(List.of()).build();
++        var bContext=KestraMcpTransportContext.builder().tenantId("tenant-b").serverId("default").sessionId(bSession.getId()).userId("alice").clientId("client").resource("resource").roles(List.of()).scopes(List.of()).build();
++        var aEnded=new AtomicBoolean();var bEnded=new AtomicBoolean();var bEvents=new AtomicInteger();Disposable a=null,b=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(aContext,aSession);service.addProxyForMcpStreamableServerSession(bContext,bSession);
++            a=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(HttpRequest.<String>GET("/api/v1/tenant-a/mcp/default").accept(MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",aSession.getId()),aContext).block(Duration.ofSeconds(2)).body()).subscribe(v->{},error->{},()->aEnded.set(true));
++            b=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(HttpRequest.<String>GET("/api/v1/tenant-b/mcp/default").accept(MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",bSession.getId()),bContext).block(Duration.ofSeconds(2)).body()).subscribe(v->bEvents.incrementAndGet(),error->{},()->bEnded.set(true));
++            require(service.sessionExists(aContext) && service.sessionExists(bContext) && e.records.size()==2,"same session ID must remain separately scoped by tenant");
++            var outside=KestraMcpTransportContext.builder().tenantId("tenant-outside").serverId("default").sessionId(aSession.getId()).userId("alice").clientId("client").resource("resource").roles(List.of()).scopes(List.of()).build();
++            require(!service.sessionExists(outside),"unknown tenant cannot find either session");
++            var noOp=provider.handleRequest(HttpRequest.<String>DELETE("/api/v1/tenant-outside/mcp/default").accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",aSession.getId()),outside).block(Duration.ofSeconds(2));
++            require(noOp.code()==200 && e.deliveredDeletes.get()==0 && e.records.size()==2 && !aEnded.get() && !bEnded.get(),"wrong-tenant DELETE is an existing no-op, not cross-tenant termination");
++            var deleted=provider.handleRequest(HttpRequest.<String>DELETE("/api/v1/tenant-a/mcp/default").accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",aSession.getId()),aContext).block(Duration.ofSeconds(2));
++            bSession.sendNotification("probe/tenant-b-still-active",Map.of()).block(Duration.ofSeconds(2));
++            require(deleted.code()==200 && e.deliveredDeletes.get()==1 && !service.sessionExists(aContext) && service.sessionExists(bContext)
++                && !bEnded.get() && bEvents.get()==1 && service.findMcpStreamableServerSession(bContext).orElseThrow()==bSession,
++                "tenant-a DELETE must preserve tenant-b same-ID persistent session and live listener");
++            System.out.println("OBSERVED tenant isolation: same ID in two tenants; outside DELETE no-op; tenant-a DELETE leaves tenant-b notification delivery intact");
++        } finally {if(a!=null)a.dispose();if(b!=null)b.dispose();aSession.close();bSession.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    @Test void wrongSubjectClientOrResourceDeleteCannotCloseActiveOwnerListener() throws Exception {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var real=session("identity-live-listener",new AtomicInteger());var owner=identity(real.getId());
++        var ended=new AtomicBoolean();var messages=new AtomicInteger();Disposable stream=null;
++        try {
++            service.addProxyForMcpStreamableServerSession(owner,real);
++            stream=Flux.from((org.reactivestreams.Publisher<?>)provider.handleRequest(get(real.getId()),owner).block(Duration.ofSeconds(2)).body()).subscribe(v->messages.incrementAndGet(),error->{},()->ended.set(true));
++            int expectedMessages=0;
++            for(var fields:List.of(List.of("bob","client","resource"),List.of("alice","other-client","resource"),List.of("alice","client","other-resource"))) {
++                var wrong=KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId(real.getId()).userId(fields.get(0)).clientId(fields.get(1)).resource(fields.get(2)).roles(List.of()).scopes(List.of()).build();
++                require(!service.sessionExists(wrong),"sameIdentity must reject a changed subject/client/resource");
++                var getDenied=provider.handleRequest(get(real.getId()),wrong).block(Duration.ofSeconds(2));
++                var deleteNoOp=provider.handleRequest(delete(real.getId()),wrong).block(Duration.ofSeconds(2));
++                real.sendNotification("probe/owner-still-active",Map.of()).block(Duration.ofSeconds(2));expectedMessages++;
++                require(getDenied.code()==404 && deleteNoOp.code()==200 && e.deliveredDeletes.get()==0 && e.records.size()==1
++                    && service.sessionExists(owner) && service.findMcpStreamableServerSession(owner).orElseThrow()==real
++                    && !ended.get() && messages.get()==expectedMessages,"wrong identity must not remove storage, emit DELETED, or close actual owner listener");
++            }
++            System.out.println("OBSERVED identity isolation: subject/client/resource GET404 and DELETE200 no-op; live owner received all three notifications");
++        } finally {if(stream!=null)stream.dispose();real.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
++    }
++
++    static HttpResponse<?> crossNodeToolCallWithPayload(McpSessionService service,
++        McpSessionRepositoryInterface repository, KestraMcpTransportContext context) {
++        var remote=new McpSession(context.getTenantId(),context.getServerId(),context.getSessionId(),"other-server-instance-id",
++            context.getUserId(),false,context.getClientId(),context.getResource(),context.getRoles());
++        repository.save(remote);
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var invoked=new AtomicInteger();var ephemeral=new AtomicReference<McpStreamableServerSession>();
++        var arguments=Map.<String,Object>of("name","echo","arguments",Map.of("value","hello-from-remote"));
++        io.modelcontextprotocol.server.McpRequestHandler<McpSchema.CallToolResult> handler=(exchange,params) -> {
++            require(arguments.equals(params),"real ephemeral tools/call must receive exact tool name and arguments");
++            invoked.incrementAndGet();return Mono.just(McpSchema.CallToolResult.builder().addTextContent("echo:hello-from-remote").isError(false).build());
++        };
++        provider.setSessionFactory(request -> {
++            var created=new McpStreamableServerSession("ephemeral-"+UUID.randomUUID(),request.capabilities(),request.clientInfo(),Duration.ofSeconds(5),Map.of("tools/call",handler),Map.of());
++            ephemeral.set(created);
++            return new McpStreamableServerSession.McpStreamableServerSessionInit(created,
++                Mono.just(new McpSchema.InitializeResult("2025-06-18",null,new McpSchema.Implementation("probe","1"),null)));
++        });
++        var mapper=new io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapper(tools.jackson.databind.json.JsonMapper.builder().build());
++        try {
++            var requestMessage=new McpSchema.JSONRPCRequest("2.0","tools/call","cross-node-call",arguments);
++            var request=HttpRequest.POST("/api/v1/"+context.getTenantId()+"/mcp/"+context.getServerId(),mapper.writeValueAsString(requestMessage))
++                .accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",context.getSessionId());
++            var response=provider.handleRequest(request,context).block(Duration.ofSeconds(2));
++            require(response!=null && response.code()==200,"ephemeral tools/call must return HTTP200");
++            require(response.getContentType().orElseThrow().equals(MediaType.TEXT_EVENT_STREAM_TYPE),"tools/call must use the actual POST SSE response");
++            var events=Flux.from((org.reactivestreams.Publisher<io.micronaut.http.sse.Event<?>>)response.body()).take(1).collectList().block(Duration.ofSeconds(2));
++            require(events.size()==1,"one correlated JSON-RPC response must be received");
++            var message=mapper.readValue(String.valueOf(events.get(0).getData()),McpSchema.JSONRPCResponse.class);
++            require(requestMessage.id().equals(message.id()) && message.error()==null,"ephemeral response must preserve ID without JSON-RPC error");
++            var result=mapper.convertValue(message.result(),McpSchema.CallToolResult.class);
++            require(Boolean.FALSE.equals(result.isError()) && result.content().size()==1
++                && result.content().get(0) instanceof McpSchema.TextContent text && text.text().equals("echo:hello-from-remote") && invoked.get()==1,
++                "real handler must execute exactly once and return the complete expected payload");
++            require(ephemeral.get()!=null && service.listMcpStreamableServerSession().isEmpty()
++                && repository.find(context.getTenantId(),context.getServerId(),context.getSessionId()).orElseThrow().equals(remote),
++                "ephemeral tool call must not take persistent/local ownership from the remote node");
++            return response;
++        } catch(java.io.IOException error) {throw new AssertionError(error);}
++        finally {if(ephemeral.get()!=null)ephemeral.get().close();provider.closeGracefully().block(Duration.ofSeconds(2));}
++    }
++
++    static HttpResponse<?> crossNodeVisibleToolsWithoutEphemeralSession(McpSessionService service,
++        McpSessionRepositoryInterface repository, KestraMcpTransportContext context, McpSchema.JSONRPCRequest requestMessage) {
++        var remote=new McpSession(context.getTenantId(),context.getServerId(),context.getSessionId(),"other-server-instance-id",
++            context.getUserId(),false,context.getClientId(),context.getResource(),context.getRoles());
++        repository.save(remote);
++        var provider=new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(),service);
++        var visibilityIdentity=new AtomicReference<KestraMcpTransportContext>();var factoryCalls=new AtomicInteger();
++        provider.setToolListProvider(identity -> {visibilityIdentity.set(identity);return Mono.just(List.of(McpSchema.Tool.builder().name("visible-only").description("visible tool").build()));});
++        provider.setSessionFactory(request -> {factoryCalls.incrementAndGet();throw new AssertionError("tools/list must use visibility provider, not ephemeral session");});
++        var mapper=new io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapper(tools.jackson.databind.json.JsonMapper.builder().build());
++        try {
++            require(requestMessage.method().equals("tools/list"),"exact list branch required");
++            var request=HttpRequest.POST("/api/v1/"+context.getTenantId()+"/mcp/"+context.getServerId(),mapper.writeValueAsString(requestMessage))
++                .accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",context.getSessionId());
++            var response=provider.handleRequest(request,context).block(Duration.ofSeconds(2));
++            require(response!=null && response.code()==200,"cross-node tools/list must return HTTP200 with a visibility provider");
++            var message=(McpSchema.JSONRPCResponse)response.body();var result=(McpSchema.ListToolsResult)message.result();
++            require(message.error()==null && requestMessage.id().equals(message.id()) && result.tools().size()==1
++                && result.tools().get(0).name().equals("visible-only") && result.nextCursor()==null,"tools/list must contain the exact visible payload and request ID");
++            require(visibilityIdentity.get()==context && factoryCalls.get()==0 && service.listMcpStreamableServerSession().isEmpty()
++                && repository.find(context.getTenantId(),context.getServerId(),context.getSessionId()).orElseThrow().equals(remote),
++                "tools/list must use the actual caller visibility and preserve remote ownership without an ephemeral session");
++            return response;
++        } catch(java.io.IOException error){throw new AssertionError(error);}
++        finally {provider.closeGracefully().block(Duration.ofSeconds(2));}
++    }
++
++    @Test void remoteToolCallUsesRealEphemeralHandlerAndPayload() {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        try {crossNodeToolCallWithPayload(service,e.repository,identity("remote-call"));}finally{service.stop();}
++    }
++
++    @Test void remoteToolsListUsesVisibilityProviderWithoutEphemeralSession() {
++        var e=new QueueAndRepository();var service=new McpSessionService(e.repository,e.queue);service.start();
++        try {crossNodeVisibleToolsWithoutEphemeralSession(service,e.repository,identity("remote-list"),new McpSchema.JSONRPCRequest("2.0","tools/list","cross-node-list",null));}finally{service.stop();}
++    }
++
++}
+diff --git a/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java b/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
+index 6b0d5b1..ee79805 100644
+--- a/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
++++ b/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
+@@ -227,25 +227,20 @@ class KestraFluxStreamableServerTransportProviderTest {
+
+     @Test
+     void shouldHandleToolCallByEphemeralSessionWhenSseConnectionIsOnSeparateInstance() {
+-        // Given — session exists on another server
+         KestraMcpTransportContext context = buildTransportContext();
+-        mcpSessionRepository.save(
+-            new McpSession(
+-                context.getTenantId(), context.getServerId(),
+-                context.getSessionId(), "other-server-instance-id", null, false
+-            )
+-        );
+-
+-        KestraFluxStreamableServerTransportProvider provider = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(), mcpSessionService);
+-        provider.setSessionFactory(buildSessionFactory());
+-
+-        // When — a tools/list request arrives for that cross-server session
+-        HttpRequest<String> request = HttpRequest.POST("/mcp", toJson(TOOLS_LIST_REQUEST))
+-            .accept(MediaType.TEXT_EVENT_STREAM_TYPE, MediaType.APPLICATION_JSON_TYPE)
+-            .header(HttpHeaders.MCP_SESSION_ID, context.getSessionId());
+-        HttpResponse<?> response = provider.handleRequest(request, context).block();
++        // The shared assertion executes real tools/call with an echo handler, checks its
++        // parameters and response payload, and proves the session remains owned remotely.
++        HttpResponse<?> response = McpSessionLifecycleTest.crossNodeToolCallWithPayload(
++            mcpSessionService, mcpSessionRepository, context);
++        assertThat(response).isNotNull();
++        assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
++    }
+
+-        // Then — an ephemeral session handles the request locally; 200 not 503
++    @Test
++    void shouldListVisibleToolsForRemoteSessionWithoutCreatingEphemeralSession() {
++        KestraMcpTransportContext context = buildTransportContext();
++        HttpResponse<?> response = McpSessionLifecycleTest.crossNodeVisibleToolsWithoutEphemeralSession(
++            mcpSessionService, mcpSessionRepository, context, TOOLS_LIST_REQUEST);
+         assertThat(response).isNotNull();
+         assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
+     }

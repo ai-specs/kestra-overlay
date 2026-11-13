@@ -1460,3 +1460,55 @@ unhandled rejection；新实现5项通过，无unhandled。原local-ci相同UI�
 逐字一致，无新增诊断，不记类型全绿。证据位于
 `.work/first-account-20261111/feeds-compat`。未运行完整local-ci、镜像或浏览器门，
 未提交、CI或发布；不扩大SSE或其他外部请求范围。
+
+### REQ-0396 MCP 监听与会话释放（2026-11-13，入口 C，已接收候选未发布）
+
+消费扩展为 kestra-plugin-rbac，真实 root MCP 组合周期出现无监听流保活告警。
+锁定 SDK 1.1.3 与 c3fe848 源码的独立机制红例已确认两条链：真实 DELETE 返回200、
+广播被真实 McpSessionService 消费且持久/本地登记消失，但 SDK delete 返回的 Mono
+未订阅，GET监听未结束、pending请求未释放；POST-only initialize保留合法会话后，
+原30秒调度器连续两个周期对 MissingMcpTransportSession ping，产生重复WARN。
+这不是正式HTTP/PG验收，也没有证据证明越权或堆持续增长。私有复现源码、日志及命令在
+`.work/stream-lifecycle-20261113`，输入为正式镜像exe及其锁定SDK，不消费插件源码。
+
+裁决最小面：协议会话登记与当前GET可发送监听分开；POST正文取消、GET断流不删除
+持久会话，保留后续POST及同身份GET重连。仅保活枚举活跃监听，普通notifyClients广播保持原行为；不在ping失败时
+删session、不关闭所有保活、不降日志级别、不改会话寿命、权限或DELETE返回码。
+DELETE/归属转移广播必须受管理地执行异步delete：先登记service持有的关闭订阅，
+再异步执行，错误记录且有超时，终态从集合移除，service停止时取消剩余订阅；
+不阻塞广播队列线程，不使用无人管理的裸subscribe。
+GET旧dispose误删新监听已取得实际红例，按流实例条件注销。
+DELETE后才订阅的旧GET必须拒绝，不能复活已删除会话；异步关闭捕获旧SDK实例，
+不得移除或关闭新owner。stop/超时/错误在取消异步关闭链时，还须关闭捕获的
+实际SDK监听流并释放pending，不能仅以订阅已取消计释放。
+
+备选直接在ping失败时删除会话被拒绝，因无GET是合法协议状态；全局关闭保活或
+同步block广播队列也不接收。新增0396承载机制及测试；0170保留原归属删除调用行并改为受管理helper，
+避免0396再次覆盖0170来源行。完整顺序应用后才编译，不改BASE。
+持久回归须真实宿主service/provider与SDK，覆盖删除释放、错误/取消、POST-only、
+GET重连及新旧流交叠；正常保活仍可达，停止后调度停止，身份隔离原门保留。
+先定向红绿与顺序重放/字节对照，再由主控协调完整local-ci和镜像/正式发布门。
+当前未宣称候选完整门通过或已发布，不扩持续SSE撤权、CSV、AI及插件策略。
+
+初版候选定向结果（2026-11-13，非完整发布门；由下方13项结果取代）：同一持久JUnit类在原宿主service/provider
+运行删除释放、POST-only和旧GET注销三项全部失败；最终候选11项全部通过，
+包括延迟GET在DELETE后拒绝、旧异步关闭及队列回调交叠不伤新owner、实际GET/pending
+在stop取消时释放。原身份隔离1项及动态工具列表4项通过；新增报告门及原首装门自测各2项通过。
+普通notifyClients与正式基线方法字节完全相同；不改变通知重放语义。保活反例使用
+实际30秒周期观察两次，正例验证真实监听收到ping，关闭后scheduler停止。
+52补丁顺序重放，359触达文件零字节差异，结构15/0。证据为
+`.work/stream-lifecycle-20261113/final11b-junit.xml`、`persistent-red.xml`和`replay-sha256.json`。
+本地以正式宿主exe作类路径编译实际service/provider和持久测试，JUnit Platform直接执行；
+没有运行Gradle完整local-ci、真实HTTP/PG或镜像门，不将方法级HttpRequest探针冒充网络HTTP。
+完整Gradle/相关镜像、双节点广播与长时间资源结果仍待主控安排，未提交或发布。
+
+主控复审新增四条释放状态核对：timeout/error/cancel三条已释放真实SDK pending，
+但初版closingSessions.add返回false时未执行终态hook，新增实际GET/pending红例失败。
+最终以显式幂等releaseListener处理拒绝登记，四路径全部绿；反射仅用于测试锁定SDK的
+pendingResponses从1到0、requestIdToStream清空及listeningStreamRef回到Missing状态，
+不以宿主集合清空代替释放。最终持久回归13/13及原有5项回归通过，完整前缀52次
+apply-check/apply均通过，最终359触达文件字节一致。新增报告门精确检查13个方法名。
+覆盖限制：13项只验证不同session ID互不影响，未包含真实监听层tenant/client/subject
+三维隔离矩阵；原McpSessionIdentityTest覆盖subject/client/resource拒绝，未覆盖tenant。
+DELETE后旧GET404已有直接断言；不把SDK GET侧pending清理宣称全部工具副作用取消。
+正式网络HTTP/PG、全量local-ci及发布仍未通过本轮候选验证。
