@@ -19,7 +19,7 @@ def check_http_origin_names(report):
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
-    "ExecutionFollowContextTest": 12,
+    "ExecutionFollowContextTest": 13,
     "PublicFaviconHttpTest": 2,
     "PublicFaviconTest": 5,
     "RbacActivationTest": 8,

@@ -1,0 +1,102 @@
+# 需求：SSE连接在已捕获HTTP来源和typed操作计划上持续复核授权快照；快照到期或拒绝时失败关闭，空闲连接和延迟事件均不得继续投递，正常完成仍取消复核。
+# 消费扩展仓：ai-specs/kestra-plugin-rbac
+# 状态：core
+# 来源：新写；生产Compose撤权后75秒仍收到事件的红例与Reactor takeUntilOther守卫设计。
+# 触达上游文件：webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java；webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java；webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+# 移除条件：上游为流式响应提供等价的授权快照到期失败关闭机制。
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+@@ -4,12 +4,15 @@
+ import io.micronaut.core.async.propagation.ReactorPropagation;
+ import io.micronaut.core.propagation.PropagatedContext;
+ import jakarta.inject.Singleton;
++import java.time.Duration;
+ import java.util.List;
+ import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
+
+ /** Fresh authorization at the stream source, inside framework-captured response context. */
+ @Singleton
+ public final class SseAuthorization {
++    private static final Duration SNAPSHOT_RECHECK = Duration.ofMillis(100);
+     private final TypedAuthorizationGate gate;
+     public SseAuthorization(TypedAuthorizationGate gate) { this.gate = gate; }
+
+@@ -24,10 +27,23 @@
+         String tenant = owner.tenant;
+         var plan = List.copyOf(owner.restPlan);
+         var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
+-        return gate.boundary(principal, tenant, () -> Flux.fromIterable(plan)
+-            .concatMap(operation -> gate.authorize(principal, operation))
+-            .all(TypedAuthorization.Decision::allowed)
+-            .flatMapMany(allowed -> allowed ? source : Flux.error(AuthorizationEvaluations.denied())))
++        return gate.boundary(principal, tenant, () -> recheck(principal, plan)
++            .flatMapMany(allowed -> allowed
++                ? source.takeUntilOther(Flux.interval(SNAPSHOT_RECHECK)
++                    .onBackpressureDrop()
++                    .concatMap(ignored -> guard(principal, plan)))
++                : Flux.error(AuthorizationEvaluations.denied())))
+             .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, origin));
+     }
++
++    private Mono<Boolean> recheck(RbacAuthorizer.Principal principal, List<TypedAuthorization.Operation> plan) {
++        return Flux.fromIterable(plan)
++            .concatMap(operation -> gate.authorize(principal, operation))
++            .all(TypedAuthorization.Decision::allowed);
++    }
++
++    private Flux<Void> guard(RbacAuthorizer.Principal principal, List<TypedAuthorization.Operation> plan) {
++        return recheck(principal, plan)
++            .flatMapMany(allowed -> allowed ? Flux.empty() : Flux.error(AuthorizationEvaluations.denied()));
++    }
+ }
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+@@ -55,6 +55,26 @@
+     @Test void deferredFollowBodyRechecksRevokedGrantBeforeReading() throws Exception {
+         deferredBody(true);
+     }
++    @Test void idleStreamFailsClosedWhenHeldSnapshotExpires() throws Exception {
++        var policy=new AuthorizationEvaluationTest.Policy();var gate=AuthorizationEvaluationTest.gate(policy);
++        var adapter=mock(OssRestOperationAdapter.class);
++        when(adapter.resolve(any())).thenReturn(java.util.List.of(AuthorizationEvaluationTest.operation(TypedAuthorization.Resource.EXECUTION,"team.a")));
++        var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,mock(io.kestra.webserver.errors.ProblemFactory.class));
++        var source=reactor.core.publisher.Flux.just(io.micronaut.http.sse.Event.of("late").id("end"))
++            .delayElements(java.time.Duration.ofMillis(250));
++        var response=reactor.core.publisher.Flux.from(filter.doFilter(AuthorizationEvaluationRestTest.request(),ignored->reactor.core.publisher.Mono.just(
++            io.micronaut.http.HttpResponse.ok(io.micronaut.core.async.propagation.ReactivePropagation.propagate(
++                io.micronaut.core.propagation.PropagatedContext.getOrEmpty(), metrics(gate).track(source,"execution",()->{}))).contentType(io.micronaut.http.MediaType.TEXT_EVENT_STREAM_TYPE))))
++            .single().block(java.time.Duration.ofSeconds(5));
++        var received=new java.util.concurrent.atomic.AtomicInteger();
++        var subscription=reactor.core.publisher.Flux.from((org.reactivestreams.Publisher<?>)response.body()).subscribe(value->received.incrementAndGet());
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->policy.calls.get()>=2);
++        policy.expired.set(true);
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(subscription::isDisposed);
++        assertEquals(0,received.get());
++        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).until(()->policy.closes.get()==2);
++    }
++
+     @Test void deferredBodyCancellationClosesItsOwnEvaluation() throws Exception {
+         var policy=new AuthorizationEvaluationTest.Policy();var gate=AuthorizationEvaluationTest.gate(policy);
+         var adapter=mock(OssRestOperationAdapter.class);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+@@ -49,6 +49,7 @@
+         final AtomicInteger begins = new AtomicInteger();
+         final AtomicInteger closes = new AtomicInteger();
+         final AtomicInteger calls = new AtomicInteger();
++        final java.util.concurrent.atomic.AtomicBoolean expired = new java.util.concurrent.atomic.AtomicBoolean();
+         Runnable afterDecision = () -> {};
+
+         public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
+@@ -58,6 +59,7 @@
+                 public CompletionStage<Decision> authorize(Operation operation) {
+                     calls.incrementAndGet();
+                     afterDecision.run();
++                    if (expired.get()) return CompletableFuture.completedFuture(Decision.deny("snapshot expired"));
+                     var domain = new QueryDomain(List.copyOf(snapshot), List.of(), List.of(), true, false);
+                     return CompletableFuture.completedFuture(operation.namespace() == null || snapshot.contains(operation.namespace())
+                         ? Decision.allow(domain) : Decision.deny("snapshot denied"));
