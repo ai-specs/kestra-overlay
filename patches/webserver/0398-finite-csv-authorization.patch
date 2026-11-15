@@ -1,0 +1,226 @@
+# 需求：CSV导出HTTP响应返回后，延迟正文在独立typed授权边界内执行repository查询；每条记录投递前复核授权，订阅前撤权不查询，导出中撤权停止后续记录，取消释放evaluation。
+# 消费扩展仓：ai-specs/kestra-plugin-rbac
+# 状态：core
+# 来源：新写；真实框架红例显示旧延迟CSV正文query domain为空并输出空文件。
+# 触达上游文件：webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java；webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java；webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
+# 移除条件：上游为有限流式HTTP正文提供等价的流源授权、逐记录撤权和取消释放机制。
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
+@@ -210,6 +210,9 @@
+     private SseConnectionMetrics sseConnectionMetrics;
+ 
+     @Inject
++    private io.kestra.webserver.rbac.FiniteBodyAuthorization finiteBodyAuthorization;
++
++    @Inject
+     protected BroadcastQueueInterface<ExecutionKilled> killQueue;
+ 
+     @Inject
+@@ -2806,12 +2809,9 @@
+             in = ParameterIn.QUERY
+         ) @QueryFilterFormat(Resource.EXECUTION) List<QueryFilter> filters) {
+ 
+-        return HttpResponse.ok(
+-            CSVUtils.toCSVFlux(
+-                executionRepository.findAsync(this.tenantService.resolveTenant(), QueryFilterUtils.replaceTimeRangeWithComputedStartDateFilter(filters))
+-                    .map(log -> objectMapper.convertValue(log, JacksonMapper.MAP_TYPE_REFERENCE))
+-            )
+-        )
++        var records = executionRepository.findAsync(this.tenantService.resolveTenant(), QueryFilterUtils.replaceTimeRangeWithComputedStartDateFilter(filters))
++            .map(log -> objectMapper.convertValue(log, JacksonMapper.MAP_TYPE_REFERENCE));
++        return HttpResponse.ok(finiteBodyAuthorization.bind(CSVUtils.toCSVFlux(records)))
+             .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=executions.csv");
+     }
+ 
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java
+@@ -0,0 +1,47 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import jakarta.inject.Singleton;
++import java.util.List;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++/** Fresh authorization for a finite response body and every record delivered by that body. */
++@Singleton
++public final class FiniteBodyAuthorization {
++    private final TypedAuthorizationGate gate;
++
++    public FiniteBodyAuthorization(TypedAuthorizationGate gate) {
++        this.gate = gate;
++    }
++
++    public <T> Flux<T> bind(Flux<T> source) {
++        if (!gate.evaluationEnabled()) return source;
++        var owner = AuthorizationEvaluations.current();
++        var request = AuthorizationInvocationContext.currentRequest().orElse(null);
++        if (owner == null || request == null || AuthorizationInvocationContext.isInternal() || owner.restPlan.isEmpty())
++            return Flux.error(AuthorizationEvaluations.denied());
++        var principal = owner.principal;
++        String tenant = owner.tenant;
++        var plan = List.copyOf(owner.restPlan);
++        var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
++        return gate.boundary(principal, tenant, () -> recheck(principal, plan)
++            .flatMapMany(allowed -> allowed
++                ? source.concatMap(item -> guard(principal, plan).then(Mono.just(item)))
++                : Flux.error(AuthorizationEvaluations.denied())))
++            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, origin));
++    }
++
++    private Mono<Boolean> recheck(RbacAuthorizer.Principal principal, List<TypedAuthorization.Operation> plan) {
++        return Flux.fromIterable(plan)
++            .concatMap(operation -> gate.authorize(principal, operation))
++            .all(TypedAuthorization.Decision::allowed);
++    }
++
++    private Flux<Void> guard(RbacAuthorizer.Principal principal, List<TypedAuthorization.Operation> plan) {
++        return recheck(principal, plan)
++            .flatMapMany(allowed -> allowed ? Flux.empty() : Flux.error(AuthorizationEvaluations.denied()));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
+new file mode 100644
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
+@@ -0,0 +1,134 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.webserver.controllers.api.ExecutionController;
++import io.micronaut.core.propagation.PropagatedContext;
++import java.lang.reflect.Field;
++import java.time.Duration;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.CopyOnWriteArrayList;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Flux;
++
++import static org.awaitility.Awaitility.await;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.*;
++
++class DeferredCsvAuthorizationTest {
++    @Test
++    void deferredCsvBodyKeepsRepositoryQueryDomainAndRowsAfterHttpResponseReturns() throws Exception {
++        var policy = new AuthorizationEvaluationTest.Policy();
++        var gate = AuthorizationEvaluationTest.gate(policy);
++        var acl = new TypedNamespaceAccessControl(gate);
++        var repository = mock(ExecutionRepositoryInterface.class);
++        var controller = realController(repository, gate);
++        var execution = Execution.builder().id("csv").tenantId("main").namespace("team.a").flowId("flow").build();
++        var observed = new java.util.concurrent.atomic.AtomicReference<TypedAuthorization.QueryDomain>();
++        when(repository.findAsync(eq("main"), any())).thenAnswer(call -> Flux.defer(() -> {
++            observed.set(acl.domain(QueryFilter.Resource.EXECUTION));
++            return Flux.just(execution);
++        }));
++        var response = route(gate, () -> controller.exportExecutions(List.of()).body());
++        assertEquals(200, response.code());
++        var csv = Flux.from(response.body()).collectList().block(Duration.ofSeconds(5));
++        assertFalse(csv.isEmpty());
++        assertTrue(observed.get().contains("team.a"), "deferred CSV repository query lost its authorized domain");
++        assertTrue(String.join("", csv).contains("csv"));
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.closes.get() == 2);
++    }
++
++    @Test
++    void deferredCsvBodyFailsClosedBeforeRepositoryWhenGrantIsRevokedBeforeBody() throws Exception {
++        var policy = new AuthorizationEvaluationTest.Policy();
++        var gate = AuthorizationEvaluationTest.gate(policy);
++        var repository = mock(ExecutionRepositoryInterface.class);
++        var controller = realController(repository, gate);
++        var execution = Execution.builder().id("hidden").tenantId("main").namespace("team.a").flowId("flow").build();
++        var queried = new java.util.concurrent.atomic.AtomicBoolean();
++        when(repository.findAsync(eq("main"), any())).thenAnswer(call -> Flux.defer(() -> {
++            queried.set(true);
++            return Flux.just(execution);
++        }));
++        var response = route(gate, () -> controller.exportExecutions(List.of()).body());
++        assertEquals(200, response.code());
++        policy.grants.set(java.util.Set.of("other"));
++        assertThrows(Exception.class, () -> Flux.from(response.body()).collectList().block(Duration.ofSeconds(5)));
++        assertFalse(queried.get(), "revoked finite body queried the repository");
++        verify(repository).findAsync(eq("main"), any());
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.closes.get() == 2);
++    }
++
++    @Test
++    void finiteBodyStopsBeforeNextRecordWhenSnapshotExpiresDuringExport() {
++        var policy = new AuthorizationEvaluationTest.Policy();
++        var gate = AuthorizationEvaluationTest.gate(policy);
++        var authorization = new FiniteBodyAuthorization(gate);
++        var response = route(gate, () -> authorization.bind(Flux.just("first", "second")
++            .delayElements(Duration.ofMillis(200))));
++        var received = new CopyOnWriteArrayList<String>();
++        var subscription = Flux.from(response.body()).subscribe(received::add);
++        await().atMost(Duration.ofSeconds(5)).until(() -> received.contains("first"));
++        policy.expired.set(true);
++        await().atMost(Duration.ofSeconds(5)).until(subscription::isDisposed);
++        assertEquals(List.of("first"), received);
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.closes.get() == 2);
++    }
++
++    @Test
++    void cancelledFiniteBodyClosesItsOwnEvaluation() {
++        var policy = new AuthorizationEvaluationTest.Policy();
++        var gate = AuthorizationEvaluationTest.gate(policy);
++        var authorization = new FiniteBodyAuthorization(gate);
++        var response = route(gate, () -> authorization.bind(Flux.<String>never()));
++        var subscription = Flux.from(response.body()).subscribe();
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.begins.get() == 2);
++        subscription.dispose();
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.closes.get() == 2);
++    }
++
++    private ExecutionController realController(ExecutionRepositoryInterface repository, TypedAuthorizationGate gate) throws Exception {
++        var controller = mock(ExecutionController.class, CALLS_REAL_METHODS);
++        inject(controller, "executionRepository", repository);
++        inject(controller, "tenantService", new TenantService());
++        inject(controller, "objectMapper", io.kestra.core.serializers.JacksonMapper.ofJson());
++        inject(controller, "finiteBodyAuthorization", new FiniteBodyAuthorization(gate));
++        return controller;
++    }
++
++    private io.micronaut.http.MutableHttpResponse<Flux<String>> route(TypedAuthorizationGate gate, java.util.function.Supplier<Flux<String>> bodySupplier) {
++        var adapter = mock(OssRestOperationAdapter.class);
++        when(adapter.resolve(any())).thenReturn(List.of(AuthorizationEvaluationTest.operation(TypedAuthorization.Resource.EXECUTION, "team.a")));
++        var filter = new TypedRestRbacFilter(new RbacConfiguration(true, false), adapter, gate, mock(io.kestra.webserver.errors.ProblemFactory.class));
++        var response = Flux.<io.micronaut.http.MutableHttpResponse<?>>from(filter.doFilter(AuthorizationEvaluationRestTest.request(), ignored -> {
++            var body = bodySupplier.get();
++            return reactor.core.publisher.Mono.just(io.micronaut.http.HttpResponse.ok(
++                io.micronaut.core.async.propagation.ReactivePropagation.propagate(PropagatedContext.getOrEmpty(), body))
++                .<Flux<String>>body(body).contentType(io.micronaut.http.MediaType.TEXT_CSV_TYPE));
++        })).single().block(Duration.ofSeconds(5));
++        assertEquals(200, response.code());
++        @SuppressWarnings("unchecked")
++        var typed = (io.micronaut.http.MutableHttpResponse<Flux<String>>) response;
++        return typed;
++    }
++
++    private static void inject(Object target, String name, Object value) throws Exception {
++        Class<?> type = ExecutionController.class;
++        while (type != null) {
++            try {
++                Field field = type.getDeclaredField(name);
++                field.setAccessible(true);
++                field.set(target, value);
++                return;
++            } catch (NoSuchFieldException ignored) {
++                type = type.getSuperclass();
++            }
++        }
++        throw new NoSuchFieldException(name);
++    }
++}

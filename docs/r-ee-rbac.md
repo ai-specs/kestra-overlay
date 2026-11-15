@@ -1461,6 +1461,34 @@ unhandled rejection；新实现5项通过，无unhandled。原local-ci相同UI�
 `.work/first-account-20261111/feeds-compat`。未运行完整local-ci、镜像或浏览器门，
 未提交、CI或发布；不扩大SSE或其他外部请求范围。
 
+### REQ-0398 有限CSV正文授权（2026-11-15，入口 C，候选未发布）
+
+消费扩展为 kestra-plugin-rbac。真实 Micronaut filter/controller 组合复现：
+`GET /api/v1/{tenant}/executions/export/by-query/csv` 返回 `MutableHttpResponse<Flux<String>>`
+后，旧实现延迟正文再进入 `executionRepository.findAsync` 时 typed query domain 为空，
+A-only用户得到空CSV。这不是授权过滤通过，也不能用HTTP 200或空文件替代可用导出。
+
+候选新增宿主 `FiniteBodyAuthorization`，仅在CSV入口消费：捕获当前HTTP来源、主体、
+tenant与已求交REST计划，在正文订阅时建立新evaluation；先逐项复核计划，再进入repository
+source。每条CSV记录投递前复核，拒绝或快照过期立即终止；取消/异常/完成关闭evaluation。
+不修改CSV列/行格式，不预取全库，不使用WithoutAcl，不把机制挂到SSE连接指标类。
+SSE仍由REQ-0397独立守卫处理。
+
+定向证据：旧实现红例见 `.work/stream-authorization-p5/red/p5-red.log`；新
+`DeferredCsvAuthorizationTest` 4项通过，覆盖延迟正文query domain与数据、订阅前撤权不查询、
+导出中快照到期停止后续记录、取消释放；`ExecutionFollowContextTest` 既有13项全部通过。
+54补丁结构检查与干净顺序重放通过。完整本地build后端492项（490通过、2既有镜像专用跳过）、
+UI130、executable、Class-Path与零jar检查通过。上传GHCR时本机buildx先后遇到DNS no such host
+与broken pipe；质量门已完成，候选发布必须由匹配提交CI与推广证明。
+
+真实生产组合预验证使用本机arm64候选、正式jar `42b901a4...bb0c`、隔离PostgreSQL：
+默认快照下A-only CSV包含A数据且不含C；撤权后0.4秒完整送达属于快照期限内行为，
+不计泄露。将隔离部署 `kestra.rbac.policy-snapshot-max-age-seconds` 显式设为2秒后，
+原始TCP暂停10.2MB响应正文、撤权并等待3秒再恢复：正文未完成，观察7,327,997
+字节后 aborted，基线10,245,732字节，后续不含C。证据在root
+`.work/stream-dependency-20261114/p5-slow-raw-http-report.json`。该2秒仅为隔离验收参数，
+默认仍为60秒；正式插件消费与root默认组合验收待完成。
+
 ### REQ-0396 MCP 监听与会话释放（2026-11-13，入口 C，已接收候选未发布）
 
 消费扩展为 kestra-plugin-rbac，真实 root MCP 组合周期出现无监听流保活告警。
@@ -1512,3 +1540,9 @@ apply-check/apply均通过，最终359触达文件字节一致。新增报告门
 三维隔离矩阵；原McpSessionIdentityTest覆盖subject/client/resource拒绝，未覆盖tenant。
 DELETE后旧GET404已有直接断言；不把SDK GET侧pending清理宣称全部工具副作用取消。
 正式网络HTTP/PG、全量local-ci及发布仍未通过本轮候选验证。
+
+2026-11-14最终状态更新：REQ-0396已随宿主 `95863ec` / CI `43552415541` 全部成功并推广
+镜像 `sha256:7bef038e2383bae6b3c01ea381b8e0abd822d66da6a7727a02eb71686e071304`。
+插件 `189206c` / CI `43575563419` 已消费该输入；root `568a30e` / CI `43595272358`
+new-install组合及最终artifact审计通过。上文候选红绿与限制保留为历史过程，不再把
+REQ-0396描述为未发布当前状态。
