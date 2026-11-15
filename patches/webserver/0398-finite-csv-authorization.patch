@@ -9,18 +9,18 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/Executi
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 @@ -210,6 +210,9 @@
      private SseConnectionMetrics sseConnectionMetrics;
- 
+
      @Inject
 +    private io.kestra.webserver.rbac.FiniteBodyAuthorization finiteBodyAuthorization;
 +
 +    @Inject
      protected BroadcastQueueInterface<ExecutionKilled> killQueue;
- 
+
      @Inject
 @@ -2806,12 +2809,9 @@
              in = ParameterIn.QUERY
          ) @QueryFilterFormat(Resource.EXECUTION) List<QueryFilter> filters) {
- 
+
 -        return HttpResponse.ok(
 -            CSVUtils.toCSVFlux(
 -                executionRepository.findAsync(this.tenantService.resolveTenant(), QueryFilterUtils.replaceTimeRangeWithComputedStartDateFilter(filters))
@@ -32,7 +32,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/Executi
 +        return HttpResponse.ok(finiteBodyAuthorization.bind(CSVUtils.toCSVFlux(records)))
              .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=executions.csv");
      }
- 
+
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java
 new file mode 100644
 --- /dev/null
