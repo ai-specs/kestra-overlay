@@ -1470,14 +1470,14 @@ A-only用户得到空CSV。这不是授权过滤通过，也不能用HTTP 200或
 
 候选新增宿主 `FiniteBodyAuthorization`，仅在CSV入口消费：捕获当前HTTP来源、主体、
 tenant与已求交REST计划，在正文订阅时建立新evaluation；先逐项复核计划，再进入repository
-source。每条CSV记录投递前复核，拒绝或快照过期立即终止；取消/异常/完成关闭evaluation。
+source。每条CSV记录投递前复核，空闲正文也周期复核快照；拒绝或过期立即终止；取消/异常/完成关闭evaluation。
 不修改CSV列/行格式，不预取全库，不使用WithoutAcl，不把机制挂到SSE连接指标类。
 SSE仍由REQ-0397独立守卫处理。
 
 定向证据：旧实现红例见 `.work/stream-authorization-p5/red/p5-red.log`；新
-`DeferredCsvAuthorizationTest` 4项通过，覆盖延迟正文query domain与数据、订阅前撤权不查询、
-导出中快照到期停止后续记录、取消释放；`ExecutionFollowContextTest` 既有13项全部通过。
-54补丁结构检查与干净顺序重放通过。完整本地build后端492项（490通过、2既有镜像专用跳过）、
+`DeferredCsvAuthorizationTest` 5项通过，覆盖延迟正文query domain与数据、订阅前撤权不查询、
+导出中快照到期停止后续记录、空闲快照过期失败关闭、取消释放；`ExecutionFollowContextTest` 既有13项全部通过。
+54补丁结构检查与干净顺序重放通过。完整本地build后端493项（491通过、2既有镜像专用跳过）、
 UI130、executable、Class-Path与零jar检查通过。上传GHCR时本机buildx先后遇到DNS no such host
 与broken pipe；质量门已完成，候选发布必须由匹配提交CI与推广证明。
 

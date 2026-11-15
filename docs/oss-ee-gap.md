@@ -3,11 +3,11 @@
 2026-11-15 R-EE-RBAC / REQ-0398 有限CSV正文授权候选（入口 C，本地完整门通过，CI/发布待执行）：
 消费 kestra-plugin-rbac 的 execution CSV export 在HTTP响应返回后延迟正文查询时丢失
 typed query domain，旧真实框架红例输出空CSV。候选新增独立 FiniteBodyAuthorization：
-正文订阅建立新evaluation，先复核REST计划再进入repository流；每条CSV记录投递前复核，
+正文订阅建立新evaluation，先复核REST计划再进入repository流；每条CSV记录投递前复核，空闲正文也周期复核快照；过期拒绝、
 取消/异常恰好关闭evaluation，不把CSV挂到SSE指标，不改变CSV格式或预取全库。
-新增4项真实框架红绿覆盖query domain、订阅前撤权、导出中快照到期与取消释放；
-既有SSE13项回归通过。54补丁顺序重放与定向重放通过。完整本地build后端492项
-（490通过、2既有镜像专用跳过）、UI130、executable/Class-Path/零jar通过；本机arm64
+新增5项真实框架红绿覆盖query domain、订阅前撤权、导出中快照到期、空闲快照过期与取消释放；
+既有SSE13项回归通过。54补丁顺序重放与定向重放通过。完整本地build后端493项
+（491通过、2既有镜像专用跳过）、UI130、executable/Class-Path/零jar通过；本机arm64
 候选与真实生产HTTP验证A-only不含范围外namespace。2秒快照参数的慢客户端真实HTTP在
 撤权并过期后中止，仅送达7,327,997/10,245,732基线字节且无范围外数据。正式CI、
 镜像推广、插件消费与root组合待完成；证据见 docs/r-ee-rbac.md REQ-0398 节。

@@ -1,9 +1,9 @@
-# 需求：CSV导出HTTP响应返回后，延迟正文在独立typed授权边界内执行repository查询；每条记录投递前复核授权，订阅前撤权不查询，导出中撤权停止后续记录，取消释放evaluation。
+# 需求：CSV导出HTTP响应返回后，延迟正文在独立typed授权边界内执行repository查询；每条记录投递前复核授权，快照过期在空闲或慢正文时也周期复核并终止，订阅前撤权不查询，导出中撤权停止后续记录，取消释放evaluation。
 # 消费扩展仓：ai-specs/kestra-plugin-rbac
 # 状态：core
 # 来源：新写；真实框架红例显示旧延迟CSV正文query domain为空并输出空文件。
 # 触达上游文件：webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java；webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java；webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
-# 移除条件：上游为有限流式HTTP正文提供等价的流源授权、逐记录撤权和取消释放机制。
+# 移除条件：上游为有限流式HTTP正文提供等价的流源授权、逐记录撤权、空闲快照过期和取消释放机制。
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
@@ -37,12 +37,13 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthoriz
 new file mode 100644
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,62 @@
 +package io.kestra.webserver.rbac;
 +
 +import io.kestra.core.repositories.AuthorizationInvocationContext;
 +import io.micronaut.core.async.propagation.ReactorPropagation;
 +import io.micronaut.core.propagation.PropagatedContext;
++import java.time.Duration;
 +import jakarta.inject.Singleton;
 +import java.util.List;
 +import reactor.core.publisher.Flux;
@@ -51,6 +52,7 @@ new file mode 100644
 +/** Fresh authorization for a finite response body and every record delivered by that body. */
 +@Singleton
 +public final class FiniteBodyAuthorization {
++    private static final Duration SNAPSHOT_RECHECK = Duration.ofMillis(100);
 +    private final TypedAuthorizationGate gate;
 +
 +    public FiniteBodyAuthorization(TypedAuthorizationGate gate) {
@@ -69,9 +71,22 @@ new file mode 100644
 +        var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
 +        return gate.boundary(principal, tenant, () -> recheck(principal, plan)
 +            .flatMapMany(allowed -> allowed
-+                ? source.concatMap(item -> guard(principal, plan).then(Mono.just(item)))
++                ? guardedSource(source, principal, plan)
 +                : Flux.error(AuthorizationEvaluations.denied())))
 +            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, origin));
++    }
++
++    private <T> Flux<T> guardedSource(Flux<T> source, RbacAuthorizer.Principal principal, List<TypedAuthorization.Operation> plan) {
++        return Flux.merge(
++            source.concatMap(item -> guard(principal, plan).then(Mono.just(java.util.Optional.of(item))))
++                .concatWith(Mono.just(java.util.Optional.<T>empty())),
++            Flux.interval(SNAPSHOT_RECHECK)
++                .onBackpressureDrop()
++                .concatMap(ignored -> guard(principal, plan).then(Mono.<java.util.Optional<T>>empty()))
++        )
++            .takeUntil(java.util.Optional::isEmpty)
++            .filter(java.util.Optional::isPresent)
++            .map(java.util.Optional::get);
 +    }
 +
 +    private Mono<Boolean> recheck(RbacAuthorizer.Principal principal, List<TypedAuthorization.Operation> plan) {
@@ -89,7 +104,7 @@ diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthori
 new file mode 100644
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,149 @@
 +package io.kestra.webserver.rbac;
 +
 +import io.kestra.core.models.QueryFilter;
@@ -169,6 +184,21 @@ new file mode 100644
 +        policy.expired.set(true);
 +        await().atMost(Duration.ofSeconds(5)).until(subscription::isDisposed);
 +        assertEquals(List.of("first"), received);
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.closes.get() == 2);
++    }
++
++    @Test
++    void idleFiniteBodyFailsClosedWhenSnapshotExpires() {
++        var policy = new AuthorizationEvaluationTest.Policy();
++        var gate = AuthorizationEvaluationTest.gate(policy);
++        var authorization = new FiniteBodyAuthorization(gate);
++        var response = route(gate, () -> authorization.bind(Flux.<String>never()));
++        var received = new CopyOnWriteArrayList<String>();
++        var subscription = Flux.from(response.body()).subscribe(received::add);
++        await().atMost(Duration.ofSeconds(5)).until(() -> policy.calls.get() >= 2);
++        policy.expired.set(true);
++        await().atMost(Duration.ofSeconds(5)).until(subscription::isDisposed);
++        assertTrue(received.isEmpty());
 +        await().atMost(Duration.ofSeconds(5)).until(() -> policy.closes.get() == 2);
 +    }
 +
