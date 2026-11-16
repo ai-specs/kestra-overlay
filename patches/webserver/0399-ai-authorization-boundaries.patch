@@ -1,0 +1,3291 @@
+# 需求：绑定AI认证主体与线程归属；异步工具在新typed评估中检查实际资源、查询域和队列写入；取消撤权停止后续输出及晚到结果。
+# 消费扩展仓：ai-specs/kestra-plugin-rbac
+# 状态：core
+# 来源：新写；线程归属有效红例与真实HTTP/H2、模式A/B、异步输出生命周期回归；不读取消费仓源码。
+# 触达上游文件：24个；详下方统一diff。
+# 移除条件：上游提供等价的AI可信主体、线程隔离、实际工具授权、异步撤权和取消释放机制。
+diff --git a/core/src/main/java/io/kestra/core/repositories/AuthorizationValidationContext.java b/core/src/main/java/io/kestra/core/repositories/AuthorizationValidationContext.java
+new file mode 100644
+index 0000000..ec47230
+--- /dev/null
++++ b/core/src/main/java/io/kestra/core/repositories/AuthorizationValidationContext.java
+@@ -0,0 +1,13 @@
++package io.kestra.core.repositories;
++
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++
++/** Host validation may inspect dependency graphs, but must never expose an unreadable node. */
++public record AuthorizationValidationContext(NamespaceAccessControl access) implements PropagatedContextElement {
++    public static void requireReadable(String tenant,String namespace,String id) {
++        var context=PropagatedContext.getOrEmpty().find(AuthorizationValidationContext.class).orElse(null);
++        if(context!=null && !context.access.resourceReadAllowed(io.kestra.core.models.QueryFilter.Resource.FLOW,tenant,namespace,id))
++            throw new SecurityException("Flow validation references an unavailable resource");
++    }
++}
+diff --git a/core/src/main/java/io/kestra/core/services/FlowService.java b/core/src/main/java/io/kestra/core/services/FlowService.java
+index 19e2a98..d37f55c 100644
+--- a/core/src/main/java/io/kestra/core/services/FlowService.java
++++ b/core/src/main/java/io/kestra/core/services/FlowService.java
+@@ -473,6 +473,7 @@ public class FlowService {
+
+                 Integer sentRevision = flow.getRevision();
+                 if (sentRevision != null) {
++                    io.kestra.core.repositories.AuthorizationValidationContext.requireReadable(tenantId, flow.getNamespace(), flow.getId());
+                     Integer lastRevision = Optional.ofNullable(flowRepository.lastRevision(tenantId, flow.getNamespace(), flow.getId())).orElse(0);
+                     constraintsBuilder.outdated(!sentRevision.equals(lastRevision + 1));
+                 }
+@@ -683,6 +684,7 @@ public class FlowService {
+                 // those fields are mandatory so the mandatory validation will apply
+                 return;
+             }
++            io.kestra.core.repositories.AuthorizationValidationContext.requireReadable(tenantId, subflow.getNamespace(), subflow.getFlowId());
+             Optional<Flow> optional = findById(tenantId, subflow.getNamespace(), subflow.getFlowId());
+
+             if (optional.isEmpty()) {
+@@ -728,6 +730,27 @@ public class FlowService {
+             return Optional.empty();
+         }
+
++        var validation = io.micronaut.core.propagation.PropagatedContext.getOrEmpty()
++            .find(io.kestra.core.repositories.AuthorizationValidationContext.class).orElse(null);
++        if (validation != null) {
++            var nodes = new HashMap<String, Flow>();
++            for (var candidate : flowMetaStore.allLastVersion())
++                if (Objects.equals(candidate.getTenantId(), flow.getTenantId())) nodes.put(candidate.uidWithoutRevision(), candidate);
++            var pending = new ArrayDeque<String>();
++            var checked = new HashSet<String>();
++            pending.add(root);
++            while (!pending.isEmpty()) {
++                String current = pending.removeFirst();
++                if (!checked.add(current)) continue;
++                for (String next : ListUtils.emptyOnNull(edges.get(current))) {
++                    if (next.equals(root)) continue;
++                    var dependency = nodes.get(next);
++                    if (dependency == null) throw new SecurityException("Flow validation references an unavailable resource");
++                    io.kestra.core.repositories.AuthorizationValidationContext.requireReadable(dependency.getTenantId(), dependency.getNamespace(), dependency.getId());
++                    pending.add(next);
++                }
++            }
++        }
+         List<String> path = new ArrayList<>(List.of(root));
+         if (!findPathToRoot(root, root, edges, path, new HashSet<>(List.of(root)), new HashSet<>())) {
+             return Optional.empty();
+diff --git a/core/src/test/java/io/kestra/core/services/AuthorizationValidationBoundaryTest.java b/core/src/test/java/io/kestra/core/services/AuthorizationValidationBoundaryTest.java
+new file mode 100644
+index 0000000..ed236c0
+--- /dev/null
++++ b/core/src/test/java/io/kestra/core/services/AuthorizationValidationBoundaryTest.java
+@@ -0,0 +1,60 @@
++package io.kestra.core.services;
++
++import java.util.List;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.models.flows.FlowSource;
++import io.kestra.core.repositories.AuthorizationValidationContext;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.core.tenant.TenantService;
++import io.micronaut.core.propagation.PropagatedContext;
++import jakarta.inject.Inject;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest
++class AuthorizationValidationBoundaryTest {
++    @Inject FlowService service;
++    private static final String YAML = """
++        id: validation_boundary
++        namespace: company.validation
++        revision: 1
++        tasks:
++          - id: output
++            type: io.kestra.plugin.core.log.Log
++            message: hello
++        """;
++
++    @Test
++    void shouldKeepModeAValidationWithoutAuthorizationContext() {
++        var result = service.validate(TenantService.MAIN_TENANT, List.of(new FlowSource(null, YAML)));
++        assertThat(result).hasSize(1);
++        assertThat(result.getFirst().getConstraints()).isNull();
++    }
++
++    @Test
++    void shouldRejectUnreadableRevisionBeforeExposingRevisionStatus() {
++        NamespaceAccessControl access = mock(NamespaceAccessControl.class);
++        when(access.resourceReadAllowed(any(), any(), any(), any())).thenReturn(false);
++        try (var ignored = PropagatedContext.empty().plus(new AuthorizationValidationContext(access)).propagate()) {
++            var result = service.validate(TenantService.MAIN_TENANT, List.of(new FlowSource(null, YAML)));
++            assertThat(result.getFirst().getConstraints()).contains("Flow validation references an unavailable resource");
++            assertThat(result.getFirst().getConstraints()).doesNotContain("lastRevision", "not found");
++        }
++        verify(access).resourceReadAllowed(any(), eq(TenantService.MAIN_TENANT), eq("company.validation"), eq("validation_boundary"));
++    }
++
++    @Test
++    void shouldAllowReadableRevisionAndKeepScopeLimitedToRequestedResource() {
++        NamespaceAccessControl access = mock(NamespaceAccessControl.class);
++        when(access.resourceReadAllowed(any(), eq(TenantService.MAIN_TENANT), eq("company.validation"), eq("validation_boundary")))
++            .thenReturn(true);
++        try (var ignored = PropagatedContext.empty().plus(new AuthorizationValidationContext(access)).propagate()) {
++            var result = service.validate(TenantService.MAIN_TENANT, List.of(new FlowSource(null, YAML)));
++            assertThat(result.getFirst().getConstraints()).isNull();
++        }
++        verify(access).resourceReadAllowed(any(), eq(TenantService.MAIN_TENANT), eq("company.validation"), eq("validation_boundary"));
++        verifyNoMoreInteractions(access);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/AiAgentController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/AiAgentController.java
+index e35dbab..e9f0520 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/AiAgentController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/AiAgentController.java
+@@ -52,8 +52,12 @@ import reactor.core.publisher.FluxSink;
+
+ @Slf4j
+ @Controller("/api/v1/{tenant}/ai/threads")
++@io.micronaut.scheduling.annotation.ExecuteOn(io.micronaut.scheduling.TaskExecutors.IO)
+ @Requires(bean = AiServiceManager.class)
+ public class AiAgentController {
++    @Inject
++    io.kestra.webserver.rbac.AiAuthorization authorization;
++
+     protected final TenantService tenantService;
+     private final AiServiceManager aiServiceManager;
+     private final AiThreadRepositoryInterface threadStore;
+@@ -99,6 +103,7 @@ public class AiAgentController {
+     @Operation(tags = { "AI" }, summary = "Create a Copilot conversation thread")
+     public ApiThreadSummary create(@Body final ApiCreateThreadRequest request) {
+         requireProvider(null);
++        if (authorization != null) authorization.checkCurrent();
+         String tenant = tenantService.resolveTenant();
+         Instant now = Instant.now();
+         AgentThread thread = AgentThread.builder()
+@@ -145,13 +150,14 @@ public class AiAgentController {
+
+         AgentMode mode = request.mode() != null ? request.mode() : thread.mode();
+
++        AgentPrincipal principal = principalResolver.resolve();
++        if (authorization != null) authorization.checkCurrent();
+         acquireTurnPermit();
+         try {
+             AgentThread running = threadManager.tryMarkRunning(thread, mode, AgentThreadStatus.IDLE)
+                 .orElseThrow(() -> new ConflictException("A turn is already in flight for thread '" + threadId + "'"));
+
+-            AgentPrincipal principal = principalResolver.resolve();
+-            return stream(
++            return stream(principal, running,
+                 sink -> orchestrator.runTurn(
+                     new AgentTurnContext(running, request.prompt(), mode, tenant, request.providerId(), principal, request.additionalContext()), sink
+                 )
+@@ -181,6 +187,8 @@ public class AiAgentController {
+             throw new NotFoundException("No pending action for confirmationId %s".formatted(request.confirmationId()));
+         }
+
++        AgentPrincipal principal = principalResolver.resolve();
++        if (authorization != null) authorization.checkCurrent();
+         acquireTurnPermit();
+         try {
+             AgentThread running = threadManager.tryMarkRunning(thread, thread.mode(), AgentThreadStatus.AWAITING_CONFIRMATION)
+@@ -188,8 +196,7 @@ public class AiAgentController {
+
+             boolean approve = request.decision() == ApiDecision.APPROVE;
+
+-            AgentPrincipal principal = principalResolver.resolve();
+-            return stream(sink -> orchestrator.resume(running, request.providerId(), approve, request.reason(), principal, sink));
++            return stream(principal, running, sink -> orchestrator.resume(running, request.providerId(), approve, request.reason(), principal, sink));
+         } catch (RuntimeException e) {
+             turnGate.release();
+             throw e;
+@@ -215,10 +222,10 @@ public class AiAgentController {
+      * task finishes (success or error) or when the client cancels before the task starts — guarded by an
+      * {@link AtomicBoolean} so the two paths never double-release.
+      */
+-    private Flux<Event<Object>> stream(final Consumer<TurnEventSink> work) {
++    private Flux<Event<Object>> stream(final AgentPrincipal principal, final AgentThread running, final Consumer<TurnEventSink> work) {
+         return Flux.create(emitter ->
+         {
+-            FluxTurnEventSink sink = new FluxTurnEventSink(emitter);
++            FluxTurnEventSink sink = new FluxTurnEventSink(emitter, authorization, principal);
+             AtomicBoolean released = new AtomicBoolean();
+             Runnable release = () -> {
+                 if (released.compareAndSet(false, true)) {
+@@ -228,18 +235,40 @@ public class AiAgentController {
+             emitter.onCancel(() ->
+             {
+                 sink.markCancelled();
+-                release.run();
+             });
+-            executor.execute(() ->
++            try { executor.execute(() ->
+             {
+                 try {
+-                    work.accept(sink);
++                    if (sink.isCancelled()) {
++                        threadManager.resetToIdleIfExists(running.tenant(), running.uid());
++                        return;
++                    }
++                    if (authorization == null) work.accept(sink);
++                    else {
++                        try (var cancelled = io.micronaut.core.propagation.PropagatedContext.getOrEmpty()
++                                .plus(new io.kestra.webserver.rbac.AiAuthorization.Cancellation(sink::isCancelled)).propagate()) {
++                            authorization.work(principal, () -> work.accept(sink));
++                        }
++                    }
+                 } catch (Exception e) {
++                    threadManager.resetToIdleIfExists(running.tenant(), running.uid());
+                     sink.error(e);
+                 } finally {
++                    sink.complete();
++                    sink.awaitOutput();
+                     release.run();
+                 }
+-            });
++            }); } catch (java.util.concurrent.RejectedExecutionException failure) {
++                sink.markCancelled();
++                try {
++                    threadManager.resetToIdleIfExists(running.tenant(), running.uid());
++                } catch (RuntimeException cleanup) {
++                    failure.addSuppressed(cleanup);
++                } finally {
++                    release.run();
++                }
++                emitter.error(failure);
++            }
+         }, FluxSink.OverflowStrategy.BUFFER);
+     }
+
+@@ -251,7 +280,10 @@ public class AiAgentController {
+     }
+
+     protected String resolveUserId() {
+-        return null;
++        return io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest()
++            .flatMap(request -> request.getAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION,
++                io.micronaut.security.authentication.Authentication.class))
++            .map(io.micronaut.security.authentication.Authentication::getName).orElse(null);
+     }
+
+     private void requireProvider(final String providerId) {
+@@ -264,37 +296,108 @@ public class AiAgentController {
+
+     /** Adapts the orchestrator's {@link TurnEventSink} onto a Reactor {@link FluxSink} of SSE events. */
+     private static final class FluxTurnEventSink implements TurnEventSink {
++        private enum State { OPEN, DRAINING, CANCELLED, TERMINATED }
++        private record Output(String event, Object payload, boolean terminal) {}
++
+         private final FluxSink<Event<Object>> emitter;
+-        private volatile boolean cancelled;
++        private final io.kestra.webserver.rbac.AiAuthorization authorization;
++        private final AgentPrincipal principal;
++        private final java.util.concurrent.BlockingQueue<Output> pending =
++            new java.util.concurrent.ArrayBlockingQueue<>(256);
++        private final java.util.concurrent.ExecutorService output = java.util.concurrent.Executors.newSingleThreadExecutor(
++            Thread.ofVirtual().name("ai-authorized-output").factory());
++        private volatile State state = State.OPEN;
+
+-        private FluxTurnEventSink(final FluxSink<Event<Object>> emitter) {
++        private FluxTurnEventSink(final FluxSink<Event<Object>> emitter,
++                io.kestra.webserver.rbac.AiAuthorization authorization, AgentPrincipal principal) {
+             this.emitter = emitter;
++            this.authorization = authorization;
++            this.principal = principal;
++            emitter.onDispose(this::markCancelled);
++            output.execute(this::drain);
+         }
+
+-        void markCancelled() {
+-            this.cancelled = true;
++        synchronized void markCancelled() {
++            if (state == State.TERMINATED || state == State.CANCELLED) return;
++            state = State.CANCELLED;
++            pending.clear();
++            output.shutdownNow();
++        }
++
++        void awaitOutput() {
++            try {
++                if (!output.awaitTermination(45, java.util.concurrent.TimeUnit.SECONDS)) {
++                    fail(new IllegalStateException("AI output drain timed out"));
++                }
++            } catch (InterruptedException interrupted) {
++                markCancelled();
++                Thread.currentThread().interrupt();
++            }
+         }
+
+         @Override
+         public boolean isCancelled() {
+-            return cancelled;
++            return state == State.CANCELLED || state == State.TERMINATED;
+         }
+
+         @Override
+         public void emit(final String event, final Object payload) {
+-            emitter.next(Event.of(payload).name(event));
++            enqueue(new Output(event, payload, false));
+         }
+
+         @Override
+         public void complete() {
+-            emitter.complete();
++            enqueue(new Output(null, null, true));
+         }
+
+         @Override
+         public void error(final Throwable error) {
+             String message = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+-            emit(AgentEvents.ERROR, new AgentEvents.ErrorEvent(message));
+-            complete();
++            enqueue(new Output(AgentEvents.ERROR, new AgentEvents.ErrorEvent(message), true));
++        }
++
++        private synchronized void enqueue(Output item) {
++            if (state != State.OPEN) return;
++            if (item.terminal()) state = State.DRAINING;
++            if (!pending.offer(item)) fail(new IllegalStateException("AI output queue capacity exceeded"));
++        }
++
++        private void drain() {
++            try {
++                while (!isCancelled()) {
++                    Output item = pending.poll(1, java.util.concurrent.TimeUnit.SECONDS);
++                    if (isCancelled()) return;
++                    if (authorization != null && authorization.enabled())
++                        authorization.entry(principal, () -> Boolean.TRUE);
++                    if (item == null) continue;
++                    synchronized (this) {
++                        if (isCancelled()) return;
++                        if (item.event() != null) emitter.next(Event.of(item.payload()).name(item.event()));
++                        if (item.terminal()) {
++                            state = State.TERMINATED;
++                            emitter.complete();
++                            return;
++                        }
++                    }
++                }
++            } catch (InterruptedException interrupted) {
++                if (!isCancelled()) fail(new java.util.concurrent.CancellationException("AI output interrupted"));
++                Thread.currentThread().interrupt();
++            } catch (RuntimeException failure) {
++                fail(authorization != null && authorization.enabled()
++                    ? io.kestra.webserver.rbac.AiAuthorization.denied() : failure);
++            } finally {
++                pending.clear();
++                output.shutdown();
++            }
++        }
++
++        private synchronized void fail(Throwable failure) {
++            if (isCancelled()) return;
++            state = State.CANCELLED;
++            pending.clear();
++            output.shutdownNow();
++            emitter.error(failure);
+         }
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AiAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/AiAuthorization.java
+new file mode 100644
+index 0000000..6ea064a
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AiAuthorization.java
+@@ -0,0 +1,104 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.ai.agent.models.AgentPrincipal;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.tenant.TenantService;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import jakarta.inject.Singleton;
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.HashMap;
++import java.util.function.Supplier;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++/** Carries caller identity, never a request's evaluation or connection, into AI work. */
++@Singleton
++public final class AiAuthorization {
++    public record Caller(RbacAuthorizer.Principal principal, String tenant, String owner,
++                         HttpRequest<?> request) implements AgentPrincipal, PropagatedContextElement {
++        @Override public String toString() {return "AI caller [redacted]";}
++    }
++    private final RbacConfiguration configuration;
++    private final TypedAuthorizationGate gate;
++    private final TenantService tenants;
++    public AiAuthorization(RbacConfiguration configuration, TypedAuthorizationGate gate, TenantService tenants) {
++        this.configuration=configuration;this.gate=gate;this.tenants=tenants;
++    }
++    public record Cancellation(java.util.function.BooleanSupplier cancelled) implements PropagatedContextElement {}
++    public static boolean cancelled() {
++        return PropagatedContext.getOrEmpty().find(Cancellation.class).map(value->value.cancelled().getAsBoolean()).orElse(false);
++    }
++    public boolean enabled(){return configuration.enabled();}
++    public Caller capture() {
++        var active=PropagatedContext.getOrEmpty().find(Caller.class).orElse(null);
++        if(active!=null)return active;
++        var request=AuthorizationInvocationContext.currentRequest().orElse(null);
++        var authentication=request==null?null:request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class).orElse(null);
++        if(authentication==null){if(enabled())throw denied();return null;}
++        String subject=authentication.getName(),tenant=tenants.resolveTenant();
++        if(subject==null||subject.isBlank()||tenant==null)throw denied();
++        return new Caller(new RbacAuthorizer.Principal(subject,List.copyOf(authentication.getRoles()),null,null,List.of()),tenant,subject,request);
++    }
++    public String owner(){var caller=capture();return caller==null?null:caller.owner();}
++    public void work(AgentPrincipal principal,Runnable action) {
++        if(!enabled()) {action.run();return;}
++        var caller=caller(principal);
++        var context=origin(caller).plus(caller);
++        var cancellation=PropagatedContext.getOrEmpty().find(Cancellation.class).orElse(null);
++        if(cancellation!=null)context=context.plus(cancellation);
++        try(var ignored=context.propagate()) {checkCurrent();action.run();}
++    }
++    public void checkCurrent(){if(enabled())checked(capture(),List.of(entry(capture().tenant())),()->Boolean.TRUE);}
++    public <T>T checked(AgentPrincipal principal,List<Operation> operations,Supplier<T> action) {
++        if(!enabled())return action.get();
++        var caller=caller(principal);
++        if(operations==null||operations.isEmpty()||operations.stream().anyMatch(op->op==null||!caller.tenant().equals(op.tenant())))throw denied();
++        var source=gate.boundary(caller.principal(),caller.tenant(),()->Flux.fromIterable(operations)
++            .concatMap(operation->gate.authorize(caller.principal(),operation))
++            .collectList().flatMapMany(decisions -> {
++                if (decisions.stream().anyMatch(decision -> !decision.allowed())) return Flux.error(denied());
++                return AuthorizationEvaluationContext.call(() -> {
++                    var domains = new HashMap<String, QueryDomain>();
++                    for (int index=0; index<operations.size(); index++) {
++                        var operation=operations.get(index);
++                        if (operation.coverage()==Coverage.COMPLETE_QUERY) domains.merge(operation.resource().name(),decisions.get(index).scope(),QueryDomain::intersect);
++                        else if (operation.action()==Action.READ && operation.namespace()!=null) {
++                            domains.merge(operation.resource().name(), operation.queryDomain().intersect(decisions.get(index).scope()), QueryDomain::intersect);
++                        }
++                    }
++                    var owner=AuthorizationEvaluations.current();
++                    if (owner == null || !owner.matches(caller.principal(), caller.tenant())) throw denied();
++                    var previous = new HashMap<>(owner.domains);
++                    owner.domains.putAll(domains);
++                    try {return action.get();}
++                    finally { owner.domains.clear(); owner.domains.putAll(previous); }
++                }).flux();
++            }));
++        return source.contextWrite(context->ReactorPropagation.addPropagatedContext(context,origin(caller)))
++            .single().block(Duration.ofSeconds(45));
++    }
++    public <T>T entry(AgentPrincipal principal,Supplier<T> action){
++        if (!enabled()) return action.get();
++        return checked(principal,List.of(entry(caller(principal).tenant())),action);
++    }
++    private static Caller caller(AgentPrincipal principal){
++        if(!(principal instanceof Caller caller)||caller.request()==null||caller.principal()==null||!caller.owner().equals(caller.principal().subject()))throw denied();
++        var authenticated=caller.request().getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class).orElseThrow(AiAuthorization::denied);
++        if(!authenticated.getName().equals(caller.principal().subject()))throw denied();
++        return caller;
++    }
++    private static PropagatedContext origin(Caller caller){return PropagatedContext.empty().plus(new AuthorizationInvocationContext(caller.request(),false));}
++    public static Operation entry(String tenant){return new Operation(CONTRACT_VERSION,Source.REST,Resource.AI,Action.EXECUTE,tenant,null,null,QueryDomain.unrestricted(),Coverage.COMPLETE_BATCH,Aggregate.NONE,SideEffect.EXTERNAL);}
++    public static HttpStatusException denied(){return new HttpStatusException(HttpStatus.FORBIDDEN,"AI authorization denied");}
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
+new file mode 100644
+index 0000000..4e94c9d
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
+@@ -0,0 +1,244 @@
++package io.kestra.webserver.rbac;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++import java.util.function.Supplier;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import dev.langchain4j.agent.tool.ToolExecutionRequest;
++import dev.langchain4j.service.tool.ToolExecutionResult;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import io.kestra.core.repositories.AuthorizationQueryContext;
++import io.kestra.core.serializers.JacksonMapper;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.kestra.webserver.services.ai.agent.AgentCallContext;
++import io.kestra.webserver.services.ai.agent.tool.ListExecutionsTool;
++import io.kestra.webserver.services.ai.agent.tool.ListFlowsTool;
++import io.kestra.webserver.services.ai.agent.tool.ReadExecutionTool;
++import io.kestra.webserver.services.ai.agent.tool.ReadExecutionLogsTool;
++import io.kestra.webserver.services.ai.agent.tool.ReadFlowTool;
++import io.kestra.webserver.services.ai.agent.tool.RestartExecutionTool;
++import io.kestra.webserver.services.ai.agent.tool.ToolCatalog;
++import jakarta.inject.Singleton;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++@Singleton
++public final class AiToolAuthorization {
++    private final AiAuthorization authorization;
++    private final ExecutionRepositoryInterface executions;
++    private final TypedAuthorizationGate gate;
++
++    public AiToolAuthorization(AiAuthorization authorization, ExecutionRepositoryInterface executions,
++        TypedAuthorizationGate gate) {
++        this.authorization = authorization;
++        this.executions = executions;
++        this.gate = gate;
++    }
++
++    @jakarta.inject.Inject
++    io.kestra.core.repositories.FlowRepositoryInterface flows;
++    @jakarta.inject.Inject
++    io.kestra.core.runners.FlowMetaStoreInterface flowMetaStore;
++    @jakarta.inject.Inject
++    RbacExecutionGate executionGate;
++
++    public <Result> Result checked(ToolCatalog.ToolEntry entry, ToolExecutionRequest request,
++        AgentCallContext.Context context, Supplier<Result> action) {
++        if (!authorization.enabled()) return action.get();
++        if (context == null || !(context.principal() instanceof AiAuthorization.Caller caller)
++            || !Objects.equals(caller.tenant(), context.tenant())) throw AiAuthorization.denied();
++        if (entry.tool() == null) {
++            Result result = authorization.entry(caller, action);
++            return authorization.entry(caller, () -> result);
++        }
++        JsonNode arguments;
++        try {
++            arguments = JacksonMapper.ofJson().readTree(request.arguments() == null ? "{}" : request.arguments());
++        } catch (Exception failure) {
++            throw AiAuthorization.denied();
++        }
++        if (arguments == null || !arguments.isObject()) throw AiAuthorization.denied();
++        List<Operation> plan = plan(entry.name(), arguments, context.tenant());
++        if (entry.name().equals("author-flow")) {
++            authorization.checked(caller, plan, () -> Boolean.TRUE);
++            Result authored = action.get();
++            return authorization.checked(caller, plan, () -> authored);
++        }
++        Result result = authorization.checked(caller, plan, () -> scoped(caller, plan, () -> {
++            if (entry.name().equals("restart-execution")) checkRestartDependencies(caller, arguments);
++            return action.get();
++        }));
++        List<Operation> returned = resultPlan(entry.name(), context.tenant(), plan, result);
++        return authorization.checked(caller, returned, () -> scoped(caller, returned, () -> result));
++    }
++
++    private void checkRestartDependencies(AiAuthorization.Caller caller, JsonNode arguments) {
++        if (flows == null || flowMetaStore == null || executionGate == null) throw AiAuthorization.denied();
++        String id = text(arguments, "executionId");
++        var execution = executions.findByIdWithoutAcl(caller.tenant(), id).orElseThrow(AiAuthorization::denied);
++        Integer revision = arguments.hasNonNull("revision") ? arguments.get("revision").intValue() : execution.getFlowRevision();
++        var flow = flows.findByIdWithoutAcl(caller.tenant(), execution.getNamespace(), execution.getFlowId(), java.util.Optional.ofNullable(revision))
++            .orElseThrow(AiAuthorization::denied);
++        if (!execution.getNamespace().equals(flow.getNamespace()) || !execution.getFlowId().equals(flow.getId())) throw AiAuthorization.denied();
++        var original = flowMetaStore.findByExecutionForRuntime(execution).orElseThrow(AiAuthorization::denied);
++        requireRuntime(caller, execution, original, execution.getFlowRevision());
++        checkDependencies(caller, original, id);
++        if (arguments.hasNonNull("revision")) {
++            var target = flowMetaStore.findByIdForRuntime(caller.tenant(),execution.getNamespace(),execution.getFlowId(),java.util.Optional.of(revision))
++                .orElseThrow(AiAuthorization::denied);
++            requireRuntime(caller, execution, target.flow(), revision);
++            checkDependencies(caller, target.flow(), id);
++        }
++    }
++
++    private void requireRuntime(AiAuthorization.Caller caller, Execution execution, io.kestra.core.models.flows.Flow flow, Integer revision) {
++        String tenant=flow.getTenantId()==null?"main":flow.getTenantId();
++        if (flow instanceof io.kestra.core.models.flows.FlowWithException || !caller.tenant().equals(tenant)
++            || !execution.getNamespace().equals(flow.getNamespace()) || !execution.getFlowId().equals(flow.getId())
++            || revision!=null && !revision.equals(flow.getRevision())) throw AiAuthorization.denied();
++    }
++    private void checkDependencies(AiAuthorization.Caller caller, io.kestra.core.models.flows.Flow flow, String id) {
++        if (!Boolean.TRUE.equals(executionGate.dependencies(caller.principal(),caller.tenant(),flow,id).block(java.time.Duration.ofSeconds(12))))
++            throw AiAuthorization.denied();
++    }
++
++    private <Result> Result scoped(AiAuthorization.Caller caller, List<Operation> plan, Supplier<Result> action) {
++        var owner = AuthorizationEvaluations.current();
++        if (owner == null || !owner.matches(caller.principal(), caller.tenant())) throw AiAuthorization.denied();
++        Operation primary = plan.getFirst();
++        QueryDomain primaryScope = null;
++        for (Operation operation : plan) {
++            Decision decision = gate.authorize(caller.principal(), operation).block();
++            if (decision == null || !decision.allowed()) throw AiAuthorization.denied();
++            QueryDomain scope = operation.queryDomain().intersect(decision.scope());
++            if (operation.namespace() != null) {
++                if (operation.resourceId() != null && !scope.resourceAllowed(operation.namespace(), operation.resourceId()))
++                    throw AiAuthorization.denied();
++                if (operation.resourceId() == null && (!scope.contains(operation.namespace())
++                    || !scope.resourceDomains().isEmpty() && scope.resourceDomains().stream().noneMatch(term ->
++                        term.idScope() == QueryDomain.IdScope.ALL_IDS && term.allows(operation.namespace(), "new-execution"))))
++                    throw AiAuthorization.denied();
++            }
++            if (operation == primary) primaryScope = scope;
++        }
++        var domain = new TypedDashboardGate.DatasourceDomain(owner, primary.resource(), primaryScope);
++        try (var ignored = PropagatedContext.getOrEmpty().plus(new AuthorizationQueryContext(domain)).propagate()) {
++            if (plan.stream().anyMatch(operation -> operation.resource()==Resource.METADATA)) {
++                var access = new TypedNamespaceAccessControl(gate);
++                try (var validation = PropagatedContext.getOrEmpty()
++                        .plus(new io.kestra.core.repositories.AuthorizationValidationContext(access)).propagate()) {
++                    return action.get();
++                }
++            }
++            return action.get();
++        }
++    }
++
++    private List<Operation> resultPlan(String name, String tenant, List<Operation> plan, Object result) {
++        Object value = result instanceof ToolExecutionResult executed ? executed.result() : result;
++        var operations = new ArrayList<>(plan);
++        if (name.equals("list-flows")) {
++            if (!(value instanceof ListFlowsTool.Result flows) || flows.flows() == null) throw AiAuthorization.denied();
++            for (var flow : flows.flows())
++                operations.add(single(Resource.FLOW, Action.READ, tenant, flow.namespace(), flow.id(), SideEffect.READ_ONLY));
++        } else if (name.equals("list-executions")) {
++            if (!(value instanceof ListExecutionsTool.Result executions) || executions.executions() == null)
++                throw AiAuthorization.denied();
++            for (var execution : executions.executions())
++                operations.add(single(Resource.EXECUTION, Action.READ, tenant, execution.namespace(), execution.id(), SideEffect.READ_ONLY));
++        } else if (name.equals("read-flow")) {
++            if (!(value instanceof ReadFlowTool.Result flow)) throw AiAuthorization.denied();
++            sameResource(plan.getFirst(), flow.namespace(), flow.id());
++            operations.add(single(Resource.FLOW, Action.READ, tenant, flow.namespace(), flow.id(), SideEffect.READ_ONLY));
++        } else if (name.equals("read-execution")) {
++            if (!(value instanceof ReadExecutionTool.Result execution)) throw AiAuthorization.denied();
++            sameResource(plan.getFirst(), execution.namespace(), execution.id());
++            operations.add(single(Resource.EXECUTION, Action.READ, tenant, execution.namespace(), execution.id(), SideEffect.READ_ONLY));
++        } else if (name.equals("read-execution-logs")) {
++            if (!(value instanceof ReadExecutionLogsTool.Result logs)
++                || !Objects.equals(plan.getFirst().resourceId(), logs.executionId())) throw AiAuthorization.denied();
++            operations.add(single(Resource.LOG, Action.READ, tenant, plan.getFirst().namespace(), logs.executionId(), SideEffect.READ_ONLY));
++        } else if (name.equals("restart-execution")) {
++            if (!(value instanceof RestartExecutionTool.Result restart)
++                || !Objects.equals(plan.getFirst().resourceId(), restart.executionId())) throw AiAuthorization.denied();
++        }
++        return List.copyOf(operations);
++    }
++
++    private void sameResource(Operation expected, String namespace, String id) {
++        if (!Objects.equals(expected.namespace(), namespace) || !Objects.equals(expected.resourceId(), id))
++            throw AiAuthorization.denied();
++    }
++
++    private List<Operation> plan(String name, JsonNode arguments, String tenant) {
++        return switch (name) {
++            case "list-flows" -> List.of(query(Resource.FLOW, tenant, arguments));
++            case "list-executions" -> List.of(query(Resource.EXECUTION, tenant, arguments));
++            case "read-flow" -> List.of(single(Resource.FLOW, Action.READ, tenant,
++                text(arguments, "namespace"), text(arguments, "flowId"), SideEffect.READ_ONLY));
++            case "read-execution", "read-execution-logs", "restart-execution" -> executionPlan(name, arguments, tenant);
++            case "search-plugins", "get-plugin-schema" -> List.of(single(Resource.METADATA, Action.READ,
++                tenant, null, null, SideEffect.READ_ONLY));
++            case "validate-flow", "author-flow" -> List.of(single(Resource.METADATA, Action.READ, tenant, null, null, SideEffect.READ_ONLY));
++            default -> throw AiAuthorization.denied();
++        };
++    }
++
++    private List<Operation> executionPlan(String name, JsonNode arguments, String tenant) {
++        String id = text(arguments, "executionId");
++        Execution execution = executions.findByIdWithoutAcl(tenant, id).orElseThrow(AiAuthorization::denied);
++        String actualTenant = execution.getTenantId() == null ? "main" : execution.getTenantId();
++        if (!tenant.equals(actualTenant)
++            || !id.equals(execution.getId()) || execution.getNamespace() == null) throw AiAuthorization.denied();
++        String namespace = execution.getNamespace();
++        if (name.equals("read-execution-logs")) {
++            return List.of(single(Resource.LOG, Action.READ, tenant, namespace, id, SideEffect.READ_ONLY));
++        }
++        var operations = new ArrayList<Operation>();
++        operations.add(single(Resource.EXECUTION, Action.READ, tenant, namespace, id, SideEffect.READ_ONLY));
++        if (name.equals("restart-execution")) {
++            String flowId = execution.getFlowId();
++            if (flowId == null || flowId.isBlank()) throw AiAuthorization.denied();
++            operations.add(single(Resource.EXECUTION, Action.UPDATE, tenant, namespace, id, SideEffect.QUEUE_WRITE));
++            operations.add(single(Resource.FLOW, Action.READ, tenant, namespace, flowId, SideEffect.READ_ONLY));
++            operations.add(single(Resource.FLOW, Action.EXECUTE, tenant, namespace, flowId, SideEffect.QUEUE_WRITE));
++            if (arguments.hasNonNull("revision")) {
++                if (!arguments.get("revision").isIntegralNumber() || !arguments.get("revision").canConvertToInt())
++                    throw AiAuthorization.denied();
++                operations.add(single(Resource.EXECUTION, Action.CREATE, tenant, namespace, null, SideEffect.QUEUE_WRITE));
++            }
++        }
++        return List.copyOf(operations);
++    }
++
++    private Operation query(Resource resource, String tenant, JsonNode arguments) {
++        var filters = new ArrayList<QueryFilter>();
++        JsonNode namespace = arguments.get("NAMESPACE");
++        if (namespace != null) {
++            if (!namespace.isObject() || !namespace.path("operator").isTextual() || !namespace.hasNonNull("value"))
++                throw AiAuthorization.denied();
++            var operation = QueryFilter.Op.fromString(namespace.get("operator").asText());
++            Object value = JacksonMapper.ofJson().convertValue(namespace.get("value"), Object.class);
++            filters.add(new QueryFilter(QueryFilter.Field.NAMESPACE, operation, value, null, null));
++        }
++        return new Operation(CONTRACT_VERSION, Source.REST, resource, Action.LIST, tenant, null, null,
++            TypedQueryDomains.fromFilters(filters, true), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
++    }
++
++    private Operation single(Resource resource, Action action, String tenant, String namespace, String id, SideEffect effect) {
++        QueryDomain domain = namespace == null ? QueryDomain.unrestricted()
++            : new QueryDomain(List.of(namespace), List.of(), List.of(), true, false);
++        return new Operation(CONTRACT_VERSION, Source.REST, resource, action, tenant, namespace, id,
++            domain, Coverage.SINGLE, Aggregate.NONE, effect);
++    }
++
++    private String text(JsonNode arguments, String field) {
++        JsonNode value = arguments.get(field);
++        if (value == null || !value.isTextual() || value.asText().isBlank()) throw AiAuthorization.denied();
++        return value.asText();
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+index 61231c6..e976f96 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+@@ -85,6 +85,12 @@ extension
+ (
+ request,
+ tenant);
++                case "io.kestra.webserver.controllers.api.AiAgentController" -> switch (handler) {
++                    case "get" -> List.of(new Operation(CONTRACT_VERSION, Source.REST, Resource.AI, Action.READ,
++                        tenant, null, null, QueryDomain.unrestricted(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
++                    case "create", "chat", "confirm" -> List.of(AiAuthorization.entry(tenant));
++                    default -> List.of();
++                };
+                 case "io.kestra.webserver.controllers.api.FlowController" -> flow(request, tenant, namespace, id);
+                 case "io.kestra.webserver.controllers.api.ExecutionController" -> execution(request, tenant, namespace, id);
+                 case "io.kestra.webserver.controllers.api.OutputController" -> switch (handler) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+index c684ab9..be3ab52 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+@@ -9,7 +9,7 @@ public final class TypedAuthorization {
+     private TypedAuthorization() {}
+
+     public enum Source { REST, MCP, INTERNAL, DASHBOARD_AGGREGATE }
+-    public enum Resource { FLOW, EXECUTION, NAMESPACE, LOG, METRIC, TRIGGER, KVSTORE,
++    public enum Resource { AI, FLOW, EXECUTION, NAMESPACE, LOG, METRIC, TRIGGER, KVSTORE,
+         NAMESPACE_FILE, METADATA, SYSTEM, MCP_SERVER, DASHBOARD, BLUEPRINT
+ ,
+         EXTENSION
+@@ -217,7 +217,7 @@ resource == Resource.EXTENSION
+             if (
+ namespace != null && !queryDomain.contains(namespace)) throw new IllegalArgumentException("Resource is outside query domain");
+             if (coverage == Coverage.COMPLETE_QUERY && !queryDomain.complete()) throw new IllegalArgumentException("Complete query required");
+-            if (coverage == Coverage.SINGLE && namespace == null && resource != Resource.METADATA && resource != Resource.SYSTEM
++            if (coverage == Coverage.SINGLE && namespace == null && resource != Resource.AI && resource != Resource.METADATA && resource != Resource.SYSTEM
+                 && resource != Resource.MCP_SERVER && resource != Resource.DASHBOARD && resource != Resource.BLUEPRINT
+ && resource != Resource.EXTENSION
+ )
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/AiThreadManager.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/AiThreadManager.java
+index cc3ffa8..c9e5546 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/AiThreadManager.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/AiThreadManager.java
+@@ -31,6 +31,9 @@ import jakarta.inject.Singleton;
+  */
+ @Singleton
+ public class AiThreadManager {
++    @Inject
++    io.kestra.webserver.rbac.AiAuthorization authorization;
++
+     private static final int MAX_TITLE_LENGTH = 60;
+
+     private final AiThreadRepositoryInterface threadStore;
+@@ -73,6 +76,7 @@ public class AiThreadManager {
+     }
+
+     public Optional<AgentThread> tryMarkRunning(final AgentThread thread, final AgentMode mode, final AgentThreadStatus expected) {
++        if (authorization != null) authorization.checkCurrent();
+         return threadStore.updateIf(
+             thread.tenant(), thread.uid(), expected, t -> t.toBuilder()
+                 .status(AgentThreadStatus.RUNNING)
+@@ -89,6 +93,7 @@ public class AiThreadManager {
+      * nothing else is captured.
+      */
+     public AgentThread markAwaiting(final AgentThread thread, final String confirmationId) {
++        if (authorization != null) authorization.checkCurrent();
+         return threadStore.save(
+             thread.withStatus(AgentThreadStatus.AWAITING_CONFIRMATION)
+                 .withPendingConfirmationId(confirmationId)
+@@ -143,6 +148,7 @@ public class AiThreadManager {
+     }
+
+     public void appendArtefactDraft(final String tenant, final String threadId, final String traceId, final ArtefactDraft draft) {
++        if (authorization != null) authorization.checkCurrent();
+         messageStore.append(
+             AgentMessage.builder()
+                 .uid(newMessageUid())
+@@ -171,6 +177,7 @@ public class AiThreadManager {
+
+     private void append(final String tenant, final String threadId, final String traceId, final AgentMessageRole role, final AgentMessageType type,
+         final String content, final AgentToolCall toolCall, final Map<String, Object> toolResult) {
++        if (type != AgentMessageType.CANCELLED && authorization != null) authorization.checkCurrent();
+         messageStore.append(
+             AgentMessage.builder()
+                 .uid(newMessageUid())
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/DefaultAgentPrincipalResolver.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/DefaultAgentPrincipalResolver.java
+index a1a78e5..a6797f5 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/DefaultAgentPrincipalResolver.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/DefaultAgentPrincipalResolver.java
+@@ -5,13 +5,16 @@ import io.kestra.core.ai.agent.models.AgentPrincipal;
+ import jakarta.inject.Singleton;
+
+ /**
+- * Default resolver: no multi-user identity exists (a single account), so there is no principal to
+- * capture. A replacement can override this to resolve the authenticated user.
++ * Captures the authenticated caller without retaining an authorization evaluation.
++ * Anonymous OSS mode remains compatible with a null principal.
+  */
+ @Singleton
+ public class DefaultAgentPrincipalResolver implements AgentPrincipalResolver {
++    @jakarta.inject.Inject
++    io.kestra.webserver.rbac.AiAuthorization authorization;
++
+     @Override
+     public AgentPrincipal resolve() {
+-        return null;
++        return authorization == null ? null : authorization.capture();
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java
+index edd6b13..51caf1a 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java
+@@ -1,9 +1,22 @@
+ package io.kestra.webserver.services.ai.agent.tool;
+
+ import java.util.List;
++import java.util.ArrayList;
+ import java.util.Objects;
++import java.time.Duration;
++import java.util.concurrent.FutureTask;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.CancellationException;
+ import java.util.stream.Collectors;
+
++import com.fasterxml.jackson.core.JsonParser;
++import com.fasterxml.jackson.databind.DeserializationFeature;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
++
+ import io.kestra.core.ai.agent.models.ArtefactDraft;
+ import io.kestra.core.ai.agent.models.ArtefactKind;
+ import io.kestra.core.models.flows.FlowSource;
+@@ -16,6 +29,12 @@ import io.kestra.webserver.services.ai.AiServiceInterface;
+ import io.kestra.webserver.services.ai.AiServiceManager;
+ import io.kestra.webserver.services.ai.UserInfo;
+ import io.kestra.webserver.services.ai.agent.AgentCallContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.repositories.AuthorizationValidationContext;
++import io.kestra.webserver.rbac.AiAuthorization;
++import io.kestra.webserver.rbac.TypedAuthorizationGate;
++import io.kestra.webserver.rbac.TypedNamespaceAccessControl;
++import io.micronaut.core.propagation.PropagatedContext;
+
+ import dev.langchain4j.agent.tool.P;
+ import dev.langchain4j.agent.tool.Tool;
+@@ -23,6 +42,8 @@ import io.micronaut.context.annotation.Requires;
+ import jakarta.inject.Inject;
+ import jakarta.inject.Singleton;
+
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
+ /**
+  * Authoring sub-agent for flows: runs the existing one-shot generation pipeline
+  * (plugin finder → restricted schema → YAML builder) through {@link AiServiceInterface#generateFlow},
+@@ -44,13 +65,28 @@ public class AuthorFlowTool implements AiAuthoringTool {
+
+     private final AiServiceManager aiServiceManager;
+     private final FlowService flowService;
++    private final AiAuthorization authorization;
++    private final TypedAuthorizationGate gate;
+
+-    @Inject
+     public AuthorFlowTool(final AiServiceManager aiServiceManager, final FlowService flowService) {
+         this.aiServiceManager = aiServiceManager;
+         this.flowService = flowService;
++        this.authorization = null;
++        this.gate = null;
++    }
++
++    @Inject
++    public AuthorFlowTool(AiServiceManager aiServiceManager, FlowService flowService,
++        AiAuthorization authorization, TypedAuthorizationGate gate) {
++        this.aiServiceManager = aiServiceManager;
++        this.flowService = flowService;
++        this.authorization = Objects.requireNonNull(authorization);
++        this.gate = Objects.requireNonNull(gate);
+     }
+
++    @io.micronaut.context.annotation.Value("${kestra.ai.agent.model-call-timeout:PT5M}")
++    private Duration generationTimeout = Duration.ofMinutes(5);
++
+     @Override
+     public ArtefactKind artefact() {
+         return ArtefactKind.FLOW;
+@@ -72,6 +108,10 @@ public class AuthorFlowTool implements AiAuthoringTool {
+             throw new IllegalStateException("No AI provider is configured; flow authoring is unavailable.");
+         }
+
++        if (authorization != null && authorization.enabled()) {
++            return authorizedFlow(aiService, instructions, namespace, currentFlowYaml, context);
++        }
++
+         // The generation pipeline requires a non-null namespace (see DEFAULT_NAMESPACE). When the agent
+         // omits it, fall back — but only a *creation* with no namespace is an assumption worth surfacing:
+         // when revising, the real namespace lives in the provided YAML and is preserved, so the default
+@@ -101,6 +141,132 @@ public class AuthorFlowTool implements AiAuthoringTool {
+         return Result.drafted(draft, assumedNamespace);
+     }
+
++    private Result authorizedFlow(AiServiceInterface service, String instructions, String namespace,
++        String currentYaml, AgentCallContext.Context context) {
++        if (!(context.principal() instanceof AiAuthorization.Caller caller)
++            || !Objects.equals(context.tenant(), caller.tenant())) throw AiAuthorization.denied();
++        var minimal = PropagatedContext.empty().plus(caller)
++            .plus(new AuthorizationInvocationContext(caller.request(), false));
++        var cancellation = PropagatedContext.getOrEmpty().find(AiAuthorization.Cancellation.class).orElse(null);
++        if (cancellation != null) minimal = minimal.plus(cancellation);
++        try (var ignored = minimal.propagate()) {
++            checkCancelled();
++            boolean creating = currentYaml == null || currentYaml.isBlank();
++            boolean missingNamespace = namespace == null || namespace.isBlank();
++            JsonNode current = creating ? null : declaration(currentYaml);
++            String expected = missingNamespace ? creating ? DEFAULT_NAMESPACE : required(current, "namespace") : namespace;
++            var operations = new ArrayList<Operation>();
++            operations.add(new Operation(CONTRACT_VERSION, Source.REST, Resource.METADATA, Action.READ, caller.tenant(),
++                null, null, QueryDomain.unrestricted(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
++            if (current != null) {
++                if (!expected.equals(required(current, "namespace"))) throw AiAuthorization.denied();
++                operations.add(new Operation(CONTRACT_VERSION, Source.REST, Resource.FLOW, Action.READ, caller.tenant(),
++                    required(current, "namespace"), required(current, "id"),
++                    new QueryDomain(List.of(expected), List.of(), List.of(), true, false),
++                    Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
++            }
++            authorization.checked(caller, operations, () -> {
++                checkReadable(caller, operations);
++                return Boolean.TRUE;
++            });
++            var prompt = new FlowGenerationPrompt(Objects.requireNonNullElseGet(context.conversationId(), IdUtils::create),
++                instructions, currentYaml, expected);
++            String yaml = generate(service, prompt, caller, minimal);
++            checkCancelled();
++            JsonNode generated = declaration(yaml);
++            if (!expected.equals(required(generated, "namespace"))) throw AiAuthorization.denied();
++            String constraints = authorization.checked(caller, operations, () -> {
++                checkCancelled();
++                checkReadable(caller, operations);
++                try (var validation = PropagatedContext.getOrEmpty()
++                    .plus(new AuthorizationValidationContext(new TypedNamespaceAccessControl(gate))).propagate()) {
++                    return Objects.requireNonNullElse(validate(caller.tenant(), yaml), "");
++                }
++            });
++            checkCancelled();
++            return authorization.checked(caller, operations, () -> {
++                checkCancelled();
++                checkReadable(caller, operations);
++                var draft = new ArtefactDraft(IdUtils.create(), ArtefactKind.FLOW, yaml, constraints.isEmpty(),
++                    constraints.isEmpty() ? null : constraints);
++                return Result.drafted(draft, missingNamespace && creating ? expected : null);
++            });
++        }
++    }
++
++    private String generate(AiServiceInterface service, FlowGenerationPrompt prompt, AiAuthorization.Caller caller,
++        PropagatedContext minimal) {
++        checkCancelled();
++        authorization.entry(caller, () -> Boolean.TRUE);
++        var task = new FutureTask<String>(() -> {
++            try (var ignored = minimal.propagate()) {
++                checkCancelled();
++                return service.generateFlow(new UserInfo(null, "copilot-agent"), prompt, caller.tenant()).content();
++            }
++        });
++        Thread.ofVirtual().name("ai-author-flow").start(task);
++        long deadline = System.nanoTime() + generationTimeout.toNanos();
++        try {
++            while (true) {
++                checkCancelled();
++                long remaining = deadline - System.nanoTime();
++                if (remaining <= 0) throw new IllegalStateException("Flow generation timed out after " + generationTimeout);
++                try {
++                    String yaml = task.get(Math.min(remaining, TimeUnit.SECONDS.toNanos(1)), TimeUnit.NANOSECONDS);
++                    checkCancelled();
++                    authorization.entry(caller, () -> Boolean.TRUE);
++                    return yaml;
++                } catch (TimeoutException waiting) {
++                    checkCancelled();
++                    authorization.entry(caller, () -> Boolean.TRUE);
++                }
++            }
++        } catch (InterruptedException interrupted) {
++            Thread.currentThread().interrupt();
++            throw new CancellationException("Flow generation wait interrupted");
++        } catch (ExecutionException failure) {
++            throw new IllegalStateException("Flow generation failed", failure.getCause());
++        } finally {
++            task.cancel(true);
++        }
++    }
++
++    private void checkReadable(AiAuthorization.Caller caller, List<Operation> operations) {
++        checkCancelled();
++        for (var operation : operations) {
++            if (operation.resource() != Resource.FLOW) continue;
++            var decision = gate.authorize(caller.principal(), operation).block(Duration.ofSeconds(5));
++            if (decision == null || !decision.allowed()
++                || !operation.queryDomain().intersect(decision.scope()).resourceAllowed(operation.namespace(), operation.resourceId()))
++                throw AiAuthorization.denied();
++        }
++    }
++
++    private static void checkCancelled() {
++        if (Thread.currentThread().isInterrupted() || AiAuthorization.cancelled())
++            throw new CancellationException("Flow authoring cancelled");
++    }
++
++    private JsonNode declaration(String yaml) {
++        try {
++            var mapper = new ObjectMapper(new YAMLFactory()).enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++                .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
++            var node = mapper.readTree(yaml);
++            if (node == null || !node.isObject() || node.has("tenantId")) throw AiAuthorization.denied();
++            required(node, "id");
++            required(node, "namespace");
++            return node;
++        } catch (Exception failure) {
++            throw AiAuthorization.denied();
++        }
++    }
++
++    private String required(JsonNode node, String field) {
++        var value = node.get(field);
++        if (value == null || !value.isTextual() || value.asText().isBlank()) throw AiAuthorization.denied();
++        return value.asText();
++    }
++
+     /** Run platform validation on the generated source; returns the violations, or null when valid. */
+     private String validate(final String tenant, final String yaml) {
+         List<ValidateConstraintViolation> violations = flowService.validate(tenant, List.of(new FlowSource(null, yaml)));
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
+index 10b0228..42b2a28 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
+@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Optional;
++import java.util.Objects;
+
+ import com.fasterxml.jackson.databind.ObjectMapper;
+
+@@ -16,6 +17,8 @@ import io.kestra.core.ai.agent.models.AgentWritePolicy;
+ import io.kestra.core.ai.agent.models.ArtefactDraft;
+ import io.kestra.core.serializers.JacksonMapper;
+ import io.kestra.webserver.converters.QueryFilterFormat;
++import io.kestra.webserver.rbac.AiAuthorization;
++import io.kestra.webserver.rbac.AiToolAuthorization;
+ import io.kestra.webserver.services.ai.agent.AgentCallContext;
+
+ import dev.langchain4j.agent.tool.Tool;
+@@ -42,9 +45,9 @@ import lombok.extern.slf4j.Slf4j;
+  *
+  * <p>
+  * A tool runs against the caller's own tenant, carried on the {@link AgentCallContext.Context}; there
+- * is no per-call tenant parameter, so a conversation is single-tenant by construction. Tools carry no
+- * authorization by default; a replacement can override the same {@code @Tool} method to validate the
+- * caller's access and then delegate to {@code super}. Because such an override drops the
++ * is no per-call tenant parameter, so a conversation is single-tenant by construction. Dispatch applies
++ * the host's typed resource authorization before executing and before returning a tool result.
++ * A replacement can override the same {@code @Tool} method. Because such an override drops the
+  * {@code @Tool}/{@code @P} annotations, {@link #toolMethod} resolves the annotated method up the class
+  * hierarchy — the spec comes from the annotated method while execution dispatches virtually to the
+  * override.
+@@ -60,9 +63,11 @@ public class ToolCatalog {
+     private final DocsMcpToolProvider docsMcpToolProvider;
+     private final AgentToolPermissionEvaluator permissionEvaluator;
+
++    private final AiToolAuthorization toolAuthorization;
++
+     private volatile Map<String, ToolEntry> registry;
+
+-    @Inject
++    /** Manual construction supports catalog inspection; dispatch requires the explicit authorization adapter. */
+     public ToolCatalog(
+         final List<AiPlatformTool> platformTools,
+         final List<AiAuthoringTool> authoringTools,
+@@ -72,6 +77,21 @@ public class ToolCatalog {
+         this.authoringTools = authoringTools;
+         this.docsMcpToolProvider = docsMcpToolProvider;
+         this.permissionEvaluator = permissionEvaluator;
++        this.toolAuthorization = null;
++    }
++
++    @Inject
++    public ToolCatalog(
++        final List<AiPlatformTool> platformTools,
++        final List<AiAuthoringTool> authoringTools,
++        final DocsMcpToolProvider docsMcpToolProvider,
++        final AgentToolPermissionEvaluator permissionEvaluator,
++        final AiToolAuthorization toolAuthorization) {
++        this.platformTools = platformTools;
++        this.authoringTools = authoringTools;
++        this.docsMcpToolProvider = docsMcpToolProvider;
++        this.permissionEvaluator = permissionEvaluator;
++        this.toolAuthorization = Objects.requireNonNull(toolAuthorization, "AI tool authorization adapter is required");
+     }
+
+     public record ToolEntry(
+@@ -82,7 +102,7 @@ public class ToolCatalog {
+         @Nullable AgentToolFamily family,
+         AgentWritePolicy writePolicy,
+         @Nullable AiTool tool) {
+-        /** Docs MCP entries carry no tool bean and are outside permission evaluation. */
++        /** Docs MCP entries use the SYSTEM boundary instead of the native permission evaluator. */
+         public boolean isPermissionEvaluated() {
+             return tool != null;
+         }
+@@ -111,7 +131,7 @@ public class ToolCatalog {
+                 register(built, tool, AgentToolCall.Kind.AUTHORING, null, AgentWritePolicy.AUTO);
+             }
+
+-            // Docs MCP tools are public documentation reads: no permission and no tenant scoping.
++            // Docs MCP has no native bean; dispatch still applies the caller's SYSTEM boundary.
+             docsMcpToolProvider.tools().forEach(
+                 (spec, executor) -> built.put(
+                     spec.name(), new ToolEntry(
+@@ -186,7 +206,10 @@ public class ToolCatalog {
+
+         // Carry the caller context to the @Tool method as a langchain4j managed argument — the executor
+         // injects it by type into the tool's AgentCallContext.Context parameter — not a thread-local.
+-        ToolExecutionResult executed = entry.executor().executeWithContext(stripEmptyOptionalArgs(entry, request), AgentCallContext.into(context));
++        ToolExecutionRequest effectiveRequest = stripEmptyOptionalArgs(entry, request);
++        if (toolAuthorization == null) throw AiAuthorization.denied();
++        ToolExecutionResult executed = toolAuthorization.checked(entry, effectiveRequest, context,
++            () -> entry.executor().executeWithContext(effectiveRequest, AgentCallContext.into(context)));
+         // A tool's single output is its return value; if that value is publishable, the caller (the
+         // orchestrator) persists and streams the artefact — the tool never reaches back through a side channel.
+         ArtefactDraft artefact = executed.result() instanceof PublishableToolResult publishable ? publishable.artefact() : null;
+diff --git a/webserver/src/test/java/io/kestra/webserver/controllers/api/AiAgentControllerTest.java b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiAgentControllerTest.java
+index 2c23050..871fc97 100644
+--- a/webserver/src/test/java/io/kestra/webserver/controllers/api/AiAgentControllerTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiAgentControllerTest.java
+@@ -55,6 +55,9 @@ class AiAgentControllerTest {
+
+     private final ScriptedStreamingChatModel scriptedModel = new ScriptedStreamingChatModel();
+
++    @Inject
++    io.kestra.webserver.services.BasicAuthService.BasicAuthConfiguration basicAuthConfiguration;
++
+     @Inject
+     @Client("/")
+     HttpClient client;
+@@ -99,7 +102,7 @@ class AiAgentControllerTest {
+     @Test
+     void shouldReturnNotFoundWhenGettingUnknownThread() {
+         // When / Then
+-        assertThatThrownBy(() -> client.toBlocking().retrieve(HttpRequest.GET(BASE + "/does-not-exist"), ApiThreadDetail.class))
++        assertThatThrownBy(() -> client.toBlocking().retrieve(HttpRequest.GET(BASE + "/does-not-exist").basicAuth(basicAuthConfiguration.getUsername(), basicAuthConfiguration.getPassword()), ApiThreadDetail.class))
+             .isInstanceOfSatisfying(
+                 HttpClientResponseException.class,
+                 e -> assertThat(e.getStatus().getCode()).isEqualTo(HttpStatus.NOT_FOUND.getCode())
+@@ -169,7 +172,7 @@ class AiAgentControllerTest {
+                 HttpRequest.POST(
+                     BASE + "/" + thread.uid() + "/chat",
+                     new ApiChatTurnRequest("again", AgentMode.EDIT, null, null)
+-                )
++                ).basicAuth(basicAuthConfiguration.getUsername(), basicAuthConfiguration.getPassword())
+             )
+         )
+             .isInstanceOfSatisfying(
+@@ -227,11 +230,11 @@ class AiAgentControllerTest {
+     }
+
+     private ApiThreadSummary createThread(final ApiCreateThreadRequest request) {
+-        return client.toBlocking().retrieve(HttpRequest.POST(BASE, request), ApiThreadSummary.class);
++        return client.toBlocking().retrieve(HttpRequest.POST(BASE, request).basicAuth(basicAuthConfiguration.getUsername(), basicAuthConfiguration.getPassword()), ApiThreadSummary.class);
+     }
+
+     private ApiThreadDetail getThread(final String threadId) {
+-        return client.toBlocking().retrieve(HttpRequest.GET(BASE + "/" + threadId), ApiThreadDetail.class);
++        return client.toBlocking().retrieve(HttpRequest.GET(BASE + "/" + threadId).basicAuth(basicAuthConfiguration.getUsername(), basicAuthConfiguration.getPassword()), ApiThreadDetail.class);
+     }
+
+     private List<Event<Map>> chat(final String threadId, final ApiChatTurnRequest request) {
+@@ -243,7 +246,7 @@ class AiAgentControllerTest {
+     }
+
+     private List<Event<Map>> stream(final String uri, final Object body) {
+-        HttpRequest<Object> request = HttpRequest.POST(uri, body).accept(MediaType.TEXT_EVENT_STREAM);
++        HttpRequest<Object> request = HttpRequest.POST(uri, body).basicAuth(basicAuthConfiguration.getUsername(), basicAuthConfiguration.getPassword()).accept(MediaType.TEXT_EVENT_STREAM);
+         return Flux.from(sseClient.eventStream(request, Argument.of(Map.class)))
+             .collectList()
+             .block(Duration.ofSeconds(20));
+diff --git a/webserver/src/test/java/io/kestra/webserver/controllers/api/AiOutputLifecycleTest.java b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiOutputLifecycleTest.java
+new file mode 100644
+index 0000000..f49f54e
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiOutputLifecycleTest.java
+@@ -0,0 +1,225 @@
++package io.kestra.webserver.controllers.api;
++
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.time.Duration;
++import java.util.List;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Supplier;
++
++import io.kestra.core.ai.agent.models.AgentPrincipal;
++import io.kestra.webserver.rbac.AiAuthorization;
++import io.kestra.webserver.services.ai.agent.TurnEventSink;
++import io.kestra.webserver.services.ai.agent.data.AgentEvents;
++import io.micronaut.http.sse.Event;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.FluxSink;
++import reactor.core.scheduler.Schedulers;
++
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++import static org.mockito.Mockito.*;
++
++class AiOutputLifecycleTest {
++    @Test
++    void shouldNeverBlockAuthorizationOnNonBlockingCallbackThread() throws Exception {
++        try (Harness harness = new Harness(true)) {
++            doAnswer(invocation -> {
++                assertThat(Schedulers.isInNonBlockingThread()).isFalse();
++                assertThat(Thread.currentThread().getName()).isEqualTo("ai-authorized-output");
++                return ((Supplier<?>) invocation.getArgument(1)).get();
++            }).when(harness.authorization).entry(any(), any());
++            Schedulers.parallel().schedule(() -> {
++                harness.sink.isCancelled();
++                harness.sink.emit(AgentEvents.TOKEN, "first");
++                harness.sink.complete();
++            });
++            harness.finished();
++            assertThat(harness.events).containsExactly(AgentEvents.TOKEN);
++            assertThat(harness.completed.get()).isEqualTo(1);
++            assertThat(harness.errors).isEmpty();
++        }
++    }
++
++    @Test
++    void shouldSealCompleteAndRejectLateEventsWithoutNewAuthorization() throws Exception {
++        try (Harness harness = new Harness(true)) {
++            CountDownLatch entered = new CountDownLatch(1);
++            CountDownLatch release = new CountDownLatch(1);
++            AtomicInteger authorizations = new AtomicInteger();
++            doAnswer(invocation -> {
++                if (authorizations.incrementAndGet() == 1) {
++                    entered.countDown();
++                    if (!release.await(3, TimeUnit.SECONDS)) throw new AssertionError("Gate not released");
++                }
++                return Boolean.TRUE;
++            }).when(harness.authorization).entry(any(), any());
++            harness.sink.emit(AgentEvents.TOKEN, "first");
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            harness.sink.emit(AgentEvents.DONE, "idle");
++            harness.sink.complete();
++            harness.sink.emit(AgentEvents.TOKEN, "late");
++            harness.sink.error(new IllegalStateException("late error"));
++            harness.sink.complete();
++            release.countDown();
++            harness.finished();
++            assertThat(harness.events).containsExactly(AgentEvents.TOKEN, AgentEvents.DONE);
++            assertThat(harness.completed.get()).isEqualTo(1);
++            assertThat(authorizations.get()).isEqualTo(3);
++            assertThat(harness.errors).isEmpty();
++        }
++    }
++
++    @Test
++    void shouldDropQueuedEventsAndTerminateExecutorWhenAuthorizationRevoked() throws Exception {
++        try (Harness harness = new Harness(true)) {
++            CountDownLatch entered = new CountDownLatch(1);
++            CountDownLatch revoke = new CountDownLatch(1);
++            doAnswer(invocation -> {
++                entered.countDown();
++                if (!revoke.await(3, TimeUnit.SECONDS)) throw new AssertionError("Revocation not released");
++                throw AiAuthorization.denied();
++            }).when(harness.authorization).entry(any(), any());
++            harness.sink.emit(AgentEvents.TOKEN, "held");
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            harness.sink.emit(AgentEvents.TOKEN, "queued");
++            harness.sink.complete();
++            revoke.countDown();
++            harness.finished();
++            assertThat(harness.sink.isCancelled()).isTrue();
++            assertThat(harness.events).isEmpty();
++            assertThat(harness.errors).hasSize(1);
++            assertThat(harness.completed.get()).isZero();
++        }
++    }
++
++    @Test
++    void shouldShutdownIdleOutputWorkerWhenPeriodicAuthorizationRevoked() throws Exception {
++        try (Harness harness = new Harness(true)) {
++            harness.sink.emit(AgentEvents.TOKEN, "allowed");
++            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> assertThat(harness.events).hasSize(1));
++            doThrow(AiAuthorization.denied()).when(harness.authorization).entry(any(), any());
++            harness.finished();
++            assertThat(harness.errors).hasSize(1);
++            assertThat(harness.sink.isCancelled()).isTrue();
++        }
++    }
++
++    @Test
++    void shouldCancelAndClearQueueWithoutAnyFurtherOutput() throws Exception {
++        try (Harness harness = new Harness(true)) {
++            CountDownLatch entered = new CountDownLatch(1);
++            doAnswer(invocation -> {
++                entered.countDown();
++                new CountDownLatch(1).await();
++                return Boolean.TRUE;
++            }).when(harness.authorization).entry(any(), any());
++            harness.sink.emit(AgentEvents.TOKEN, "held");
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            harness.sink.emit(AgentEvents.TOKEN, "queued");
++            harness.cancel();
++            harness.sink.emit(AgentEvents.TOKEN, "late");
++            harness.sink.complete();
++            harness.finished();
++            assertThat(harness.events).isEmpty();
++            assertThat(harness.errors).isEmpty();
++            assertThat(harness.completed.get()).isZero();
++            assertThat(harness.sink.isCancelled()).isTrue();
++        }
++    }
++
++    @Test
++    void shouldFailClosedWhenBoundedQueueSaturates() throws Exception {
++        try (Harness harness = new Harness(true)) {
++            CountDownLatch entered = new CountDownLatch(1);
++            doAnswer(invocation -> {
++                entered.countDown();
++                new CountDownLatch(1).await();
++                return Boolean.TRUE;
++            }).when(harness.authorization).entry(any(), any());
++            harness.sink.emit(AgentEvents.TOKEN, "held");
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            for (int index = 0; index < 257; index++) harness.sink.emit(AgentEvents.TOKEN, index);
++            harness.finished();
++            assertThat(harness.events).isEmpty();
++            assertThat(harness.errors).hasSize(1);
++            assertThat(harness.errors.getFirst()).hasMessageContaining("capacity exceeded");
++            assertThat(harness.sink.isCancelled()).isTrue();
++        }
++    }
++
++    @Test
++    void shouldDrainTokenDoneAndCompleteWithoutCallingProviderWhenRbacDisabled() throws Exception {
++        try (Harness harness = new Harness(false)) {
++            harness.sink.emit(AgentEvents.TOKEN, "first");
++            harness.sink.emit(AgentEvents.DONE, "idle");
++            harness.sink.complete();
++            harness.finished();
++            assertThat(harness.events).containsExactly(AgentEvents.TOKEN, AgentEvents.DONE);
++            assertThat(harness.completed.get()).isEqualTo(1);
++            verify(harness.authorization, never()).entry(any(), any());
++        }
++    }
++
++    @Test
++    void shouldKeepErrorAndCompletionAtomicAgainstLateCallbacks() throws Exception {
++        try (Harness harness = new Harness(false)) {
++            harness.sink.emit(AgentEvents.TOKEN, "first");
++            harness.sink.error(new IllegalStateException("model failed"));
++            harness.sink.emit(AgentEvents.TOKEN, "late");
++            harness.finished();
++            assertThat(harness.events).containsExactly(AgentEvents.TOKEN, AgentEvents.ERROR);
++            assertThat(harness.completed.get()).isEqualTo(1);
++            assertThat(harness.errors).isEmpty();
++        }
++    }
++
++    private static final class Harness implements AutoCloseable {
++        final AiAuthorization authorization = mock(AiAuthorization.class);
++        final List<String> events = new CopyOnWriteArrayList<>();
++        final List<Throwable> errors = new CopyOnWriteArrayList<>();
++        final AtomicInteger completed = new AtomicInteger();
++        final TurnEventSink sink;
++        final ExecutorService executor;
++        final Method cancel;
++
++        @SuppressWarnings("unchecked")
++        Harness(boolean enabled) throws Exception {
++            when(authorization.enabled()).thenReturn(enabled);
++            when(authorization.entry(any(), any())).thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get());
++            FluxSink<Event<Object>> emitter = mock(FluxSink.class);
++            doAnswer(invocation -> {
++                events.add(((Event<?>) invocation.getArgument(0)).getName());
++                return emitter;
++            }).when(emitter).next(any());
++            doAnswer(invocation -> { completed.incrementAndGet(); return null; }).when(emitter).complete();
++            doAnswer(invocation -> { errors.add(invocation.getArgument(0)); return null; }).when(emitter).error(any());
++            Class<?> type = Class.forName(AiAgentController.class.getName() + "$FluxTurnEventSink");
++            Constructor<?> constructor = type.getDeclaredConstructor(FluxSink.class, AiAuthorization.class, AgentPrincipal.class);
++            constructor.setAccessible(true);
++            sink = (TurnEventSink) constructor.newInstance(emitter, authorization, null);
++            Field field = type.getDeclaredField("output");
++            field.setAccessible(true);
++            executor = (ExecutorService) field.get(sink);
++            cancel = type.getDeclaredMethod("markCancelled");
++            cancel.setAccessible(true);
++        }
++
++        void cancel() throws Exception { cancel.invoke(sink); }
++
++        void finished() throws Exception {
++            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
++        }
++
++        @Override
++        public void close() throws Exception {
++            cancel();
++            assertThat(executor.awaitTermination(3, TimeUnit.SECONDS)).isTrue();
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java
+new file mode 100644
+index 0000000..aa25d65
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java
+@@ -0,0 +1,232 @@
++package io.kestra.webserver.controllers.api;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.time.Duration;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.AbstractExecutorService;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.Semaphore;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Consumer;
++import java.util.function.Supplier;
++
++import io.kestra.core.ai.agent.models.AgentMode;
++import io.kestra.core.ai.agent.models.AgentPrincipal;
++import io.kestra.core.ai.agent.models.AgentThread;
++import io.kestra.core.ai.agent.models.AgentThreadStatus;
++import io.kestra.core.ai.agent.repositories.AiMessageRepositoryInterface;
++import io.kestra.core.ai.agent.repositories.AiThreadRepositoryInterface;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.utils.ExecutorsUtils;
++import io.kestra.webserver.rbac.AiAuthorization;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.agent.AgentConfiguration;
++import io.kestra.webserver.services.ai.agent.AgentOrchestrator;
++import io.kestra.webserver.services.ai.agent.AgentPrincipalResolver;
++import io.kestra.webserver.services.ai.agent.AiThreadManager;
++import io.kestra.webserver.services.ai.agent.TurnEventSink;
++import io.kestra.webserver.services.ai.agent.data.AgentEvents;
++import io.micronaut.http.sse.Event;
++import org.junit.jupiter.api.Test;
++import reactor.core.Disposable;
++import reactor.core.publisher.Flux;
++
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++import static org.mockito.Mockito.*;
++
++class AiTurnSchedulingTest {
++    @Test
++    void shouldRestoreIdleAndReleasePermitWhenCancelledBeforeWorkerStarts() throws Exception {
++        try (Harness harness = new Harness()) {
++            AtomicBoolean ran = new AtomicBoolean();
++            Disposable subscription = harness.stream(sink -> ran.set(true)).subscribe();
++            assertThat(harness.permits.availablePermits()).isZero();
++            subscription.dispose();
++            assertThat(harness.permits.availablePermits()).isZero();
++            harness.runQueued();
++            harness.idleAndReleased();
++            assertThat(ran).isFalse();
++        }
++    }
++
++    @Test
++    void shouldRestoreIdleWhenAuthorizationWorkRejectsBeforeOrchestratorStarts() throws Exception {
++        try (Harness harness = new Harness()) {
++            AtomicBoolean ran = new AtomicBoolean();
++            doThrow(AiAuthorization.denied()).when(harness.authorization).work(any(), any());
++            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
++            harness.stream(sink -> ran.set(true)).subscribe(event -> {}, errors::add);
++            harness.runQueued();
++            harness.idleAndReleased();
++            assertThat(ran).isFalse();
++            verify(harness.authorization).work(any(), any());
++        }
++    }
++
++    @Test
++    void shouldRestoreIdleAndReleaseOnlyOnceWhenExecutorRejectsSubmission() throws Exception {
++        try (Harness harness = new Harness()) {
++            harness.executor.reject = true;
++            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
++            Disposable subscription = harness.stream(sink -> fail("Work must not run")).subscribe(event -> {}, errors::add);
++            harness.idleAndReleased();
++            assertThat(errors).hasSize(1);
++            assertThat(errors.getFirst()).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
++            subscription.dispose();
++            assertThat(harness.permits.availablePermits()).isEqualTo(1);
++            verify(harness.threads, times(1)).save(any());
++        }
++    }
++
++    @Test
++    void shouldReleasePermitExactlyOnceWhenSubmissionAndIdleResetBothFail() throws Exception {
++        try (Harness harness = new Harness()) {
++            harness.executor.reject = true;
++            doThrow(new IllegalStateException("Test storage unavailable")).when(harness.threads).save(any());
++            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
++            Disposable subscription = harness.stream(sink -> fail("Work must not run")).subscribe(event -> {}, errors::add);
++            assertThat(errors).hasSize(1);
++            assertThat(errors.getFirst()).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
++            assertThat(errors.getFirst().getSuppressed()).hasSize(1);
++            assertThat(errors.getFirst().getSuppressed()[0]).hasMessage("Test storage unavailable");
++            assertThat(harness.current.get().status()).isEqualTo(AgentThreadStatus.RUNNING);
++            assertThat(harness.permits.availablePermits()).isEqualTo(1);
++            subscription.dispose();
++            assertThat(harness.permits.availablePermits()).isEqualTo(1);
++        }
++    }
++
++    @Test
++    void shouldHoldPermitUntilQueuedOutputActuallyTerminates() throws Exception {
++        try (Harness harness = new Harness()) {
++            CountDownLatch gateEntered = new CountDownLatch(1);
++            CountDownLatch gateRelease = new CountDownLatch(1);
++            doAnswer(invocation -> {
++                gateEntered.countDown();
++                if (!gateRelease.await(4, TimeUnit.SECONDS)) throw new AssertionError("Output gate not released");
++                return ((Supplier<?>) invocation.getArgument(1)).get();
++            }).when(harness.authorization).entry(any(), any());
++            var events = new java.util.concurrent.CopyOnWriteArrayList<String>();
++            AtomicBoolean complete = new AtomicBoolean();
++            harness.stream(sink -> {
++                harness.manager.resetToIdleIfExists("main", "running");
++                sink.emit(AgentEvents.TOKEN, "first");
++                sink.emit(AgentEvents.DONE, "idle");
++                sink.complete();
++            }).subscribe(event -> events.add(event.getName()), failure -> fail("Unexpected stream error", failure), () -> complete.set(true));
++            Thread worker = harness.startQueued();
++            try {
++                assertThat(gateEntered.await(3, TimeUnit.SECONDS)).isTrue();
++                assertThat(harness.current.get().status()).isEqualTo(AgentThreadStatus.IDLE);
++                assertThat(harness.permits.availablePermits()).isZero();
++                assertThat(complete).isFalse();
++            } finally {
++                gateRelease.countDown();
++            }
++            worker.join(Duration.ofSeconds(4));
++            assertThat(worker.isAlive()).isFalse();
++            harness.idleAndReleased();
++            assertThat(events).containsExactly(AgentEvents.TOKEN, AgentEvents.DONE);
++            assertThat(complete).isTrue();
++        }
++    }
++
++    private static final class Harness implements AutoCloseable {
++        final ControlledExecutor executor = new ControlledExecutor();
++        final AiThreadRepositoryInterface threads = mock(AiThreadRepositoryInterface.class);
++        final AtomicReference<AgentThread> current = new AtomicReference<>(AgentThread.builder()
++            .uid("running").tenant("main").mode(AgentMode.ASK).status(AgentThreadStatus.RUNNING).build());
++        final AiThreadManager manager = new AiThreadManager(threads, mock(AiMessageRepositoryInterface.class));
++        final AiAuthorization authorization = mock(AiAuthorization.class);
++        final AiAgentController controller;
++        final Semaphore permits;
++        final Method stream;
++
++        Harness() throws Exception {
++            when(threads.find("main", "running")).thenAnswer(invocation -> Optional.of(current.get()));
++            when(threads.save(any())).thenAnswer(invocation -> {
++                AgentThread thread = invocation.getArgument(0);
++                current.set(thread);
++                return thread;
++            });
++            when(authorization.enabled()).thenReturn(true);
++            when(authorization.entry(any(), any())).thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get());
++            doAnswer(invocation -> { ((Runnable) invocation.getArgument(1)).run(); return null; })
++                .when(authorization).work(any(), any());
++            ExecutorsUtils executors = mock(ExecutorsUtils.class);
++            when(executors.cachedVirtualThreadPool(anyString())).thenReturn(executor);
++            var configuration = new AgentConfiguration(Duration.ofSeconds(5), "http://localhost/unused", 25, 50, 1, 10, Duration.ofHours(1), 50);
++            controller = new AiAgentController(new TenantService(), mock(AiServiceManager.class), threads,
++                mock(AiMessageRepositoryInterface.class), manager, mock(AgentOrchestrator.class),
++                mock(AgentPrincipalResolver.class), configuration, executors);
++            Field auth = AiAgentController.class.getDeclaredField("authorization");
++            auth.setAccessible(true);
++            auth.set(controller, authorization);
++            Field semaphore = AiAgentController.class.getDeclaredField("turnGate");
++            semaphore.setAccessible(true);
++            permits = (Semaphore) semaphore.get(controller);
++            assertThat(permits.tryAcquire()).isTrue();
++            stream = AiAgentController.class.getDeclaredMethod("stream", AgentPrincipal.class, AgentThread.class, Consumer.class);
++            stream.setAccessible(true);
++        }
++
++        @SuppressWarnings("unchecked")
++        Flux<Event<Object>> stream(Consumer<TurnEventSink> work) throws Exception {
++            return (Flux<Event<Object>>) stream.invoke(controller, null, current.get(), work);
++        }
++
++        void runQueued() throws Exception {
++            Thread worker = startQueued();
++            worker.join(Duration.ofSeconds(5));
++            assertThat(worker.isAlive()).isFalse();
++        }
++
++        Thread startQueued() throws Exception {
++            Runnable task = executor.pending.poll(3, TimeUnit.SECONDS);
++            assertThat(task).isNotNull();
++            return Thread.ofVirtual().start(task);
++        }
++
++        void idleAndReleased() {
++            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
++                assertThat(current.get().status()).isEqualTo(AgentThreadStatus.IDLE);
++                assertThat(permits.availablePermits()).isEqualTo(1);
++            });
++        }
++
++        @Override
++        public void close() { executor.shutdownNow(); }
++    }
++
++    private static final class ControlledExecutor extends AbstractExecutorService {
++        final LinkedBlockingQueue<Runnable> pending = new LinkedBlockingQueue<>();
++        volatile boolean reject;
++        volatile boolean shutdown;
++        @Override
++        public void execute(Runnable task) {
++            if (reject || shutdown) throw new java.util.concurrent.RejectedExecutionException("Test submission rejected");
++            pending.add(task);
++        }
++        @Override
++        public void shutdown() { shutdown = true; }
++        @Override
++        public List<Runnable> shutdownNow() {
++            shutdown = true;
++            var remaining = new java.util.ArrayList<Runnable>();
++            pending.drainTo(remaining);
++            return remaining;
++        }
++        @Override
++        public boolean isShutdown() { return shutdown; }
++        @Override
++        public boolean isTerminated() { return shutdown && pending.isEmpty(); }
++        @Override
++        public boolean awaitTermination(long timeout, TimeUnit unit) { return isTerminated(); }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorFlowBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorFlowBoundaryTest.java
+new file mode 100644
+index 0000000..a3e83a9
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorFlowBoundaryTest.java
+@@ -0,0 +1,203 @@
++package io.kestra.webserver.rbac;
++
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Supplier;
++
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.repositories.AuthorizationValidationContext;
++import io.kestra.core.services.FlowService;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.webserver.services.ai.AiServiceInterface;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.GenerationResult;
++import io.kestra.webserver.services.ai.agent.AgentCallContext;
++import io.kestra.webserver.services.ai.agent.tool.AuthorFlowTool;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import org.junit.jupiter.api.Test;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiAuthorFlowBoundaryTest {
++    private static final String YAML = "namespace: company.a\nid: draft\ntasks: []\n";
++    private final TypedAuthorizationGate gate = mock(TypedAuthorizationGate.class);
++    private final AiServiceManager manager = mock(AiServiceManager.class);
++    private final AiServiceInterface service = mock(AiServiceInterface.class);
++    private final FlowService flows = mock(FlowService.class);
++    private final AtomicBoolean allowed = new AtomicBoolean(true);
++    private final AtomicBoolean cancelled = new AtomicBoolean();
++    private final AtomicInteger begins = new AtomicInteger();
++    private final AtomicInteger closes = new AtomicInteger();
++    private final RbacAuthorizer.Principal principal = new RbacAuthorizer.Principal("alice", List.of(), null, null, List.of());
++    private final AiAuthorization.Caller caller = new AiAuthorization.Caller(principal, "main", "alice",
++        HttpRequest.GET("/api/v1/main/ai").setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("alice")));
++    private final AgentCallContext.Context context = new AgentCallContext.Context("main", caller, "test", "thread");
++
++    AiAuthorFlowBoundaryTest() {
++        when(manager.getAiService("test")).thenReturn(service);
++        when(flows.validate(anyString(), anyList())).thenReturn(List.of());
++        when(gate.authorize(any(), any())).thenAnswer(invocation -> {
++            Operation operation = invocation.getArgument(1);
++            return Mono.just(allowed.get() ? Decision.allow(operation.queryDomain()) : Decision.deny("revoked"));
++        });
++        when(gate.boundary(any(), anyString(), any())).thenAnswer(invocation -> {
++            Supplier<? extends Publisher<Object>> action = invocation.getArgument(2);
++            var owner = new AuthorizationEvaluations.Owner(principal, "main");
++            owner.acquire((subject, tenant) -> CompletableFuture.completedFuture(mock(AuthorizationEvaluationV1.class))).block();
++            begins.incrementAndGet();
++            return Flux.defer(() -> Flux.from(action.get())).contextWrite(reactor -> ReactorPropagation.addPropagatedContext(reactor,
++                PropagatedContext.empty().plus(new AuthorizationEvaluationContext(owner))))
++                .doFinally(signal -> closes.incrementAndGet());
++        });
++    }
++
++    @Test
++    void shouldKeepModeAOriginalSynchronousGenerationAndValidation() {
++        when(service.generateFlow(any(), any(), anyString())).thenReturn(GenerationResult.of(YAML));
++        var tool = tool(false);
++        var result = tool.authorFlow("draft", "different.namespace", null, context);
++        assertThat(result.yaml()).isEqualTo(YAML);
++        verifyNoInteractions(gate);
++        verify(flows).validate(eq("main"), anyList());
++    }
++
++    @Test
++    void shouldStripOldEvaluationAndValidateInFreshBoundaryAfterGeneration() {
++        when(service.generateFlow(any(), any(), anyString())).thenAnswer(invocation -> {
++            assertThat(AuthorizationEvaluationContext.current()).isEmpty();
++            assertThat(PropagatedContext.getOrEmpty().find(AiAuthorization.Caller.class)).contains(caller);
++            assertThat(AuthorizationInvocationContext.currentRequest()).contains(caller.request());
++            assertThat(PropagatedContext.getOrEmpty().find(AiAuthorization.Cancellation.class)).isPresent();
++            assertThat(begins.get()).isEqualTo(closes.get());
++            return GenerationResult.of(YAML);
++        });
++        when(flows.validate(anyString(), anyList())).thenAnswer(invocation -> {
++            assertThat(AuthorizationEvaluationContext.current()).isPresent();
++            assertThat(PropagatedContext.getOrEmpty().find(AuthorizationValidationContext.class)).isPresent();
++            return List.of();
++        });
++        try (var ignored = origin().plus(new AuthorizationEvaluationContext(new Object())).propagate()) {
++            assertThat(tool(true).authorFlow("draft", "company.a", YAML, context).valid()).isTrue();
++        }
++        assertBalanced();
++    }
++
++    @Test
++    void shouldDenyUnreadableCurrentYamlBeforeSendingItToModel() {
++        doAnswer(invocation -> {
++            Operation operation = invocation.getArgument(1);
++            return Mono.just(operation.resource() == Resource.FLOW ? Decision.deny("unreadable") : Decision.allow(operation.queryDomain()));
++        }).when(gate).authorize(any(), any());
++        try (var ignored = origin().propagate()) {
++            assertThatThrownBy(() -> tool(true).authorFlow("draft", "company.a", YAML, context)).hasMessageContaining("AI authorization denied");
++        }
++        verifyNoInteractions(service, flows);
++        assertBalanced();
++    }
++
++    @Test
++    void shouldRejectGeneratedNamespaceMismatchBeforeValidation() {
++        when(service.generateFlow(any(), any(), anyString())).thenReturn(GenerationResult.of(YAML.replace("company.a", "company.b")));
++        try (var ignored = origin().propagate()) {
++            assertThatThrownBy(() -> tool(true).authorFlow("draft", "company.a", null, context)).hasMessageContaining("AI authorization denied");
++        }
++        verifyNoInteractions(flows);
++        assertBalanced();
++    }
++
++    @Test
++    void shouldCancelWaitingWorkerOnRevocationAndIgnoreItsLateResult() throws Exception {
++        deniedWhileWaiting(false);
++    }
++
++    @Test
++    void shouldCancelWaitingWorkerOnOuterCancellationAndIgnoreItsLateResult() throws Exception {
++        deniedWhileWaiting(true);
++    }
++
++    @Test
++    void shouldNotValidateWhenPermissionRevokedAsGenerationFinishes() {
++        when(service.generateFlow(any(), any(), anyString())).thenAnswer(invocation -> {
++            allowed.set(false);
++            return GenerationResult.of(YAML);
++        });
++        try (var ignored = origin().propagate()) {
++            assertThatThrownBy(() -> tool(true).authorFlow("draft", "company.a", null, context)).hasMessageContaining("AI authorization denied");
++        }
++        verifyNoInteractions(flows);
++        assertBalanced();
++    }
++
++    private void deniedWhileWaiting(boolean outerCancellation) throws Exception {
++        var started = new CountDownLatch(1);
++        var interrupted = new CountDownLatch(1);
++        var release = new CountDownLatch(1);
++        var finished = new CountDownLatch(1);
++        when(service.generateFlow(any(), any(), anyString())).thenAnswer(invocation -> {
++            started.countDown();
++            try {
++                while (release.getCount() != 0) {
++                    try { release.await(); }
++                    catch (InterruptedException failure) { interrupted.countDown(); }
++                }
++                return GenerationResult.of(YAML);
++            } finally { finished.countDown(); }
++        });
++        var result = new CompletableFuture<AuthorFlowTool.Result>();
++        Thread waiting = Thread.ofVirtual().start(() -> {
++            try (var ignored = origin().propagate()) {
++                result.complete(tool(true).authorFlow("draft", "company.a", null, context));
++            } catch (Throwable failure) { result.completeExceptionally(failure); }
++        });
++        try {
++            assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
++            if (outerCancellation) cancelled.set(true); else allowed.set(false);
++            if (outerCancellation) {
++                assertThatThrownBy(() -> result.get(5, TimeUnit.SECONDS)).isInstanceOf(java.util.concurrent.CancellationException.class);
++            } else {
++                assertThatThrownBy(() -> result.get(5, TimeUnit.SECONDS))
++                    .isInstanceOf(java.util.concurrent.ExecutionException.class)
++                    .hasCauseInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);
++            }
++            assertThat(interrupted.await(2, TimeUnit.SECONDS)).isTrue();
++            verifyNoInteractions(flows);
++        } finally {
++            release.countDown();
++            waiting.join(Duration.ofSeconds(3));
++        }
++        assertThat(finished.await(3, TimeUnit.SECONDS)).isTrue();
++        verifyNoInteractions(flows);
++        assertBalanced();
++    }
++
++    private PropagatedContext origin() {
++        return PropagatedContext.empty().plus(caller).plus(new AuthorizationInvocationContext(caller.request(), false))
++            .plus(new AiAuthorization.Cancellation(cancelled::get));
++    }
++
++    private AuthorFlowTool tool(boolean enabled) {
++        return new AuthorFlowTool(manager, flows,
++            new AiAuthorization(new RbacConfiguration(enabled, false), gate, new TenantService()), gate);
++    }
++
++    private void assertBalanced() {
++        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(3))
++            .untilAsserted(() -> assertThat(closes.get()).isEqualTo(begins.get()));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationHttpTest.java
+new file mode 100644
+index 0000000..ccb9575
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationHttpTest.java
+@@ -0,0 +1,326 @@
++package io.kestra.webserver.rbac;
++
++import java.lang.reflect.Field;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import dev.langchain4j.agent.tool.ToolExecutionRequest;
++import dev.langchain4j.data.message.AiMessage;
++import dev.langchain4j.model.chat.StreamingChatModel;
++import dev.langchain4j.model.chat.request.ChatRequest;
++import dev.langchain4j.model.chat.response.ChatResponse;
++import dev.langchain4j.model.chat.response.PartialResponse;
++import dev.langchain4j.model.chat.response.PartialResponseContext;
++import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
++import dev.langchain4j.model.chat.response.StreamingHandle;
++import io.kestra.core.ai.agent.models.AgentMessageType;
++import io.kestra.core.ai.agent.models.AgentThreadStatus;
++import io.kestra.core.ai.agent.repositories.AiMessageRepositoryInterface;
++import io.kestra.core.ai.agent.repositories.AiThreadRepositoryInterface;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.models.flows.GenericFlow;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.serializers.JacksonMapper;
++import io.kestra.webserver.services.ai.AiServiceInterface;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.agent.store.InMemoryAgentStore;
++import io.kestra.webserver.services.ai.agent.tool.DocsMcpToolProvider;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import io.micronaut.test.annotation.MockBean;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.awaitility.Awaitility.await;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "kestra.rbac.evaluation.enabled", value = "true")
++@Property(name = "kestra.rbac.application-groups.enabled", value = "false")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAuthenticated()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "ai.authorization.http.probe", value = "true")
++@Property(name = "datasources.h2.url", value = "jdbc:h2:mem:ai_authorization_http_${random.uuid};LOCK_TIMEOUT=30000;TIME ZONE=UTC;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE")
++@Property(name = "kestra.ai.agent.model-call-timeout", value = "PT20S")
++class AiAuthorizationHttpTest {
++    private static final String BASE = "/api/v1/main/ai/threads";
++    private final ScriptedModel model = new ScriptedModel();
++    private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
++
++    @Inject EmbeddedServer server;
++    @Inject ProbePolicy policy;
++    @Inject AiThreadRepositoryInterface threads;
++    @Inject AiMessageRepositoryInterface messages;
++    @Inject InMemoryAgentStore store;
++    @Inject FlowRepositoryInterface flows;
++
++    @MockBean(AiServiceManager.class)
++    AiServiceManager aiServiceManager() {
++        AiServiceInterface service = mock(AiServiceInterface.class);
++        when(service.streamingChatModel(any())).thenReturn(model);
++        AiServiceManager manager = mock(AiServiceManager.class);
++        when(manager.getAiService(any())).thenReturn(service);
++        when(manager.hasConfiguredProvider()).thenReturn(true);
++        return manager;
++    }
++
++    @MockBean(DocsMcpToolProvider.class)
++    DocsMcpToolProvider docsMcpToolProvider() {
++        DocsMcpToolProvider provider = mock(DocsMcpToolProvider.class);
++        when(provider.tools()).thenReturn(Map.of());
++        return provider;
++    }
++
++    @BeforeEach
++    void reset() {
++        awaitBalanced();
++        policy.allowed.set(true);
++        policy.toolOperations.set(0);
++        model.reset();
++    }
++
++    @Test
++    void shouldIsolateAliceAndBobThreadsThroughAuthenticatedTestTransport() throws Exception {
++        String alice = create("alice");
++        String bob = create("bob");
++        assertThat(send("GET", BASE + "/" + alice, "alice", null).statusCode()).isEqualTo(200);
++        assertThat(send("GET", BASE + "/" + bob, "bob", null).statusCode()).isEqualTo(200);
++        assertThat(send("GET", BASE + "/" + alice, "bob", null).statusCode()).isEqualTo(404);
++        assertThat(send("GET", BASE + "/" + bob, "alice", null).statusCode()).isEqualTo(404);
++        assertThat(threads.find("main", alice).orElseThrow().userId()).isEqualTo("alice");
++        assertThat(threads.find("main", bob).orElseThrow().userId()).isEqualTo("bob");
++        awaitBalanced();
++    }
++
++    @Test
++    void shouldStreamTokenAndDoneAndScopeRealListToolToCompanyA() throws Exception {
++        String id = "ai-http-" + java.util.UUID.randomUUID();
++        for (String namespace : List.of("company.a", "company.b", "outside")) {
++            flows.create(GenericFlow.fromYaml("main", "namespace: " + namespace + "\nid: " + id + "\ntasks: []"));
++        }
++        String thread = create("alice");
++        model.responses.add(AiMessage.from("", List.of(ToolExecutionRequest.builder()
++            .id("list-1").name("list-flows").arguments("{}").build())));
++        model.responses.add(AiMessage.from("Only the permitted flows are listed."));
++        HttpResponse<String> response = send("POST", BASE + "/" + thread + "/chat", "alice", chat());
++        assertThat(response.statusCode()).isEqualTo(200);
++        String events = response.body().replace("event: ", "event:");
++        assertThat(events).contains("event:token", "event:done");
++        assertThat(model.calls.get()).isEqualTo(2);
++        assertThat(policy.toolOperations.get()).isPositive();
++        assertThat(threads.find("main", thread).orElseThrow().status()).isEqualTo(AgentThreadStatus.IDLE);
++        assertThat(messages.load("main", thread)).anyMatch(message -> message.type() == AgentMessageType.TOOL_RESULT);
++        String savedResults = JacksonMapper.ofJson().writeValueAsString(messages.load("main", thread).stream()
++            .filter(message -> message.type() == AgentMessageType.TOOL_RESULT).map(message -> message.toolResult()).toList());
++        assertThat(savedResults).contains("company.a", id).doesNotContain("company.b", "outside");
++        awaitBalanced();
++    }
++
++    @Test
++    void shouldNotCreateAnyConversationWhenSystemEntryDenied() throws Exception {
++        create("alice");
++        Map<?, ?> before = conversations();
++        policy.allowed.set(false);
++        HttpResponse<String> response = send("POST", BASE, "alice", "{\"mode\":\"ASK\",\"title\":\"denied\"}");
++        assertThat(response.statusCode()).isEqualTo(403);
++        assertThat(conversations()).isEqualTo(before);
++        assertThat(model.calls.get()).isZero();
++        awaitBalanced();
++    }
++
++    @Test
++    void shouldLeaveExistingThreadAndMessagesUnchangedWhenSystemEntryDenied() throws Exception {
++        String thread = create("alice");
++        var before = threads.find("main", thread).orElseThrow();
++        var beforeMessages = List.copyOf(messages.load("main", thread));
++        policy.allowed.set(false);
++        assertThat(send("GET", BASE + "/" + thread, "alice", null).statusCode()).isEqualTo(403);
++        assertThat(send("POST", BASE + "/" + thread + "/chat", "alice", chat()).statusCode()).isEqualTo(403);
++        assertThat(threads.find("main", thread).orElseThrow()).isEqualTo(before);
++        assertThat(messages.load("main", thread)).isEqualTo(beforeMessages);
++        assertThat(model.calls.get()).isZero();
++        assertThat(policy.toolOperations.get()).isZero();
++        awaitBalanced();
++    }
++
++    @Test
++    void shouldTerminateWaitingModelAfterRevocationWithoutDispatchingToolsAndCloseEvaluations() throws Exception {
++        String thread = create("alice");
++        model.waiting.set(true);
++        CompletableFuture<HttpResponse<String>> response = client.sendAsync(
++            request("POST", BASE + "/" + thread + "/chat", "alice", chat()), HttpResponse.BodyHandlers.ofString());
++        try {
++            assertThat(model.started.await(5, TimeUnit.SECONDS)).isTrue();
++            policy.allowed.set(false);
++            response.handle((result, failure) -> Boolean.TRUE).get(8, TimeUnit.SECONDS);
++            await().atMost(Duration.ofSeconds(5)).until(model.handle::isCancelled);
++            await().atMost(Duration.ofSeconds(5)).until(() -> threads.find("main", thread).orElseThrow().status() == AgentThreadStatus.IDLE);
++            assertThat(policy.toolOperations.get()).isZero();
++            assertThat(messages.load("main", thread)).noneMatch(message -> message.type() == AgentMessageType.TOOL_CALL);
++            model.pending.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from("", List.of(
++                ToolExecutionRequest.builder().id("late-list").name("list-flows").arguments("{}").build()))).build());
++            assertThat(policy.toolOperations.get()).isZero();
++            assertThat(model.calls.get()).isEqualTo(1);
++            awaitBalanced();
++        } finally {
++            response.cancel(true);
++        }
++    }
++
++    private String create(String user) throws Exception {
++        HttpResponse<String> response = send("POST", BASE, user, "{\"mode\":\"ASK\",\"title\":\"test conversation\"}");
++        assertThat(response.statusCode()).isEqualTo(200);
++        JsonNode body = JacksonMapper.ofJson().readTree(response.body());
++        assertThat(body.path("uid").asText()).isNotBlank();
++        return body.path("uid").asText();
++    }
++
++    private HttpResponse<String> send(String method, String path, String user, String body) throws Exception {
++        return client.send(request(method, path, user, body), HttpResponse.BodyHandlers.ofString());
++    }
++
++    private HttpRequest request(String method, String path, String user, String body) {
++        return HttpRequest.newBuilder(server.getURI().resolve(path)).timeout(Duration.ofSeconds(12))
++            .header("X-AI-Test-Transport", user).header("Content-Type", "application/json")
++            .header("Accept", path.endsWith("/chat") ? "text/event-stream" : "application/json")
++            .method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body)).build();
++    }
++
++    private static String chat() {
++        return "{\"prompt\":\"List the flows I can read\",\"mode\":\"ASK\"}";
++    }
++
++    private Map<?, ?> conversations() throws Exception {
++        Field field = InMemoryAgentStore.class.getDeclaredField("conversations");
++        field.setAccessible(true);
++        synchronized (store) {
++            return Map.copyOf((Map<?, ?>) field.get(store));
++        }
++    }
++
++    private void awaitBalanced() {
++        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(policy.closes.get()).isEqualTo(policy.begins.get()));
++    }
++
++    @Singleton
++    @Requires(property = "ai.authorization.http.probe", value = "true")
++    static class TestTransportIdentity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        @Override
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            String user = request.getHeaders().get("X-AI-Test-Transport");
++            return "alice".equals(user) || "bob".equals(user)
++                ? Mono.just(Authentication.build(user, List.of("ai-http-test"))) : Mono.empty();
++        }
++    }
++
++    @Singleton
++    @Requires(property = "ai.authorization.http.probe", value = "true")
++    static class ProbePolicy implements AuthorizationEvaluationProviderV1 {
++        final AtomicBoolean allowed = new AtomicBoolean(true);
++        final AtomicInteger begins = new AtomicInteger();
++        final AtomicInteger closes = new AtomicInteger();
++        final AtomicInteger toolOperations = new AtomicInteger();
++
++        @Override
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
++            begins.incrementAndGet();
++            boolean snapshot = allowed.get();
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                final AtomicBoolean closed = new AtomicBoolean();
++                @Override
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    if (operation.resource() == Resource.FLOW) toolOperations.incrementAndGet();
++                    boolean identity = "main".equals(tenant) && ("alice".equals(principal.subject()) || "bob".equals(principal.subject()));
++                    Decision decision = Decision.deny("AI HTTP test policy denied");
++                    if (snapshot && identity) {
++                        if (operation.resource() == Resource.AI && List.of(Action.READ, Action.EXECUTE).contains(operation.action()))
++                            decision = Decision.allow(operation.queryDomain());
++                        else if (operation.resource() == Resource.FLOW && (operation.action() == Action.READ || operation.action() == Action.LIST)
++                            && (operation.namespace() == null || "company.a".equals(operation.namespace())))
++                            decision = Decision.allow(new QueryDomain(List.of("company.a"), List.of(), List.of(), true, operation.queryDomain().paginated()));
++                    }
++                    return CompletableFuture.completedFuture(decision);
++                }
++                @Override
++                public CompletionStage<Void> close() {
++                    if (!closed.compareAndSet(false, true)) return CompletableFuture.failedFuture(new AssertionError("Evaluation closed twice"));
++                    closes.incrementAndGet();
++                    return CompletableFuture.completedFuture(null);
++                }
++            });
++        }
++    }
++
++    private static final class ScriptedModel implements StreamingChatModel {
++        final BlockingQueue<AiMessage> responses = new LinkedBlockingQueue<>();
++        final AtomicBoolean waiting = new AtomicBoolean();
++        final AtomicInteger calls = new AtomicInteger();
++        volatile CountDownLatch started = new CountDownLatch(1);
++        volatile StreamingChatResponseHandler pending;
++        volatile RecordingHandle handle = new RecordingHandle();
++
++        void reset() {
++            responses.clear();
++            waiting.set(false);
++            calls.set(0);
++            started = new CountDownLatch(1);
++            pending = null;
++            handle = new RecordingHandle();
++        }
++
++        @Override
++        public void chat(ChatRequest request, StreamingChatResponseHandler handler) {
++            calls.incrementAndGet();
++            if (waiting.get()) {
++                pending = handler;
++                handler.onPartialResponse(new PartialResponse("waiting for test model"), new PartialResponseContext(handle));
++                started.countDown();
++                return;
++            }
++            AiMessage response = responses.poll();
++            if (response == null) {
++                handler.onError(new IllegalStateException("Missing scripted HTTP test response"));
++                return;
++            }
++            if (response.text() != null && !response.text().isEmpty()) handler.onPartialResponse(response.text());
++            handler.onCompleteResponse(ChatResponse.builder().aiMessage(response).build());
++        }
++    }
++
++    private static final class RecordingHandle implements StreamingHandle {
++        private volatile boolean cancelled;
++        @Override
++        public void cancel() { cancelled = true; }
++        @Override
++        public boolean isCancelled() { return cancelled; }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationTest.java
+new file mode 100644
+index 0000000..efabbd0
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationTest.java
+@@ -0,0 +1,73 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.ai.agent.models.AgentPrincipal;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Supplier;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiAuthorizationTest {
++    private final TenantService tenants=mock(TenantService.class);
++    private final TypedAuthorizationGate gate=mock(TypedAuthorizationGate.class);
++    AiAuthorizationTest(){when(tenants.resolveTenant()).thenReturn("main");}
++    private AiAuthorization auth(boolean enabled){return new AiAuthorization(new RbacConfiguration(enabled,false),gate,tenants);}
++    private <T>T as(String subject,Supplier<T> action){
++        var request=HttpRequest.GET("/api/v1/main/ai/threads").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build(subject));
++        return ServerRequestContext.with(request,action);
++    }
++    private void stubBoundary(AiAuthorization.Caller caller) {
++        when(gate.boundary(any(),anyString(),any())).thenAnswer(invocation -> {
++            Supplier<org.reactivestreams.Publisher<Object>> action = invocation.getArgument(2);
++            var owner = new AuthorizationEvaluations.Owner(caller.principal(), caller.tenant());
++            owner.acquire((subject, tenant) -> java.util.concurrent.CompletableFuture.completedFuture(mock(AuthorizationEvaluationV1.class))).block();
++            return Flux.defer(action).contextWrite(context -> io.micronaut.core.async.propagation.ReactorPropagation.addPropagatedContext(context,
++                PropagatedContext.empty().plus(new AuthorizationEvaluationContext(owner))));
++        });
++    }
++    @Test void modeAAllowsNativeActionWithoutPolicyProvider(){
++        var result=auth(false).checked(null,List.of(),()->"native");assertThat(result).isEqualTo("native");verifyNoInteractions(gate);
++    }
++    @Test void modeACapturesAuthenticatedOwnerButPreservesAnonymousOss(){
++        var auth=auth(false);assertThat(auth.capture()).isNull();assertThat(as("alice",auth::owner)).isEqualTo("alice");
++    }
++    @Test void modeBRejectsMissingAuthenticationBeforeWork(){
++        var auth=auth(true);assertThatThrownBy(auth::capture).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);verifyNoInteractions(gate);
++    }
++    @Test void workDoesNotCarryAnOldEvaluationOrInternalBypass(){
++        var auth=auth(true);var caller=as("alice",auth::capture);var context=PropagatedContext.empty().plus(new AuthorizationEvaluationContext(new Object())).plus(new AuthorizationInvocationContext(null,true));
++        stubBoundary(caller);
++        when(gate.authorize(any(),any())).thenReturn(Mono.just(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted())));
++        try(var ignored=context.propagate()){
++            auth.work(caller,()->{assertThat(AuthorizationEvaluationContext.current()).isEmpty();assertThat(AuthorizationInvocationContext.isInternal()).isFalse();assertThat(auth.capture()).isSameAs(caller);});
++        }
++        assertThat(AuthorizationInvocationContext.current()).isEmpty();
++    }
++    @Test void modeBDeniesBeforeSideEffectAndChecksEveryInvocation(){
++        var auth=auth(true);var caller=as("alice",auth::capture);var writes=new AtomicInteger();
++        stubBoundary(caller);
++        when(gate.authorize(any(),any())).thenReturn(Mono.just(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted())),Mono.just(TypedAuthorization.Decision.deny("revoked")));
++        assertThat(auth.checked(caller,List.of(AiAuthorization.entry("main")),writes::incrementAndGet)).isEqualTo(1);
++        assertThatThrownBy(()->auth.checked(caller,List.of(AiAuthorization.entry("main")),writes::incrementAndGet)).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);
++        assertThat(writes).hasValue(1);verify(gate,times(2)).boundary(any(),anyString(),any());
++    }
++    @Test void modeBRejectsMissingCallerForeignTenantAndEmptyPlans(){
++        var auth=auth(true);var caller=as("alice",auth::capture);
++        assertThatThrownBy(()->auth.checked(null,List.of(AiAuthorization.entry("main")),()->1)).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);
++        assertThatThrownBy(()->auth.checked(new AgentPrincipal(){},List.of(AiAuthorization.entry("main")),()->1)).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);
++        assertThatThrownBy(()->auth.checked(caller,List.of(AiAuthorization.entry("other")),()->1)).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);
++        assertThatThrownBy(()->auth.checked(caller,List.of(),()->1)).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class);
++        verifyNoInteractions(gate);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiEntryOperationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiEntryOperationTest.java
+new file mode 100644
+index 0000000..f575332
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiEntryOperationTest.java
+@@ -0,0 +1,39 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Map;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import org.junit.jupiter.api.Test;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiEntryOperationTest {
++    private final OssRestOperationAdapter adapter = new OssRestOperationAdapter(mock(ExecutionRepositoryInterface.class));
++
++    @Test
++    void shouldMapReadsAndMutatingTurnsToExplicitTenantAiPermission() {
++        for (String handler : List.of("get", "create", "chat", "confirm")) {
++            var operations = adapter.resolve(request(handler, "main"));
++            assertThat(operations).hasSize(1);
++            var operation = operations.getFirst();
++            assertThat(operation.resource()).isEqualTo(Resource.AI);
++            assertThat(operation.action()).isEqualTo(handler.equals("get") ? Action.READ : Action.EXECUTE);
++            assertThat(operation.namespace()).isNull();
++            assertThat(operation.resourceId()).isNull();
++            assertThat(operation.source()).isEqualTo(Source.REST);
++        }
++    }
++
++    @Test
++    void shouldFailClosedForUnknownAiHandlersAndForeignTenants() {
++        assertThat(adapter.resolve(request("unknown", "main"))).isEmpty();
++        assertThat(adapter.resolve(request("chat", "other"))).isEmpty();
++    }
++
++    private OssRestOperationAdapter.Request request(String handler, String tenant) {
++        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request("POST",
++            "/api/v1/" + tenant + "/ai/threads", Map.of(), "application/json", new byte[0],
++            "io.kestra.webserver.controllers.api.AiAgentController", handler, List.of()), Map.of("tenant", tenant));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java
+new file mode 100644
+index 0000000..f0bf8b5
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java
+@@ -0,0 +1,54 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.ai.agent.models.*;
++import io.kestra.core.ai.agent.repositories.*;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.utils.ExecutorsUtils;
++import io.kestra.webserver.controllers.api.AiAgentController;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.agent.*;
++import io.kestra.webserver.services.ai.agent.data.*;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.time.Duration;
++import java.util.Optional;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiThreadOwnershipTest {
++    @Test void authenticatedCreatorMustOwnItsThread() {
++        var threads=mock(AiThreadRepositoryInterface.class);
++        when(threads.create(any())).thenAnswer(invocation->invocation.getArgument(0));
++        var controller=controller(threads);
++        try {
++            var request=HttpRequest.GET("/api/v1/main/ai/threads").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++            ServerRequestContext.with(request,(java.util.function.Supplier<ApiThreadSummary>)()->controller.create(new ApiCreateThreadRequest(AgentMode.ASK,"owned")));
++            var saved=org.mockito.ArgumentCaptor.forClass(AgentThread.class);
++            verify(threads).create(saved.capture());
++            assertThat(saved.getValue().userId()).isEqualTo("alice");
++        } finally {controller.close();}
++    }
++    @Test void anotherAuthenticatedUserCannotReadAnOwnedThread() {
++        var threads=mock(AiThreadRepositoryInterface.class);
++        when(threads.find("main","owned")).thenReturn(Optional.of(AgentThread.builder().uid("owned").tenant("main").userId("alice").status(AgentThreadStatus.IDLE).mode(AgentMode.ASK).build()));
++        var controller=controller(threads);
++        try {
++            var request=HttpRequest.GET("/api/v1/main/ai/threads/owned").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("bob"));
++            assertThatThrownBy(()->ServerRequestContext.with(request,(java.util.function.Supplier<ApiThreadDetail>)()->controller.get("owned"))).isInstanceOf(io.kestra.core.exceptions.NotFoundException.class);
++        } finally {controller.close();}
++    }
++    private ExecutorsUtils executors() {
++        var executors=mock(ExecutorsUtils.class);
++        when(executors.cachedVirtualThreadPool(anyString())).thenAnswer(ignored->java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
++        return executors;
++    }
++    private AiAgentController controller(AiThreadRepositoryInterface threads) {
++        var tenant=mock(TenantService.class);when(tenant.resolveTenant()).thenReturn("main");
++        var services=mock(AiServiceManager.class);when(services.hasConfiguredProvider()).thenReturn(true);when(services.getAiService(any())).thenReturn(mock(io.kestra.webserver.services.ai.AiServiceInterface.class));
++        var config=new AgentConfiguration(Duration.ofSeconds(10),"http://localhost/disabled",25,50,32,10,Duration.ofHours(1),50);
++        return new AiAgentController(tenant,services,threads,mock(AiMessageRepositoryInterface.class),mock(AiThreadManager.class),mock(AgentOrchestrator.class),mock(AgentPrincipalResolver.class),config,executors());
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java
+new file mode 100644
+index 0000000..fed6d82
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java
+@@ -0,0 +1,396 @@
++package io.kestra.webserver.rbac;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Supplier;
++
++import org.junit.jupiter.api.Test;
++import org.reactivestreams.Publisher;
++
++import dev.langchain4j.agent.tool.ToolExecutionRequest;
++import io.kestra.core.ai.agent.models.AgentToolCall;
++import io.kestra.core.ai.agent.models.AgentToolFamily;
++import io.kestra.core.ai.agent.models.AgentWritePolicy;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationQueryContext;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.webserver.services.ai.agent.AgentCallContext;
++import io.kestra.webserver.services.ai.agent.tool.AiTool;
++import io.kestra.webserver.services.ai.agent.tool.ListFlowsTool;
++import io.kestra.webserver.services.ai.agent.tool.ListExecutionsTool;
++import io.kestra.webserver.services.ai.agent.tool.ToolCatalog;
++import io.kestra.webserver.services.ai.agent.tool.ReadFlowTool;
++import io.kestra.webserver.services.ai.agent.tool.ReadExecutionTool;
++import io.kestra.webserver.services.ai.agent.tool.ReadExecutionLogsTool;
++import io.kestra.webserver.services.ai.agent.tool.RestartExecutionTool;
++import io.kestra.webserver.services.ai.agent.tool.DocsMcpToolProvider;
++import io.kestra.webserver.services.ai.agent.tool.TestTenantEchoTool;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++class AiToolAuthorizationTest {
++    private final TypedAuthorizationGate gate = mock(TypedAuthorizationGate.class);
++    private final ExecutionRepositoryInterface executions = mock(ExecutionRepositoryInterface.class);
++    private final RbacAuthorizer.Principal principal = new RbacAuthorizer.Principal("alice", List.of(), null, null, List.of());
++    private final AiAuthorization.Caller caller = new AiAuthorization.Caller(principal, "main", "alice",
++        HttpRequest.GET("/api/v1/main/ai").setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("alice")));
++    private final AgentCallContext.Context context = new AgentCallContext.Context("main", caller, null, null);
++    private final List<Operation> seen = new ArrayList<>();
++    private final AtomicInteger boundaries = new AtomicInteger();
++    private final AtomicInteger actions = new AtomicInteger();
++    private java.util.function.Function<Operation, Decision> policy = operation -> Decision.allow(operation.queryDomain());
++
++    AiToolAuthorizationTest() {
++        when(gate.authorize(any(), any())).thenAnswer(invocation -> {
++            Operation operation = invocation.getArgument(1);
++            seen.add(operation);
++            return Mono.just(policy.apply(operation));
++        });
++        when(gate.boundary(any(), anyString(), any())).thenAnswer(invocation -> {
++            Supplier<? extends Publisher<Object>> action = invocation.getArgument(2);
++            var owner = new AuthorizationEvaluations.Owner(principal, "main");
++            owner.acquire((subject, tenant) -> CompletableFuture.completedFuture(mock(AuthorizationEvaluationV1.class))).block();
++            boundaries.incrementAndGet();
++            return Flux.defer(() -> Flux.from(action.get())).contextWrite(reactor ->
++                ReactorPropagation.addPropagatedContext(reactor,
++                    PropagatedContext.empty().plus(new AuthorizationEvaluationContext(owner))));
++        });
++    }
++
++    @Test
++    void shouldRunOriginalActionWhenRbacDisabledEvenForUnknownTool() {
++        var adapter = adapter(false);
++        String result = adapter.checked(entry("future-tool", false), request("future-tool", "not json"), null, () -> {
++            actions.incrementAndGet();
++            return "original";
++        });
++        assertThat(result).isEqualTo("original");
++        assertThat(actions.get()).isEqualTo(1);
++        verifyNoInteractions(gate, executions);
++    }
++
++    @Test
++    void shouldAuthorizeMetadataInFreshBoundariesBeforeAndAfterAction() {
++        assertThat(call("search-plugins", "{}", this::action)).isEqualTo("result");
++        assertThat(boundaries.get()).isEqualTo(2);
++        assertThat(actions.get()).isEqualTo(1);
++        assertThat(seen).allMatch(operation -> operation.resource() == Resource.METADATA && operation.action() == Action.READ);
++    }
++
++    @Test
++    void shouldNotRunActionWhenPolicyDenies() {
++        policy = operation -> Decision.deny("revoked");
++        assertThatThrownBy(() -> call("get-plugin-schema", "{}", this::action)).hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldDenyUnknownToolsWithValidCaller() {
++        for (String name : List.of("unknown-tool")) {
++            assertThatThrownBy(() -> call(name, "{}", this::action)).hasMessageContaining("AI authorization denied");
++        }
++        assertThat(actions.get()).isZero();
++        verifyNoInteractions(gate, executions);
++    }
++
++    @Test
++    void shouldBindSafeValidationScopeForDraftAndValidationTools() {
++        for (String name : List.of("validate-flow")) {
++            assertThat(call(name, "{}", () -> {
++                assertThat(PropagatedContext.getOrEmpty().find(io.kestra.core.repositories.AuthorizationValidationContext.class)).isPresent();
++                return "validated";
++            })).isEqualTo("validated");
++        }
++    }
++
++    @Test
++    void shouldDenyMissingCallerForNativeAndDocsTools() {
++        for (boolean docs : List.of(false, true)) {
++            assertThatThrownBy(() -> adapter(true).checked(entry("docs", docs), request("docs", "{}"),
++                AgentCallContext.Context.ofTenant("main"), this::action)).hasMessageContaining("AI authorization denied");
++        }
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldUseSystemBoundaryForDocsMcp() {
++        assertThat(adapter(true).checked(entry("docs-search", true), request("docs-search", "{}"), context, this::action))
++            .isEqualTo("result");
++        assertThat(boundaries.get()).isEqualTo(2);
++        assertThat(seen).allMatch(operation -> operation.resource() == Resource.AI && operation.action() == Action.EXECUTE);
++    }
++
++    @Test
++    void shouldKeepNamespaceAndIdCorrelatedForSingleFlow() {
++        policy = operation -> Decision.allow(idScope("team.a", "flow-a"));
++        assertThat(call("read-flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-a\"}", () -> {
++            actions.incrementAndGet();
++            return new ReadFlowTool.Result("team.a", "flow-a", 1, "source");
++        }).source()).isEqualTo("source");
++        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-b\"}", this::action))
++            .hasMessageContaining("AI authorization denied");
++        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"team.b\",\"flowId\":\"flow-a\"}", this::action))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldBindDecisionDomainBeforeRepositoryActionAndCheckReturnedRows() {
++        policy = operation -> Decision.allow(idScope("team.a", "flow-a"));
++        var result = call("list-flows", "{\"NAMESPACE\":{\"operator\":\"EQUALS\",\"value\":\"team.a\"}}", () -> {
++            var reference = PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class).orElseThrow();
++            var domain = (TypedDashboardGate.DatasourceDomain) reference.reference();
++            assertThat(domain.domain().resourceAllowed("team.a", "flow-a")).isTrue();
++            assertThat(domain.domain().resourceAllowed("team.a", "flow-b")).isFalse();
++            assertThat(domain.domain().resourceAllowed("team.b", "flow-a")).isFalse();
++            return new ListFlowsTool.Result(List.of(new ListFlowsTool.FlowSummary("team.a", "flow-a", "allowed")));
++        });
++        assertThat(result.flows()).hasSize(1);
++        assertThat(seen).anyMatch(operation -> operation.coverage() == Coverage.COMPLETE_QUERY && operation.queryDomain().paginated());
++        assertThat(seen).anyMatch(operation -> operation.action() == Action.READ && "flow-a".equals(operation.resourceId()));
++    }
++
++    @Test
++    void shouldRejectResultWhenPermissionRevokedAfterAction() {
++        assertThatThrownBy(() -> call("search-plugins", "{}", () -> {
++            policy = operation -> Decision.deny("revoked");
++            return action();
++        })).hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isEqualTo(1);
++        assertThat(boundaries.get()).isEqualTo(2);
++    }
++
++    @Test
++    void shouldResolveActualExecutionOwnerAndRequireAllRestartWrites() {
++        owner("main", "team.actual", "exec");
++        assertThat(call("restart-execution", "{\"executionId\":\"exec\",\"namespace\":\"spoofed\",\"revision\":2}", this::restartAction).executionId())
++            .isEqualTo("exec");
++        assertThat(seen).allMatch(operation -> "team.actual".equals(operation.namespace()));
++        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.EXECUTION && operation.action() == Action.UPDATE
++            && operation.sideEffect() == SideEffect.QUEUE_WRITE && "exec".equals(operation.resourceId()));
++        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.FLOW && operation.action() == Action.READ);
++        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.FLOW && operation.action() == Action.EXECUTE);
++        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.EXECUTION && operation.action() == Action.CREATE);
++    }
++
++    @Test
++    void shouldNeverRunRestartWhenUpdateDeniedDespiteReadPermission() {
++        owner("main", "team.a", "exec");
++        policy = operation -> operation.action() == Action.UPDATE ? Decision.deny("read only") : Decision.allow(operation.queryDomain());
++        assertThatThrownBy(() -> call("restart-execution", "{\"executionId\":\"exec\"}", this::action))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldDenyExecutionOwnerOutsideCallerTenant() {
++        owner("other", "team.a", "exec");
++        assertThatThrownBy(() -> call("read-execution", "{\"executionId\":\"exec\"}", this::action))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldUseLogReadOfActualExecutionWithoutGrantingExecutionUpdate() {
++        owner(null, "team.a", "exec");
++        call("read-execution-logs", "{\"executionId\":\"exec\"}", () -> new ReadExecutionLogsTool.Result("exec", List.of()));
++        assertThat(seen).allMatch(operation -> operation.resource() == Resource.LOG && operation.action() == Action.READ
++            && "exec".equals(operation.resourceId()) && "team.a".equals(operation.namespace()));
++    }
++
++    @Test
++    void shouldRequireExecutionCreateOnlyForExplicitRestartRevision() {
++        owner("main", "team.a", "exec");
++        policy = operation -> operation.action() == Action.CREATE ? Decision.deny("no create") : Decision.allow(operation.queryDomain());
++        call("restart-execution", "{\"executionId\":\"exec\"}", this::restartAction);
++        assertThat(seen).noneMatch(operation -> operation.action() == Action.CREATE);
++        assertThatThrownBy(() -> call("restart-execution", "{\"executionId\":\"exec\",\"revision\":2}", this::action))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isEqualTo(1);
++    }
++
++    @Test
++    void shouldRejectRestartWhenOriginalRuntimeDeclarationIsMissingWithoutRawFallback() {
++        owner("main", "team.a", "exec");
++        var adapter = adapter(true);
++        doReturn(Optional.empty()).when(adapter.flowMetaStore).findByExecutionForRuntime(any());
++        assertThatThrownBy(() -> adapter.checked(entry("restart-execution", false),
++            request("restart-execution", "{\"executionId\":\"exec\"}"), context, this::restartAction))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++        verifyNoInteractions(adapter.executionGate);
++    }
++
++    @Test
++    void shouldRejectRestartWhenResolvedTargetRevisionDiffersFromRequestedRevision() {
++        owner("main", "team.a", "exec");
++        var adapter = adapter(true);
++        doReturn(Optional.of(
++            io.kestra.core.runners.ProcessedFlow.of(io.kestra.core.models.flows.FlowWithSource.of(
++                io.kestra.core.models.flows.Flow.builder().tenantId("main").namespace("team.a").id("flow")
++                    .revision(3).tasks(List.of()).build(), "")))).when(adapter.flowMetaStore).findByIdForRuntime(any(), any(), any(), any());
++        assertThatThrownBy(() -> adapter.checked(entry("restart-execution", false),
++            request("restart-execution", "{\"executionId\":\"exec\",\"revision\":2}"), context, this::restartAction))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldRejectRestartBeforeQueueWriteWhenRuntimeDependenciesAreDenied() {
++        owner("main", "team.a", "exec");
++        var adapter = adapter(true);
++        when(adapter.executionGate.dependencies(any(), anyString(), any(), anyString())).thenReturn(Mono.just(false));
++        assertThatThrownBy(() -> adapter.checked(entry("restart-execution", false),
++            request("restart-execution", "{\"executionId\":\"exec\"}"), context, this::restartAction))
++            .hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldPlanExecutionListsAsQueriesAndAuthorizeReturnedExecutionIds() {
++        var result = call("list-executions", "{}", () -> new ListExecutionsTool.Result(List.of(
++            new ListExecutionsTool.ExecutionSummary("exec", "team.a", "flow", "FAILED", "today", null))));
++        assertThat(result.executions()).hasSize(1);
++        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.EXECUTION
++            && operation.action() == Action.LIST && operation.coverage() == Coverage.COMPLETE_QUERY);
++        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.EXECUTION
++            && operation.action() == Action.READ && "exec".equals(operation.resourceId()));
++    }
++
++    @Test
++    void shouldNotReturnListRowsOutsideAuthorizedResourceIds() {
++        policy = operation -> Decision.allow(idScope("team.a", "flow-a"));
++        assertThatThrownBy(() -> call("list-flows", "{}", () -> new ListFlowsTool.Result(List.of(
++            new ListFlowsTool.FlowSummary("team.a", "flow-b", "outside")))))
++            .hasMessageContaining("AI authorization denied");
++    }
++
++    @Test
++    void shouldRejectInvalidNamespaceAndArgumentsBeforeAction() {
++        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"bad namespace\",\"flowId\":\"flow\"}", this::action))
++            .isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> call("read-flow", "[]", this::action)).hasMessageContaining("AI authorization denied");
++        assertThat(actions.get()).isZero();
++    }
++
++    @Test
++    void shouldReauthorizeActualReadExecutionResultInNewBoundary() {
++        owner("main", "team.a", "exec");
++        var result = call("read-execution", "{\"executionId\":\"exec\"}", () ->
++            new ReadExecutionTool.Result("exec", "team.a", "flow", "FAILED", "today", null, List.of()));
++        assertThat(result.id()).isEqualTo("exec");
++        assertThat(boundaries.get()).isEqualTo(2);
++        assertThat(seen).allMatch(operation -> operation.action() == Action.READ
++            && "exec".equals(operation.resourceId()) && "team.a".equals(operation.namespace()));
++    }
++
++    @Test
++    void shouldNeverReturnSingleReadWhoseActualNamespaceOrIdDiffersFromPlan() {
++        owner("main", "team.a", "exec");
++        assertThatThrownBy(() -> call("read-execution", "{\"executionId\":\"exec\"}", () ->
++            new ReadExecutionTool.Result("other", "team.b", "flow", "FAILED", "today", null, List.of())))
++            .hasMessageContaining("AI authorization denied");
++        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-a\"}", () ->
++            new ReadFlowTool.Result("team.b", "flow-a", 1, "outside")))
++            .hasMessageContaining("AI authorization denied");
++    }
++
++    @Test
++    void shouldRejectManualCatalogDispatchWhenAuthorizationAdapterMissing() {
++        var docs = mock(DocsMcpToolProvider.class);
++        when(docs.tools()).thenReturn(java.util.Map.of());
++        var catalog = new ToolCatalog(List.of(new TestTenantEchoTool()), List.of(), docs,
++            (entry, tenant, subject) -> true);
++        String name = catalog.entries().iterator().next().name();
++        assertThatThrownBy(() -> catalog.dispatch(request(name, "{}"), AgentCallContext.Context.ofTenant("main")))
++            .hasMessageContaining("AI authorization denied");
++        assertThatThrownBy(() -> new ToolCatalog(List.of(), List.of(), docs,
++            (entry, tenant, subject) -> true, null)).isInstanceOf(NullPointerException.class);
++    }
++
++    @Test
++    void shouldPreserveCatalogDispatchWithExplicitDisabledAdapter() {
++        var docs = mock(DocsMcpToolProvider.class);
++        when(docs.tools()).thenReturn(java.util.Map.of());
++        var catalog = new ToolCatalog(List.of(new TestTenantEchoTool()), List.of(), docs,
++            (entry, tenant, subject) -> true, adapter(false));
++        String name = catalog.entries().iterator().next().name();
++        assertThat(catalog.dispatch(request(name, "{}"), AgentCallContext.Context.ofTenant("main")).text())
++            .contains("main");
++        verifyNoInteractions(gate, executions);
++    }
++
++    private void owner(String tenant, String namespace, String id) {
++        var execution = mock(Execution.class);
++        when(execution.getTenantId()).thenReturn(tenant);
++        when(execution.getNamespace()).thenReturn(namespace);
++        when(execution.getId()).thenReturn(id);
++        when(execution.getFlowId()).thenReturn("flow");
++        when(executions.findByIdWithoutAcl("main", id)).thenReturn(Optional.of(execution));
++    }
++
++    private AiToolAuthorization adapter(boolean enabled) {
++        var adapter = new AiToolAuthorization(new AiAuthorization(new RbacConfiguration(enabled, false), gate, new TenantService()), executions, gate);
++        adapter.flows=mock(io.kestra.core.repositories.FlowRepositoryInterface.class);
++        adapter.flowMetaStore=mock(io.kestra.core.runners.FlowMetaStoreInterface.class);
++        adapter.executionGate=mock(RbacExecutionGate.class);
++        when(adapter.flows.findByIdWithoutAcl(eq("main"),anyString(),eq("flow"),any())).thenAnswer(invocation -> Optional.of(
++            io.kestra.core.models.flows.Flow.builder().tenantId("main").namespace(invocation.getArgument(1)).id("flow").tasks(List.of()).build()));
++        when(adapter.flowMetaStore.findByExecutionForRuntime(any())).thenAnswer(invocation -> {
++            Execution execution=invocation.getArgument(0);
++            return Optional.of(io.kestra.core.models.flows.FlowWithSource.of(
++                io.kestra.core.models.flows.Flow.builder().tenantId("main").namespace(execution.getNamespace()).id("flow").revision(execution.getFlowRevision()).tasks(List.of()).build(),""));
++        });
++        when(adapter.flowMetaStore.findByIdForRuntime(any(),any(),any(),any())).thenAnswer(invocation -> {
++            Optional<Integer> revision=invocation.getArgument(3);
++            return Optional.of(io.kestra.core.runners.ProcessedFlow.of(io.kestra.core.models.flows.FlowWithSource.of(
++                io.kestra.core.models.flows.Flow.builder().tenantId("main").namespace(invocation.getArgument(1)).id("flow").revision(revision.orElse(null)).tasks(List.of()).build(),"")));
++        });
++        when(adapter.executionGate.dependencies(any(),anyString(),any(),anyString())).thenReturn(Mono.just(true));
++        return adapter;
++    }
++
++    private <T> T call(String name, String json, Supplier<T> action) {
++        return adapter(true).checked(entry(name, false), request(name, json), context, action);
++    }
++
++    private RestartExecutionTool.Result restartAction() {
++        actions.incrementAndGet();
++        return new RestartExecutionTool.Result("exec");
++    }
++
++    private String action() {
++        actions.incrementAndGet();
++        return "result";
++    }
++
++    private static QueryDomain idScope(String namespace, String id) {
++        var term = new QueryDomain.ResourceDomain(List.of(namespace), List.of(), List.of(), List.of(id),
++            QueryDomain.ResourceScope.NAMESPACE, QueryDomain.IdScope.RESTRICTED_IDS);
++        return new QueryDomain(List.of(), List.of(), List.of(), true, true, DomainKind.GLOBAL, List.of(term));
++    }
++
++    private static ToolCatalog.ToolEntry entry(String name, boolean docs) {
++        return new ToolCatalog.ToolEntry(name, null, null, AgentToolCall.Kind.PLATFORM,
++            AgentToolFamily.READ, AgentWritePolicy.AUTO, docs ? null : mock(AiTool.class));
++    }
++
++    private static ToolExecutionRequest request(String name, String json) {
++        return ToolExecutionRequest.builder().id("test").name(name).arguments(json).build();
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiValidationScopeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiValidationScopeTest.java
+new file mode 100644
+index 0000000..9f94797
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiValidationScopeTest.java
+@@ -0,0 +1,20 @@
++package io.kestra.webserver.rbac;
++import io.kestra.core.repositories.AuthorizationValidationContext;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.core.models.QueryFilter;
++import io.micronaut.core.propagation.PropagatedContext;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++class AiValidationScopeTest {
++    @Test void nativeValidationDoesNotRequireAnAuthorizationProvider(){assertThatCode(()->AuthorizationValidationContext.requireReadable("main","company.a","flow")).doesNotThrowAnyException();}
++    @Test void crossNamespaceOrIdDependencyFailsWithUniformMessage(){
++        var access=mock(NamespaceAccessControl.class);
++        when(access.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","company.a","allowed")).thenReturn(true);
++        try(var scope=PropagatedContext.empty().plus(new AuthorizationValidationContext(access)).propagate()){
++            assertThatCode(()->AuthorizationValidationContext.requireReadable("main","company.a","allowed")).doesNotThrowAnyException();
++            for(var target:java.util.List.of(new String[]{"company.b","secret"},new String[]{"company.a","other"}))
++                assertThatThrownBy(()->AuthorizationValidationContext.requireReadable("main",target[0],target[1])).isInstanceOf(SecurityException.class).hasMessage("Flow validation references an unavailable resource");
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/AiModeLifecycleTest.java b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/AiModeLifecycleTest.java
+new file mode 100644
+index 0000000..fdea2be
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/AiModeLifecycleTest.java
+@@ -0,0 +1,387 @@
++package io.kestra.webserver.services.ai.agent;
++
++import java.time.Instant;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executors;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++import io.kestra.core.ai.agent.models.AgentMessageType;
++import io.kestra.core.ai.agent.models.AgentMode;
++import io.kestra.core.ai.agent.models.AgentThread;
++import io.kestra.core.ai.agent.models.AgentThreadStatus;
++import io.kestra.core.ai.agent.repositories.AiMessageRepositoryInterface;
++import io.kestra.core.ai.agent.repositories.AiThreadRepositoryInterface;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.utils.IdUtils;
++import io.kestra.webserver.services.ai.AiServiceInterface;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.agent.data.AgentEvents;
++import io.kestra.webserver.services.ai.agent.tool.AgentToolPermissionEvaluator;
++import io.kestra.webserver.services.ai.agent.tool.DefaultAgentToolPermissionEvaluator;
++import io.kestra.webserver.services.ai.agent.tool.DocsMcpToolProvider;
++import io.kestra.webserver.services.ai.agent.tool.TestMutateTool;
++
++import dev.langchain4j.agent.tool.ToolExecutionRequest;
++import dev.langchain4j.data.message.AiMessage;
++import dev.langchain4j.model.chat.StreamingChatModel;
++import dev.langchain4j.model.chat.request.ChatRequest;
++import dev.langchain4j.model.chat.response.ChatResponse;
++import dev.langchain4j.model.chat.response.PartialResponse;
++import dev.langchain4j.model.chat.response.PartialResponseContext;
++import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
++import dev.langchain4j.model.chat.response.StreamingHandle;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.test.annotation.MockBean;
++import jakarta.inject.Inject;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.spy;
++import static org.mockito.Mockito.when;
++
++@KestraTest
++@Property(name = "kestra.ai.agent.model-call-timeout", value = "PT10S")
++class AiModeLifecycleTest {
++    private static final String TENANT = TenantService.MAIN_TENANT;
++    private final ScriptedModel model = new ScriptedModel();
++    private final AtomicBoolean controlledPermissions = new AtomicBoolean();
++    private final AtomicBoolean permitted = new AtomicBoolean(true);
++    private final AtomicInteger writes = new AtomicInteger();
++    private final List<Boolean> writeDecisions = new CopyOnWriteArrayList<>();
++
++    @Inject
++    AgentOrchestrator orchestrator;
++    @Inject
++    AiThreadManager threadManager;
++    @Inject
++    AiThreadRepositoryInterface threads;
++    @Inject
++    AiMessageRepositoryInterface messages;
++
++    @MockBean(AiServiceManager.class)
++    AiServiceManager aiServiceManager() {
++        AiServiceInterface service = mock(AiServiceInterface.class);
++        when(service.streamingChatModel(any())).thenReturn(model);
++        AiServiceManager manager = mock(AiServiceManager.class);
++        when(manager.getAiService(any())).thenReturn(service);
++        return manager;
++    }
++
++    @MockBean(DocsMcpToolProvider.class)
++    DocsMcpToolProvider docsMcpToolProvider() {
++        DocsMcpToolProvider provider = mock(DocsMcpToolProvider.class);
++        when(provider.tools()).thenReturn(Map.of());
++        return provider;
++    }
++
++    @MockBean(DefaultAgentToolPermissionEvaluator.class)
++    AgentToolPermissionEvaluator permissionEvaluator() {
++        return (entry, tenant, principal) -> {
++            boolean allowed = !controlledPermissions.get() || permitted.get();
++            if (entry.name().equals("update-artefact")) {
++                writeDecisions.add(allowed);
++            }
++            return allowed;
++        };
++    }
++
++    @MockBean(TestMutateTool.class)
++    TestMutateTool mutateTool() {
++        TestMutateTool tool = spy(new TestMutateTool());
++        doAnswer(invocation -> {
++            writes.incrementAndGet();
++            return invocation.callRealMethod();
++        }).when(tool).updateArtefact(any());
++        return tool;
++    }
++
++    @BeforeEach
++    void reset() {
++        model.reset();
++        controlledPermissions.set(false);
++        permitted.set(true);
++        writes.set(0);
++        writeDecisions.clear();
++    }
++
++    @Test
++    void shouldStreamAndPersistAskWhenModeAHasNoPermissionRequirement() {
++        permitted.set(false);
++        AgentThread thread = newThread(AgentMode.ASK);
++        model.enqueue(AiMessage.from("A trigger starts a flow."));
++        Sink sink = turn(thread);
++        assertThat(sink.names()).containsExactly(AgentEvents.TOKEN, AgentEvents.DONE);
++        assertIdle(thread, sink);
++        assertThat(messages.load(TENANT, thread.uid()))
++            .anyMatch(message -> message.type() == AgentMessageType.TEXT
++                && message.role().name().equals("ASSISTANT"));
++        assertThat(model.calls.get()).isEqualTo(1);
++        assertThat(writes.get()).isZero();
++    }
++
++    @Test
++    void shouldRunHeldToolExactlyOnceWhenModeAActionApproved() {
++        permitted.set(false);
++        AgentThread thread = propose();
++        assertThat(writes.get()).isZero();
++        model.enqueue(AiMessage.from("Updated."));
++        Sink sink = resume(thread, true);
++        assertThat(outcome(sink)).isEqualTo("ok");
++        assertThat(writes.get()).isEqualTo(1);
++        assertThat(writeDecisions).contains(true).doesNotContain(false);
++        assertIdle(thread, sink);
++    }
++
++    @Test
++    void shouldNeverRunHeldToolWhenModeAActionRejected() {
++        AgentThread thread = propose();
++        model.enqueue(AiMessage.from("Left unchanged."));
++        Sink sink = resume(thread, false);
++        assertThat(outcome(sink)).isEqualTo("rejected");
++        assertThat(writes.get()).isZero();
++        assertIdle(thread, sink);
++    }
++
++    @Test
++    void shouldNotClaimOrWriteTwiceWhenConfirmationDuplicated() {
++        AgentThread thread = propose();
++        AgentThread awaiting = reload(thread);
++        AgentThread claimed = threadManager.tryMarkRunning(awaiting, awaiting.mode(),
++            AgentThreadStatus.AWAITING_CONFIRMATION).orElseThrow();
++        assertThat(threadManager.tryMarkRunning(awaiting, awaiting.mode(),
++            AgentThreadStatus.AWAITING_CONFIRMATION)).isEmpty();
++        model.enqueue(AiMessage.from("Updated once."));
++        Sink sink = new Sink();
++        orchestrator.resume(claimed, null, true, null, null, sink);
++        assertThat(threadManager.tryMarkRunning(awaiting, awaiting.mode(),
++            AgentThreadStatus.AWAITING_CONFIRMATION)).isEmpty();
++        assertThat(writes.get()).isEqualTo(1);
++        assertThat(messages.load(TENANT, thread.uid()))
++            .filteredOn(message -> message.type() == AgentMessageType.TOOL_RESULT)
++            .hasSize(1);
++        assertIdle(thread, sink);
++    }
++
++    @Test
++    void shouldStopProviderAndReleaseThreadWhenStreamCancelled() throws Exception {
++        AgentThread thread = newThread(AgentMode.ASK);
++        model.waitForResponse.set(true);
++        Sink sink = new Sink();
++        var pool = Executors.newSingleThreadExecutor();
++        try {
++            var running = pool.submit(() -> run(thread, sink));
++            assertThat(model.started.await(3, TimeUnit.SECONDS)).isTrue();
++            sink.cancelled = true;
++            running.get(5, TimeUnit.SECONDS);
++            assertThat(model.handle.isCancelled()).isTrue();
++            assertThat(reload(thread).status()).isEqualTo(AgentThreadStatus.IDLE);
++            assertThat(messages.load(TENANT, thread.uid()))
++                .anyMatch(message -> message.type() == AgentMessageType.CANCELLED);
++            model.completePending(writeRequest());
++            assertThat(writes.get()).isZero();
++            assertThat(model.calls.get()).isEqualTo(1);
++            assertThat(sink.failure).isNull();
++            AgentThread claimed = threadManager.tryMarkRunning(reload(thread), AgentMode.ASK,
++                AgentThreadStatus.IDLE).orElseThrow();
++            threadManager.finish(claimed);
++        } finally {
++            pool.shutdownNow();
++            assertThat(pool.awaitTermination(3, TimeUnit.SECONDS)).isTrue();
++        }
++    }
++
++    @Test
++    void shouldRunToolWhenModeBConfirmationAllowed() {
++        controlledPermissions.set(true);
++        AgentThread thread = propose();
++        model.enqueue(AiMessage.from("Authorized update."));
++        Sink sink = resume(thread, true);
++        assertThat(outcome(sink)).isEqualTo("ok");
++        assertThat(writeDecisions).contains(true).doesNotContain(false);
++        assertThat(writes.get()).isEqualTo(1);
++        assertIdle(thread, sink);
++    }
++
++    @Test
++    void shouldRejectWithoutWriteWhenModeBPermissionRevokedBeforeConfirmation() {
++        controlledPermissions.set(true);
++        AgentThread thread = propose();
++        assertThat(writeDecisions).contains(true);
++        permitted.set(false);
++        model.enqueue(AiMessage.from("Permission denied."));
++        Sink sink = resume(thread, true);
++        assertThat(writeDecisions.getLast()).isFalse();
++        assertThat(outcome(sink)).isEqualTo("rejected");
++        assertThat(writes.get()).isZero();
++        assertIdle(thread, sink);
++    }
++
++    @Test
++    void shouldNotReachWriteToolWhenModeBPermissionRevokedDuringModelWait() throws Exception {
++        controlledPermissions.set(true);
++        AgentThread thread = newThread(AgentMode.EDIT);
++        model.waitForResponse.set(true);
++        Sink first = new Sink();
++        var pool = Executors.newSingleThreadExecutor();
++        try {
++            var running = pool.submit(() -> run(thread, first));
++            assertThat(model.started.await(3, TimeUnit.SECONDS)).isTrue();
++            permitted.set(false);
++            model.waitForResponse.set(false);
++            model.completePending(writeRequest());
++            running.get(5, TimeUnit.SECONDS);
++            assertThat(reload(thread).status()).isEqualTo(AgentThreadStatus.AWAITING_CONFIRMATION);
++            assertThat(writes.get()).isZero();
++            model.enqueue(AiMessage.from("Permission denied after waiting."));
++            Sink confirmed = resume(thread, true);
++            assertThat(outcome(confirmed)).isEqualTo("rejected");
++            assertThat(writeDecisions.getLast()).isFalse();
++            assertThat(writes.get()).isZero();
++            assertIdle(thread, confirmed);
++        } finally {
++            pool.shutdownNow();
++            assertThat(pool.awaitTermination(3, TimeUnit.SECONDS)).isTrue();
++        }
++    }
++
++    private AgentThread newThread(AgentMode mode) {
++        return threads.create(AgentThread.builder().uid(IdUtils.create()).tenant(TENANT)
++            .mode(mode).status(AgentThreadStatus.IDLE).createdAt(Instant.now())
++            .updatedAt(Instant.now()).deleted(false).build());
++    }
++
++    private AgentThread reload(AgentThread thread) {
++        return threads.find(TENANT, thread.uid()).orElseThrow();
++    }
++
++    private Sink turn(AgentThread thread) {
++        Sink sink = new Sink();
++        run(thread, sink);
++        return sink;
++    }
++
++    private void run(AgentThread thread, Sink sink) {
++        orchestrator.runTurn(new AgentTurnContext(thread, "Explain or update the test artefact",
++            thread.mode(), TENANT, null, null, null), sink);
++    }
++
++    private AgentThread propose() {
++        AgentThread thread = newThread(AgentMode.EDIT);
++        model.enqueue(writeRequest());
++        Sink sink = turn(thread);
++        AgentThread awaiting = reload(thread);
++        assertThat(awaiting.status()).isEqualTo(AgentThreadStatus.AWAITING_CONFIRMATION);
++        assertThat(awaiting.pendingConfirmationId()).isNotBlank();
++        assertThat(sink.names()).contains(AgentEvents.PROPOSED_ACTION);
++        assertThat(writes.get()).isZero();
++        return awaiting;
++    }
++
++    private Sink resume(AgentThread thread, boolean approve) {
++        AgentThread awaiting = reload(thread);
++        AgentThread claimed = threadManager.tryMarkRunning(awaiting, awaiting.mode(),
++            AgentThreadStatus.AWAITING_CONFIRMATION).orElseThrow();
++        Sink sink = new Sink();
++        orchestrator.resume(claimed, null, approve, approve ? null : "leave unchanged", null, sink);
++        return sink;
++    }
++
++    private void assertIdle(AgentThread thread, Sink sink) {
++        assertThat(reload(thread).status()).isEqualTo(AgentThreadStatus.IDLE);
++        assertThat(sink.completed).isTrue();
++        assertThat(sink.failure).isNull();
++    }
++
++    private static String outcome(Sink sink) {
++        return sink.events.stream().filter(event -> event.getKey().equals(AgentEvents.TOOL_RESULT))
++            .map(event -> ((AgentEvents.ToolResultEvent) event.getValue()).outcome())
++            .findFirst().orElseThrow();
++    }
++
++    private static AiMessage writeRequest() {
++        return AiMessage.from("", List.of(ToolExecutionRequest.builder().id("write-1")
++            .name("update-artefact").arguments("{\"executionId\":\"test-execution\"}").build()));
++    }
++
++    private static final class Sink implements TurnEventSink {
++        final List<Map.Entry<String, Object>> events = new CopyOnWriteArrayList<>();
++        volatile boolean cancelled;
++        volatile boolean completed;
++        volatile Throwable failure;
++
++        @Override
++        public boolean isCancelled() { return cancelled; }
++        @Override
++        public void emit(String event, Object payload) { events.add(Map.entry(event, payload)); }
++        @Override
++        public void complete() { completed = true; }
++        @Override
++        public void error(Throwable error) { failure = error; }
++        List<String> names() { return events.stream().map(Map.Entry::getKey).toList(); }
++    }
++
++    private static final class ScriptedModel implements StreamingChatModel {
++        final BlockingQueue<AiMessage> responses = new LinkedBlockingQueue<>();
++        final AtomicBoolean waitForResponse = new AtomicBoolean();
++        final AtomicInteger calls = new AtomicInteger();
++        volatile CountDownLatch started = new CountDownLatch(1);
++        volatile StreamingChatResponseHandler pending;
++        volatile Handle handle = new Handle();
++
++        void reset() {
++            responses.clear();
++            waitForResponse.set(false);
++            calls.set(0);
++            started = new CountDownLatch(1);
++            pending = null;
++            handle = new Handle();
++        }
++
++        void enqueue(AiMessage response) { responses.add(response); }
++
++        void completePending(AiMessage response) {
++            pending.onCompleteResponse(ChatResponse.builder().aiMessage(response).build());
++        }
++
++        @Override
++        public void chat(ChatRequest request, StreamingChatResponseHandler handler) {
++            calls.incrementAndGet();
++            if (waitForResponse.get()) {
++                pending = handler;
++                handler.onPartialResponse(new PartialResponse("waiting"), new PartialResponseContext(handle));
++                started.countDown();
++                return;
++            }
++            AiMessage response = responses.poll();
++            if (response == null) {
++                handler.onError(new IllegalStateException("Missing scripted response"));
++                return;
++            }
++            if (response.text() != null && !response.text().isEmpty()) {
++                handler.onPartialResponse(new PartialResponse(response.text()), new PartialResponseContext(handle));
++            }
++            handler.onCompleteResponse(ChatResponse.builder().aiMessage(response).build());
++        }
++    }
++
++    private static final class Handle implements StreamingHandle {
++        private volatile boolean cancelled;
++        @Override
++        public void cancel() { cancelled = true; }
++        @Override
++        public boolean isCancelled() { return cancelled; }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
+index 5907d7a..c2b7f91 100644
+--- a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
+@@ -5,6 +5,12 @@ import java.util.Map;
+
+ import org.junit.jupiter.api.Test;
+
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.webserver.rbac.AiAuthorization;
++import io.kestra.webserver.rbac.AiToolAuthorization;
++import io.kestra.webserver.rbac.RbacConfiguration;
++import io.kestra.webserver.rbac.TypedAuthorizationGate;
+ import io.kestra.webserver.services.ai.agent.AgentCallContext;
+
+ import dev.langchain4j.agent.tool.ToolExecutionRequest;
+@@ -73,7 +79,7 @@ class ToolCatalogTest {
+         // how a replacement subclass extends a base tool
+         DocsMcpToolProvider docs = mock(DocsMcpToolProvider.class);
+         when(docs.tools()).thenReturn(Map.of());
+-        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL);
++        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, disabledAuthorization());
+         ToolExecutionRequest request = ToolExecutionRequest.builder().id("c1").name("tenant-echo").arguments("{}").build();
+
+         // When — the spec is derived from the inherited @Tool method, execution dispatches virtually
+@@ -123,7 +129,14 @@ class ToolCatalogTest {
+     private static ToolCatalog newCatalog(final AgentToolPermissionEvaluator evaluator) {
+         DocsMcpToolProvider docs = mock(DocsMcpToolProvider.class);
+         when(docs.tools()).thenReturn(Map.of());
+-        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator);
++        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator,
++            disabledAuthorization());
++    }
++
++    private static AiToolAuthorization disabledAuthorization() {
++        TypedAuthorizationGate gate = mock(TypedAuthorizationGate.class);
++        AiAuthorization authorization = new AiAuthorization(new RbacConfiguration(false, false), gate, mock(TenantService.class));
++        return new AiToolAuthorization(authorization, mock(ExecutionRepositoryInterface.class), gate);
+     }
+
+     private static ToolExecutionRequest request(final String name) {

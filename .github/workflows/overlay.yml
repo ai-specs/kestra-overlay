@@ -129,6 +129,8 @@ jobs:
           path: |
             .work/verify/webserver/build/test-results/test/*.xml
             .work/verify/webserver/build/reports/tests/test/
+            .work/verify/core/build/test-results/test/*.xml
+            .work/verify/core/build/reports/tests/test/
           include-hidden-files: true
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4

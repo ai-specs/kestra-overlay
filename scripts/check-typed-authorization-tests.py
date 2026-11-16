@@ -19,6 +19,13 @@ def check_http_origin_names(report):
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
+    "AiAuthorFlowBoundaryTest": 7,
+    "AiEntryOperationTest": 2,
+    "AiAuthorizationHttpTest": 5,
+    "AiAuthorizationTest": 6,
+    "AiThreadOwnershipTest": 2,
+    "AiToolAuthorizationTest": 25,
+    "AiValidationScopeTest": 2,
     "ExecutionFollowContextTest": 13,
     "DeferredCsvAuthorizationTest": 5,
     "PublicFaviconHttpTest": 2,
@@ -52,6 +59,20 @@ for suite, expected in {
         raise SystemExit(f"FAIL: {suite} must execute {expected} tests without failures or skips")
     if suite == "AuthorizationHttpOriginBoundaryTest":
         check_http_origin_names(report)
+    print(f"PASS: {suite}: {expected} tests executed, no failures or skips")
+
+for suite, expected in {
+    "controllers.api.AiAgentControllerTest": 9,
+    "controllers.api.AiOutputLifecycleTest": 8,
+    "controllers.api.AiTurnSchedulingTest": 5,
+    "services.ai.agent.AiModeLifecycleTest": 8,
+    "services.ai.agent.tool.ToolCatalogTest": 8,
+}.items():
+    report = ET.parse(results / f"TEST-io.kestra.webserver.{suite}.xml").getroot()
+    if int(report.attrib["tests"]) != expected or any(
+        int(report.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
+    ):
+        raise SystemExit(f"FAIL: {suite} must execute {expected} tests without failures or skips")
     print(f"PASS: {suite}: {expected} tests executed, no failures or skips")
 
 directory = ET.parse(results / "TEST-io.kestra.webserver.oidc.UserDirectoryContractTest.xml").getroot()

@@ -1,3 +1,11 @@
+2026-11-15 R-EE-RBAC / REQ-0399 AI身份与异步工具授权（入口B已接收，未发布）：
+消费ai-specs/kestra-plugin-rbac；当前54补丁原生线程归属两项有效红例已取得。
+复用S2/S6/S8及既有TypedAuthorizationGate；宿主解析原生工具实际资源，插件保留
+策略所有权。模式A/B均须允许正例、隔离、确认取消与副作用门。详见r-ee-rbac末节。
+2026-11-16补充接收显式租户AI.READ/EXECUTE入口契约；SYSTEM旧兜底不能授予普通应用scope。
+旧namespace AI声明不得自动升为租户许可；消费插件负责显式声明、兼容和初装计划。
+不得将未发布候选用于独立插件编译或部署结论。
+
 # OSS vs EE 架构能力差异表（kestra-overlay 立身依据）
 
 2026-11-15 R-EE-RBAC / REQ-0398 有限CSV正文授权候选（入口 C，本地完整门通过，CI/发布待执行）：
