@@ -21,6 +21,9 @@ results = pathlib.Path(sys.argv[1])
 for suite, expected in {
     "AiAuthorFlowBoundaryTest": 7,
     "AiEntryOperationTest": 2,
+    "AiProvidersOperationTest": 2,
+    "AiProvidersHttpTest": 3,
+    "AiProvidersNativeHttpTest": 1,
     "AiAuthorizationHttpTest": 5,
     "AiAuthorizationTest": 6,
     "AiThreadOwnershipTest": 2,

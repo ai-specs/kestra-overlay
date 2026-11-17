@@ -1,0 +1,268 @@
+# 需求：REQ-0400 原生 AI provider 列表精确映射租户 AI.READ，其他 AiController 请求失败关闭。
+# 消费扩展仓：ai-specs/kestra-plugin-rbac
+# 状态：core
+# 来源：新写；依据固定 BASE AiController.getProviders 公开 HTTP 路由及生产模式 B 403 证据；不移植业务策略。
+# 触达上游文件：OssRestOperationAdapter.java 与三组独立 typed/HTTP 测试（共 4 文件）。
+# 移除条件：上游提供等价的固定 main provider 列表类型化授权及未知请求失败关闭机制。
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+index e976f96..b40b32a 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+@@ -70,6 +70,13 @@ public final class OssRestOperationAdapter {
+         if (route.path() == null || route.path().contains("%") || route.path().contains("//")
+             || route.path().contains("\\") || List.of(route.path().split("/")).stream().anyMatch(segment -> segment.equals(".") || segment.equals("..")))
+             return List.of();
++        if ("io.kestra.webserver.controllers.api.AiController".equals(route.controller())) {
++            if (!"getProviders".equals(route.handler()) || !"GET".equals(route.method())
++                || !"/api/v1/main/ai/providers".equals(route.path())
++                || (request.variable("tenant") != null && !"main".equals(request.variable("tenant")))) return List.of();
++            return List.of(new Operation(CONTRACT_VERSION, Source.REST, Resource.AI, Action.READ,
++                "main", null, null, QueryDomain.unrestricted(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
++        }
+         String tenant = request.variable("tenant");
+         if (tenant == null && Set.of("io.kestra.webserver.controllers.api.MiscController",
+             "io.kestra.webserver.controllers.api.PluginController").contains(route.controller())) tenant = "main";
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java
+new file mode 100644
+index 0000000..7f65147
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java
+@@ -0,0 +1,33 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Map;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import org.junit.jupiter.api.Test;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiProvidersOperationTest {
++    private final OssRestOperationAdapter adapter = new OssRestOperationAdapter(mock(ExecutionRepositoryInterface.class));
++    @Test
++    void mapsOnlyTheExactNativeProviderRouteToTenantAiRead() {
++        var operations = adapter.resolve(request("GET", "/api/v1/main/ai/providers", "getProviders", Map.of()));
++        assertThat(operations).containsExactly(new Operation(CONTRACT_VERSION, Source.REST, Resource.AI, Action.READ,
++            "main", null, null, QueryDomain.unrestricted(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
++    }
++    @Test
++    void rejectsOtherMethodsPathsHandlersAndTenantsEvenWithMainVariable() {
++        for (String method : List.of("POST", "PUT", "DELETE", "HEAD", "OPTIONS", "get"))
++            assertThat(adapter.resolve(request(method, "/api/v1/main/ai/providers", "getProviders", Map.of("tenant", "main")))).isEmpty();
++        for (String path : List.of("/api/v1/other/ai/providers", "/api/v1/main/ai/providers/", "/api/v1/main/ai/generate/flow", "/api/v1/main/ai/%70roviders", "/api/v1/main/ai//providers"))
++            assertThat(adapter.resolve(request("GET", path, "getProviders", Map.of("tenant", "main")))).isEmpty();
++        for (String handler : List.of("generateFlow", "unknown"))
++            assertThat(adapter.resolve(request("GET", "/api/v1/main/ai/providers", handler, Map.of("tenant", "main")))).isEmpty();
++        assertThat(adapter.resolve(request("GET", "/api/v1/main/ai/providers", "getProviders", Map.of("tenant", "other")))).isEmpty();
++    }
++    private OssRestOperationAdapter.Request request(String method, String path, String handler, Map<String,Object> variables) {
++        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, path, Map.of(), null,
++            new byte[0], "io.kestra.webserver.controllers.api.AiController", handler, List.of()), variables);
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersHttpTest.java
+new file mode 100644
+index 0000000..bae1a4d
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersHttpTest.java
+@@ -0,0 +1,102 @@
++package io.kestra.webserver.rbac;
++
++import java.net.http.*;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicBoolean;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.serializers.JacksonMapper;
++import io.kestra.webserver.services.ai.*;
++import io.micronaut.context.annotation.*;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import io.micronaut.test.annotation.MockBean;
++import jakarta.inject.*;
++import org.junit.jupiter.api.*;
++import reactor.core.publisher.Mono;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "kestra.rbac.evaluation.enabled", value = "true")
++@Property(name = "kestra.rbac.application-groups.enabled", value = "false")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAuthenticated()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "ai.providers.http.probe", value = "true")
++@Property(name = "datasources.h2.url", value = "jdbc:h2:mem:ai_providers_http_${random.uuid};LOCK_TIMEOUT=30000;TIME ZONE=UTC;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE")
++@Property(name = "kestra.ai.agent.model-call-timeout", value = "PT20S")
++class AiProvidersHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject ProbePolicy policy;
++    @Inject AiServiceManager manager;
++    @MockBean(AiServiceManager.class)
++    AiServiceManager manager() {
++        var service = mock(AiServiceInterface.class);
++        when(service.displayName()).thenReturn("Test provider");
++        var manager = mock(AiServiceManager.class);
++        when(manager.getAllAiServices()).thenReturn(Map.of("test-provider", service));
++        when(manager.getDefaultProviderId()).thenReturn("test-provider");
++        when(manager.hasConfiguredProvider()).thenReturn(true);
++        return manager;
++    }
++    @BeforeEach void reset() { policy.allowed.set(true); clearInvocations(manager); }
++    @Test void aiReadAloneAllowsOnlyThePublicProviderFields() throws Exception {
++        var response = send("GET", "/api/v1/main/ai/providers");
++        assertThat(response.statusCode()).isEqualTo(200);
++        var json = JacksonMapper.ofJson().readTree(response.body());
++        assertThat(json.size()).isEqualTo(1);
++        assertThat(json.get(0).properties().stream().map(Map.Entry::getKey).toList())
++            .containsExactlyInAnyOrder("id", "displayName", "isDefault");
++        assertThat(json.get(0).path("id").asText()).isEqualTo("test-provider");
++        assertThat(json.get(0).path("displayName").asText()).isEqualTo("Test provider");
++        assertThat(json.get(0).path("isDefault").asBoolean()).isTrue();
++        verify(manager).getAllAiServices();
++    }
++    @Test void zeroAiPermissionDeniesBeforeReadingProviderConfiguration() throws Exception {
++        policy.allowed.set(false);
++        assertThat(send("GET", "/api/v1/main/ai/providers").statusCode()).isEqualTo(403);
++        verify(manager, never()).getAllAiServices();
++    }
++    @Test void unknownMethodsAndLegacyGenerationDoNotGainPermission() throws Exception {
++        for (String method : List.of("POST", "PUT", "DELETE", "HEAD"))
++            assertThat(send(method, "/api/v1/main/ai/providers").statusCode()).isBetween(400, 499);
++        assertThat(send("POST", "/api/v1/main/ai/generate/flow").statusCode()).isEqualTo(403);
++        verify(manager, never()).getAllAiServices();
++        verify(manager, never()).getAiService(any());
++    }
++    private HttpResponse<String> send(String method, String path) throws Exception {
++        return HttpClient.newHttpClient().send(HttpRequest.newBuilder(server.getURI().resolve(path))
++            .header("X-AI-Providers-Test", "alice").header("Content-Type", "application/json")
++            .method(method, method.equals("POST") ? HttpRequest.BodyPublishers.ofString("{}") : HttpRequest.BodyPublishers.noBody())
++            .build(), HttpResponse.BodyHandlers.ofString());
++    }
++    @Singleton @Requires(property="ai.providers.http.probe", value="true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            return "alice".equals(request.getHeaders().get("X-AI-Providers-Test"))
++                ? Mono.just(Authentication.build("alice", List.of())) : Mono.empty();
++        }
++    }
++    @Singleton @Requires(property="ai.providers.http.probe", value="true")
++    static class ProbePolicy implements AuthorizationEvaluationProviderV1 {
++        final AtomicBoolean allowed = new AtomicBoolean(true);
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    return CompletableFuture.completedFuture(allowed.get() && "alice".equals(principal.subject())
++                        && "main".equals(tenant) && operation.resource()==Resource.AI && operation.action()==Action.READ
++                        ? Decision.allow(operation.queryDomain()) : Decision.deny("Test policy denied"));
++                }
++                public CompletionStage<Void> close() { return CompletableFuture.completedFuture(null); }
++            });
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersNativeHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersNativeHttpTest.java
+new file mode 100644
+index 0000000..258adc9
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersNativeHttpTest.java
+@@ -0,0 +1,91 @@
++package io.kestra.webserver.rbac;
++
++import java.net.http.*;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicBoolean;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.serializers.JacksonMapper;
++import io.kestra.webserver.services.ai.*;
++import io.micronaut.context.annotation.*;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import io.micronaut.test.annotation.MockBean;
++import jakarta.inject.*;
++import org.junit.jupiter.api.*;
++import reactor.core.publisher.Mono;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "false")
++@Property(name = "kestra.rbac.typed.enabled", value = "false")
++@Property(name = "kestra.rbac.evaluation.enabled", value = "false")
++@Property(name = "kestra.rbac.application-groups.enabled", value = "false")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAuthenticated()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "ai.providers.native.http.probe", value = "true")
++@Property(name = "datasources.h2.url", value = "jdbc:h2:mem:ai_providers_native_http_${random.uuid};LOCK_TIMEOUT=30000;TIME ZONE=UTC;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE")
++@Property(name = "kestra.ai.agent.model-call-timeout", value = "PT20S")
++class AiProvidersNativeHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject ProbePolicy policy;
++    @Inject AiServiceManager manager;
++    @MockBean(AiServiceManager.class)
++    AiServiceManager manager() {
++        var service = mock(AiServiceInterface.class);
++        when(service.displayName()).thenReturn("Test provider");
++        var manager = mock(AiServiceManager.class);
++        when(manager.getAllAiServices()).thenReturn(Map.of("test-provider", service));
++        when(manager.getDefaultProviderId()).thenReturn("test-provider");
++        when(manager.hasConfiguredProvider()).thenReturn(true);
++        return manager;
++    }
++    @BeforeEach void reset() { policy.allowed.set(true); clearInvocations(manager); }
++    @Test void modeAKeepsTheNativeProviderRouteWithoutAiPermission() throws Exception {
++        policy.allowed.set(false);
++        var response = send("GET", "/api/v1/main/ai/providers");
++        assertThat(response.statusCode()).isEqualTo(200);
++        var json = JacksonMapper.ofJson().readTree(response.body());
++        assertThat(json.size()).isEqualTo(1);
++        assertThat(json.get(0).properties().stream().map(Map.Entry::getKey).toList())
++            .containsExactlyInAnyOrder("id", "displayName", "isDefault");
++        assertThat(json.get(0).path("id").asText()).isEqualTo("test-provider");
++        assertThat(json.get(0).path("displayName").asText()).isEqualTo("Test provider");
++        assertThat(json.get(0).path("isDefault").asBoolean()).isTrue();
++        verify(manager).getAllAiServices();
++    }
++    private HttpResponse<String> send(String method, String path) throws Exception {
++        return HttpClient.newHttpClient().send(HttpRequest.newBuilder(server.getURI().resolve(path))
++            .header("X-AI-Providers-Test", "alice").header("Content-Type", "application/json")
++            .method(method, method.equals("POST") ? HttpRequest.BodyPublishers.ofString("{}") : HttpRequest.BodyPublishers.noBody())
++            .build(), HttpResponse.BodyHandlers.ofString());
++    }
++    @Singleton @Requires(property="ai.providers.native.http.probe", value="true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            return "alice".equals(request.getHeaders().get("X-AI-Providers-Test"))
++                ? Mono.just(Authentication.build("alice", List.of())) : Mono.empty();
++        }
++    }
++    @Singleton @Requires(property="ai.providers.native.http.probe", value="true")
++    static class ProbePolicy implements AuthorizationEvaluationProviderV1 {
++        final AtomicBoolean allowed = new AtomicBoolean(true);
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    return CompletableFuture.completedFuture(allowed.get() && "alice".equals(principal.subject())
++                        && "main".equals(tenant) && operation.resource()==Resource.AI && operation.action()==Action.READ
++                        ? Decision.allow(operation.queryDomain()) : Decision.deny("Test policy denied"));
++                }
++                public CompletionStage<Void> close() { return CompletableFuture.completedFuture(null); }
++            });
++        }
++    }
++}

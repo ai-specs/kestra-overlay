@@ -1,3 +1,10 @@
+2026-11-17 R-EE-RBAC / REQ-0400（入口 B 补充已接收，未发布）：
+消费 ai-specs/kestra-plugin-rbac；正式 4891c3d 模式 B 原生 providers 返回 403，页面
+无法装载输入框。归属既有 S2/S6/S8 和 REQ-0399 AI 入口契约；新增 0400 只适配精确
+AiController.getProviders 固定 main GET 到 AI.READ，不新增业务能力或 SYSTEM 许可。
+其他 AiController 请求失败关闭，模式 A 保留原生行为。独立 typed/HTTP 红绿与后续
+CI、镜像、插件正式消费及根仓组合门见 r-ee-rbac.md REQ-0400。
+
 2026-11-15 R-EE-RBAC / REQ-0399 AI身份与异步工具授权（入口B已接收，未发布）：
 消费ai-specs/kestra-plugin-rbac；当前54补丁原生线程归属两项有效红例已取得。
 复用S2/S6/S8及既有TypedAuthorizationGate；宿主解析原生工具实际资源，插件保留

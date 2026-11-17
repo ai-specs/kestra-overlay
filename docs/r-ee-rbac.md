@@ -1550,6 +1550,21 @@ REQ-0396描述为未发布当前状态。
 
 ## REQ-0399：AI 用户身份与异步工具授权（2026-11-15，入口B已接收，未发布）
 
+2026-11-17生产组合补充提案（主控已接收；补充契约未发布）：消费方仍为
+`kestra-plugin-rbac`。正式宿主`4891c3d`及插件`2b7b433`下，普通账号显式拥有租户
+`AI.READ/EXECUTE`，原生AI页面却在GET `/api/v1/main/ai/providers`返回403后无法装载
+composer；Ego证据为根仓忽略目录`.work/stream-authorization-ai/ego-ai-stage-1794878944613/report.json`。
+原因是固定main路径的`AiController.getProviders`没有tenant路径变量，也没有明确typed操作计划，
+现有默认行政分派不能由普通AI授权满足。不得添加SYSTEM或管理权限来绕过该缺口。
+
+最小接收面：仅精确已知`AiController.getProviders`固定main路径映射到租户`AI.READ`，
+同时校验实际GET方法及公开路由。provider列表只含既有id/displayName/isDefault，不能泄露配置
+或密钥，不授予模型执行或业务资源读取权限。其他AiController方法（包括旧generateFlow）
+不因该规则放行；未知路径、方法、handler及非main租户失败关闭。模式A关闭RBAC保持原生路径。
+独立宿主测试须真实HTTP验证AI.READ允许、零AI拒绝、未知方法拒绝及无密钥响应，并保留
+既有AI授权回归。先本地相关门、宿主CI与正式镜像，再由插件消费正式输入独立发布，最后
+根仓重新执行模式A/B生产UI；本提案不代表新版本已发布或组合验收通过。
+
 消费项目：`ai-specs/kestra-plugin-rbac`；组合验收由根部署仓负责。
 维护者要求补齐SA-06并同时兼容模式A/B，不将未激活能力当作全部交付。
 
@@ -1601,3 +1616,77 @@ core3及UI130全部通过；镜像classpath、OIDC35、MCP四份XML各1且零ski
 `.work/stream-authorization-ai/full-local-ci-entry-02-evidence/`。模式A无插件Ego候选
 已实际生产登录、发送文本和点击Stop，线程IDLE/CANCELLED与模型断连读回；该预检
 不替代正式版本根仓矩阵。正式CI/镜像推广、插件消费与生产组合仍待执行。
+
+
+## REQ-0400：原生 AI provider 列表授权（2026-11-17，本地候选，未发布）
+
+承接 REQ-0399 下已接收的生产补充提案。消费项目为 `ai-specs/kestra-plugin-rbac`。
+[src] 已独立读取根仓 `ego-ai-stage-1794878944613/report.json`，确认同一 GET providers
+在模式 A 为 200、模式 B 为 403。主控报告普通主体已有租户 AI.READ/EXECUTE。
+本轮不读取插件内部策略，不将其构建为宿主输入。
+
+独立红例：`providers-red.log` 及 `providers-fix-20261117/red-xml/`。解析允许例得到空
+计划，未知方法带 main 变量得到 SYSTEM.EXECUTE；真实 HTTP 仅授 AI.READ 返回 403。
+以上为实际断言失败，不是编译或初始化失败。新 0400 不修改已发布 0399；生产改动为
+OssRestOperationAdapter 中精确识别固定 main GET providers 的 7 行，生成既有租户
+AI.READ。其他 AiController handler、路径、方法或非 main 租户无计划并拒绝。
+不授予 SYSTEM/BUSINESS_INSTANCE，不扩展旧 generateFlow 或模型执行。
+
+新增 AiProvidersOperationTest 两项、AiProvidersHttpTest 三项、AiProvidersNativeHttpTest
+一项。真实 HTTP 仅 AI.READ 允许并精确断言三个响应字段；零 AI 权限拒绝且未读取
+provider 配置；未知方法及旧生成入口不调用 provider 服务。模式 A 关闭三个 RBAC
+开关，策略即使拒绝仍保持原生 providers 200。测试配置初次只关闭 RBAC 而仍开启
+evaluation 导致启动 500，该错误已修正并单列保留，不能作为产品红例。
+
+复现命令（在开发树，JAVA_HOME 指向 JDK 25）：
+`./gradlew :webserver:test --tests 'io.kestra.webserver.rbac.Ai*' --tests io.kestra.webserver.controllers.api.AiAgentControllerTest --tests io.kestra.webserver.controllers.api.AiOutputLifecycleTest --tests io.kestra.webserver.controllers.api.AiTurnSchedulingTest --tests io.kestra.webserver.services.ai.agent.AiModeLifecycleTest --tests io.kestra.webserver.services.ai.agent.tool.ToolCatalogTest --console=plain`。
+本轮该组 93 项全通过、失败/错误/跳过均为零，XML 留在 owner 目录。Node 命令
+`node --test scripts/rbac-ui-probe/sdk-canonical.test.mjs scripts/rbac-ui-probe/sdk-evidence.test.mjs scripts/rbac-ui-probe/sdk-theme.test.mjs`
+为 7 项全通过。检查脚本新增 2/3/1 精确数量，不减少旧组或放宽失败/跳过要求。
+
+当前状态以本节下方的完整检查点和最终汇总为准；剩余正式门为主控审查、对应提交
+CI 与镜像推广、插件正式输入独立发布，最后由根部署仓重跑生产模式 A/B。不得以
+源码或本地通过宣称正式交付。owner 为 `ai-provider-fix-20261117`；原证据与用户备份
+均保留，独立验证树位于 `.work/stream-authorization-ai/providers-fix-20261117/verify`。
+
+
+REQ-0400 本轮完整本地验证（2026-11-17，未发布）：独立 owner 验证树运行原
+`WORK=<owner>/verify KESTRA_TEST_RESOURCE_OWNER=ai-provider-fix-20261117 ./scripts/local-ci.sh`
+通过。后端 586 项中 584 通过、零失败/错误、2 项原镜像专用跳过；core 3/3、UI 130/130，
+翻译、executable、Class-Path 和零扩展 jar 检查通过。既有两项跳过另由镜像 MCP 四份
+XML 各 1 项、零失败/错误/跳过覆盖，不把跳过计为通过。`./scripts/check-patches.sh` 结构门 15/0；
+`./scripts/check-patches.sh --apply-check <owner>/replay` 在独立干净 BASE 上顺序应用
+56/56，含应用检查共 17/0；全部补丁触达的 387 文件与 dev/verify/replay 字节一致。
+
+候选仅在本机 arm64 构建，镜像 ID 为
+`sha256:83c8a39da0600c8d358f47506f4312fc23a15ad30d5d24e2a9b90d9aa7e76644`；
+实际从镜像提取的 executable 与 staged 产物一致，SHA-256 为
+`d380949df3d5159c9a066ee625fd9aa43468a823ab6a03b461bd68aa0fc02044`。
+classpath、OIDC 35、MCP 四 XML、form/env 完整脚本、geometry 64、onboarding 21 和
+recovery 4 已通过。onboarding/recovery 是宿主自有 HTTP 替身浏览器门，不是部署组合
+生产验收。form/env 原样脚本复制 116 文件 SHA 一致；12 份不同认证 JSON 加 8 份浏览器
+JSON 已本地归档。env 目录还保留 6 份 form 报告副本，不重复计数。浏览器子脚本曾按
+进程工作目录写入共享 `.work/`；已复制本轮 8 份到 owner，旧 candidate-entry 证据仍保留。
+该路径限制单列记录，不宣称首次报告写入完全隔离。原脚本和全部断言均未修改。
+
+SDK 原完整 949 首次执行为 948 通过、1 失败、零未运行，失败 ID 为
+`preferences/system/de/768/drawer-1`，原报告、PNG、日志和 SHA 保留。`pmset -g log`
+实际记录 10:55:49 Maintenance Sleep、11:02:13 唤醒；失败用例墙钟 10:55:51 至
+11:02:13，和该休眠区间吻合。原 until 用 Date.now 的 15 秒期限；唤醒时最后谓词样本
+仍在入场位置，随后 catch 快照仍有一项运行动画，之后截图抽屉已显示。不能据单一
+截图把该例计为通过，也不能据定向重跑删除完整失败。当前和旧镜像 SDK 的同配置
+六项原断言诊断各 6/6；18 源文件 hash、buildId、CSS hash、矩阵 SHA 与旧成功输入
+一致。旧镜像重建 dist 有 4 个路径/输出差异，不能宣称全部旧运行产物完全相同。
+主控据系统证据授权一次原 949 完整重跑，冻结 source/dist，使用 caffeinate 防空闲
+休眠并记录墙钟及 monotonic 调度间隔；不增加等待时间，不改共享断言或 UI 产品源码。
+重跑最终为 949/949、失败/跳过/未运行均为零，原具名 ID 顺序完全一致。调度监测
+的 992 个间隔中，最大墙钟 1121 毫秒、最大 monotonic
+1120.827 毫秒；进程退出 0。冻结 source 18 文件、dist 444 文件与首轮及几何
+输入保持一致。详细状态见 owner 的 stage-summary.json 和 sdk-end-audit.json。
+
+错误检查点单列：首次完整门是 operatorInvalidation，主动 SIGTERM 导致 Test Executor
+退出 143，不是产品红例；onboarding 首次缺 GITHUB_WORKSPACE 在输入收集期 EISDIR，
+未进入测试，修正后 21/21 独立记录。真实 provider 红例仍为最初的解析/HTTP 三失败。
+全部证据位于 `.work/stream-authorization-ai/providers-fix-20261117/`，本地配置、原始
+日志和 executable 不上传；公开报告必须按显式白名单审核。未提交、推送、触发正式
+CI 或推广；正式交付仍待主控审查、对应提交 CI/镜像发布及插件、根部署仓的顺序验收。

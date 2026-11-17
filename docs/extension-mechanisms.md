@@ -1,5 +1,24 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## 原生 AI provider 固定租户授权适配（2026-11-17，REQ-0400，未发布）
+
+[src] 固定 BASE 的 AiController 路由为 `/api/v1/main/ai`，getProviders 没有 tenant
+路径变量。原 OssRestOperationAdapter 在控制器分派前拒绝缺少 tenant 的请求；手工
+添加 main 变量又会落到 SYSTEM 行政兜底。0400 在这两处之前精确检查完整控制器名、
+getProviders、GET、规范 `/api/v1/main/ai/providers` 和不存在或为 main 的 tenant 变量，
+生成 REST / AI.READ / main / SINGLE / READ_ONLY；namespace 和 resourceId 均为空。
+其余 AiController 请求直接返回空计划，包括旧 generateFlow，不增加行政绕过。
+TypedRestRbacFilter 沿用既有真实 HTTP 主体、短评估及失败关闭。关闭 RBAC 的模式 A
+不进入此授权分支。provider DTO 仍由上游生成，仅有 id/displayName/isDefault；插件
+只消费原有公开 Operation，不解析控制器或路由。上游升级须重新核对此精确路由。
+
+本地红例同时证明缺少计划、未知入口行政兜底和真实 HTTP 403；新增两项解析、三项
+模式 B HTTP、一项模式 A HTTP，检查脚本分别要求 2/3/1 且零失败、错误或跳过。
+定向 93 项全绿，完整 local-ci 后端 584 通过加 2 镜像专用跳过、core 3、UI 130
+通过；镜像门、几何 64、首装 21、恢复 4 和原 SDK949 完整重跑通过，首轮休眠中断
+失败保留，详见能力文档。正式 CI、镜像发布及部署组合
+仍待执行，不以此候选作为独立插件的正式编译输入。详见 r-ee-rbac.md REQ-0400。
+
 ## 本地 OIDC 认证回退边界（2026-11-04，候选未发布）
 
 Micronaut Security 4.15.2在JWT验证失败后使用userinfo远程验证同一token；内置issuer
