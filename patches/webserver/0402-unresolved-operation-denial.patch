@@ -1,0 +1,77 @@
+# 需求: REQ-0402 未知操作和SYSTEM失败关闭，移除行政兜底
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；维护者2026-11-18接收的宿主公开契约修复，不含插件业务模型
+# 触达上游文件: 4 个
+# 移除条件: 上游提供等价未解析操作失败关闭机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+index b40b32a..6ca33b0 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
+@@ -289,8 +289,7 @@ extension(Request request, String tenant) {
+ 
+     private List<Operation>
+  administrative(String tenant) {
+-        return List.of(new Operation(CONTRACT_VERSION, Source.REST, Resource.SYSTEM, Action.EXECUTE, tenant, null, null,
+-            QueryDomain.unrestricted(), Coverage.COMPLETE_BATCH, Aggregate.NONE, SideEffect.EXTERNAL));
++        return List.of();
+     }
+ 
+     private List<Operation> single(Resource resource, Action action, String tenant, String namespace, String id) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+index 0fa1d3e..7970325 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+@@ -48,7 +48,7 @@ public final class TypedAuthorizationGate {
+                 io.kestra.core.repositories.AuthorizationEvaluationContext.capture(context), Mono.fromFuture(stage.toCompletableFuture(), true)))
+                 .map(decision -> {
+                     if (decision.contractVersion() != CONTRACT_VERSION) return Decision.deny("Unsupported policy version");
+-                    if (!decision.allowed()) return Decision.deny(decision.reason());
++                    if (!decision.allowed() || operation.resource() == Resource.SYSTEM) return Decision.deny(decision.reason());
+                     QueryDomain effective = operation.queryDomain().intersect(decision.scope());
+                     if (operation.namespace() == null && effective.structuredDomain() != null
+                         && (operation.coverage() == Coverage.SINGLE || operation.resource() == Resource.AI || operation.resource() == Resource.METADATA || operation.resource() == Resource.MCP_SERVER)
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
+index 85ebe09..6832119 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
+@@ -56,10 +56,8 @@ class OssRestOperationAdapterTest {
+         assertThat(list.coverage()).isEqualTo(Coverage.COMPLETE_QUERY);
+         assertThat(list.queryDomain().contains("team")).isTrue();
+         assertThat(list.queryDomain().contains("team.child")).isFalse();
+-        var unknown = adapter.resolve(request("FutureController", "unknownMutation", "POST", Map.of("tenant", "main"), "", Map.of())).getFirst();
+-        assertThat(unknown.resource()).isEqualTo(Resource.SYSTEM);
+-        assertThat(unknown.coverage()).isEqualTo(Coverage.COMPLETE_BATCH);
+-        assertThat(unknown.sideEffect()).isEqualTo(SideEffect.EXTERNAL);
++        assertThat(adapter.resolve(request("FutureController", "unknownMutation", "POST", Map.of("tenant", "main"), "", Map.of()))).isEmpty();
++        assertThat(adapter.resolve(request("FlowController", "unknownImport", "POST", Map.of("tenant", "main"), "", Map.of()))).isEmpty();
+         assertThat(adapter.resolve(request("FlowController", "getFlow", "GET", Map.of("tenant", "other", "namespace", "team", "id", "flow"), "", Map.of()))).isEmpty();
+         assertThat(adapter.resolve(request("PluginController", "getPluginIcons", "GET", Map.of(), "", Map.of())).getFirst().resource())
+             .isEqualTo(Resource.METADATA);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/UnresolvedOperationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/UnresolvedOperationTest.java
+new file mode 100644
+index 0000000..6e577fb
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/UnresolvedOperationTest.java
+@@ -0,0 +1,21 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import io.micronaut.context.BeanProvider;
++import org.junit.jupiter.api.Test;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.*;
++
++class UnresolvedOperationTest {
++    @Test void deniesSystemEvenWhenProviderAllowsEverything() {
++        BeanProvider<TypedAuthorizationResolver> policies=mock(BeanProvider.class);
++        when(policies.isUnique()).thenReturn(true);
++        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted())));
++        var gate=new TypedAuthorizationGate(policies);
++        var principal=new RbacAuthorizer.Principal("subject",List.of(),null,null,List.of());
++        assertThat(gate.authorize(principal,new Operation(CONTRACT_VERSION,Source.REST,Resource.SYSTEM,Action.EXECUTE,"main",null,null,
++            QueryDomain.unrestricted(),Coverage.COMPLETE_BATCH,Aggregate.NONE,SideEffect.EXTERNAL)).block().allowed()).isFalse();
++    }
++}

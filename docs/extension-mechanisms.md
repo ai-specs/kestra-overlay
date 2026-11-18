@@ -1,5 +1,38 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## namespace 补集与特殊功能分类（2026-11-18，本地门通过，未正式发布）
+
+0401/0402候选已通过本地完整localCI、classpath、OIDC35、MCP、form/env（各含
+dependency503七项）、SDK949及geometry64。后端597项为595通过和2项原镜像专项
+assume；core3、UI130通过。SDK949唯一具名ID、零失败/未运行和输入hash已核对。
+58补丁重放与dev的391个触达文件一致，正式CI、发布及真实插件组合仍待执行。
+V2不兼容旧插件二进制，必须重新编译和验证；普通bulk/import等未适配操作仍拒绝，
+不能计为正常功能已支持。独立特殊功能标识留待后续裁决，本批没有新增泛FEATURE。
+
+本节记录宿主机制与候选验证，完整裁决与独立测试见
+[R-EE-RBAC](r-ee-rbac.md#2026-11-18-namespace-补集与未解析操作收窄提案)。
+它取代本文历史未知控制器 SYSTEM 门可作为授权兜底的建议，不声称现有代码已改变。
+正式输入 `sha256:dd40ed1149ac322fa175055481100e70d01c345c11d67eabc4f5ee2f5e28379b`
+的 resolver 对未知非扩展 controller 和 Flow 未识别 handler 生成相同 SYSTEM.EXECUTE，
+没有功能标识；现有 QueryDomain 排除仅按精确名称匹配。可对正式产物使用 `javap -c -p`
+检查 OssRestOperationAdapter、TypedAuthorization$QueryDomain 与其 ResourceDomain。
+
+最小演进沿用 typed gate、评估生命周期、namespace/log ACL 与实际 repository 激活点。
+版本化域以 DNF term 并集保存，每项独立关联 namespace 包含域、精确/子树排除域与 IDs；
+并集不得跨项合并 exclusions。交集逐项笛卡尔配对，包含求交、排除求并、IDs 求交，
+超过公开复杂度上限则在业务执行前拒绝。namespace GLOBAL 仅为当前 tenant 内具体
+namespace 宇宙，不含 null，也不是 TENANT 资源；TENANT 不能携带 namespace 选择器。
+宿主只接结构化域，不解析感叹号语法。补集是该项的允许范围，不是全局 deny，独立正向
+项继续有效。SQL 以 OR 连接 term，每项包含、排除、IDs 同时约束，tenant 强制约束所有项。
+所有查询、统计、分页和单资源授权必须保留相关性，不支持的域明确拒绝。
+
+未知操作不得再产生可授予的 SYSTEM 兜底；批量/导入先解析全部实际资源再执行完整授权。
+真正与 tenant/namespace 数据范围无关的特殊功能使用显式稳定 featureId/action，走
+可信身份和评估边界，逐项登记与授权，未知标识拒绝。普通数据子操作仍单独授权，不能
+通过特殊功能许可扩大范围。旧 V1 精确排除不改变含义；新域须显式版本兼容检查，不能
+丢弃字段降级。宿主独立 provider/SQL/log/HTTP 探针先通过并发布，扩展后消费；真实双账号
+登录、保存与拒绝副作用由部署仓验证。本次仅文档提案，不运行或替代上述门。
+
 ## 原生 AI provider 固定租户授权适配（2026-11-17，REQ-0400，未发布）
 
 [src] 固定 BASE 的 AiController 路由为 `/api/v1/main/ai`，getProviders 没有 tenant

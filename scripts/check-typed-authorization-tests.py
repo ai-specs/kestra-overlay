@@ -35,7 +35,9 @@ for suite, expected in {
     "PublicFaviconTest": 5,
     "RbacActivationTest": 8,
     "TypedAuthorizationContractTest": 6,
-    "TypedAuthorizationGateTest": 2,
+    "TypedAuthorizationGateTest": 5,
+    "UnresolvedOperationTest": 1,
+    "NamespaceDomainV2Test": 6,
     "OssRestOperationAdapterTest": 4,
     "TypedQueryDomainsTest": 1,
     "TypedDashboardGateTest": 1,
@@ -93,11 +95,11 @@ if int(mcp_evaluation.attrib["tests"]) != 3 or any(
 print("PASS: McpEvaluationLifecycleTest: 3 tests executed, no failures or skips")
 
 dynamic_tools = ET.parse(results / "TEST-io.kestra.mcp.McpDynamicToolListTest.xml").getroot()
-if int(dynamic_tools.attrib["tests"]) != 4 or any(
+if int(dynamic_tools.attrib["tests"]) != 5 or any(
     int(dynamic_tools.attrib.get(status, "0")) for status in ("failures", "errors", "skipped")
 ):
-    raise SystemExit("FAIL: McpDynamicToolListTest must execute 4 tests without failures or skips")
-print("PASS: McpDynamicToolListTest: 4 tests executed, no failures or skips")
+    raise SystemExit("FAIL: McpDynamicToolListTest must execute 5 tests without failures or skips")
+print("PASS: McpDynamicToolListTest: 5 tests executed, no failures or skips")
 
 for suite, expected in {"UiExtensionRegistryTest": 5, "UiExtensionControllerTest": 4, "UiExtensionHttpTest": 1}.items():
     report = ET.parse(results / f"TEST-io.kestra.webserver.ui.{suite}.xml").getroot()

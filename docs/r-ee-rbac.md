@@ -1,5 +1,187 @@
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
+## 2026-11-18 namespace 补集与未解析操作收窄提案
+
+### 2026-11-18 消费者审计与特殊功能调查（源码候选，未发布）
+
+当前候选为 REQ-0401（19 文件，域代数和相关执行）与 REQ-0402（4 文件，未知操作拒绝）。
+原完整相关包执行 296 项全部通过；随后新增 namespace 合成候选、H2 拓扑双端、
+ChartDataService 分子/分母 H2 count 与 unsupported-ID REST 403/零业务调用专项。
+最终 namespace-scoped COMPLETE_QUERY 保留相关 IDs，标量和创建空 ID 仍要求 ALL_IDS；
+构造时请求域外 namespace 与 gate 策略拒绝分别测试，不能合并为同一拒绝阶段。
+最终源码另有定向报告，不能将不同轮报告拼成一次完整执行。本次完整 localCI 已运行：
+后端597项（595通过、0失败、2项原镜像专项 assume）、core3、UI130通过，真实单例
+PostgreSQL 已执行并自动清理；classpath H2、OIDC35、MCP、form/env及geometry64
+候选镜像门通过，SDK949最终949项全部通过，具名ID唯一、零失败/未运行且source hash
+复核一致。部署组合、正式CI和发布未执行，本候选不能作为插件编译输入。
+0260 仅重新生成 JDBC 单个 diff 段，将 Field 声明移到 scope 声明之前，避免新增补丁
+与既有插入边界重叠；其他文件段保持原字节，不修改 checker。0401/0402 均从 Git
+中间树生成，58 个 patch 在独立 verify 顺序重放后与冻结 dev 树字节一致。
+
+本轮使用 BASE `172dd0f3760fb1255d3b22bd1fd07ce31b173fa3` 顺序应用既有补丁，
+在独占开发树调查。下表区分执行入口与验证状态；源码接通不能代替正式 CI 或组合验收。
+
+| 消费者与具体方法 | 域执行方式 | 正反例与限制 |
+| --- | --- | --- |
+| `AbstractJdbcRepository.aclCondition(Resource,String)` | 优先 structuredDomain，逐 term OR，项内包含/排除/IDs | H2 分页、总数、聚合和相关 IDs；非 FLOW/EXECUTION 受限 IDs 明确拒绝，不计支持 |
+| `AbstractJdbcFlowRepository.singleReadFilter`、execution repository | 精确读调用 resourceReadAllowed，查询走统一 JDBC 条件 | Flow 详情 IDs、范围外拒绝；执行 owner 仍由宿主解析 |
+| `AbstractJdbcLogDataStore.aclCondition` | 独立日志 structuredDomain，复用 SQL term 编译 | H2 子树补集、带下划线根与前缀碰撞；受限 IDs 不支持并在 gate 拒绝 |
+| `TypedNamespaceAccessControl.domain/resourceReadAllowed/namespaceAllowed` | 短评估取得 QueryDomain，实际谓词使用 effectiveDomain | 单资源关联 ID 与 namespace；旧 AccessScope 只作可表达的投影，不能携带补集 |
+| `NamespaceController.getNamespaces/searchNamespaces/autocompleteNamespaces` | namespaceAllowed 过滤合成、强制及 system 候选，先过滤再分页 | 既有合成候选/分页门；新增真实 controller 补集 company/company.sub 拒绝、company2/outside 允许 |
+| `AbstractJdbcFlowTopologyRepository`、`GraphService` 展开子流程 | 拓扑两端 JDBC ACL，展开 owner 经 namespaceAllowed | 既有展开拒绝回归；新增 H2 双端补集只保留两端均允许的边 |
+| KV 与 namespace-file metadata store | JDBC 查询入口；验证 facade 保留原评估上下文 | 不支持相关 ID 查询时拒绝；不能宣称全部 KV/file 查询支持 ID 限制 |
+| `TypedDashboardGate`、`ChartDataService.fetchData/fetchValue` | datasource 操作与请求域求交，repository 执行 structured term | 新增 ChartDataService KPI 分子/分母分别执行 H2 count，补集排除 company 子树并保留 outside/company2，结果50%；生产 dashboard 仍归部署验收 |
+| `FiniteBodyAuthorization`、SSE 授权 helper | 正文订阅/逐记录新评估保留实际查询域 | 既有 CSV/SSE 回归；流式运行产物未验收 |
+| `TypedTenantResourceAccessControl.domain` | MCP_SERVER TENANT term IDs，不能借 namespace GLOBAL | MCP_SERVER/METADATA/AI gate 正例与 mixed 拒绝；租户 SQL 正常门仍须发布前核对 |
+| `AiToolAuthorization.scoped` | 每个实际 namespace/ID 调用 resourceAllowed | 旧 ID 空值判断已迁移；AI 工具包仍须完整回归 |
+| `McpToolService.fetchFlowWithMcpToolTrigger/visibleToolSpecs` | findWithNoAcl 获取候选；同一次 capabilities.evaluation 内逐 Flow readable 进入 V2 scalar gate | 默认旧 GLOBAL 上界下测试 company.sub 同 namespace 两 ID、补集、company2、协议 scope 与 tenant 错误；不是 repository ACL 过滤 |
+| `McpToolService.buildCallHandler`、`McpCapabilityGate.execute/preflight/outputs` | 旧独立 AccessScope 上界后，typed READ/EXECUTE/CREATE/输出及依赖逐项授权 | list 允许不授执行；保留协议 scope、可信上下文与运行时门；真实执行拒绝专项需另核对 |
+| `McpToolScope`、`McpServerHandlerTransport` | 保留既有独立 AccessScope 上界与身份/协议缓存隔离，动态 list 每请求重算 typed READ | 未新增结构化 MCP SPI；默认 GLOBAL 不替代 typed 决策；旧空 IDs 按 AccessScope.resourceAllowed 的既有不限语义处理，V2 RESTRICTED_IDS 空集仍为空 |
+
+MCP 新 `executableDomain` SPI 调查已由主控拒绝：生产没有此需求，已有每 Flow typed gate
+可以执行补集和相关 IDs。调查差异仅保存在忽略的独占工作目录；四个 MCP 生产文件已按
+完整已应用 overlay 的 index 快照恢复，不从 BASE HEAD 恢复，不改变旧缓存协议。
+
+当前 BASE 的特殊功能分类建议如下，供主控逐项裁决，不预授未知路径：
+
+| 实际 controller/handler | 已有分类或实际缺口 | 最小后续方案 |
+| --- | --- | --- |
+| `PluginController.installPlugins/getInstallJob/detectMissingPlugins` | 安装发起与 job 查询没有明确稳定许可；detect 需进一步核对是否纯分析 | 候选有限插件安装功能与独立读/执行动作；先审查实际副作用和 job 归属，不新增泛 FEATURE |
+| Plugin schemas/properties/inputs/list/icons/documentation/UI | 现有 METADATA READ | 继续复用，不因插件安装需求扩大 METADATA |
+| `MiscController.getConfiguration/getExpressionFilters/getExpressionFunctions` | METADATA READ；配置 API 为读取 | 复用；没有证据支持新增“服务配置写”功能 |
+| `MiscController.getUsages` | FLOW/EXECUTION 查询与统计 | 必须执行数据域，不是特殊功能 |
+| `McpServerController.listMcps/getMcp/createMcp/updateMcp/toggleMcp/deleteMcp` | 明确 MCP_SERVER tenant 配置操作 | 复用 tenant typed 声明，不创建特殊功能 |
+| AI providers/agent thread/chat/confirm、实际工具 | AI.READ/EXECUTE 与业务子操作 | 复用；功能许可不能绕过工具数据域 |
+| `FlowController.updateFlowsInNamespace/bulkUpdateFlows/importFlows`、source replace、delete/disable/enable by-query/by-ids | 普通数据批量，当前 adapter 未完整解析 | 单独最小批量 typed patch，先生成完整 namespace/ID/动作计划再产生副作用；本批保持拒绝 |
+| Trigger unlock/restart/backfill/set-disabled 的单项与 by-query/by-triggers | 普通 TRIGGER/EXECUTION 数据操作，现有 adapter 覆盖不足 | 按实际目标分类并补完整计划；不能作为 SYSTEM 或 feature |
+| Blueprint search/get/source/graph/tags | 资源读取，现有 adapter 覆盖不足 | 后续明确 BLUEPRINT/METADATA 分类；不是特殊功能 |
+| Dashboard preview/export | 实际 datasource 数据查询 | 复用 dashboard gate，不能用特殊功能扩大查询域 |
+
+未知 SYSTEM 拒绝是本批安全收窄；上表未适配正常操作仍属未完成能力，不将全拒绝计为支持。
+特殊功能标识清单尚未获主控批准，本批不新增 feature 类型、标识或泛 SYSTEM 许可。
+
+**裁决：入口 B/C 已接收；REQ-0401/0402 已完成本地实现与上述候选检查，尚未正式 CI 或发布。**
+本节取代下文关于“未知业务操作生成 SYSTEM/EXECUTE 并可由实例权限放行”的设计。
+下文保留接收时的目标约束；已实现的具体 Java 类型和限制以本仓 README 的 V2 候选
+契约为准。特殊功能与普通批量路径尚未实现，不在本次域机制通过范围内。
+
+### 消费行为、证据与现有机制不足
+
+消费项目为 `ai-specs/kestra-plugin-rbac`。部署仓主控已真实复现：默认首装账号可在
+`outside` 创建 Flow 和 KV；插件在普通数据声明之前按管理域放行，绕过原 namespace
+写范围。这一业务策略缺陷归插件修复。宿主必须同时补齐普通范围表达和未解析操作拒绝，
+否则收窄插件仍不能安全保留未知路径或表达动态 namespace 补集。
+
+主控已核对消费项目的正式产物 pin 与提取 provenance 均为镜像
+`sha256:dd40ed1149ac322fa175055481100e70d01c345c11d67eabc4f5ee2f5e28379b`。
+对该正式产物的 `OssRestOperationAdapter` 反汇编确认：未知非扩展 controller 与 Flow
+未知 handler 均调用 `administrative(tenant)`；它生成 `SYSTEM/EXECUTE`、namespace 和
+resourceId 均为空、GLOBAL 查询域、COMPLETE_BATCH、EXTERNAL。该 Operation 没有路由
+或功能标识，不能区分真正特殊功能与普通资源未适配的批量或导入路径。此处确认兜底机制，
+不声称已穷尽并真实执行全部 bulk/import HTTP handler。
+
+同一公开 QueryDomain 的 `contains` 和 ResourceDomain 的 `allows` 使用
+`excludedNamespaces.contains(namespace)`，只排除精确名称，不能排除整棵子树。
+现有 NamespaceAccessControl、JDBC/log ACL、typed gate 与评估生命周期应继续复用；
+OSS 查询钩子没有补全此代数，旧单一 namespace grant 或精确排除也不能枚举未来子空间。
+调查可复现入口为对固定正式 executable 中的 host-webserver.jar 执行
+`javap -c -p io.kestra.webserver.rbac.OssRestOperationAdapter`，并分别检查
+`TypedAuthorization$QueryDomain`、`TypedAuthorization$QueryDomain$ResourceDomain`。
+宿主接收和测试不得依赖部署仓反汇编文件或真实插件源码。
+
+### 结构化域与精确集合语义
+
+采用版本化的相关项析取范式（DNF）：域是有限个 term 的并集。每个 term 必须独立保存
+资源范围、namespace 包含域、namespace 排除域、ID 选择器。宿主只接结构化值，不解析
+`!company`、角色、scope 或任何插件语法。Java 类型与固定上限已在本批冻结，公开
+形状见 README 的 V2 候选契约；不得静默改变已发布 V1 构造器的含义。
+
+| 组成 | 目标契约 |
+| --- | --- |
+| 资源范围 | 显式区分 NAMESPACE 与 TENANT。namespace GLOBAL 仅表示当前已验证 tenant 内全部合法具体 namespace 的宇宙 U，不含 null，不跨 tenant；TENANT 表示没有 namespace 的租户资源，不是 U 的别名 |
+| 包含域 I | 显式 ALL_NAMESPACES，或精确名称集合与子树根集合的并集；空受限集合为空。子树包含自身及点分隔后代，不含相似前缀 |
+| 排除域 E | 精确名称集合与子树根集合的并集；每项仅约束所属 term。只允许 NAMESPACE term 使用 namespace 选择器 |
+| ID 选择器 J | 显式 ALL_IDS 或 RESTRICTED_IDS 集合；受限空集合为空，不能升级为全部。ID 与同一 term 的 I/E 绑定；不得把不同 term 的 namespace 与 IDs 做无条件交叉组合 |
+| term 谓词 | 对 NAMESPACE 资源，实际 tenant 必须匹配，具体 namespace n 属于 I 且不属于 E，实际资源 ID 属于 J；无 ID 的合法操作必须有单独定义的 ALL_IDS 规则，不能借 null 匹配受限 IDs |
+| TENANT term | 无 namespace 包含域或排除域；仅匹配已分类的无 namespace 租户资源及其 ID 规则。不得用 TENANT 代表 namespace GLOBAL，也不得用 GLOBAL 授予特殊功能 |
+
+域并集直接保留独立 term。不得跨 term 汇总排除项：合并排除会误拒，丢弃排除会泄漏。
+例如 `(U \\ subtree(company)) × {a}` 与 `subtree(company) × {b}` 并集，必须允许
+outside/a 与 company/b，拒绝 outside/b 与 company/a。另一条正向 company grant
+仍独立生效；补集不是全局 deny。新 namespace 按谓词即时判断，不在授权保存时枚举。
+消费方的 `!company` 且 `descendants=true` 必须翻译为 main 的 namespace 宇宙 U
+减去 company 自身及其点分隔后代；company2 保留。该例仅说明消费方预期集合，
+宿主不接收或解析感叹号字符串。
+
+交集对左右 term 做笛卡尔配对：资源范围与 tenant 必须一致；每对结果为
+`(I_left ∩ I_right) \\ (E_left ∪ E_right)`，IDs 为 `J_left ∩ J_right`。
+ALL 是各自宇宙中的恒等元，空结果丢弃；NAMESPACE 与 TENANT 配对为空。
+READ/LIST 或请求域与授权域的求交都使用此代数；调用方的策略组合仍归扩展。
+不得把顶层旧 exclusions 全局传播到互不相关的并集项。
+
+必须设置并公开有限复杂度上限，至少约束输入 term 数、每项选择器/ID 数、交集配对数
+和归一化后输出项数。本批固定 terms256、每项包含/排除各128、IDs256、配对4096。
+构造、求交或 SQL 编译
+超限必须在业务查询或副作用前明确拒绝；不得截断、丢弃排除、退回 GLOBAL 或只检查前几项。
+未知版本、非法 namespace、混用 TENANT 选择器、身份或 tenant 缺失同样失败关闭。
+
+### 实际执行、未解析操作与特殊功能
+
+所有查询执行器必须将相关 term 编译为 OR，每项内部为包含 AND NOT 排除 AND IDs；
+tenant 条件必须在所有 OR 项之外强制成立。子树条件为相等或点分隔后代，SQL 必须
+参数化并正确处理 LIKE 转义，不能用裸前缀或拼接用户文本。列表、total、分页、统计、
+聚合、日志、namespace 合成候选、dashboard 数据源与导出必须在读取结果前执行同一域。
+详情与实际写入/执行检查使用同一 namespace×ID 谓词，不得展平关联项或读取后过滤分页。
+不支持某资源 ID 条件或补集的执行器必须拒绝该域，不得近似为 namespace-only。
+
+未识别 controller、handler、数据源、资源归属和空/不完整批量计划必须拒绝；不得生成
+可被策略授予的通用 SYSTEM.EXECUTE。批量/导入必须先解析全部实际资源与动作，在第一项
+数据库、存储、队列或外部副作用前完成完整计划授权；不能完整解析则拒绝整个操作。
+后续运行时 gate 和可信身份、CSRF、MCP 能力范围、短期评估生命周期仍独立有效。
+
+真正特殊功能必须没有 tenant/namespace 数据范围语义，并由宿主显式登记稳定功能标识
+与明确动作。候选公开形状为独立、版本化的功能操作：`featureId + action + source`，
+使用现有可信身份与评估边界；不得拿 namespace GLOBAL、TENANT 或空 resourceId 代替。
+标识必须是宿主拥有的语义标识，不是 controller、handler、URL 或插件管理域。
+允许的 featureId/action 对必须在发布契约中逐项列明；本提案不预授任何功能，不保留
+“other”或通配功能。未知、重复、版本不符及未登记组合拒绝。若所谓特殊功能实际读写
+业务资源，必须改为相应 typed 数据操作，或将其子操作加入完整计划，不能借功能许可绕过。
+扩展决定各功能授予和撤销，不要求使用一个不可拆分管理许可。
+
+### 兼容、升级与双方职责
+
+旧精确排除必须继续保持精确含义；不得升级为子树排除。新补集不能降级传给旧 provider
+或执行器。新增公开版本须有明确能力协商和最低兼容版本；宿主或 provider 不支持必需
+语义时拒绝启用该组合，不得忽略新字段。旧 SYSTEM 兜底的撤除会收窄既有许可，未适配
+路由会被拒绝；发布说明须列出受影响操作、明确支持列表及迁移要求，不为兼容继续泛放行。
+
+overlay 负责公开代数、实际执行器、完整操作解析、稳定功能分类及独立发布；插件负责
+用户表达式、权限数据与界面、首装计划和已有声明显式维护。宿主不包含插件业务模型，
+不自动改写扩展存储或补授权限。先发布通过全部宿主门的镜像，再由插件独立消费、测试、
+发布，最后由部署仓验收。仅先关闭 SYSTEM 兜底可形成阶段性安全修正，但不表示补集、
+全部正常业务路径或组合已交付。
+
+### 必需独立测试与组合验收
+
+宿主仅使用自有最小 provider 与测试数据，不能读取或构建真实插件。必须新增具名门：
+
+- 代数：精确/子树排除、company2、未来子空间、空域、GLOBAL 与 TENANT 分离、相关
+  IDs、独立 term 并集、逐项交集、交换律与对有限宇宙逐点谓词的等价性、复杂度超限拒绝。
+- 执行：真实 SQL 与独立日志条件、详情、分页/total/聚合/统计、namespace 合成候选、
+  dashboard 与导出均验证相关项；不支持 IDs 或补集时拒绝，不能只测 DTO 或字符串 SQL。
+- 操作：未知 controller/handler、Flow 默认分支、普通批量/导入混合允许与拒绝资源、
+  未解析归属和空计划，拒绝前后核对数据库/存储/队列及延迟副作用。明确可支持的批量
+  路由必须有成功用例，不能把全拒绝计为完整支持。
+- 功能：逐 featureId/action 正反例、未知和重复标识、无权限、撤权、跨主体与未知版本；
+  功能许可不得放行普通数据操作。保留身份、CSRF、MCP、评估生命周期和关闭 RBAC 回归。
+- 兼容：旧 V1 精确排除不变、新旧版本不兼容失败关闭、超限或异常无业务调用；报告核对
+  精确具名集合及零失败/跳过/未运行。具体新增数量随实现冻结，不能借文档声明已经通过。
+
+部署仓另用正式镜像与插件产物执行真实双账号登录：首账号 company 子树读写，子树补集
+只读；第二账号仅 company.sub 子树 Flow/KV 读写，其他范围拒绝。读取须核对列表、详情、
+总数与相关 IDs，允许写须真实 UI 保存读回，拒绝须核对即时与延迟副作用；补集不通过
+特殊功能授权。此为组合条件，不放入 overlay CI，不作为本次文档交付已运行结果。
+
 2026-11-11 最新本地候选为第二候选（未提交/未发布）：源内 SSE 授权 helper，
 49 patch 重放17/0、356触达文件字节一致；完整local-ci后端453项中451通过、0失败、
 2镜像专用跳过，UI126通过。候选镜像2e2895e6、executable ef2992e4已内容核对。
@@ -655,8 +837,8 @@ KV/file、Dashboard preview 必须使用稳定资源语义。旧 REST SPI 将 co
 
 `kestra.rbac.enabled: true` 和 `kestra.rbac.typed.enabled: true` 同时启用 typed REST 与查询门。
 typed 开关默认关闭，以保留旧已发布扩展兼容性；启用后旧 REST resolver 不参与请求授权。
-未知业务操作生成 SYSTEM/EXECUTE 完整批次操作，只能由扩展明确授予实例权限；普通角色
-必须拒绝该操作。实际执行 gate 和 MCP gate 在 typed 模式下消费同一 policy，MCP scope
+历史实现将未知业务操作生成 SYSTEM/EXECUTE 完整批次操作；2026-11-18 提案已裁决
+撤除此可授予兜底，尚待源码实施，不得将历史行为作为新授权契约。实际执行 gate 和 MCP gate 在 typed 模式下消费同一 policy，MCP scope
 检查保持独立。输入/输出依赖解析继续使用已有公开 `McpAuthorizationResolver`。
 
 `QueryDomain` 明确区分 GLOBAL 与 RESTRICTED。受限空集合为空域；null scope、null 集合、

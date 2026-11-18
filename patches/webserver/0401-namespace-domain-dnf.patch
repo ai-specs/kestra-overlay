@@ -1,0 +1,928 @@
+# 需求: REQ-0401 namespace相关DNF补集代数与JDBC日志执行激活
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；维护者2026-11-18接收的宿主公开契约修复，不含插件业务模型
+# 触达上游文件: 19 个
+# 移除条件: 上游提供等价相关DNF补集代数与查询执行机制
+diff --git a/core/src/main/java/io/kestra/core/models/NamespaceDomain.java b/core/src/main/java/io/kestra/core/models/NamespaceDomain.java
+new file mode 100644
+index 0000000..22ea588
+--- /dev/null
++++ b/core/src/main/java/io/kestra/core/models/NamespaceDomain.java
+@@ -0,0 +1,128 @@
++package io.kestra.core.models;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++import java.util.stream.Stream;
++
++public record NamespaceDomain(List<Term> terms) {
++    public static final int VERSION = 2;
++    public static final int MAX_TERMS = 256;
++    public static final int MAX_SELECTORS = 128;
++    public static final int MAX_IDS = 256;
++    public static final int MAX_PAIRS = 4096;
++
++    public enum Universe { NAMESPACE, TENANT }
++    public enum IdScope { ALL_IDS, RESTRICTED_IDS }
++
++    public NamespaceDomain {
++        Objects.requireNonNull(terms);
++        if (terms.size() > MAX_TERMS) throw new IllegalArgumentException("Too many domain terms");
++        terms = terms.stream().filter(term -> !term.empty()).distinct().toList();
++    }
++
++    public record Term(Universe universe, boolean allNamespaces, List<String> exactNamespaces,
++        List<String> namespaceSubtrees, List<String> excludedNamespaces, List<String> excludedSubtrees,
++        IdScope idScope, List<String> resourceIds) {
++        public Term {
++            Objects.requireNonNull(universe);
++            Objects.requireNonNull(idScope);
++            exactNamespaces = names(exactNamespaces);
++            namespaceSubtrees = names(namespaceSubtrees);
++            excludedNamespaces = names(excludedNamespaces);
++            excludedSubtrees = names(excludedSubtrees);
++            if (exactNamespaces.size() + namespaceSubtrees.size() > MAX_SELECTORS
++                || excludedNamespaces.size() + excludedSubtrees.size() > MAX_SELECTORS)
++                throw new IllegalArgumentException("Too many namespace selectors");
++            Objects.requireNonNull(resourceIds);
++            if (resourceIds.size() > MAX_IDS || resourceIds.stream().anyMatch(value -> value == null || value.isBlank()
++                || !value.equals(value.trim()) || value.chars().anyMatch(Character::isISOControl)))
++                throw new IllegalArgumentException("Invalid ID selectors");
++            resourceIds = resourceIds.stream().distinct().toList();
++            if (idScope == IdScope.ALL_IDS && !resourceIds.isEmpty()) throw new IllegalArgumentException("ALL_IDS has selectors");
++            if (universe == Universe.TENANT && (allNamespaces || !exactNamespaces.isEmpty() || !namespaceSubtrees.isEmpty()
++                || !excludedNamespaces.isEmpty() || !excludedSubtrees.isEmpty()))
++                throw new IllegalArgumentException("TENANT has namespace selectors");
++            if (allNamespaces && (!exactNamespaces.isEmpty() || !namespaceSubtrees.isEmpty()))
++                throw new IllegalArgumentException("GLOBAL has positive selectors");
++        }
++
++        public boolean namespaceAllowed(String namespace) {
++            return universe == Universe.TENANT ? namespace == null : namespace != null
++                && namespace.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*")
++                && !excludedNamespaces.contains(namespace) && excludedSubtrees.stream().noneMatch(root -> within(namespace, root))
++                && (allNamespaces || exactNamespaces.contains(namespace) || namespaceSubtrees.stream().anyMatch(root -> within(namespace, root)));
++        }
++
++        public boolean allows(String namespace, String resourceId) {
++            return namespaceAllowed(namespace) && (idScope == IdScope.ALL_IDS || resourceId != null && resourceIds.contains(resourceId));
++        }
++
++        public boolean empty() {
++            return idScope == IdScope.RESTRICTED_IDS && resourceIds.isEmpty()
++                || universe == Universe.NAMESPACE && !allNamespaces
++                    && exactNamespaces.stream().noneMatch(this::namespaceAllowed)
++                    && namespaceSubtrees.stream().allMatch(root -> excludedSubtrees.stream().anyMatch(excluded -> within(root, excluded)));
++        }
++
++        private Term intersect(Term other) {
++            if (universe != other.universe) return null;
++            var ids = idScope == IdScope.ALL_IDS ? other.resourceIds : other.idScope == IdScope.ALL_IDS ? resourceIds
++                : resourceIds.stream().filter(other.resourceIds::contains).toList();
++            var scope = idScope == IdScope.ALL_IDS && other.idScope == IdScope.ALL_IDS ? IdScope.ALL_IDS : IdScope.RESTRICTED_IDS;
++            if (universe == Universe.TENANT) return new Term(universe, false, List.of(), List.of(), List.of(), List.of(), scope, ids);
++            var exact = allNamespaces ? other.exactNamespaces : other.allNamespaces ? exactNamespaces
++                : union(exactNamespaces.stream().filter(other::included).toList(), other.exactNamespaces.stream().filter(this::included).toList());
++            var roots = allNamespaces ? other.namespaceSubtrees : other.allNamespaces ? namespaceSubtrees
++                : namespaceSubtrees.stream().flatMap(root -> other.namespaceSubtrees.stream()
++                    .map(otherRoot -> within(root, otherRoot) ? root : within(otherRoot, root) ? otherRoot : null))
++                    .filter(Objects::nonNull).distinct().toList();
++            return new Term(universe, allNamespaces && other.allNamespaces, exact, roots,
++                union(excludedNamespaces, other.excludedNamespaces), union(excludedSubtrees, other.excludedSubtrees), scope, ids);
++        }
++
++        private boolean included(String namespace) {
++            return allNamespaces || exactNamespaces.contains(namespace) || namespaceSubtrees.stream().anyMatch(root -> within(namespace, root));
++        }
++    }
++
++    public boolean allows(String namespace, String resourceId) {
++        return terms.stream().anyMatch(term -> term.allows(namespace, resourceId));
++    }
++
++    public boolean contains(String namespace) {
++        return terms.stream().anyMatch(term -> term.namespaceAllowed(namespace));
++    }
++
++    public NamespaceDomain union(NamespaceDomain other) {
++        return new NamespaceDomain(Stream.concat(terms.stream(), other.terms.stream()).toList());
++    }
++
++    public NamespaceDomain intersect(NamespaceDomain other) {
++        if ((long) terms.size() * other.terms.size() > MAX_PAIRS) throw new IllegalArgumentException("Domain intersection too complex");
++        var result = new ArrayList<Term>();
++        for (var left : terms) for (var right : other.terms) {
++            var term = left.intersect(right);
++            if (term != null && !term.empty() && !result.contains(term)) {
++                result.add(term);
++                if (result.size() > MAX_TERMS) throw new IllegalArgumentException("Too many intersection terms");
++            }
++        }
++        return new NamespaceDomain(result);
++    }
++
++    private static List<String> names(List<String> values) {
++        Objects.requireNonNull(values);
++        if (values.size() > MAX_SELECTORS || values.stream().anyMatch(value -> value == null || !value.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*")))
++            throw new IllegalArgumentException("Invalid namespace selectors");
++        return values.stream().distinct().toList();
++    }
++
++    private static List<String> union(List<String> left, List<String> right) {
++        return Stream.concat(left.stream(), right.stream()).distinct().toList();
++    }
++
++    private static boolean within(String namespace, String root) {
++        return namespace.equals(root) || namespace.startsWith(root + ".");
++    }
++}
+diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
+index 6a59e4a..3bbe23b 100644
+--- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
++++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
+@@ -11,6 +11,9 @@ import io.kestra.core.models.QueryFilter;
+  * per-repository ACL subclass.
+  */
+ public interface NamespaceAccessControl {
++    default io.kestra.core.models.NamespaceDomain structuredDomain(QueryFilter.Resource resource) {
++        return null;
++    }
+ 
+     /**
+      * A no-op collaborator granting global access, the safe default for OSS, which has no namespace ACL.
+diff --git a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
+index cb86321..32ff9aa 100644
+--- a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
++++ b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
+@@ -18,6 +18,9 @@ import io.kestra.core.models.AccessScope;
+  * {@code CurrentUserContext}-based implementation.
+  */
+ public interface LogDataStoreAccessControl {
++    default io.kestra.core.models.NamespaceDomain structuredDomain() {
++        return null;
++    }
+ 
+     /**
+      * A no-op collaborator granting global access with no auditing. Used as the safe default for log
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
+index 450a7a7..2e7cebb 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
+@@ -600,6 +600,8 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
+      * {@code NAMESPACES} → the namespace (or its children) is in the allowed set.
+      */
+     protected Condition aclCondition() {
++        var structured = accessControl.structuredDomain();
++        if (structured != null) return NamespaceDomainCondition.compile(structured, field("namespace", String.class), null);
+         io.kestra.core.models.AccessScope scope = accessControl.namespaceScope();
+         Condition allowed = switch (scope.kind()) {
+             case GLOBAL -> DSL.trueCondition();
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
+index 9abd08c..5b47465 100644
+--- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
+@@ -113,7 +113,7 @@ public abstract class AbstractJdbcRepository {
+      *
+      * @param namespaceColumn the column holding the namespace, which is not always named {@code namespace}.
+      */
+-    protected Condition aclCondition(Resource resource, String namespaceColumn) {
++    private Condition legacyAclCondition(Resource resource, String namespaceColumn) {
+         Field<String> column = field(namespaceColumn, String.class);
+         AccessScope scope = namespaceAccessControl().
+ namespaceScopeWithResourceDomains
+@@ -882,6 +882,12 @@ allowed =
+         throw new UnsupportedOperationException("formatDateField() not implemented");
+     }
+ 
++    protected Condition aclCondition(Resource resource, String namespaceColumn) {
++        var structured = namespaceAccessControl().structuredDomain(resource);
++        return structured == null ? legacyAclCondition(resource, namespaceColumn) : NamespaceDomainCondition.compile(structured,
++            field(namespaceColumn, String.class), resource == Resource.FLOW || resource == Resource.EXECUTION ? field("id", String.class) : null);
++    }
++
+     protected <F extends Enum<F>> List<Field<Date>> generateDateFields(
+         DataFilter<F, ? extends ColumnDescriptor<F>> descriptors,
+         Map<F, String> fieldsMapping,
+diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/NamespaceDomainCondition.java b/jdbc/src/main/java/io/kestra/jdbc/repository/NamespaceDomainCondition.java
+new file mode 100644
+index 0000000..d18f7bc
+--- /dev/null
++++ b/jdbc/src/main/java/io/kestra/jdbc/repository/NamespaceDomainCondition.java
+@@ -0,0 +1,35 @@
++package io.kestra.jdbc.repository;
++
++import io.kestra.core.models.NamespaceDomain;
++import java.util.ArrayList;
++import org.jooq.Condition;
++import org.jooq.Field;
++import org.jooq.impl.DSL;
++
++public final class NamespaceDomainCondition {
++    private NamespaceDomainCondition() {}
++
++    public static Condition compile(NamespaceDomain domain, Field<String> namespace, Field<String> resourceId) {
++        var terms = new ArrayList<Condition>();
++        for (var term : domain.terms()) {
++            if (term.universe() != NamespaceDomain.Universe.NAMESPACE
++                || resourceId == null && term.idScope() == NamespaceDomain.IdScope.RESTRICTED_IDS)
++                return DSL.falseCondition();
++            var includes = new ArrayList<Condition>();
++            for (var exact : term.exactNamespaces()) includes.add(namespace.eq(exact));
++            for (var root : term.namespaceSubtrees()) includes.add(subtree(namespace, root));
++            Condition condition = term.allNamespaces()
++                ? namespace.likeRegex("^[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*$") : DSL.or(includes);
++            for (var exact : term.excludedNamespaces()) condition = condition.and(namespace.ne(exact));
++            for (var root : term.excludedSubtrees()) condition = condition.and(subtree(namespace, root).not());
++            if (term.idScope() == NamespaceDomain.IdScope.RESTRICTED_IDS)
++                condition = condition.and(resourceId.in(term.resourceIds()));
++            terms.add(condition);
++        }
++        return DSL.or(terms);
++    }
++
++    private static Condition subtree(Field<String> namespace, String root) {
++        return namespace.eq(root).or(namespace.startsWith(root + "."));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
+index 4801eaa..aef6e3a 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiExtensionController.java
+@@ -59,7 +59,7 @@ visible
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+         if (authentication == null) return Mono.just(false);
+         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+-        var operation = new TypedAuthorization.Operation(1, TypedAuthorization.Source.REST, TypedAuthorization.Resource.
++        var operation = new TypedAuthorization.Operation(TypedAuthorization.CONTRACT_VERSION, TypedAuthorization.Source.REST, TypedAuthorization.Resource.
+ EXTENSION
+ ,
+             TypedAuthorization.Action.
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
+index 4e94c9d..d3dc23d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
+@@ -118,9 +118,7 @@ public final class AiToolAuthorization {
+             if (operation.namespace() != null) {
+                 if (operation.resourceId() != null && !scope.resourceAllowed(operation.namespace(), operation.resourceId()))
+                     throw AiAuthorization.denied();
+-                if (operation.resourceId() == null && (!scope.contains(operation.namespace())
+-                    || !scope.resourceDomains().isEmpty() && scope.resourceDomains().stream().noneMatch(term ->
+-                        term.idScope() == QueryDomain.IdScope.ALL_IDS && term.allows(operation.namespace(), "new-execution"))))
++                if (operation.resourceId() == null && !scope.resourceAllowed(operation.namespace(), null))
+                     throw AiAuthorization.denied();
+             }
+             if (operation == primary) primaryScope = scope;
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+index be3ab52..c38cc4d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+@@ -5,7 +5,7 @@ import java.util.Objects;
+ 
+ /** Versioned typed authorization contract. Route adapters own OSS-specific parsing. */
+ public final class TypedAuthorization {
+-    public static final int CONTRACT_VERSION = 1;
++    public static final int CONTRACT_VERSION = 2;
+     private TypedAuthorization() {}
+ 
+     public enum Source { REST, MCP, INTERNAL, DASHBOARD_AGGREGATE }
+@@ -24,9 +24,13 @@ public final class TypedAuthorization {
+     public record QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
+         List<String> excludedNamespaces, boolean complete, boolean paginated, DomainKind kind
+ ,
+-            List<ResourceDomain> resourceDomains
++            List<ResourceDomain> resourceDomains,
++        io.kestra.core.models.NamespaceDomain structuredDomain
+ ) {
+         public QueryDomain {
++            if (structuredDomain != null && (!exactNamespaces.isEmpty() || !namespaceSubtrees.isEmpty()
++                || !excludedNamespaces.isEmpty() || !resourceDomains.isEmpty() || kind != DomainKind.GLOBAL))
++                throw new IllegalArgumentException("Structured domain cannot have legacy outer selectors");
+             exactNamespaces = clean(exactNamespaces);
+             namespaceSubtrees = clean(namespaceSubtrees);
+             excludedNamespaces = clean(excludedNamespaces);
+@@ -81,11 +85,38 @@ if (resourceDomains.stream().anyMatch(term -> term.resourceScope() == QueryDomai
+         public static QueryDomain empty() {
+             return new QueryDomain(List.of(), List.of(), List.of(), true, false);
+         }
+-        public boolean
+-resourceAllowed(String namespace, String resourceId) {
+-            if (resourceDomains.isEmpty()) return contains(namespace);
+-            return (namespace == null ? kind == DomainKind.GLOBAL : contains(namespace)) && resourceDomains.stream()
+-                    .anyMatch(domain -> domain.allows(namespace, resourceId));
++        public QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
++            List<String> excludedNamespaces, boolean complete, boolean paginated, DomainKind kind,
++            List<ResourceDomain> resourceDomains) {
++            this(exactNamespaces, namespaceSubtrees, excludedNamespaces, complete, paginated, kind, resourceDomains, null);
++        }
++
++        public static QueryDomain structured(io.kestra.core.models.NamespaceDomain domain, boolean complete, boolean paginated) {
++            Objects.requireNonNull(domain);
++            if (domain.terms().isEmpty()) return empty();
++            return new QueryDomain(List.of(), List.of(), List.of(), complete, paginated, DomainKind.GLOBAL, List.of(), domain);
++        }
++
++        public io.kestra.core.models.NamespaceDomain effectiveDomain() {
++            if (structuredDomain != null) return structuredDomain;
++            var universe = io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE;
++            var all = io.kestra.core.models.NamespaceDomain.IdScope.ALL_IDS;
++            var outer = new io.kestra.core.models.NamespaceDomain(List.of(
++                new io.kestra.core.models.NamespaceDomain.Term(universe, kind == DomainKind.GLOBAL,
++                    exactNamespaces, namespaceSubtrees, excludedNamespaces, List.of(), all, List.of())));
++            if (resourceDomains.isEmpty()) return outer;
++            var terms = new io.kestra.core.models.NamespaceDomain(resourceDomains.stream().map(term ->
++                new io.kestra.core.models.NamespaceDomain.Term(
++                    io.kestra.core.models.NamespaceDomain.Universe.valueOf(term.resourceScope().name()), false,
++                    term.exactNamespaces(), term.namespaceSubtrees(), term.excludedNamespaces(), List.of(),
++                    io.kestra.core.models.NamespaceDomain.IdScope.valueOf(term.idScope().name()), term.resourceIds())).toList());
++            if (resourceDomains.stream().allMatch(term -> term.resourceScope() == ResourceScope.TENANT))
++                return terms;
++            return outer.intersect(terms);
++        }
++
++        public boolean resourceAllowed(String namespace, String resourceId) {
++            return effectiveDomain().allows(namespace, resourceId);
+         }
+ 
+         public enum ResourceScope { NAMESPACE, TENANT }
+@@ -126,63 +157,22 @@ resourceAllowed(String namespace, String resourceId) {
+             }
+         }
+ 
+-        public boolean
+- contains(String namespace) {
+-            return namespace != null && !excludedNamespaces.contains(namespace)
+-                && (kind == DomainKind.GLOBAL || exactNamespaces.contains(namespace)
+-                    || namespaceSubtrees.stream().anyMatch(root -> within(namespace, root)));
++        public boolean contains(String namespace) {
++            return namespace != null && effectiveDomain().contains(namespace);
+         }
+-        public QueryDomain intersect(QueryDomain other) {
+-            Objects.requireNonNull(other, "Intersection domain is required");
+-if (!resourceDomains.isEmpty() || !other.resourceDomains.isEmpty()) {
+-                QueryDomain outer = withoutResourceDomains().intersect(other.withoutResourceDomains());
+-                var terms = new java.util.ArrayList<ResourceDomain>();
+-                var leftTerms = resourceDomains.isEmpty() ? List.of(new ResourceDomain(exactNamespaces,
+-                    namespaceSubtrees, excludedNamespaces, List.of(), ResourceScope.NAMESPACE, IdScope.ALL_IDS)) : resourceDomains;
+-                var rightTerms = other.resourceDomains.isEmpty() ? List.of(new ResourceDomain(other.exactNamespaces,
+-                    other.namespaceSubtrees, other.excludedNamespaces, List.of(), ResourceScope.NAMESPACE, IdScope.ALL_IDS)) : other.resourceDomains;
+-                if (resourceDomains.isEmpty() && kind == DomainKind.GLOBAL) leftTerms = other.resourceDomains;
+-                if (other.resourceDomains.isEmpty() && other.kind == DomainKind.GLOBAL) rightTerms = resourceDomains;
+-                for (var left : leftTerms) for (var right : rightTerms) {
+-                    if (left.resourceScope() != right.resourceScope()) continue;
+-                    IdScope idsKind = left.idScope() == IdScope.ALL_IDS && right.idScope() == IdScope.ALL_IDS
+-                        ? IdScope.ALL_IDS : IdScope.RESTRICTED_IDS;
+-                    List<String> ids = left.idScope() == IdScope.ALL_IDS ? right.resourceIds()
+-                        : right.idScope() == IdScope.ALL_IDS ? left.resourceIds()
+-                        : left.resourceIds().stream().filter(right.resourceIds()::contains).toList();
+-                    if (left.resourceScope() == ResourceScope.TENANT) {
+-                        terms.add(new ResourceDomain(List.of(), List.of(), List.of(), ids, ResourceScope.TENANT, idsKind));
+-                    } else {
+-                        var bounded = new QueryDomain(left.exactNamespaces(), left.namespaceSubtrees(), left.excludedNamespaces(), true, false)
+-                            .intersect(new QueryDomain(right.exactNamespaces(), right.namespaceSubtrees(), right.excludedNamespaces(), true, false));
+-                        terms.add(new ResourceDomain(bounded.exactNamespaces(), bounded.namespaceSubtrees(), bounded.excludedNamespaces(), ids, ResourceScope.NAMESPACE, idsKind));
+-                    }
+-                }
+-                if (terms.isEmpty()) return new QueryDomain(List.of(),List.of(),List.of(),
+-                    outer.complete(),outer.paginated(),DomainKind.RESTRICTED,List.of());
+-                return new QueryDomain(outer.exactNamespaces(), outer.namespaceSubtrees(), outer.excludedNamespaces(),
+-                    outer.complete(), outer.paginated(), outer.kind(), terms);
+-            }
+ 
+-            var exclusions = java.util.stream.Stream.concat(excludedNamespaces.stream(), other.excludedNamespaces.stream()).distinct().toList();
+-            boolean resultComplete = complete && other.complete;
+-            boolean resultPaginated = paginated || other.paginated;
+-            if (kind == DomainKind.GLOBAL && other.kind == DomainKind.GLOBAL)
+-                return new QueryDomain(List.of(), List.of(), exclusions, resultComplete, resultPaginated, DomainKind.GLOBAL);
+-            if (kind == DomainKind.GLOBAL)
+-                return new QueryDomain(other.exactNamespaces, other.namespaceSubtrees, exclusions, resultComplete, resultPaginated);
+-            if (other.kind == DomainKind.GLOBAL)
+-                return new QueryDomain(exactNamespaces, namespaceSubtrees, exclusions, resultComplete, resultPaginated);
+-            var exact = java.util.stream.Stream.concat(exactNamespaces.stream().filter(other::contains),
+-                other.exactNamespaces.stream().filter(this::contains)).distinct().toList();
+-            var subtrees = namespaceSubtrees.stream().flatMap(root -> other.namespaceSubtrees.stream()
+-                .map(otherRoot -> within(root, otherRoot) ? root : within(otherRoot, root) ? otherRoot : null))
+-                .filter(Objects::nonNull).distinct().toList();
+-            return new QueryDomain(exact, subtrees, exclusions, resultComplete, resultPaginated);
++        public QueryDomain intersect(QueryDomain other) {
++            Objects.requireNonNull(other);
++            if (structuredDomain == null && resourceDomains.isEmpty() && kind == DomainKind.GLOBAL && excludedNamespaces.isEmpty())
++                return new QueryDomain(other.exactNamespaces, other.namespaceSubtrees, other.excludedNamespaces,
++                    complete && other.complete, paginated || other.paginated, other.kind, other.resourceDomains, other.structuredDomain);
++            if (other.structuredDomain == null && other.resourceDomains.isEmpty() && other.kind == DomainKind.GLOBAL && other.excludedNamespaces.isEmpty())
++                return other.intersect(this);
++            return structured(effectiveDomain().intersect(other.effectiveDomain()), complete && other.complete, paginated || other.paginated);
+         }
+-        private
+-QueryDomain withoutResourceDomains() {
+-            return new QueryDomain(exactNamespaces, namespaceSubtrees, excludedNamespaces, complete, paginated, kind);
++
++        public QueryDomain union(QueryDomain other) {
++            return structured(effectiveDomain().union(other.effectiveDomain()), complete && other.complete, paginated || other.paginated);
+         }
+ 
+         private
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+index ca2e4aa..0fa1d3e 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+@@ -47,10 +47,28 @@ public final class TypedAuthorizationGate {
+             return Mono.from(io.micronaut.core.async.propagation.ReactivePropagation.propagate(
+                 io.kestra.core.repositories.AuthorizationEvaluationContext.capture(context), Mono.fromFuture(stage.toCompletableFuture(), true)))
+                 .map(decision -> {
++                    if (decision.contractVersion() != CONTRACT_VERSION) return Decision.deny("Unsupported policy version");
+                     if (!decision.allowed()) return Decision.deny(decision.reason());
+                     QueryDomain effective = operation.queryDomain().intersect(decision.scope());
+-                    if (operation.namespace() != null && !effective.contains(operation.namespace()))
+-                        return Decision.deny("Resource is outside authorized scope");
++                    if (operation.namespace() == null && effective.structuredDomain() != null
++                        && (operation.coverage() == Coverage.SINGLE || operation.resource() == Resource.AI || operation.resource() == Resource.METADATA || operation.resource() == Resource.MCP_SERVER)
++                        && (effective.effectiveDomain().terms().stream().anyMatch(term -> term.universe() != io.kestra.core.models.NamespaceDomain.Universe.TENANT)
++                            || operation.coverage() != Coverage.COMPLETE_QUERY && !effective.resourceAllowed(null, operation.resourceId())))
++                        return Decision.deny("Tenant resource requires a tenant domain");
++                    if (operation.coverage() == Coverage.COMPLETE_QUERY
++                        && effective.effectiveDomain().terms().stream().anyMatch(term ->
++                            term.universe() == io.kestra.core.models.NamespaceDomain.Universe.TENANT
++                                && operation.resource() != Resource.METADATA && operation.resource() != Resource.MCP_SERVER && operation.resource() != Resource.AI
++                            || term.idScope() == io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS
++                                && operation.resource() != Resource.FLOW && operation.resource() != Resource.EXECUTION && operation.resource() != Resource.MCP_SERVER))
++                        return Decision.deny("Unsupported query domain");
++                    if (operation.namespace() != null) {
++                        boolean namespaceAllowed = effective.effectiveDomain().terms().stream().anyMatch(term -> term.namespaceAllowed(operation.namespace())
++                            && (term.idScope() == io.kestra.core.models.NamespaceDomain.IdScope.ALL_IDS || !term.resourceIds().isEmpty()));
++                        if (!namespaceAllowed) return Decision.deny("Resource is outside authorized scope");
++                        if (operation.coverage() != Coverage.COMPLETE_QUERY && !effective.resourceAllowed(operation.namespace(), operation.resourceId()))
++                            return Decision.deny("Resource is outside authorized scope");
++                    }
+                     return Decision.allow(effective);
+                 });
+         }).timeout(Duration.ofSeconds(5))
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
+index aac1cd4..9446c86 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
+@@ -25,6 +25,11 @@ public final class TypedLogAccessControl implements LogDataStoreAccessControl {
+         return namespaces.namespaceScope(QueryFilter.Resource.LOG);
+     }
+ 
++    @Override
++    public io.kestra.core.models.NamespaceDomain structuredDomain() {
++        return namespaces.structuredDomain(QueryFilter.Resource.LOG);
++    }
++
+     @Override
+     public List<String> excludedNamespaces() {
+         return namespaces.excludedNamespaces(QueryFilter.Resource.LOG);
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+index 78df11f..6f00f8f 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+@@ -111,24 +111,21 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
+     @Override
+     public AccessScope namespaceScope(QueryFilter.Resource resource) {
+         QueryDomain scope = domain(resource);
+-if (restrictedIds(scope)) return AccessScope.denyAll();
+-        if (!scope.resourceDomains().isEmpty()) {
+-            // Keep the namespace term union for legacy consumers, including log backends.
+-            var terms = scope.resourceDomains();
+-            if (terms.stream().anyMatch(term -> term.resourceScope() != QueryDomain.ResourceScope.NAMESPACE)) return AccessScope.denyAll();
+-            var projected = new QueryDomain(
+-                terms.stream().flatMap(term -> term.exactNamespaces().stream()).distinct().toList(),
+-                terms.stream().flatMap(term -> term.namespaceSubtrees().stream()).distinct().toList(),
+-                terms.stream().flatMap(term -> term.excludedNamespaces().stream()).distinct().toList(), true, false);
+-            scope = projected.intersect(new QueryDomain(scope.exactNamespaces(), scope.namespaceSubtrees(),
+-                scope.excludedNamespaces(), scope.complete(), scope.paginated(), scope.kind()));
++        if (restrictedIds(scope)) return AccessScope.denyAll();
++        if (scope.structuredDomain() != null || !scope.resourceDomains().isEmpty()) {
++            var terms = scope.effectiveDomain().terms();
++            if (terms.stream().anyMatch(term -> term.universe() != io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE
++                || !term.excludedNamespaces().isEmpty() || !term.excludedSubtrees().isEmpty())) return AccessScope.denyAll();
++            if (terms.stream().anyMatch(io.kestra.core.models.NamespaceDomain.Term::allNamespaces)) return AccessScope.global();
++            return AccessScope.namespaces(terms.stream().flatMap(term -> term.namespaceSubtrees().stream()).distinct().toList(),
++                terms.stream().flatMap(term -> term.exactNamespaces().stream()).distinct().toList());
+         }
+         return namespaceProjection(scope);
+     }
+ 
+     @Override
+     public AccessScope namespaceScopeWithResourceDomains(QueryFilter.Resource resource) {
+-        return namespaceProjection(domain(resource));
++        return namespaceScope(resource);
+     }
+ 
+     private AccessScope namespaceProjection(QueryDomain scope) {
+@@ -136,8 +133,14 @@ if (restrictedIds(scope)) return AccessScope.denyAll();
+         return scope.kind() == DomainKind.GLOBAL ? AccessScope.global()
+             : AccessScope.namespaces(scope.namespaceSubtrees(), scope.exactNamespaces());
+     }
+-private boolean restrictedIds(QueryDomain scope) {
+-        return scope.resourceDomains().stream().anyMatch(term -> term.idScope() == QueryDomain.IdScope.RESTRICTED_IDS);
++    @Override
++    public io.kestra.core.models.NamespaceDomain structuredDomain(QueryFilter.Resource resource) {
++        return domain(resource).effectiveDomain();
++    }
++
++    private boolean restrictedIds(QueryDomain scope) {
++        return scope.effectiveDomain().terms().stream().anyMatch(term ->
++            term.idScope() == io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS);
+     }
+ 
+     private boolean idReadSupported(QueryFilter.Resource resource) {
+@@ -155,15 +158,7 @@ private boolean restrictedIds(QueryDomain scope) {
+ 
+     @Override
+     public List<String> excludedNamespaces(QueryFilter.Resource resource) {
+-
+-var scope =
+- domain(resource)
+-;
+-        return java.util.stream.Stream.concat(scope
+-.excludedNamespaces
+-().stream(),
+-            scope.resourceDomains().stream().flatMap(term -> term.excludedNamespaces().stream())).distinct().toList
+-();
++        return domain(resource).excludedNamespaces();
+     }
+ 
+     @Override
+@@ -210,14 +205,7 @@ resourceAllowed
+ 
+     @Override
+     public boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
+-
+-var scope =
+- domain(resource)
+-;
+-        if (restrictedIds(scope) || !scope
+-.contains(namespace)
+-) return false;
+-        return scope.resourceDomains().isEmpty() || scope.resourceDomains().stream().anyMatch(term -> term.allows(namespace, "namespace-probe"))
+-;
++        var scope = domain(resource);
++        return !restrictedIds(scope) && namespace != null && scope.effectiveDomain().contains(namespace);
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
+index dca24ae..406d166 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
+@@ -18,10 +18,9 @@ public final class TypedQueryDomains {
+         if (filter.isNode()) {
+             if (filter.logical() == QueryFilter.Logical.AND) return fromFilters(filter.children(), paginated);
+             var domains = filter.children().stream().map(child -> fromFilter(child, paginated)).toList();
+-            if (domains.stream().anyMatch(domain -> domain.kind() == DomainKind.GLOBAL || !domain.excludedNamespaces().isEmpty()))
+-                return QueryDomain.unrestricted();
+-            return new QueryDomain(domains.stream().flatMap(domain -> domain.exactNamespaces().stream()).distinct().toList(),
+-                domains.stream().flatMap(domain -> domain.namespaceSubtrees().stream()).distinct().toList(), List.of(), true, paginated);
++            var result = QueryDomain.empty();
++            for (var domain : domains) result = result.union(domain);
++            return result;
+         }
+         if (filter.field() != QueryFilter.Field.NAMESPACE) return QueryDomain.unrestricted();
+         List<String> values = filter.value() instanceof List<?> list ? list.stream().map(Object::toString).toList()
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java
+index fddecfb..ffc233f 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedTenantResourceAccessControl.java
+@@ -22,15 +22,15 @@ public final class TypedTenantResourceAccessControl implements TenantResourceAcc
+         var owner = AuthorizationEvaluations.current();
+         if (owner == null) return AuthorizationInvocationContext.isInternal() ? new Domain(Kind.ALL_IDS, List.of()) : empty;
+         if (!owner.matches(owner.principal, tenant)) return empty;
+-        var operation = new Operation(1, Source.REST, Resource.MCP_SERVER, Action.LIST, tenant, null, null,
++        var operation = new Operation(CONTRACT_VERSION, Source.REST, Resource.MCP_SERVER, Action.LIST, tenant, null, null,
+             QueryDomain.unrestricted(), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
+         try {
+             var decision = gate.authorize(owner.principal, operation).block();
+             if (decision == null || !decision.allowed()) return empty;
+             var scope = decision.scope();
+-            if (scope.resourceDomains().isEmpty()) return scope.kind() == DomainKind.GLOBAL ? new Domain(Kind.ALL_IDS, List.of()) : empty;
+-            var terms = scope.resourceDomains().stream().filter(term -> term.resourceScope() == QueryDomain.ResourceScope.TENANT).toList();
+-            if (terms.stream().anyMatch(term -> term.idScope() == QueryDomain.IdScope.ALL_IDS)) return new Domain(Kind.ALL_IDS, List.of());
++            if (scope.structuredDomain() == null && scope.resourceDomains().isEmpty()) return scope.kind() == DomainKind.GLOBAL ? new Domain(Kind.ALL_IDS, List.of()) : empty;
++            var terms = scope.effectiveDomain().terms().stream().filter(term -> term.universe() == io.kestra.core.models.NamespaceDomain.Universe.TENANT).toList();
++            if (terms.stream().anyMatch(term -> term.idScope() == io.kestra.core.models.NamespaceDomain.IdScope.ALL_IDS)) return new Domain(Kind.ALL_IDS, List.of());
+             return new Domain(Kind.RESTRICTED_IDS, terms.stream().flatMap(term -> term.resourceIds().stream()).distinct().toList());
+         } catch (RuntimeException failure) { return empty; }
+     }
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
+index fb4835f..35c9536 100644
+--- a/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
++++ b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
+@@ -136,6 +136,43 @@ class McpDynamicToolListTest {
+             .accept(MediaType.APPLICATION_JSON_TYPE, MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id", "session");
+     }
+ 
++    @Test void actualListAppliesStructuredScalarReadToSameNamespaceIdsAndComplement() {
++        var terms = new io.kestra.core.models.NamespaceDomain(List.of(
++            new io.kestra.core.models.NamespaceDomain.Term(io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE,true,List.of(),List.of(),List.of(),List.of("company"),io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS,List.of("outsideAllowed")),
++            new io.kestra.core.models.NamespaceDomain.Term(io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE,false,List.of(),List.of("company.sub"),List.of(),List.of(),io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS,List.of("insideAllowed"))));
++        var decisions=new java.util.concurrent.CopyOnWriteArrayList<String>();
++        AuthorizationEvaluationProviderV1 provider=(principal,tenant)->CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++            public java.util.concurrent.CompletionStage<Decision> authorize(Operation operation) {
++                decisions.add(operation.namespace()+"/"+operation.resourceId());
++                return CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(terms,true,false)));
++            }
++            public java.util.concurrent.CompletionStage<Void> close(){return CompletableFuture.completedFuture(null);}
++        });
++        var configuration=new RbacConfiguration(true,false);
++        var typed=new TypedAuthorizationGate(bean(null),new AuthorizationEvaluations(true,configuration,true,bean(provider)));
++        var capabilities=new McpCapabilityGate(true,true,false,bean(null),configuration,new RbacGate(bean(null),typed,true));
++        var repository=mock(FlowRepositoryInterface.class);
++        var flows=List.of(flow("company.sub","insideAllowed"),flow("company.sub","insideDenied"),flow("company.other","insideAllowed"),
++            flow("outside","outsideAllowed"),flow("outside","outsideDenied"),flow("company2","outsideAllowed"));
++        when(repository.findWithNoAcl(any(),eq("main"),eq(McpToolTrigger.class))).thenReturn(new ArrayListTotal<>(flows,flows.size()));
++        var mapper=mock(FlowToolSchemaMapper.class);
++        when(mapper.buildTool(any(),any())).thenAnswer(call->McpSchema.Tool.builder().name(((Flow)call.getArgument(0)).getNamespace()+"_"+((Flow)call.getArgument(0)).getId()).build());
++        var service=new McpToolService(mock(DispatchQueueInterface.class),repository,mapper,mock(ExecutionStreamingService.class),event->{},
++            new McpConfig(new McpConfig.ToolCacheConfig(20L,Duration.ofMinutes(5)),null,Duration.ofSeconds(5)),mock(FlowInputOutput.class),mock(FlowMetaStoreInterface.class),mock(ExecutionOutputService.class),new DefaultMcpToolAccessControl(),capabilities);
++        assertThat(service.visibleToolSpecs("main","default",io.kestra.core.models.AccessScope.global(),identity("alice")).block())
++            .extracting(spec->spec.tool().name()).containsExactly("company.sub_insideAllowed","outside_outsideAllowed","company2_outsideAllowed");
++        assertThat(decisions).hasSize(6);
++        clearInvocations(repository);
++        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.visibleToolSpecs("other","default",io.kestra.core.models.AccessScope.global(),identity("alice")).block())
++            .isExactlyInstanceOf(IllegalStateException.class).hasMessage("Invalid MCP authorization context.");
++        verifyNoInteractions(repository);
++        var writer=KestraMcpTransportContext.builder().tenantId("main").serverId("default").userId("alice").clientId("client").resource("resource")
++            .roles(List.of()).scopes(List.of(McpCapabilityGate.FLOW_READ,McpCapabilityGate.EXECUTION_WRITE)).build();
++        assertThat(capabilities.evaluation(writer,"main",()->capabilities.execute(writer,"main","company.sub","insideDenied")).block()).isFalse();
++        var noProtocol=KestraMcpTransportContext.builder().tenantId("main").serverId("default").userId("alice").clientId("client").resource("resource").scopes(List.of()).build();
++        assertThat(service.visibleToolSpecs("main","default",io.kestra.core.models.AccessScope.global(),noProtocol).block()).isEmpty();
++    }
++
+     private static KestraMcpTransportContext identity(String subject) {
+         return KestraMcpTransportContext.builder().tenantId("main").serverId("default").sessionId("session").userId(subject)
+             .clientId("client").resource("resource").roles(List.of()).scopes(List.of(McpCapabilityGate.FLOW_READ)).build();
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+index ce3ac02..da1553f 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+@@ -180,7 +180,7 @@ class ExecutionFollowContextTest {
+         when(repository.findById("main","test")).thenAnswer(call-> acl.domain(QueryFilter.Resource.EXECUTION).contains("team.a")
+             ?Optional.of(Execution.builder().id("test").tenantId("main").namespace("team.a").flowId("flow").build()):Optional.empty());
+         var adapter=mock(OssRestOperationAdapter.class);
+-        when(adapter.resolve(any())).thenReturn(java.util.List.of(new TypedAuthorization.Operation(1,TypedAuthorization.Source.REST,
++        when(adapter.resolve(any())).thenReturn(java.util.List.of(new TypedAuthorization.Operation(TypedAuthorization.CONTRACT_VERSION,TypedAuthorization.Source.REST,
+             TypedAuthorization.Resource.EXECUTION,TypedAuthorization.Action.READ,"main","team.a","test",TypedAuthorization.QueryDomain.unrestricted(),
+             TypedAuthorization.Coverage.SINGLE,TypedAuthorization.Aggregate.NONE,TypedAuthorization.SideEffect.READ_ONLY)));
+         var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,mock(io.kestra.webserver.errors.ProblemFactory.class));
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceDomainV2Test.java b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceDomainV2Test.java
+new file mode 100644
+index 0000000..785e431
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceDomainV2Test.java
+@@ -0,0 +1,167 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.models.NamespaceDomain;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.core.repositories.log.LogDataStoreAccessControl;
++import io.kestra.jdbc.repository.AbstractJdbcRepository;
++import io.kestra.jdbc.repository.AbstractJdbcLogDataStore;
++import java.sql.DriverManager;
++import java.util.List;
++import java.util.stream.IntStream;
++import org.jooq.Condition;
++import org.jooq.SQLDialect;
++import org.jooq.impl.DSL;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++import static io.kestra.core.models.NamespaceDomain.*;
++
++class NamespaceDomainV2Test {
++    @Test void executesComplementForNamespaceCandidatesTopologyAndDashboard() throws Exception {
++        var domain=new NamespaceDomain(List.of(complement("company",IdScope.ALL_IDS,List.of())));
++        var control=mock(TypedNamespaceAccessControl.class,CALLS_REAL_METHODS);
++        doReturn(TypedAuthorization.QueryDomain.structured(domain,true,false)).when(control).domain(any());
++        var fixture=new NamespaceScopeContractTest();
++        var factory=NamespaceScopeContractTest.class.getDeclaredMethod("controller",io.kestra.core.models.AccessScope.class); factory.setAccessible(true);
++        var controller=(io.kestra.webserver.controllers.api.NamespaceController<?>)factory.invoke(fixture,io.kestra.core.models.AccessScope.global());
++        var field=io.kestra.webserver.controllers.api.NamespaceController.class.getDeclaredField("namespaceAccessControl"); field.setAccessible(true);field.set(controller,control);
++        var flows=mock(io.kestra.core.repositories.FlowRepositoryInterface.class);
++        when(flows.findDistinctNamespace("main")).thenReturn(List.of("company","company.sub","company2","outside"));
++        var flowField=io.kestra.webserver.controllers.api.NamespaceController.class.getDeclaredField("flowRepository");flowField.setAccessible(true);flowField.set(controller,flows);
++        var result=controller.searchNamespaces(1,50,List.of("id:asc"),false,null);
++        assertThat(result.getResults()).extracting("id").contains("company2","outside").doesNotContain("company","company.sub");
++        var topology=new io.kestra.jdbc.repository.AbstractJdbcFlowTopologyRepository(null) {
++            protected NamespaceAccessControl namespaceAccessControl(){return control;}
++        };
++        var method=io.kestra.jdbc.repository.AbstractJdbcFlowTopologyRepository.class.getDeclaredMethod("topologyAccess");method.setAccessible(true);
++        try(var connection=DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var db=DSL.using(connection,SQLDialect.H2);db.execute("create table topology(source_namespace varchar(255),destination_namespace varchar(255))");
++            db.execute("insert into topology values ('outside','company2'),('company','outside'),('outside','company.sub')");
++            assertThat(db.fetchCount(db.selectFrom(DSL.table("topology")).where((Condition)method.invoke(topology)))).isEqualTo(1);
++        }
++        var policies=mock(io.micronaut.context.BeanProvider.class);
++        when(policies.isUnique()).thenReturn(true);
++        when(policies.get()).thenReturn((TypedAuthorizationResolver)(principal,operation)->java.util.concurrent.CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.structured(domain,true,false))));
++        var gate=new TypedDashboardGate(new RbacConfiguration(true,false),true,new TypedAuthorizationGate(policies));
++        var request=io.micronaut.http.HttpRequest.GET("/api/v1/main/dashboards/charts/preview");
++        request.setAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION,io.micronaut.security.authentication.Authentication.build("reader",List.of()));
++        var source=io.kestra.plugin.core.dashboard.data.ExecutionsKPI.builder().type("io.kestra.plugin.core.dashboard.data.ExecutionsKPI").build();
++        io.micronaut.http.context.ServerRequestContext.with(request,()->gate.beforeQuery("main",source,false));
++        var saved=request.getAttribute(TypedNamespaceAccessControl.class.getName()+".EXECUTION",TypedAuthorization.QueryDomain.class).orElseThrow();
++        assertThat(saved.contains("outside")).isTrue();assertThat(saved.contains("company.sub")).isFalse();
++        try(var connection=DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var db=DSL.using(connection,SQLDialect.H2);db.execute("create table executions(namespace varchar(255))");
++            db.execute("insert into executions values ('outside'),('company2'),('company'),('company.sub')");
++            var repository=mock(io.kestra.core.repositories.ExecutionRepositoryInterface.class);
++            when(repository.fetchValue(anyString(),any(),any(),any(),anyBoolean())).thenAnswer(invocation->{
++                var effective=request.getAttribute(TypedNamespaceAccessControl.class.getName()+".EXECUTION",TypedAuthorization.QueryDomain.class).orElseThrow();
++                var condition=io.kestra.jdbc.repository.NamespaceDomainCondition.compile(effective.effectiveDomain(),DSL.field("namespace",String.class),null);
++                return db.fetchCount(db.selectFrom(DSL.table("executions")).where(condition))*1.0;
++            });
++            var service=new io.kestra.core.services.ChartDataService(List.of(repository),gate);
++            var data=io.kestra.plugin.core.dashboard.data.ExecutionsKPI.<io.kestra.core.models.dashboards.ColumnDescriptor<io.kestra.plugin.core.dashboard.data.IExecutions.Fields>>builder()
++                .type("io.kestra.plugin.core.dashboard.data.ExecutionsKPI").numerator(List.of(io.kestra.core.models.dashboards.filters.EqualTo.<io.kestra.plugin.core.dashboard.data.IExecutions.Fields>builder()
++                    .field(io.kestra.plugin.core.dashboard.data.IExecutions.Fields.NAMESPACE).value("outside").build())).build();
++            var chart=io.kestra.plugin.core.dashboard.chart.KPI.<io.kestra.plugin.core.dashboard.data.IExecutions.Fields,io.kestra.core.models.dashboards.DataFilterKPI<io.kestra.plugin.core.dashboard.data.IExecutions.Fields,? extends io.kestra.core.models.dashboards.ColumnDescriptor<io.kestra.plugin.core.dashboard.data.IExecutions.Fields>>>builder()
++                .data(data).chartOptions(io.kestra.plugin.core.dashboard.chart.kpis.KpiOption.builder().numberType(io.kestra.plugin.core.dashboard.chart.kpis.KpiOption.NumberType.PERCENTAGE).build()).build();
++            io.micronaut.http.context.ServerRequestContext.with(request,(java.util.concurrent.Callable<Void>)()->{assertThat(service.generateKPI("main",chart,null,null).getFirst().get("value")).isEqualTo(50.0);return null;});
++            verify(repository,times(2)).fetchValue(anyString(),any(),any(),any(),anyBoolean());
++        }
++    }
++    private Term complement(String root, IdScope scope, List<String> ids) {
++        return new Term(Universe.NAMESPACE, true, List.of(), List.of(), List.of(), List.of(root), scope, ids);
++    }
++    private Term subtree(String root, IdScope scope, List<String> ids) {
++        return new Term(Universe.NAMESPACE, false, List.of(), List.of(root), List.of(), List.of(), scope, ids);
++    }
++    @Test void preservesComplementAndAssociatedIdsAcrossUnionAndIntersection() {
++        var domain = new NamespaceDomain(List.of(complement("company",IdScope.RESTRICTED_IDS,List.of("a")),
++            subtree("company",IdScope.RESTRICTED_IDS,List.of("b"))));
++        assertThat(domain.allows("outside","a")).isTrue();
++        assertThat(domain.allows("company.sub","b")).isTrue();
++        assertThat(domain.allows("company2","a")).isTrue();
++        assertThat(domain.allows("company.sub","a")).isFalse();
++        assertThat(domain.allows("outside","b")).isFalse();
++        var mask = new NamespaceDomain(List.of(subtree("company.sub",IdScope.ALL_IDS,List.of())));
++        for (var namespace : List.of("outside","company","company.sub","company.sub.future","company2"))
++            for (var id : List.of("a","b","c")) {
++                assertThat(domain.intersect(mask).allows(namespace,id)).isEqualTo(domain.allows(namespace,id) && mask.allows(namespace,id));
++                assertThat(mask.intersect(domain).allows(namespace,id)).isEqualTo(domain.intersect(mask).allows(namespace,id));
++            }
++        assertThat(domain.union(mask).allows("company.sub","c")).isTrue();
++    }
++    @Test void exhaustivelyMatchesFiniteUniverseBooleanAlgebra() {
++        var atoms = List.of(complement("company",IdScope.ALL_IDS,List.of()),
++            subtree("company",IdScope.RESTRICTED_IDS,List.of("a")),
++            subtree("company.sub",IdScope.RESTRICTED_IDS,List.of("b")),
++            subtree("team_x",IdScope.ALL_IDS,List.of()));
++        var domains = IntStream.range(0,16).mapToObj(mask -> new NamespaceDomain(IntStream.range(0,4)
++            .filter(index -> (mask & (1<<index)) != 0).mapToObj(atoms::get).toList())).toList();
++        for (var left : domains) for (var right : domains) {
++            var intersection=left.intersect(right); var union=left.union(right);
++            for(var namespace:List.of("company","company.sub","company.sub.new","company.other","company2","outside","team_x","teamAx"))
++                for(var id:List.of("a","b","c")) {
++                    assertThat(intersection.allows(namespace,id)).isEqualTo(left.allows(namespace,id)&&right.allows(namespace,id));
++                    assertThat(union.allows(namespace,id)).isEqualTo(left.allows(namespace,id)||right.allows(namespace,id));
++                }
++        }
++    }
++    @Test void separatesTenantAndValidatesSelectorsAndLimits() {
++        var global = new NamespaceDomain(List.of(complement("company",IdScope.ALL_IDS,List.of())));
++        var tenant = new NamespaceDomain(List.of(new Term(Universe.TENANT,false,List.of(),List.of(),List.of(),List.of(),IdScope.ALL_IDS,List.of())));
++        assertThat(global.contains(null)).isFalse();
++        assertThat(global.contains(" ")).isFalse();
++        assertThat(global.contains("company..bad")).isFalse();
++        assertThat(global.intersect(tenant).terms()).isEmpty();
++        assertThat(tenant.allows(null,null)).isTrue();
++        for (var id : List.of(" a","a ","a\nb"))
++            assertThatIllegalArgumentException().isThrownBy(() -> subtree("company",IdScope.RESTRICTED_IDS,List.of(id)));
++        assertThatIllegalArgumentException().isThrownBy(() -> new NamespaceDomain(java.util.Collections.nCopies(257,subtree("a",IdScope.ALL_IDS,List.of()))));
++        var many = new NamespaceDomain(IntStream.range(0,65).mapToObj(i -> subtree("n"+i,IdScope.ALL_IDS,List.of())).toList());
++        assertThatIllegalArgumentException().isThrownBy(() -> many.intersect(many));
++        var left = new Term(Universe.NAMESPACE,true,List.of(),List.of(),IntStream.range(0,128).mapToObj(i->"a"+i).toList(),List.of(),IdScope.ALL_IDS,List.of());
++        var right = new Term(Universe.NAMESPACE,true,List.of(),List.of(),List.of("other"),List.of(),IdScope.ALL_IDS,List.of());
++        assertThatIllegalArgumentException().isThrownBy(() -> new NamespaceDomain(List.of(left)).intersect(new NamespaceDomain(List.of(right))));
++        var result = global.intersect(new NamespaceDomain(List.of(subtree("outside",IdScope.ALL_IDS,List.of()))));
++        assertThat(result.intersect(global).allows("outside.future",null)).isTrue();
++    }
++    @Test void executesAssociatedSqlBeforePagingCountingAndAggregating() throws Exception {
++        var domain = new NamespaceDomain(List.of(complement("company",IdScope.RESTRICTED_IDS,List.of("a")),subtree("company",IdScope.RESTRICTED_IDS,List.of("b"))));
++        var control = new NamespaceAccessControl() {
++            public io.kestra.core.models.AccessScope namespaceScope(QueryFilter.Resource resource) { return io.kestra.core.models.AccessScope.denyAll(); }
++            public NamespaceDomain structuredDomain(QueryFilter.Resource resource) { return domain; }
++        };
++        var repository = new AbstractJdbcRepository() {
++            protected NamespaceAccessControl namespaceAccessControl() { return control; }
++        };
++        var method = AbstractJdbcRepository.class.getDeclaredMethod("aclCondition",QueryFilter.Resource.class); method.setAccessible(true);
++        try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var db = DSL.using(connection,SQLDialect.H2);
++            db.execute("create table candidates(namespace varchar(255), id varchar(255), tenant varchar(255))");
++            db.execute("insert into candidates values ('outside','a','main'),('outside','b','main'),('company.sub','a','main'),('company.sub','b','main'),('company2','a','other'),('company','a','main'),('company','b','main'),('company2','a','main')");
++            var condition = ((Condition)method.invoke(repository,QueryFilter.Resource.FLOW)).and(DSL.field("tenant").eq("main"));
++            assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(condition))).isEqualTo(4);
++            assertThat(db.select(DSL.countDistinct(DSL.field("namespace"))).from("candidates").where(condition).fetchOne(0,Integer.class)).isEqualTo(4);
++            assertThat(db.select(DSL.field("namespace",String.class)).from("candidates").where(condition).orderBy(DSL.field("namespace")).limit(1).offset(3).fetch(0,String.class)).containsExactly("outside");
++            assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where((Condition)method.invoke(repository,QueryFilter.Resource.KV_METADATA)))).isZero();
++        }
++    }
++    @Test void executesLogComplementAndEscapesUnderscoreSubtrees() throws Exception {
++        var domain = new NamespaceDomain(List.of(complement("team_x",IdScope.ALL_IDS,List.of())));
++        var logs = mock(AbstractJdbcLogDataStore.class,CALLS_REAL_METHODS);
++        var field = AbstractJdbcLogDataStore.class.getDeclaredField("accessControl"); field.setAccessible(true);
++        field.set(logs,new LogDataStoreAccessControl() {
++            public io.kestra.core.models.AccessScope namespaceScope() { return io.kestra.core.models.AccessScope.denyAll(); }
++            public NamespaceDomain structuredDomain() { return domain; }
++        });
++        var method = AbstractJdbcLogDataStore.class.getDeclaredMethod("aclCondition"); method.setAccessible(true);
++        try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var db=DSL.using(connection,SQLDialect.H2);
++            db.execute("create table candidates(namespace varchar(255))");
++            db.execute("insert into candidates values ('team_x'),('team_x.child'),('teamAx.child'),('team_x2'),(null)");
++            assertThat(db.select(DSL.field("namespace",String.class)).from("candidates").where((Condition)method.invoke(logs)).fetch(0,String.class)).containsExactly("teamAx.child","team_x2");
++        }
++        assertThatIllegalArgumentException().isThrownBy(() -> complement("team%",IdScope.ALL_IDS,List.of()));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
+index 773a35c..0f5e02d 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
+@@ -47,6 +47,67 @@ class TypedAuthorizationGateTest {
+             new QueryDomain(List.of("team"), List.of(), List.of(), true, true), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
+     }
+ 
++    @Test void rejectsLegacyDecisionAndUnsupportedCorrelatedQuery() {
++        var policies=policies(); when(policies.isUnique()).thenReturn(true);
++        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(new Decision(true,QueryDomain.unrestricted(),"",1)));
++        var gate=new TypedAuthorizationGate(policies);
++        assertThat(gate.authorize(principal,query()).block().allowed()).isFalse();
++        var term=new io.kestra.core.models.NamespaceDomain.Term(io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE,true,
++            List.of(),List.of(),List.of(),List.of("company"),io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS,List.of("id"));
++        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(new io.kestra.core.models.NamespaceDomain(List.of(term)),true,false))));
++        var logs=new Operation(CONTRACT_VERSION,Source.REST,Resource.LOG,Action.LIST,"main",null,null,QueryDomain.unrestricted(),Coverage.COMPLETE_QUERY,Aggregate.NONE,SideEffect.READ_ONLY);
++        assertThat(gate.authorize(principal,logs).block().allowed()).isFalse();
++        var adapter=mock(OssRestOperationAdapter.class);when(adapter.resolve(any())).thenReturn(List.of(logs));
++        var filter=new TypedRestRbacFilter(new RbacConfiguration(true,false),adapter,gate,new io.kestra.webserver.errors.ProblemFactory(
++            new io.kestra.webserver.errors.ProblemMapperRegistry(List.of()),new io.kestra.core.utils.EditionProvider()));
++        var effects=new java.util.concurrent.atomic.AtomicInteger();
++        var response=reactor.core.publisher.Flux.from(filter.doFilter(AuthorizationEvaluationRestTest.request(),request->{
++            effects.incrementAndGet();return reactor.core.publisher.Mono.just(io.micronaut.http.HttpResponse.ok());
++        })).single().block();
++        assertThat(response.code()).isEqualTo(403);assertThat(effects.get()).isZero();
++    }
++
++    @Test void permitsTenantResourcesButRejectsNamespaceGlobalAndMixedTerms() {
++        var policies=policies(); when(policies.isUnique()).thenReturn(true);
++        var gate=new TypedAuthorizationGate(policies);
++        var tenant=new io.kestra.core.models.NamespaceDomain.Term(io.kestra.core.models.NamespaceDomain.Universe.TENANT,false,List.of(),List.of(),List.of(),List.of(),io.kestra.core.models.NamespaceDomain.IdScope.ALL_IDS,List.of());
++        var namespace=new io.kestra.core.models.NamespaceDomain.Term(io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE,true,List.of(),List.of(),List.of(),List.of(),io.kestra.core.models.NamespaceDomain.IdScope.ALL_IDS,List.of());
++        for(var resource:List.of(Resource.MCP_SERVER,Resource.METADATA,Resource.AI)) {
++            var operation=new Operation(CONTRACT_VERSION,Source.REST,resource,Action.READ,"main",null,null,QueryDomain.unrestricted(),Coverage.SINGLE,Aggregate.NONE,SideEffect.READ_ONLY);
++            when(policies.get()).thenReturn((subject,op)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(new io.kestra.core.models.NamespaceDomain(List.of(tenant)),true,false))));
++            assertThat(gate.authorize(principal,operation).block().allowed()).as(resource.name()).isTrue();
++            for(var terms:List.of(List.of(namespace),List.of(tenant,namespace))) {
++                when(policies.get()).thenReturn((subject,op)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(new io.kestra.core.models.NamespaceDomain(terms),true,false))));
++                assertThat(gate.authorize(principal,operation).block().allowed()).isFalse();
++            }
++        }
++        when(policies.get()).thenReturn((subject,op)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.unrestricted())));
++    }
++
++    @Test void keepsRestrictedIdsForNamespaceQueriesButRequiresIdsForScalarOperations() {
++        var policies=policies(); when(policies.isUnique()).thenReturn(true);
++        var domain=new io.kestra.core.models.NamespaceDomain(List.of(new io.kestra.core.models.NamespaceDomain.Term(
++            io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE,false,List.of(),List.of("company"),List.of(),List.of(),
++            io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS,List.of("flow-a"))));
++        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(domain,true,true))));
++        var gate=new TypedAuthorizationGate(policies);
++        var query=new Operation(CONTRACT_VERSION,Source.REST,Resource.FLOW,Action.LIST,"main","company",null,
++            QueryDomain.structured(domain,true,true),Coverage.COMPLETE_QUERY,Aggregate.NONE,SideEffect.READ_ONLY);
++        assertThat(gate.authorize(principal,query).block().allowed()).isTrue();
++        org.assertj.core.api.Assertions.assertThatIllegalArgumentException().isThrownBy(()->new Operation(CONTRACT_VERSION,Source.REST,Resource.FLOW,Action.LIST,"main","outside",null,
++            QueryDomain.structured(domain,true,true),Coverage.COMPLETE_QUERY,Aggregate.NONE,SideEffect.READ_ONLY));
++        var outside=new Operation(CONTRACT_VERSION,Source.REST,Resource.FLOW,Action.LIST,"main","outside",null,
++            QueryDomain.unrestricted(),Coverage.COMPLETE_QUERY,Aggregate.NONE,SideEffect.READ_ONLY);
++        assertThat(gate.authorize(principal,outside).block().allowed()).isFalse();
++        var empty=new io.kestra.core.models.NamespaceDomain(List.of());
++        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(empty,true,true))));
++        assertThat(gate.authorize(principal,query).block().allowed()).isFalse();
++        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(Decision.allow(QueryDomain.structured(domain,true,false))));
++        var scalar=new Operation(CONTRACT_VERSION,Source.REST,Resource.FLOW,Action.READ,"main","company","flow-b",
++            QueryDomain.structured(domain,true,false),Coverage.SINGLE,Aggregate.NONE,SideEffect.READ_ONLY);
++        assertThat(gate.authorize(principal,scalar).block().allowed()).isFalse();
++    }
++
+     @SuppressWarnings("unchecked")
+     private BeanProvider<TypedAuthorizationResolver> policies() {
+         return mock(BeanProvider.class);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
+index 7c3a436..377916c 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
+@@ -58,8 +58,8 @@ class TypedResourceDomainBoundaryTest {
+         var all = control(domain(false));
+         assertThat(all.namespaceAllowed(QueryFilter.Resource.FLOW, "a")).isTrue();
+         assertThat(all.namespaceAllowed(QueryFilter.Resource.FLOW, "b")).isFalse();
+-        assertThat(new TypedLogAccessControl(all).namespaceScope().namespaceAllowed("a")).isTrue();
+-        assertThat(new TypedLogAccessControl(all).namespaceScope().namespaceAllowed("b")).isFalse();
++        assertThat(new TypedLogAccessControl(all).structuredDomain().contains("a")).isTrue();
++        assertThat(new TypedLogAccessControl(all).structuredDomain().contains("b")).isFalse();
+     }
+     @Test void exactResourcePredicatesPreserveNamespaceIdAssociation() throws Exception {
+         var terms = List.of(new QueryDomain.ResourceDomain(List.of("a"), List.of(), List.of(), List.of("one")),

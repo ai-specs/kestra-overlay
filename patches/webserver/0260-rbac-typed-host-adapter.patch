@@ -178,7 +178,7 @@ index 5ee14ab542692d89137699d66bebcf5c3eef009d..450a7a701678763dde1d1704ebf0af43
 
      @Override
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
-index 03cfa0397e4ee5364c8ccfd10a428110c5724625..df6589efeb8566e625a1424e635aa5ed3afb6d5e 100644
+index 03cfa03..9abd08c 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 @@ -114,9 +114,11 @@ public abstract class AbstractJdbcRepository {
@@ -186,11 +186,11 @@ index 03cfa0397e4ee5364c8ccfd10a428110c5724625..df6589efeb8566e625a1424e635aa5ed
       */
      protected Condition aclCondition(Resource resource, String namespaceColumn) {
 -        AccessScope scope = namespaceAccessControl().namespaceScope(resource);
+         Field<String> column = field(namespaceColumn, String.class);
+-        return switch (scope.kind()) {
 +        AccessScope scope = namespaceAccessControl().
 +namespaceScopeWithResourceDomains
 +(resource);
-         Field<String> column = field(namespaceColumn, String.class);
--        return switch (scope.kind()) {
 +        Condition allowed = switch (scope.kind()) {
              case GLOBAL -> DSL.noCondition();
              case DENY_ALL -> DSL.falseCondition();

@@ -7,6 +7,48 @@
 
 # kestra-overlay
 
+## Typed authorization V2 候选契约（2026-11-18，未发布）
+
+REQ-0401/0402 已完成本地源码与镜像候选检查；正式 CI、镜像推广和消费扩展组合仍待
+主控验收。本节不是当前正式镜像能力声明，插件不得以本地候选作为正式编译输入。
+
+`io.kestra.webserver.rbac.TypedAuthorization.CONTRACT_VERSION` 为 2。公开共享域为
+`io.kestra.core.models.NamespaceDomain(List<Term> terms)`，`VERSION=2`；
+`Term(Universe universe, boolean allNamespaces, List<String> exactNamespaces,
+List<String> namespaceSubtrees, List<String> excludedNamespaces, List<String> excludedSubtrees,
+IdScope idScope, List<String> resourceIds)`。`Universe` 为 NAMESPACE/TENANT，`IdScope`
+为 ALL_IDS/RESTRICTED_IDS。通过 `QueryDomain.structured(domain,complete,paginated)`
+构造，`effectiveDomain()` 取得实际相关域；空域规范为明确拒绝域。
+
+term 是相关项，域是 term 的并集。包含、精确/子树排除、IDs 保留在同一项；交集逐项
+配对，包含求交、排除求并、IDs 求交。NAMESPACE 的 allNamespaces 是当前操作 tenant
+内全部合法具体 namespace，不含 null，与 TENANT 分离。子树包含自身及点分隔后代，
+不匹配 company2。补集是该项的允许域，另一条正向项继续有效。宿主不解析 `!` 语法。
+
+固定上限为 `MAX_TERMS=256`、每项包含选择器总数及排除选择器总数各
+`MAX_SELECTORS=128`、每项 `MAX_IDS=256`、单次交集 `MAX_PAIRS=4096`；结果继续
+遵守相同构造上限。超限、未知版本、非法选择器或不支持的资源 ID 查询域失败关闭，
+不得截断或扩大为 GLOBAL。COMPLETE_QUERY 的 namespace 检查保留非空相关 ID 域给
+SQL；标量操作与创建空 ID 不得借此跳过 IDs。
+
+旧 QueryDomain 构造器保留精确排除含义和调用形状，不表示旧二进制能消费 V2。旧
+Operation/Decision 版本拒绝；provider、评估、MCP 和独立探针必须按正式 V2 产物重新
+编译验证。旧无选择器请求 unrestricted 作为请求交集恒等元；显式结构化 namespace
+GLOBAL 不授予 TENANT。namespace/log JDBC、候选 predicate 和实际单资源检查使用
+相关项；非 FLOW/EXECUTION 的受限 ID 查询未普遍支持，必须明确拒绝。
+
+未解析 REST controller/handler 返回空计划，SYSTEM 不再作为可授予行政兜底。
+普通 bulk/import/backfill 等尚未适配的路径保持拒绝，不计为正常功能已支持。特殊
+功能登记仍为文档候选，本批没有新增泛 FEATURE 或 MCP scope SPI。MCP 动态工具列表
+继续在每次评估中逐 Flow 执行 typed READ，旧 AccessScope 仅为独立上界。
+
+本地完整 localCI 为后端597项（595通过、0失败、2项原镜像专项 assume）、core3、
+UI130通过；镜像专项随后在候选门运行，不将 assume 计为通过。候选 executable
+SHA-256 为 `126b4ed8c5431b88fcc4dda5878da5611e367a2f1a7796d65942ca79e36336b4`。
+当前 classpath、OIDC35、MCP原脚本、form/env原脚本、geometry64及SDK949通过。
+SDK949具名ID唯一、零失败/跳过/未运行且source hash复核一致。最终结果、兼容限制和
+消费者清单见 `docs/r-ee-rbac.md`；本地门不等于正式发布。
+
 REQ-0399 已随正式宿主 `4891c3d` 发布；该基线将 AI 会话入口与工具访问分别授权。
 其租户级 `AI.READ`（读取自己的线程）和 `AI.EXECUTE`（创建、聊天、确认及持续输出）
 操作；线程归属不授予流程或执行权限。工具仍检查实际 FLOW/EXECUTION/LOG/METADATA
