@@ -9,14 +9,14 @@ index b40b32a..6ca33b0 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 @@ -289,8 +289,7 @@ extension(Request request, String tenant) {
- 
+
      private List<Operation>
   administrative(String tenant) {
 -        return List.of(new Operation(CONTRACT_VERSION, Source.REST, Resource.SYSTEM, Action.EXECUTE, tenant, null, null,
 -            QueryDomain.unrestricted(), Coverage.COMPLETE_BATCH, Aggregate.NONE, SideEffect.EXTERNAL));
 +        return List.of();
      }
- 
+
      private List<Operation> single(Resource resource, Action action, String tenant, String namespace, String id) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 index 0fa1d3e..7970325 100644

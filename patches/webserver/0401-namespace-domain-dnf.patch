@@ -149,7 +149,7 @@ index 6a59e4a..3bbe23b 100644
 +    default io.kestra.core.models.NamespaceDomain structuredDomain(QueryFilter.Resource resource) {
 +        return null;
 +    }
- 
+
      /**
       * A no-op collaborator granting global access, the safe default for OSS, which has no namespace ACL.
 diff --git a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
@@ -163,7 +163,7 @@ index cb86321..32ff9aa 100644
 +    default io.kestra.core.models.NamespaceDomain structuredDomain() {
 +        return null;
 +    }
- 
+
      /**
       * A no-op collaborator granting global access with no auditing. Used as the safe default for log
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
@@ -195,7 +195,7 @@ index 9abd08c..5b47465 100644
 @@ -882,6 +882,12 @@ allowed =
          throw new UnsupportedOperationException("formatDateField() not implemented");
      }
- 
+
 +    protected Condition aclCondition(Resource resource, String namespaceColumn) {
 +        var structured = namespaceAccessControl().structuredDomain(resource);
 +        return structured == null ? legacyAclCondition(resource, namespaceColumn) : NamespaceDomainCondition.compile(structured,
@@ -279,13 +279,13 @@ index be3ab52..c38cc4d 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
 @@ -5,7 +5,7 @@ import java.util.Objects;
- 
+
  /** Versioned typed authorization contract. Route adapters own OSS-specific parsing. */
  public final class TypedAuthorization {
 -    public static final int CONTRACT_VERSION = 1;
 +    public static final int CONTRACT_VERSION = 2;
      private TypedAuthorization() {}
- 
+
      public enum Source { REST, MCP, INTERNAL, DASHBOARD_AGGREGATE }
 @@ -24,9 +24,13 @@ public final class TypedAuthorization {
      public record QueryDomain(List<String> exactNamespaces, List<String> namespaceSubtrees,
@@ -344,12 +344,12 @@ index be3ab52..c38cc4d 100644
 +        public boolean resourceAllowed(String namespace, String resourceId) {
 +            return effectiveDomain().allows(namespace, resourceId);
          }
- 
+
          public enum ResourceScope { NAMESPACE, TENANT }
 @@ -126,63 +157,22 @@ resourceAllowed(String namespace, String resourceId) {
              }
          }
- 
+
 -        public boolean
 - contains(String namespace) {
 -            return namespace != null && !excludedNamespaces.contains(namespace)
@@ -389,7 +389,7 @@ index be3ab52..c38cc4d 100644
 -                return new QueryDomain(outer.exactNamespaces(), outer.namespaceSubtrees(), outer.excludedNamespaces(),
 -                    outer.complete(), outer.paginated(), outer.kind(), terms);
 -            }
- 
+
 -            var exclusions = java.util.stream.Stream.concat(excludedNamespaces.stream(), other.excludedNamespaces.stream()).distinct().toList();
 -            boolean resultComplete = complete && other.complete;
 -            boolean resultPaginated = paginated || other.paginated;
@@ -421,7 +421,7 @@ index be3ab52..c38cc4d 100644
 +        public QueryDomain union(QueryDomain other) {
 +            return structured(effectiveDomain().union(other.effectiveDomain()), complete && other.complete, paginated || other.paginated);
          }
- 
+
          private
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 index ca2e4aa..0fa1d3e 100644
@@ -465,7 +465,7 @@ index aac1cd4..9446c86 100644
 @@ -25,6 +25,11 @@ public final class TypedLogAccessControl implements LogDataStoreAccessControl {
          return namespaces.namespaceScope(QueryFilter.Resource.LOG);
      }
- 
+
 +    @Override
 +    public io.kestra.core.models.NamespaceDomain structuredDomain() {
 +        return namespaces.structuredDomain(QueryFilter.Resource.LOG);
@@ -504,13 +504,13 @@ index 78df11f..6f00f8f 100644
          }
          return namespaceProjection(scope);
      }
- 
+
      @Override
      public AccessScope namespaceScopeWithResourceDomains(QueryFilter.Resource resource) {
 -        return namespaceProjection(domain(resource));
 +        return namespaceScope(resource);
      }
- 
+
      private AccessScope namespaceProjection(QueryDomain scope) {
 @@ -136,8 +133,14 @@ if (restrictedIds(scope)) return AccessScope.denyAll();
          return scope.kind() == DomainKind.GLOBAL ? AccessScope.global()
@@ -527,10 +527,10 @@ index 78df11f..6f00f8f 100644
 +        return scope.effectiveDomain().terms().stream().anyMatch(term ->
 +            term.idScope() == io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS);
      }
- 
+
      private boolean idReadSupported(QueryFilter.Resource resource) {
 @@ -155,15 +158,7 @@ private boolean restrictedIds(QueryDomain scope) {
- 
+
      @Override
      public List<String> excludedNamespaces(QueryFilter.Resource resource) {
 -
@@ -544,10 +544,10 @@ index 78df11f..6f00f8f 100644
 -();
 +        return domain(resource).excludedNamespaces();
      }
- 
+
      @Override
 @@ -210,14 +205,7 @@ resourceAllowed
- 
+
      @Override
      public boolean namespaceAllowed(QueryFilter.Resource resource, String namespace) {
 -
@@ -612,7 +612,7 @@ index fb4835f..35c9536 100644
 @@ -136,6 +136,43 @@ class McpDynamicToolListTest {
              .accept(MediaType.APPLICATION_JSON_TYPE, MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id", "session");
      }
- 
+
 +    @Test void actualListAppliesStructuredScalarReadToSameNamespaceIdsAndComplement() {
 +        var terms = new io.kestra.core.models.NamespaceDomain(List.of(
 +            new io.kestra.core.models.NamespaceDomain.Term(io.kestra.core.models.NamespaceDomain.Universe.NAMESPACE,true,List.of(),List.of(),List.of(),List.of("company"),io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS,List.of("outsideAllowed")),
@@ -846,7 +846,7 @@ index 773a35c..0f5e02d 100644
 @@ -47,6 +47,67 @@ class TypedAuthorizationGateTest {
              new QueryDomain(List.of("team"), List.of(), List.of(), true, true), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
      }
- 
+
 +    @Test void rejectsLegacyDecisionAndUnsupportedCorrelatedQuery() {
 +        var policies=policies(); when(policies.isUnique()).thenReturn(true);
 +        when(policies.get()).thenReturn((subject,operation)->CompletableFuture.completedFuture(new Decision(true,QueryDomain.unrestricted(),"",1)));
