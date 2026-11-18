@@ -433,3 +433,9 @@ outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
 保留双凭据失败关闭。缺 jar 补放需 JVM 重启，页面自动等待；配置登录 client 自动追加
 应用组 selector，不影响其他 client。契约、锁序、兼容和独立测试见 r-oidc-server.md
 同日接收节；完整门与正式发布尚未执行。
+
+
+REQ-0404a（R-EE-RBAC，入口B已接收，候选未发布）：原生Flow列表缺可选执行内容的
+真实请求前能力投影，OSS Me永真不能表达外部typed决策。新增有限batch HTTP及原生
+列表按目标消费，复用现有SPI/冻结snapshot，不扩插件业务、不重写全局Me。
+仅latest/日期状态/逐行TimeSeries；完整详情待独立分类，不计本次通过。

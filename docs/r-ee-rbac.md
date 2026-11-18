@@ -1877,7 +1877,7 @@ SDK 原完整 949 首次执行为 948 通过、1 失败、零未运行，失败 
 CI 或推广；正式交付仍待主控审查、对应提交 CI/镜像发布及插件、根部署仓的顺序验收。
 
 
-## 下一阶段：Flow 关联执行内容的有限页面能力提案（2026-11-19，初裁接收范围，未实施、未发布）
+## Flow 关联执行内容的有限页面能力（2026-11-19，0404a列表候选已实施、未发布）
 
 消费方为 `kestra-plugin-rbac` 下的宿主原生 Flow 列表与详情。真实组合使用仅有 Flow/KV
 权限的测试账号，namespace 正反授权正确，生产登录也已正确返回书签 `/ui/main/flows`，
@@ -1944,4 +1944,46 @@ RBAC启用时，未知枚举、目标不可解析、身份无效、缺少/重复
 
 发布顺序保持宿主独立CI与镜像、插件正式输入及独立CI、部署仓真实Compose验收。
 根仓使用正式产物验证仅Flow/KV账号、执行读取账号、混合范围及撤权，不得沿用本次
-候选或先前报告。当前仅提案，未写新业务补丁，未改变0403候选源码或镜像。
+候选或先前报告。0404a只实施下方接收的列表范围，详情仍须独立接收；0403已正式发布，0404a候选不改变其发布事实。
+
+
+## REQ-0404a 接收范围：原生 Flow 列表有限执行能力（2026-11-19，已接收、候选未发布）
+
+主控已接收只读提案，并冻结本次实现为 Flow 列表 latest、末次日期/状态和逐行 TimeSeries。
+不修改复合 Overview 或其他详情 tab，不将其403处理或详情可用性计为本次通过。
+新增宿主有限 HTTP POST /api/v1/{tenant}/ui/flows/execution-capabilities，formatVersion=1；
+target 显式包含 tenant/namespace/flowId/capabilities，1..100目标、每目标1..2固定枚举、
+无重复目标或能力、总项≤200、正文≤128KiB。字符串复用上游验证规则。
+模式A由宿主公开配置boolean关闭能力请求并保持原OSS行为；RBACtrue缺组件503，不回退。
+同一可信身份与冻结snapshot内复用typed gate；先FLOW.READ，再执行固定query operation。
+latest为LIST COMPLETE_QUERY，统计为READ COMPLETE_QUERY EXECUTION aggregate；
+当前插件二者均按同scope READ/LIST域交集求值，不能改为只LIST或放宽READ-only统计。
+执行ID只保留在授权domain；flowId不充当executionId。不查当前执行存在性决定能力。
+无新SPI、无策略前端副本、无新授权存储、无插件业务改动。业务API继续独立授权。
+能力响应no-store；沿用session和CSRF。gate已有未分类异常折叠deny限制保留。
+前端按目标装载；换页、刷新、换号、取消和错误必须清除或隔离旧generation，不能泄漏旧结果。
+宿主独立无PG定向测试及真实浏览器native list门使用明确测试transport。
+正式交付必须通过宿主完整本地门、正式CI及镜像发布，再由部署仓消费兼容正式产物验收。
+本机制当前为未发布候选，源码与局部门通过不能替代正式发布证明。
+
+
+0404a候选核对（2026-11-19，未提交、未发布）：固定BASE+59独立dev，
+服务7、真实Micronaut/H2 HTTP5、缺provider1、modeA1，连同domain6/gate5/
+原评估生命周期16，同轮41/41零失败/错误/跳过；hook4/4。
+原生Flows.vue/KsDataTable/TimeSeries显式测试transport共享计划在Ego与Playwright
+各10/10，未缩减断言；报告预置10个notRun、失败保留剩余项，结束重算源码/driver/
+adapter/transport/lock hash，复用宿主sdk-browser-diagnostics记录文档来源，
+只有精确当前document能力503及同请求network log作为预期。
+分页项是测试transport调用native loadData的代次刺激，不是实际分页按钮点击，
+生产分页仍由根组合门验证。scopeQueryDomains用例是宿主预计算domain投影，
+不冒充插件同scope策略算法。正式生产身份、数据库范围与无副作用未在本仓计通过。
+guard最小移位后的完整localci通过：webserver619项中617通过、零失败/错误、2项原镜像专用跳过；core3、UI134及翻译/构建通过。原classpath/OIDC/MCP/form/env镜像门通过，MCP四份XML已独立覆盖镜像专用检查。完整SDK949/949与geometry64/64均通过，失败/跳过/未运行均为零，冻结probe及driver结束hash复核通过；首装HTTP替身浏览器21/21、认证恢复4/4通过。正式CI及推广未执行。
+新Java SPI未新增；已有gate折叠未分类异常的deny语义保持。
+详情Overview/logs/metrics/concurrency及其它tab尚未完整分类，不属于0404a，
+不得把它们403吞掉或计作支持。
+
+0404a guard边界收敛（候选，未发布）：精确委派guard在Authentication读取之后，
+先短路核对authentication非空，再执行原精确matches。匿名仍返回401，未改变策略或
+HTTP契约。最初tenant解析段仍属于0330的来源边界，故未采用该位置。
+结构含实际apply门17/17，60/60补丁应用，全部414个触达文件字节等值，旧59hash未变。
+移位后原41项与原生Ego/Playwright共享10项均重新执行通过；完整verify来源的原生Playwright10项也通过。旧产物不作为新源码证明。本地fullci候选仅用于验证，不是插件正式编译输入。

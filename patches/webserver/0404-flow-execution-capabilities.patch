@@ -1,0 +1,1309 @@
+# 需求: REQ-0404a 原生Flow列表有限执行能力
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；2026-11-19主控接收的有限HTTP及原生列表激活点，不改变插件业务策略
+# 触达上游文件: 24 个
+# 移除条件: 上游提供等价有限页面能力投影与原生Flow列表逐目标消费
+diff --git a/ui/src/components/flows/Flows.vue b/ui/src/components/flows/Flows.vue
+index fe0e185..6f88909 100644
+--- a/ui/src/components/flows/Flows.vue
++++ b/ui/src/components/flows/Flows.vue
+@@ -20,6 +20,7 @@
+             </NavBarActions>
+         </template>
+     </TopNavBar>
++    <KsAlert v-if="optionalExecutionError" type="error" :closable="false" role="alert">{{ $t("error") }}</KsAlert>
+     <section :class="{'full-container': fitHeightResolved}">
+         <KsDataTable
+             ref="dataTable"
+@@ -162,7 +163,7 @@
+                     <template #default="scope">
+                         <div @click.prevent.stop>
+                             <router-link
+-                                v-if="lastExecutionByFlowReady && getLastExecution(scope.row)"
++                                v-if="executionCapabilities.allowed(scope.row, 'LATEST_EXECUTIONS_LIST') && lastExecutionByFlowReady && getLastExecution(scope.row)"
+                                 :to="{
+                                     name: 'executions/update',
+                                     params: {
+@@ -186,7 +187,7 @@
+                     <template #default="scope">
+                         <div
+                             @click.prevent.stop
+-                            v-if="lastExecutionByFlowReady && getLastExecution(scope.row)"
++                            v-if="executionCapabilities.allowed(scope.row, 'LATEST_EXECUTIONS_LIST') && lastExecutionByFlowReady && getLastExecution(scope.row)"
+                             class="d-flex justify-content-between align-items-center"
+                         >
+                             <router-link
+@@ -213,6 +214,7 @@
+                 >
+                     <template #default="scope">
+                         <TimeSeries
++                            v-if="executionCapabilities.allowed(scope.row, 'EXECUTION_STATISTICS_READ')"
+                             :chart="mappedChart(scope.row.id, scope.row.namespace)"
+                             :filters="chartFilters()"
+                             showDefault
+@@ -300,7 +302,7 @@
+ </template>
+
+ <script setup lang="ts">
+-    import {ref, computed, useTemplateRef, watch} from "vue"
++    import {ref, computed, useTemplateRef, watch, onBeforeUnmount, onMounted} from "vue"
+     import {useRoute, useRouter} from "vue-router"
+     import {useI18n} from "vue-i18n"
+     import _merge from "lodash/merge"
+@@ -336,6 +338,7 @@
+     import type {Chart} from "../dashboard/types"
+     import TopNavBar from "../../components/layout/TopNavBar.vue"
+
++    import {useFlowExecutionCapabilities} from "./useFlowExecutionCapabilities"
+     import action from "../../models/action"
+     import resource from "../../models/resource"
+
+@@ -391,6 +394,51 @@
+
+     const lastExecutionByFlowReady = ref(false)
+     const latestExecutions = ref<any[]>([])
++    const executionCapabilities = useFlowExecutionCapabilities(
++        () => miscStore.configs?.flowExecutionCapabilitiesRequired,
++        () => String(route.params.tenant ?? "main"),
++    )
++    let latestController: AbortController | undefined
++    let projectionLoadedAt = 0
++    let pageGeneration = 0
++    let capabilityTimer: ReturnType<typeof setTimeout> | undefined
++    let currentRows: {id: string; namespace: string}[] = []
++    const clearExecutionContent = () => {
++        pageGeneration++
++        latestController?.abort()
++        latestController = undefined
++        projectionLoadedAt = 0
++        executionCapabilities.invalidate()
++        clearTimeout(capabilityTimer)
++        latestExecutions.value = []
++        lastExecutionByFlowReady.value = false
++    }
++    const identityChanged = () => {
++        clearExecutionContent()
++        currentRows = []
++        flowStore.flows = []
++        flowStore.total = 0
++        optionalExecutionError.value = undefined
++    }
++    watch(() => [authStore.user, authStore.isLogged, route.params.tenant, miscStore.configs?.flowExecutionCapabilitiesRequired], identityChanged, {flush: "sync"})
++    const activateExecutionContent = () => {
++        if (miscStore.configs?.flowExecutionCapabilitiesRequired !== true) return
++        clearExecutionContent()
++        if (miscStore.configs?.flowExecutionCapabilitiesRequired === true && document.visibilityState === "visible" && currentRows.length)
++            void loadExecutionContent(currentRows, pageGeneration)
++    }
++    const focusExecutionContent = () => {
++        if (!projectionLoadedAt || Date.now() - projectionLoadedAt >= 30_000) activateExecutionContent()
++    }
++    onMounted(() => {
++        document.addEventListener("visibilitychange", activateExecutionContent)
++        window.addEventListener("focus", focusExecutionContent)
++    })
++    onBeforeUnmount(() => {
++        identityChanged()
++        document.removeEventListener("visibilitychange", activateExecutionContent)
++        window.removeEventListener("focus", focusExecutionContent)
++    })
+     const file = ref<HTMLInputElement | null>(null)
+
+     const optionalColumns = ref<ColumnConfig[]>([
+@@ -485,26 +533,42 @@
+
+     async function loadData({page, size, sort}: {page: number; size: number; sort?: string}) {
+         if (!loadInit.value) return
+-        await flowStore
+-            .findFlows(
+-                loadQuery({
+-                    size,
+-                    page,
+-                    sort: sort ?? String(route.query.sort ?? "id:asc"),
+-                }),
+-            )
+-            .then((data: any) => {
+-                if (user.value?.hasAnyActionOnAnyNamespace(resource.EXECUTION, action.LIST)) {
+-                    executionsStore.loadLatestExecutions({
+-                        flowFilters: data.results.map((flow: any) => ({id: flow.id, namespace: flow.namespace})),
+-                    }).then((latestExecs: any) => {
+-                        latestExecutions.value = latestExecs
+-                        lastExecutionByFlowReady.value = true
+-                    })
+-                }
+-                loadExtensionData(data.results)
+-            })
++        clearExecutionContent()
++        currentRows = []
++        const generation = pageGeneration
++        optionalExecutionError.value = undefined
++        const data = await flowStore.findFlows({...loadQuery({size, page, sort: sort ?? String(route.query.sort ?? "id:asc")}), commit: false})
++        if (generation !== pageGeneration) return
++        flowStore.flows = data.results
++        flowStore.total = data.total ?? 0
++        currentRows = data.results
++        loadExtensionData(data.results)
++        // Flow rows are already usable while optional content is evaluated.
++        void loadExecutionContent(data.results, generation)
++    }
++
++    async function loadExecutionContent(rows: {id: string; namespace: string}[], generation: number) {
++        try {
++            const projection = await executionCapabilities.load(rows)
++            if (generation !== pageGeneration || !projection.current()) return
++            projectionLoadedAt = Date.now()
++            if (miscStore.configs?.flowExecutionCapabilitiesRequired === true)
++                capabilityTimer = setTimeout(activateExecutionContent, 30_000)
++            const permitted = rows.filter(row => executionCapabilities.allowed(row, "LATEST_EXECUTIONS_LIST"))
++            if (!permitted.length || !user.value?.hasAnyActionOnAnyNamespace(resource.EXECUTION, action.LIST)) return
++            latestController = new AbortController()
++            const latest = await executionsStore.loadLatestExecutions({flowFilters: permitted.map(row => ({id: row.id, namespace: row.namespace})), signal: latestController.signal})
++            if (generation !== pageGeneration || !projection.current()) return
++            latestExecutions.value = latest
++            lastExecutionByFlowReady.value = true
++        } catch (failure) {
++            if (generation !== pageGeneration) return
++            clearExecutionContent()
++            // The shared HTTP client reports real request errors. Retain local failure state too.
++            optionalExecutionError.value = failure
++        }
+     }
++    const optionalExecutionError = ref<unknown>()
+
+     const onRowClick = (item: any, column: any, event: Event) => {
+         if (column?.type === "selection") return
+diff --git a/ui/src/components/flows/useFlowExecutionCapabilities.spec.ts b/ui/src/components/flows/useFlowExecutionCapabilities.spec.ts
+new file mode 100644
+index 0000000..5a915c2
+--- /dev/null
++++ b/ui/src/components/flows/useFlowExecutionCapabilities.spec.ts
+@@ -0,0 +1,54 @@
++import {describe, it, expect, vi} from "vitest"
++import {effectScope} from "vue"
++const post = vi.hoisted(() => vi.fn())
++vi.mock("@kestra-io/kestra-sdk", () => ({useClient: () => ({post})}))
++vi.mock("override/utils/route", () => ({apiUrl: () => "/api/v1/main"}))
++import {useFlowExecutionCapabilities} from "./useFlowExecutionCapabilities"
++const rows = [{namespace: "company.sub", id: "one"}, {namespace: "other", id: "two"}]
++const response = (allowed: boolean[]) => ({data: {formatVersion: 1, results: rows.map((row, index) => ({tenant: "main", namespace: row.namespace, flowId: row.id, capabilities: {EXECUTION_STATISTICS_READ: allowed[index] ? "AVAILABLE" : "UNAVAILABLE", LATEST_EXECUTIONS_LIST: allowed[index] ? "AVAILABLE" : "UNAVAILABLE"}}))}})
++describe("native Flow list execution projection", () => {
++    it("mode A preserves OSS without querying capabilities", async () => {
++        post.mockReset()
++        const scope = effectScope(), projection = scope.run(() => useFlowExecutionCapabilities(() => false, () => "main"))!
++        await projection.load(rows)
++        expect(post).not.toHaveBeenCalled()
++        expect(projection.allowed(rows[0], "LATEST_EXECUTIONS_LIST")).toBe(true)
++        scope.stop()
++    })
++    it("keeps mixed targets distinct and clears permissions on invalidation", async () => {
++        post.mockReset().mockResolvedValue(response([true, false]))
++        const scope = effectScope(), projection = scope.run(() => useFlowExecutionCapabilities(() => true, () => "main"))!
++        await projection.load(rows)
++        expect(projection.allowed(rows[0], "LATEST_EXECUTIONS_LIST")).toBe(true)
++        expect(projection.allowed(rows[1], "EXECUTION_STATISTICS_READ")).toBe(false)
++        expect(post.mock.calls[0][1].targets[0].flowId).toBe("one")
++        projection.invalidate()
++        expect(projection.allowed(rows[0], "LATEST_EXECUTIONS_LIST")).toBe(false)
++        scope.stop()
++    })
++    it("ignores stale responses after cancellation or page replacement", async () => {
++        let complete!: (value: unknown) => void
++        post.mockReset().mockImplementationOnce(() => new Promise(resolve => {complete = resolve})).mockResolvedValue(response([false, false]))
++        const scope = effectScope(), projection = scope.run(() => useFlowExecutionCapabilities(() => true, () => "main"))!
++        const old = projection.load(rows)
++        await projection.load(rows)
++        complete(response([true, true]))
++        expect((await old).current()).toBe(false)
++        expect(projection.allowed(rows[0], "LATEST_EXECUTIONS_LIST")).toBe(false)
++        scope.stop()
++    })
++    it("fails closed on absent config, malformed target and real errors", async () => {
++        for (const mode of [undefined, true]) {
++            post.mockReset().mockResolvedValue({data: {formatVersion: 1, results: []}})
++            const scope = effectScope(), projection = scope.run(() => useFlowExecutionCapabilities(() => mode, () => "main"))!
++            await expect(projection.load(rows)).rejects.toThrow()
++            expect(projection.allowed(rows[0], "EXECUTION_STATISTICS_READ")).toBe(false)
++            scope.stop()
++        }
++        post.mockReset().mockRejectedValue(new Error("503"))
++        const scope = effectScope(), projection = scope.run(() => useFlowExecutionCapabilities(() => true, () => "main"))!
++        await expect(projection.load(rows)).rejects.toThrow("503")
++        expect(projection.error.value).toBeTruthy()
++        scope.stop()
++    })
++})
+diff --git a/ui/src/components/flows/useFlowExecutionCapabilities.ts b/ui/src/components/flows/useFlowExecutionCapabilities.ts
+new file mode 100644
+index 0000000..a009816
+--- /dev/null
++++ b/ui/src/components/flows/useFlowExecutionCapabilities.ts
+@@ -0,0 +1,67 @@
++import {computed, onBeforeUnmount, ref} from "vue"
++import {useClient} from "@kestra-io/kestra-sdk"
++import {apiUrl} from "override/utils/route"
++
++export type Capability = "EXECUTION_STATISTICS_READ" | "LATEST_EXECUTIONS_LIST"
++export type FlowTarget = {id: string; namespace: string}
++const capabilities: Capability[] = ["EXECUTION_STATISTICS_READ", "LATEST_EXECUTIONS_LIST"]
++const key = (tenant: string, row: FlowTarget) => JSON.stringify([tenant, row.namespace, row.id])
++
++/** Current-page projection only. No policy cache, no global execution permission. */
++export function useFlowExecutionCapabilities(mode: () => boolean | undefined, tenant: () => string) {
++    const client = useClient()
++    const states = ref<Record<string, Partial<Record<Capability, boolean>>>>({})
++    const error = ref<unknown>()
++    let generation = 0
++    let controller: AbortController | undefined
++    const required = computed(() => mode() !== false) // missing config never implies OSS mode
++    const invalidate = () => {
++        generation++
++        controller?.abort()
++        controller = undefined
++        states.value = {}
++        error.value = undefined
++    }
++    const allowed = (row: FlowTarget, capability: Capability) => mode() === false
++        || states.value[key(tenant(), row)]?.[capability] === true
++    const load = async (rows: FlowTarget[]) => {
++        invalidate()
++        const current = generation
++        const currentTenant = tenant()
++        if (mode() === false || rows.length === 0) return {current: () => current === generation, rows}
++        if (mode() !== true) throw new Error("Missing flow execution capability configuration")
++        controller = new AbortController()
++        try {
++            const next: typeof states.value = {}
++            // Page sizes above 100 remain bounded HTTP batches, under this same page generation.
++            for (let offset = 0; offset < rows.length; offset += 100) {
++                const batch = rows.slice(offset, offset + 100)
++                const response = await client.post(`${apiUrl()}/ui/flows/execution-capabilities`, {
++                    formatVersion: 1,
++                    targets: batch.map(row => ({tenant: currentTenant, namespace: row.namespace, flowId: row.id, capabilities})),
++                }, {signal: controller.signal})
++                if (current !== generation) return {current: () => false, rows: []}
++                const body = response.data
++                if (body?.formatVersion !== 1 || !Array.isArray(body.results) || body.results.length !== batch.length)
++                    throw new Error("Invalid flow execution capability response")
++                for (let index = 0; index < batch.length; index++) {
++                    const result = body.results[index], row = batch[index]
++                    if (result.tenant !== currentTenant || result.namespace !== row.namespace || result.flowId !== row.id
++                        || Object.keys(result.capabilities ?? {}).length !== capabilities.length
++                        || capabilities.some(capability => !["AVAILABLE", "UNAVAILABLE"].includes(result.capabilities[capability])))
++                        throw new Error("Invalid flow execution capability target")
++                    next[key(currentTenant, row)] = Object.fromEntries(capabilities.map(capability => [capability, result.capabilities[capability] === "AVAILABLE"]))
++                }
++            }
++            if (current === generation) states.value = next
++        } catch (failure) {
++            if (current !== generation) return {current: () => false, rows: []}
++            states.value = {}
++            error.value = failure
++            throw failure // retain normal request error handling, never blanket-swallow 403
++        }
++        return {current: () => current === generation && currentTenant === tenant(), rows}
++    }
++    onBeforeUnmount(invalidate)
++    return {allowed, load, invalidate, error, required}
++}
+diff --git a/ui/src/stores/executions.ts b/ui/src/stores/executions.ts
+index fcfadd9..cc2294f 100644
+--- a/ui/src/stores/executions.ts
++++ b/ui/src/stores/executions.ts
+@@ -810,8 +810,8 @@ export const useExecutionsStore = defineStore("executions", () => {
+             })
+     }
+
+-    const loadLatestExecutions = (options: { flowFilters: any }) => {
+-        return ExecutionsAPI.latestExecutions({body: options.flowFilters})
++    const loadLatestExecutions = (options: { flowFilters: any; signal?: AbortSignal }) => {
++        return ExecutionsAPI.latestExecutions({body: options.flowFilters}, {signal: options.signal})
+     }
+
+     // mutations
+diff --git a/ui/tests/flow-execution-capabilities/browser.mjs b/ui/tests/flow-execution-capabilities/browser.mjs
+new file mode 100644
+index 0000000..9e1b846
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/browser.mjs
+@@ -0,0 +1,18 @@
++const task = await taskSpace(browserSpace ?? "0404a native Flow list test transport")
++const nativePage=task.page("p1")
++await nativePage.goto("about:blank")
++await nativePage.cdp("Page.stopLoading")
++await nativePage.cdp("egoAutomated.disable")
++await nativePage.events()
++const {createDiagnostics} = await import(diagnosticPath)
++const listeners=new Map()
++const session={send:(method,params)=>nativePage.cdp(method,params),on:(name,handler)=>{listeners.set(name,[...(listeners.get(name)??[]),handler])},off:(name,handler)=>listeners.set(name,(listeners.get(name)??[]).filter(value=>value!==handler)),detach:async()=>{}}
++const collector=createDiagnostics(session)
++await collector.attach()
++const diagnostics={currentDocument:()=>collector.currentDocument(),snapshot:async()=>{for(const event of await nativePage.events())for(const handler of listeners.get(event.method)??[])handler(event.params);return collector.snapshot()}}
++const page={
++ viewport:()=>nativePage.cdp("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false}),
++ goto:(...args)=>nativePage.goto(...args),click:(...args)=>nativePage.click(...args),waitForSelector:(...args)=>nativePage.waitForSelector(...args),
++ waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.snapshot(),
++}
++await runNativeFlowListPlan({page,reportRoot,diagnostics,diagnosticPath,spaceId:task.spaceId})
+diff --git a/ui/tests/flow-execution-capabilities/cases.mjs b/ui/tests/flow-execution-capabilities/cases.mjs
+new file mode 100644
+index 0000000..764b580
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/cases.mjs
+@@ -0,0 +1,122 @@
++import {classifyDiagnostics} from "./diagnostics.mjs"
++export const CASE_NAMES = [
++ "none-native-list-no-latest-no-chart-no-expected403","mixed-native-target-row-latest-and-chart","all-native-allowed-path-preserved","provider503-native-clears-content-and-displays-error",
++ "identity-switch-ignores-pending-flow-response","identity-switch-cancels-pending-latest-and-unmounts-chart","identity-switch-cancels-pending-capability-projection",
++ "pagination-ignores-older-flow-page-response","current-page-30s-expiry-rechecks-and-unmounts-revoked-content","mode-a-native-oss-without-capability-request",
++]
++export async function runNativeFlowListPlan({page, reportRoot, diagnostics, diagnosticPath, spaceId=null}) {
++const fs=await import("node:fs/promises");const assert=(await import("node:assert/strict")).default
++await page.viewport()
++const crypto=await import("node:crypto")
++const sourcePaths=["../../src/components/flows/Flows.vue","../../src/components/flows/useFlowExecutionCapabilities.ts","../../src/stores/executions.ts","./cases.mjs","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./check-report.mjs","../../package-lock.json"]
++const inputs={}
++for(const relative of sourcePaths)inputs[relative]=crypto.createHash("sha256").update(await fs.readFile(new URL(relative,import.meta.url))).digest("hex")
++inputs["overlay:sdk-browser-diagnostics.cjs"]=crypto.createHash("sha256").update(await fs.readFile(diagnosticPath)).digest("hex")
++const report = {completed:false,passedGate:false,notRun:10,inputs,transport:"explicit-test-transport",component:"native Flows.vue / KsDataTable / TimeSeries",locale:"en",width:1280,spaceId,startedAt:new Date().toISOString(),cases:CASE_NAMES.map(name=>({name,status:"notRun",stimulus:name.startsWith("pagination-")?"test transport invokes native loadData; not a native pagination click":"native test page"}))}
++await fs.mkdir(reportRoot,{recursive:true})
++const control = async value => {
++    const r=await fetch("http://127.0.0.1:5178/test/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({flowDelay:0,latestDelay:0,capabilityDelay:0,...value})})
++    assert.equal(r.status,200)
++}
++const evidence = async () => (await fetch("http://127.0.0.1:5178/test/evidence")).json()
++const stable = async () => {
++    await page.waitForFunction(async()=>{const state=await fetch("/test/evidence").then(r=>r.json());return state.calls.some(c=>c.kind==="capability"&&c.completed)},undefined,{timeout:15000})
++    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
++}
++const dom = async () => page.evaluate(()=>({rows:[...document.querySelectorAll("tbody tr")].map(row=>({text:row.textContent,canvases:row.querySelectorAll("canvas").length,executionLinks:row.querySelectorAll('a[href*="/execution-"]').length})),canvases:document.querySelectorAll(".row-graph canvas").length,alerts:[...document.querySelectorAll('[role="alert"]')].map(e=>e.textContent),errors:window.probe.errorList(),text:document.body.textContent}))
++const persist=async()=>{await fs.writeFile(`${reportRoot}/browser.json`,JSON.stringify(report,null,2)+"\n")}
++await persist()
++let lastEvents=new Set()
++const record = async (name,run) => {
++    const test=report.cases.find(test=>test.name===name);assert(test&&test.status==="notRun")
++    Object.assign(test,{status:"running",startedAt:new Date().toISOString()})
++    test.documentId=diagnostics.currentDocument()
++    await persist()
++    try {
++        await run(test)
++        const snapshot=await diagnostics.snapshot()
++        test.eventIds=snapshot.events.filter(event=>!lastEvents.has(event.id)).map(event=>event.id)
++        test.diagnostics=classifyDiagnostics(snapshot,name,test.documentId,lastEvents)
++        lastEvents=new Set(snapshot.events.map(event=>event.id))
++        assert.deepEqual(test.diagnostics.unexpected,[],"Unexpected source-associated browser errors")
++        test.status="passed"
++    } catch(error){test.status="failed";test.error=String(error);throw error}
++    finally {test.finishedAt=new Date().toISOString();test.network=await evidence();test.dom=await dom();report.notRun=report.cases.filter(test=>test.status==="notRun").length;report.diagnostics=await diagnostics.snapshot();await persist()}
++}
++try {
++ await control({mode:"none"});await page.goto("http://127.0.0.1:5178/main/flows");await page.waitForSelector("#transport-mixed",{state:"visible"});await stable()
++ await record("none-native-list-no-latest-no-chart-no-expected403",async()=>{
++    const state=await evidence(),view=await dom()
++    assert.equal(view.rows.length,2);assert.equal(view.canvases,0)
++    assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0)
++    assert.deepEqual(view.errors,[]);assert(!view.text.includes("filter.refresh"));assert(view.text.includes("Refresh"))
++ })
++ await record("mixed-native-target-row-latest-and-chart",async()=>{
++    await page.click("#transport-mixed",{label:"load mixed native rows"});await stable()
++    await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===1)
++    const state=await evidence(),view=await dom()
++    assert.deepEqual(state.calls.filter(c=>c.kind==="latest").map(c=>c.body),[[{id:"one",namespace:"company.sub"}]])
++    const charts=state.calls.filter(c=>c.kind==="chart");assert.equal(charts.length,1);assert(charts[0].body.chart.includes("value: company.sub"));assert(charts[0].body.chart.includes("value: one"))
++    assert.equal(view.rows[0].canvases,1);assert.equal(view.rows[1].canvases,0);assert(view.rows[0].text.includes("Success"));assert(!view.rows[1].text.includes("Success"));assert.deepEqual(view.errors,[])
++    await page.screenshot({path:`${reportRoot}/mixed-native-en-1280.png`})
++ })
++ await record("all-native-allowed-path-preserved",async()=>{
++    await page.click("#transport-all",{label:"load both allowed rows"});await stable();await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===2)
++    const state=await evidence();assert.equal(state.calls.filter(c=>c.kind==="latest")[0].body.length,2);assert.equal(state.calls.filter(c=>c.kind==="chart").length,2);assert.deepEqual((await dom()).errors,[])
++ })
++ await record("provider503-native-clears-content-and-displays-error",async()=>{
++    await page.click("#transport-failure",{label:"show capability service failure"});await stable();await page.waitForSelector('[role="alert"]',{state:"visible"})
++    const state=await evidence(),view=await dom();assert.equal(view.canvases,0);assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0);assert(state.calls.some(c=>c.kind==="capability"&&c.status===503));assert(view.alerts.length>0)
++ })
++ await record("identity-switch-ignores-pending-flow-response",async()=>{
++    await control({mode:"all",flowDelay:1200});await page.click("#refresh-native",{label:"start delayed flow request"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows")})
++    await page.click("#transport-switch",{label:"switch identity during flow"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows"&&c.completed)})
++    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
++    const state=await evidence(),view=await dom();assert.equal(view.rows.length,0);assert.equal(view.canvases,0);assert.equal(state.calls.filter(c=>["latest","chart","capability"].includes(c.kind)).length,0)
++ })
++ await record("identity-switch-cancels-pending-latest-and-unmounts-chart",async()=>{
++    await control({mode:"all",latestDelay:1200});await page.click("#refresh-native",{label:"start delayed latest request"});await stable()
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="latest")})
++    await page.click("#transport-switch",{label:"switch identity during latest"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="latest"&&c.completed)})
++    const view=await dom();assert.equal(view.rows.length,0);assert.equal(view.canvases,0);assert.equal(view.rows.flatMap(r=>r.executionLinks).length,0)
++ })
++ await record("identity-switch-cancels-pending-capability-projection",async()=>{
++    await control({mode:"all",capabilityDelay:1200});await page.click("#refresh-native",{label:"start delayed capability request"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="capability")})
++    await page.click("#transport-switch",{label:"switch identity during capability"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="capability"&&c.completed)})
++    const state=await evidence(),view=await dom();assert.equal(view.rows.length,0);assert.equal(view.canvases,0);assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0)
++ })
++ await record("pagination-ignores-older-flow-page-response",async()=>{
++    await control({mode:"all",flowDelay:1200});await page.evaluate(()=>window.probe.loadPage(1))
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows")})
++    await control({mode:"mixed",flowDelay:0});await page.evaluate(()=>window.probe.loadPage(2));await stable()
++    await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===1)
++    await page.waitForFunction(()=>window.probe.pendingPages()===0)
++    const state=await evidence(),view=await dom();assert.equal(view.rows.length,2);assert.equal(view.rows[0].canvases,1);assert.equal(view.rows[1].canvases,0);assert(!view.text.includes("stale-"))
++    assert.equal(state.calls.filter(c=>c.kind==="latest").length,1);assert.equal(state.calls.filter(c=>c.kind==="chart").length,1)
++ })
++ await record("current-page-30s-expiry-rechecks-and-unmounts-revoked-content",async()=>{
++    await control({mode:"all"});await page.click("#refresh-native",{label:"load current page capabilities"});await stable();await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===2)
++    await control({mode:"none"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="capability"&&c.completed)&&document.querySelectorAll(".row-graph canvas").length===0},undefined,{timeout:40000})
++    const state=await evidence();assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0)
++ })
++ await record("mode-a-native-oss-without-capability-request",async()=>{
++    await control({mode:"all"});await page.evaluate(()=>window.probe.mode(false));await page.click("#refresh-native",{label:"load original OSS mode"})
++    await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===2)
++    const state=await evidence();assert.equal(state.calls.filter(c=>c.kind==="capability").length,0);assert.equal(state.calls.filter(c=>c.kind==="latest")[0].body.length,2)
++ })
++ for(const relative of sourcePaths)assert.equal(crypto.createHash("sha256").update(await fs.readFile(new URL(relative,import.meta.url))).digest("hex"),inputs[relative],`Input changed during run: ${relative}`)
++ assert.equal(crypto.createHash("sha256").update(await fs.readFile(diagnosticPath)).digest("hex"),inputs["overlay:sdk-browser-diagnostics.cjs"])
++ report.inputsRechecked=true;report.completed=true;report.passedGate=true
++ report.finishedAt=new Date().toISOString();report.passed=report.cases.filter(c=>c.status==="passed").length
++ await fs.writeFile(`${reportRoot}/browser.json`,JSON.stringify(report,null,2)+"\n")
++ console.log(JSON.stringify({spaceId,passed:report.passed,total:report.cases.length,report:`${reportRoot}/browser.json`}))
++ console.log(await page.snapshot())
++} catch(error) {report.failure=String(error);report.completed=true;report.passedGate=false;report.notRun=report.cases.filter(test=>test.status==="notRun").length;report.diagnostics=await diagnostics.snapshot();await persist();console.log(JSON.stringify({failed:String(error),report:`${reportRoot}/browser.json`}));throw error}
++
++}
+diff --git a/ui/tests/flow-execution-capabilities/check-report.mjs b/ui/tests/flow-execution-capabilities/check-report.mjs
+new file mode 100644
+index 0000000..8a5845b
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/check-report.mjs
+@@ -0,0 +1,37 @@
++import fs from "node:fs"
++import crypto from "node:crypto"
++import {classifyDiagnostics} from "./diagnostics.mjs"
++const report=JSON.parse(fs.readFileSync(process.argv[2],"utf8"))
++const expected=[
++ "none-native-list-no-latest-no-chart-no-expected403",
++ "mixed-native-target-row-latest-and-chart",
++ "all-native-allowed-path-preserved",
++ "provider503-native-clears-content-and-displays-error",
++ "identity-switch-ignores-pending-flow-response",
++ "identity-switch-cancels-pending-latest-and-unmounts-chart",
++ "identity-switch-cancels-pending-capability-projection",
++ "pagination-ignores-older-flow-page-response",
++ "current-page-30s-expiry-rechecks-and-unmounts-revoked-content",
++ "mode-a-native-oss-without-capability-request",
++]
++if(report.transport!=="explicit-test-transport" || report.locale!=="en" || report.width!==1280 || !report.finishedAt || report.passed!==10
++ || !report.completed || !report.passedGate || !report.inputsRechecked || report.notRun!==0
++ || report.cases.some(c=>!c.diagnostics||c.diagnostics.unexpected?.length!==0)
++ || JSON.stringify(report.cases?.map(c=>c.name))!==JSON.stringify(expected) || report.cases.some(c=>c.status!=="passed"||!c.network||!c.dom||!c.finishedAt))
++ throw new Error("Native Flow list report must execute the exact ten cases without failure, skip or notRun")
++const covered=new Set()
++for(const test of report.cases){
++ if(!test.documentId||!Array.isArray(test.eventIds))throw new Error("Missing case document and diagnostic event association")
++ const delta=report.diagnostics.events.filter(event=>test.eventIds.includes(event.id))
++ if(delta.length!==test.eventIds.length||test.eventIds.some(id=>covered.has(id)))throw new Error("Missing or duplicated diagnostic events")
++ test.eventIds.forEach(id=>covered.add(id))
++ const classified=classifyDiagnostics({...report.diagnostics,events:report.diagnostics.events},test.name,test.documentId,new Set(report.diagnostics.events.filter(event=>!test.eventIds.includes(event.id)).map(event=>event.id)))
++ if(classified.unexpected.length||JSON.stringify(classified)!==JSON.stringify(test.diagnostics))throw new Error("Unclassified or forged case diagnostics")
++}
++if(report.diagnostics.events.some(event=>["console-error","page-error","http-error","request-failed","diagnostic-integrity-error"].includes(event.kind)&&!covered.has(event.id)))throw new Error("Browser error outside executed cases")
++const sources=["../../src/components/flows/Flows.vue","../../src/components/flows/useFlowExecutionCapabilities.ts","../../src/stores/executions.ts","./cases.mjs","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./check-report.mjs","../../package-lock.json"]
++if(JSON.stringify(Object.keys(report.inputs??{}))!==JSON.stringify([...sources,"overlay:sdk-browser-diagnostics.cjs"]))throw new Error("Missing exact native source provenance")
++for(const relative of sources){const sha=crypto.createHash("sha256").update(fs.readFileSync(new URL(relative,import.meta.url))).digest("hex");if(report.inputs[relative]!==sha)throw new Error(`Source changed since browser run: ${relative}`)}
++const diagnosticPath=process.argv[3]
++if(!diagnosticPath||report.inputs["overlay:sdk-browser-diagnostics.cjs"]!==crypto.createHash("sha256").update(fs.readFileSync(diagnosticPath)).digest("hex"))throw new Error("Missing or changed host diagnostic collector")
++console.log(JSON.stringify({suite:"native-flow-execution-capabilities",tests:10,passed:10,failures:0,skipped:0,notRun:0,inputs:report.inputs}))
+diff --git a/ui/tests/flow-execution-capabilities/diagnostics.mjs b/ui/tests/flow-execution-capabilities/diagnostics.mjs
+new file mode 100644
+index 0000000..93e56c3
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/diagnostics.mjs
+@@ -0,0 +1,23 @@
++// Shared policy: recognize only exact, source-bound expected failures for this finite test plan.
++export function classifyDiagnostics(snapshot, caseName, currentDocument, previousIds = new Set()) {
++    const errors=snapshot.events.filter(event=>!previousIds.has(event.id)&&["console-error","page-error","http-error","request-failed","diagnostic-integrity-error"].includes(event.kind))
++    const expected=[],unexpected=[]
++    const exactCapability="http://127.0.0.1:5178/api/v1/main/ui/flows/execution-capabilities"
++    const exactLatest="http://127.0.0.1:5178/api/v1/main/executions/latest"
++    for(const event of errors){
++        let reason=null
++        const sameDocument=event.documentId===currentDocument
++        const sourceRequest=event.requestId??event.networkRequestId
++        const linked=snapshot.events.find(item=>item.kind==="request"&&item.requestId===sourceRequest&&item.documentId===currentDocument)
++        if(caseName==="provider503-native-clears-content-and-displays-error"&&sameDocument){
++            if(event.kind==="http-error"&&event.url===exactCapability&&event.status===503)reason="exact current-document capability 503"
++            if(event.kind==="console-error"&&event.source==="network"&&linked?.url===exactCapability
++                &&snapshot.events.some(item=>item.kind==="http-error"&&item.requestId===sourceRequest&&item.documentId===currentDocument&&item.status===503))reason="browser network log for the same capability 503"
++        }
++        const canceledCase=caseName==="identity-switch-cancels-pending-capability-projection"?exactCapability
++            :caseName==="identity-switch-cancels-pending-latest-and-unmounts-chart"?exactLatest:null
++        if(canceledCase&&sameDocument&&event.kind==="request-failed"&&event.url===canceledCase&&event.canceled===true&&event.error==="net::ERR_ABORTED")reason="explicit identity-switch cancellation of this exact request"
++        ;(reason?expected:unexpected).push({...event,...(reason?{expectedReason:reason}:{})})
++    }
++    return {expected,unexpected}
++}
+diff --git a/ui/tests/flow-execution-capabilities/index.html b/ui/tests/flow-execution-capabilities/index.html
+new file mode 100644
+index 0000000..9daef50
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/index.html
+@@ -0,0 +1 @@
++<!DOCTYPE html><html><head><meta charset="UTF-8"><title>0404a native Flow list test transport</title></head><body><div id="app"></div><script type="module" src="/tests/flow-execution-capabilities/main.ts"></script></body></html>
+diff --git a/ui/tests/flow-execution-capabilities/main.ts b/ui/tests/flow-execution-capabilities/main.ts
+new file mode 100644
+index 0000000..6ea8114
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/main.ts
+@@ -0,0 +1,45 @@
++import {createApp, h, ref, nextTick} from "vue"
++import {createPinia} from "pinia"
++import {createI18n} from "vue-i18n"
++import {createRouter, createWebHistory} from "vue-router"
++import DesignSystem, {registerDesignSystemI18n, setMomentInstance, setDateFormatter} from "@kestra-io/design-system"
++import moment from "moment-timezone"
++import {configureClient} from "@kestra-io/kestra-sdk"
++import Flows from "../../src/components/flows/Flows.vue"
++import {auth, misc, evidence} from "./transport"
++import {Me} from "../../src/override/stores/auth"
++import en from "../../src/translations/en.json"
++import "element-plus/dist/index.css"
++import "../../src/styles/app.scss"
++window.KESTRA_BASE_PATH = ""
++configureClient({baseUrl: location.origin, throwOnError: true})
++const router = createRouter({history: createWebHistory(), routes: [
++    {name: "flows/list", path: "/:tenant/flows", component: {render: () => null}},
++    ...["flows/update", "namespaces/update", "executions/update", "flows/create", "flows/search"].map((name, i) => ({name, path: `/target${i}/:id?`, component: {render: () => null}})),
++]})
++await router.push("/main/flows")
++await router.isReady()
++const native = ref<any>()
++const component = {
++    setup() {
++        let pendingPages = 0
++        const load = () => native.value.$.setupState.loadData({page: 1, size: 25})
++        const loadPage = (page: number) => {pendingPages++;void native.value.$.setupState.loadData({page, size: 25}).finally(() => {pendingPages--})}
++        ;(window as any).probe = {load, loadPage, pendingPages: () => pendingPages, async switchAccount() {auth.user = new Me(); await nextTick()}, async mode(value: boolean) {misc.configs.flowExecutionCapabilitiesRequired = value; await nextTick()}, errors: evidence.errors, errorList: () => [...evidence.errors], clearErrors: () => {evidence.errors.splice(0)},
++            mountedCharts: () => document.querySelectorAll(".row-graph canvas").length}
++        const setMode = async (mode: string) => {await fetch("/test/control", {method: "POST", body: JSON.stringify({mode, flowDelay: 0, latestDelay: 0, capabilityDelay: 0})}); await load()}
++        return () => h("main", [h("nav", {"aria-label": "Explicit test transport controls"}, [
++            ...["none", "mixed", "all", "failure"].map(mode => h("button", {id: `transport-${mode}`, onClick: () => setMode(mode)}, mode)),
++            h("button", {id: "transport-switch", onClick: () => (window as any).probe.switchAccount()}, "Switch test identity"),
++        ]), h("p", {id: "test-transport"}, "0404a native Flow list / explicit test transport / no production identity"),
++            h("button", {id: "refresh-native", onClick: load}, "Refresh native list"), h(Flows, {ref: native, topbar: false, fitHeight: false})])
++    },
++}
++const app = createApp(component)
++const i18n = createI18n({legacy: false, locale: "en", messages: {en: (en as any).en ?? en}, missingWarn: false, fallbackWarn: false})
++await registerDesignSystemI18n(i18n)
++setMomentInstance(moment)
++setDateFormatter(value => moment(value).format("YYYY-MM-DD HH:mm"))
++app.use(createPinia()).use(router).use(i18n).use(DesignSystem)
++app.config.errorHandler = error => {evidence.errors.push(String(error)); console.error(error)}
++app.mount("#app")
+diff --git a/ui/tests/flow-execution-capabilities/playwright.mjs b/ui/tests/flow-execution-capabilities/playwright.mjs
+new file mode 100644
+index 0000000..c7e71a3
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/playwright.mjs
+@@ -0,0 +1,17 @@
++import {chromium} from "playwright"
++import path from "node:path"
++import {runNativeFlowListPlan} from "./cases.mjs"
++const browser=await chromium.launch({headless:true})
++const context=await browser.newContext({viewport:{width:1280,height:900}})
++const nativePage=await context.newPage()
++const diagnosticPath=path.resolve(process.argv[3]??"../../../scripts/sdk-browser-diagnostics.cjs")
++const {createDiagnostics}=await import(diagnosticPath)
++const diagnostics=createDiagnostics(await context.newCDPSession(nativePage))
++await diagnostics.attach()
++const page={
++ viewport:async()=>{},goto:(...args)=>nativePage.goto(...args),click:(selector)=>nativePage.click(selector),
++ waitForSelector:(...args)=>nativePage.waitForSelector(...args),waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),
++ screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.locator("body").innerText(),
++}
++try {await runNativeFlowListPlan({page,diagnostics,diagnosticPath,reportRoot:path.resolve(process.argv[2]??"../../reports/browser-playwright")})}
++finally {await browser.close()}
+diff --git a/ui/tests/flow-execution-capabilities/run-browser.mjs b/ui/tests/flow-execution-capabilities/run-browser.mjs
+new file mode 100644
+index 0000000..0bd60c1
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/run-browser.mjs
+@@ -0,0 +1,9 @@
++import fs from "node:fs"
++import path from "node:path"
++import {execFileSync} from "node:child_process"
++const area=path.dirname(new URL(import.meta.url).pathname)
++const reportRoot=path.resolve(process.argv[2] ?? "../../reports/browser")
++const browserSpace=process.argv[3] ? Number(process.argv[3]) : null
++const diagnosticPath=path.resolve(process.argv[4]??"../../../scripts/sdk-browser-diagnostics.cjs")
++const input=`const diagnosticPath=${JSON.stringify(diagnosticPath)}; const {runNativeFlowListPlan}=await import(${JSON.stringify(new URL("./cases.mjs",import.meta.url).href)}); const reportRoot=${JSON.stringify(reportRoot)}; const browserSpace=${JSON.stringify(browserSpace)};\n`+fs.readFileSync(path.join(area,"browser.mjs"),"utf8")
++process.stdout.write(execFileSync("ego-browser",["nodejs"],{input,encoding:"utf8",maxBuffer:8*1024*1024}))
+diff --git a/ui/tests/flow-execution-capabilities/serve.mjs b/ui/tests/flow-execution-capabilities/serve.mjs
+new file mode 100644
+index 0000000..c2be2a1
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/serve.mjs
+@@ -0,0 +1,63 @@
++import {createServer} from "vite"
++import vue from "@vitejs/plugin-vue"
++import path from "node:path"
++import fs from "node:fs"
++import {createHash} from "node:crypto"
++import YAML from "yaml"
++const root = process.cwd()
++const area = path.join(root, "tests/flow-execution-capabilities")
++const state = {runId:process.env.FLOW_BROWSER_RUN_ID??"manual-test-transport",sourceHash:createHash("sha256").update(fs.readFileSync(new URL(import.meta.url))).digest("hex"),mode: "none", calls: [], flowDelay: 0, latestDelay: 0, capabilityDelay: 0}
++const rows = [{id: "one", namespace: "company.sub", labels: [], triggers: [], disabled: false}, {id: "two", namespace: "other", labels: [], triggers: [], disabled: false}]
++const stores = ["src/stores/flow", "src/stores/api", "src/stores/executions", "src/stores/dashboard", "src/override/stores/misc"]
++const blank = ["src/components/flows/FlowRun.vue", "src/components/flows/FlowRunActions.vue", "src/components/flows/TriggerAvatar.vue", "src/components/layout/MarkdownTooltip.vue"]
++const mockIds = new Map(stores.map(p => [path.join(root,p), "\0flow-probe-transport"]))
++mockIds.set(path.join(root,"src/override/stores/auth"), "\0flow-probe-auth")
++const read = async req => {let text=""; for await(const part of req)text+=part;return text ? JSON.parse(text) : {}}
++const json = (res, body, status=200) => {res.statusCode=status;res.setHeader("Content-Type","application/json");res.end(JSON.stringify(body))}
++const server = await createServer({configFile: false, root, mode: "test", server: {host:"127.0.0.1",port: 5178,strictPort:true,fs:{allow:[root]}},
++    resolve: {alias: [{find:"override",replacement:path.join(root,"src/override")}],dedupe:["vue","vue-router","pinia","vue-i18n","echarts"]},
++    define: {"window.KESTRA_BASE_PATH": JSON.stringify("")},
++    plugins: [{name:"explicit-flow-test-transport", enforce:"pre",
++        resolveId(source, importer) {
++            let resolved = source.startsWith("override/") ? path.join(root,"src/override",source.slice(9)) : source.startsWith(".") && importer ? path.resolve(path.dirname(importer),source) : source.startsWith("/src/") ? path.join(root,source) : source
++            const bare=resolved.replace(/\.(ts|js)$/u,"")
++            if (mockIds.has(bare)) return mockIds.get(bare)
++            if (blank.includes(path.relative(root,resolved)))return "\0flow-probe-blank"
++            if (bare===path.join(root,"src/composables/useRestoreUrl"))return "\0flow-probe-restore"
++            if (bare===path.join(root,"src/components/filter/configurations"))return "\0flow-probe-filter"
++            if (bare===path.join(root,"src/components/flows/useFlowsBulkActions"))return "\0flow-probe-bulk"
++        },
++        load(id) {
++            if(id==="\0flow-probe-transport")return `export * from ${JSON.stringify(path.join(area,"transport.ts"))}`
++            if(id==="\0flow-probe-auth")return `export {useAuthStore} from ${JSON.stringify(path.join(area,"transport.ts"))}; export class Me {hasAny(){return true} hasAnyActionOnAnyNamespace(){return true} isAllowed(){return true}}`
++            if(id==="\0flow-probe-blank")return 'export default {render(){return null}}'
++            if(id==="\0flow-probe-restore")return 'import {ref} from "vue";export default ()=>({loadInit:ref(true)})'
++            if(id==="\0flow-probe-filter")return 'export const useFlowFilter=()=>({fields:[]})'
++            if(id==="\0flow-probe-bulk")return 'export default ()=>({anyFlowDisabled:false,anyFlowEnabled:true,deleteFlows(){},enableFlows(){},disableFlows(){},exportFlows(){},exportFlowsAsStream(){},importFlows(){}})'
++        },
++        configureServer(server) {server.middlewares.use(async(req,res,next)=>{
++            try {
++                if(req.url.startsWith("/test/control")){Object.assign(state,await read(req));state.calls=[];return json(res,{ok:true})}
++                if(req.url.startsWith("/test/evidence"))return json(res,state)
++                if(req.url.startsWith("/test/flows")){const record={kind:"flows",url:req.url,completed:false};state.calls.push(record);const copy=structuredClone(rows);if(req.url.includes("page=1")&&state.flowDelay>0)copy.forEach(row=>row.id="stale-"+row.id);const delay=state.flowDelay;await new Promise(r=>setTimeout(r,delay));record.completed=true;return json(res,{results:copy,total:2})}
++                if(req.url.startsWith("/api/v1/main/ui/flows/execution-capabilities")){
++                    const body=await read(req);const record={kind:"capability",body,completed:false,status:200};state.calls.push(record);const mode=state.mode,delay=state.capabilityDelay;
++                    await new Promise(r=>setTimeout(r,delay));record.completed=true;if(mode==="failure"){record.status=503;return json(res,{code:"AUTHORIZATION_UNAVAILABLE"},503)}
++                    return json(res,{formatVersion:1,results:body.targets.map(t=>({...t,capabilities:Object.fromEntries(t.capabilities.map(c=>[c,mode==="all"||mode==="mixed"&&t.namespace==="company.sub"?"AVAILABLE":"UNAVAILABLE"]))}))})
++                }
++                if(req.url.includes("/executions/latest")){
++                    const body=await read(req);const record={kind:"latest",body,completed:false,status:200};state.calls.push(record);const mode=state.mode,delay=state.latestDelay;
++                    await new Promise(r=>setTimeout(r,delay));record.completed=true;if(mode==="none"){record.status=403;return json(res,{message:"denied"},403)}
++                    return json(res,body.map(t=>({id:`execution-${t.id}`,flowId:t.id,namespace:t.namespace,startDate:"2026-11-19T00:00:00Z",status:"SUCCESS"})))
++                }
++                if(req.url.includes("/dashboards/charts/preview")){
++                    const body=await read(req);const record={kind:"chart",body,completed:true,status:state.mode==="none"?403:200};state.calls.push(record);if(state.mode==="none")return json(res,{message:"denied"},403)
++                    return json(res,{total:1,results:[{date:"2026-11-19T00:00:00Z",state:"SUCCESS",total:1,duration:0.5}]})
++                }
++                if(req.url==="/" || req.url.startsWith("/main/flows")){res.setHeader("Content-Type","text/html");return res.end(await server.transformIndexHtml(req.url,fs.readFileSync(path.join(area,"index.html"),"utf8")))}
++                next()
++            }catch(error){json(res,{error:String(error)},500)}
++        })},
++    },vue()],css:{preprocessorOptions:{scss:{silenceDeprecations:["legacy-js-api","import","global-builtin","color-functions"]}}}})
++await server.listen()
++console.log("0404a explicit transport native Flows.vue at http://127.0.0.1:5178")
+diff --git a/ui/tests/flow-execution-capabilities/transport.ts b/ui/tests/flow-execution-capabilities/transport.ts
+new file mode 100644
+index 0000000..a69b4f1
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/transport.ts
+@@ -0,0 +1,26 @@
++import {reactive} from "vue"
++import {Me} from "../../src/override/stores/auth"
++export const evidence = reactive({errors: [] as string[]})
++export const auth = reactive({user: new Me(), isLogged: true})
++export const misc = reactive({configs: {flowExecutionCapabilitiesRequired: true, chartDefaultDuration: "PT24H"}})
++export const flow = reactive({flows: [] as any[], total: 0,
++    async findFlows(options: any) {
++        const response = await fetch(`/test/flows?page=${options.page}`).then(r => r.json())
++        if (options.commit !== false) {flow.flows = response.results; flow.total = response.total}
++        return response
++    },
++})
++export const useFlowStore = () => flow
++export const useAuthStore = () => auth
++export const useMiscStore = () => misc
++export const useApiStore = () => ({posthogEvents() {}})
++export const useExecutionsStore = () => ({flow: undefined, async loadLatestExecutions({flowFilters, signal}: any) {
++    const response = await fetch("/api/v1/main/executions/latest", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(flowFilters), signal})
++    if (!response.ok) {evidence.errors.push(`latest ${response.status}`); throw new Error(`latest ${response.status}`)}
++    return response.json()
++}})
++export const useDashboardStore = () => ({async chartPreview(input: any) {
++    const response = await fetch("/api/v1/main/dashboards/charts/preview", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(input)})
++    if (!response.ok) {evidence.errors.push(`chart ${response.status}`); throw new Error(`chart ${response.status}`)}
++    return response.json()
++}})
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java
+new file mode 100644
+index 0000000..dd0bae5
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java
+@@ -0,0 +1,52 @@
++package io.kestra.webserver.controllers.api;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.rbac.*;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.*;
++import io.micronaut.http.annotation.*;
++import io.micronaut.http.server.util.HttpHostResolver;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.scheduling.TaskExecutors;
++import io.micronaut.scheduling.annotation.ExecuteOn;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import reactor.core.publisher.Mono;
++import java.util.List;
++import java.util.Map;
++
++@Controller("/api/v1/{tenant}/ui/flows/execution-capabilities")
++@Requires(property = "kestra.rbac.enabled", value = "true")
++@ExecuteOn(TaskExecutors.IO)
++public final class FlowExecutionCapabilitiesController {
++    private final FlowExecutionCapabilities capabilities;
++    private final HttpHostResolver hostResolver;
++    public FlowExecutionCapabilitiesController(FlowExecutionCapabilities capabilities, HttpHostResolver hostResolver) {
++        this.capabilities = capabilities; this.hostResolver = hostResolver;
++    }
++
++    @Post(consumes = MediaType.APPLICATION_JSON, produces = MediaType.APPLICATION_JSON)
++    public Mono<MutableHttpResponse<?>> query(String tenant, @Body byte[] body, HttpRequest<?> request) {
++        return Mono.<MutableHttpResponse<?>>defer(() -> {
++            Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++            if (authentication == null) return Mono.just(error(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED"));
++            // Keep the existing API CSRF filter; additionally require the native browser's same-origin POST.
++            if (!hostResolver.resolve(request).equals(request.getHeaders().get(HttpHeaders.ORIGIN)))
++                return Mono.just(error(HttpStatus.FORBIDDEN, "ORIGIN_MISMATCH"));
++            var targets = capabilities.parse(tenant, body);
++            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++            return capabilities.query(principal, tenant, targets).map(result -> (MutableHttpResponse<?>) HttpResponse.ok(result))
++                .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, PropagatedContext.empty()
++                    .plus(new AuthorizationInvocationContext(request, false))));
++        }).onErrorResume(failure -> {
++            if (failure instanceof HttpStatusException status) return Mono.just(error(status.getStatus(), status.getMessage()));
++            // Boundary failures are observable; already-folded gate denies remain UNAVAILABLE.
++            return Mono.just(error(HttpStatus.SERVICE_UNAVAILABLE, "AUTHORIZATION_UNAVAILABLE"));
++        }).map(response -> response.header(HttpHeaders.CACHE_CONTROL, "no-store"));
++    }
++    private static MutableHttpResponse<?> error(HttpStatus status, String code) {
++        return HttpResponse.status(status).body(Map.of("code", code));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+index 9516ceb..ad66c52 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
+@@ -82,6 +82,9 @@ public class MiscController {
+     @io.micronaut.context.annotation.Value("${micronaut.security.enabled:false}")
+     protected boolean securityEnabled;
+
++    @io.micronaut.context.annotation.Value("${kestra.rbac.enabled:false}")
++    protected boolean flowExecutionCapabilitiesRequired;
++
+     @Inject
+     Optional<AiServiceManager> aiServiceManager = Optional.empty();
+
+@@ -164,6 +167,7 @@ public class MiscController {
+             .isAiEnabled(applicationContext.containsBean(AiController.class))
+             .isAiApiKeyConfigured(aiServiceManager.map(AiServiceManager::hasConfiguredProvider).orElse(false))
+             .isBasicAuthInitialized(isBasicAuthInitialized())
++            .flowExecutionCapabilitiesRequired(flowExecutionCapabilitiesRequired)
+             .systemNamespace(systemFlowsConfiguration.namespace())
+             .hiddenLabelsPrefixes(hiddenLabelsPrefixes)
+             .url(kestraUrl)
+@@ -389,6 +393,9 @@ public class MiscController {
+         Long pluginsHash;
+
+         Boolean isPluginAutoInstallEnabled;
++
++        @JsonInclude
++        Boolean flowExecutionCapabilitiesRequired;
+     }
+
+     @Value
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
+index 0c3bf4c..f2ec17e 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationEvaluations.java
+@@ -64,6 +64,13 @@ private BeanProvider<AuthorizationEvaluationProviderV2> applicationGroupProvider
+
+     public boolean enabled() { return enabled; }
+
++    /** Finite native projections require one frozen provider, never legacy per-call fallback. */
++    public boolean ready() {
++        return enabled && (applicationGroups
++            ? applicationGroupProviders != null && applicationGroupProviders.isUnique() && identities != null && identities.isUnique()
++            : providers.isUnique());
++    }
++
+     public <Result> Flux<Result> boundary(RbacAuthorizer.Principal principal, String tenant,
+         Supplier<? extends Publisher<Result>> action) {
+         if (!enabled) return Flux.defer(action);
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java b/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java
+new file mode 100644
+index 0000000..2f6aaff
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java
+@@ -0,0 +1,137 @@
++package io.kestra.webserver.rbac;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import io.kestra.core.models.flows.AbstractFlow;
++import io.kestra.core.serializers.JacksonMapper;
++import io.micronaut.context.annotation.Value;
++import io.micronaut.http.*;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.web.router.MethodBasedRouteMatch;
++import io.micronaut.web.router.RouteAttributes;
++import jakarta.inject.Singleton;
++import jakarta.validation.Validator;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++import java.time.Duration;
++import java.util.*;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++/** Finite native-page projection of existing typed query decisions, never a permission grant. */
++@Singleton
++public final class FlowExecutionCapabilities {
++    public static final int MAX_BODY_BYTES = 128 * 1024;
++    public enum Capability { EXECUTION_STATISTICS_READ, LATEST_EXECUTIONS_LIST }
++    public enum State { AVAILABLE, UNAVAILABLE }
++    public record Target(String tenant, String namespace, String flowId, List<Capability> capabilities) {}
++    public record Result(String tenant, String namespace, String flowId, Map<Capability, State> capabilities) {}
++    public record Response(int formatVersion, List<Result> results) {}
++    private final TypedAuthorizationGate gate;
++    private final AuthorizationEvaluations evaluations;
++    private final Validator validator;
++    private final boolean typed;
++
++    public FlowExecutionCapabilities(TypedAuthorizationGate gate, AuthorizationEvaluations evaluations, Validator validator,
++        @Value("${kestra.rbac.typed.enabled:false}") boolean typed) {
++        this.gate = gate; this.evaluations = evaluations; this.validator = validator; this.typed = typed;
++    }
++
++    /** Only this authenticated POST delegates its complete finite plan to the controller. */
++    public static boolean matches(HttpRequest<?> request) {
++        var route = RouteAttributes.getRouteMatch(request).orElse(null);
++        return request.getMethod() == HttpMethod.POST
++            && request.getPath().equals("/api/v1/main/ui/flows/execution-capabilities")
++            && route instanceof MethodBasedRouteMatch<?, ?> method
++            && method.getDeclaringType().getName().equals("io.kestra.webserver.controllers.api.FlowExecutionCapabilitiesController")
++            && method.getMethodName().equals("query");
++    }
++
++    public List<Target> parse(String tenant, byte[] bytes) {
++        if (bytes.length > MAX_BODY_BYTES) throw error(HttpStatus.REQUEST_ENTITY_TOO_LARGE, "REQUEST_TOO_LARGE");
++        try {
++            JsonNode root;
++            try (var parser = JacksonMapper.ofJson().getFactory().createParser(bytes)) {
++                parser.enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
++                root = JacksonMapper.ofJson().readTree(parser);
++                if (parser.nextToken() != null) throw invalid();
++            }
++            fields(root, Set.of("formatVersion", "targets"));
++            if (!root.path("formatVersion").isIntegralNumber() || !root.path("formatVersion").canConvertToInt()
++                || root.path("formatVersion").intValue() != 1) throw error(HttpStatus.BAD_REQUEST, "UNSUPPORTED_VERSION");
++            JsonNode targets = root.path("targets");
++            if (!targets.isArray() || targets.isEmpty() || targets.size() > 100) throw invalid();
++            var result = new ArrayList<Target>();
++            var unique = new HashSet<List<String>>();
++            int count = 0;
++            for (JsonNode node : targets) {
++                fields(node, Set.of("tenant", "namespace", "flowId", "capabilities"));
++                String targetTenant = string(node, "tenant"), namespace = string(node, "namespace"), id = string(node, "flowId");
++                if (!"main".equals(tenant) || !tenant.equals(targetTenant)) throw error(HttpStatus.FORBIDDEN, "TENANT_MISMATCH");
++                // Reuse fixed upstream Flow constraints, including actual lengths and ID patterns.
++                if (!validator.validateValue(AbstractFlow.class, "id", id).isEmpty()
++                    || !validator.validateValue(AbstractFlow.class, "namespace", namespace).isEmpty()) throw invalid();
++                flowRead(new Target(tenant, namespace, id, List.of())); // existing typed namespace semantics
++                if (!unique.add(List.of(tenant, namespace, id))) throw invalid();
++                var requested = node.path("capabilities");
++                if (!requested.isArray() || requested.isEmpty() || requested.size() > 2) throw invalid();
++                var capabilities = new ArrayList<Capability>();
++                for (JsonNode value : requested) {
++                    if (!value.isTextual()) throw invalid();
++                    var capability = Capability.valueOf(value.textValue());
++                    if (capabilities.contains(capability)) throw invalid();
++                    capabilities.add(capability);
++                }
++                count += capabilities.size();
++                if (count > 200) throw invalid();
++                result.add(new Target(tenant, namespace, id, List.copyOf(capabilities)));
++            }
++            return List.copyOf(result);
++        } catch (HttpStatusException failure) { throw failure; }
++        catch (Exception invalid) { throw invalid(); }
++    }
++
++    public Mono<Response> query(RbacAuthorizer.Principal principal, String tenant, List<Target> targets) {
++        return Mono.defer(() -> {
++            if (!typed || !evaluations.ready()) return Mono.error(error(HttpStatus.SERVICE_UNAVAILABLE, "AUTHORIZATION_UNAVAILABLE"));
++            return gate.boundary(principal, tenant, () -> Flux.fromIterable(targets).concatMap(target ->
++                gate.authorize(principal, flowRead(target)).flatMap(flow -> {
++                    if (!flow.allowed()) return Mono.just(unavailable(target));
++                    return Flux.fromIterable(target.capabilities()).concatMap(capability ->
++                        gate.authorize(principal, executionQuery(target, capability)).map(decision -> Map.entry(capability,
++                            decision.allowed() && !decision.scope().intersect(domain(target, false)).effectiveDomain().terms().isEmpty()
++                                ? State.AVAILABLE : State.UNAVAILABLE)))
++                        .collect(LinkedHashMap<Capability, State>::new, (map, entry) -> map.put(entry.getKey(), entry.getValue()))
++                        .map(states -> new Result(target.tenant(), target.namespace(), target.flowId(), Collections.unmodifiableMap(states)));
++                }))).collectList().map(results -> new Response(1, List.copyOf(results)))
++                .timeout(Duration.ofSeconds(10));
++        });
++    }
++
++    static Operation flowRead(Target target) {
++        return new Operation(CONTRACT_VERSION, Source.REST, Resource.FLOW, Action.READ, target.tenant(), target.namespace(),
++            target.flowId(), domain(target, false), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY);
++    }
++    static Operation executionQuery(Target target, Capability capability) {
++        boolean latest = capability == Capability.LATEST_EXECUTIONS_LIST;
++        return new Operation(CONTRACT_VERSION, latest ? Source.REST : Source.DASHBOARD_AGGREGATE, Resource.EXECUTION,
++            latest ? Action.LIST : Action.READ, target.tenant(), latest ? target.namespace() : null, null,
++            domain(target, latest), Coverage.COMPLETE_QUERY, latest ? Aggregate.NONE : Aggregate.EXECUTION, SideEffect.READ_ONLY);
++    }
++    private static QueryDomain domain(Target target, boolean paginated) {
++        return new QueryDomain(List.of(target.namespace()), List.of(), List.of(), true, paginated);
++    }
++    private static Result unavailable(Target target) {
++        var states = new LinkedHashMap<Capability, State>();
++        target.capabilities().forEach(capability -> states.put(capability, State.UNAVAILABLE));
++        return new Result(target.tenant(), target.namespace(), target.flowId(), Collections.unmodifiableMap(states));
++    }
++    private static String string(JsonNode node, String key) {
++        if (!node.path(key).isTextual()) throw invalid();
++        return node.path(key).textValue();
++    }
++    private static void fields(JsonNode node, Set<String> expected) {
++        if (node == null || !node.isObject() || node.size() != expected.size()
++            || !expected.containsAll(node.properties().stream().map(Map.Entry::getKey).toList())) throw invalid();
++    }
++    private static HttpStatusException invalid() { return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST"); }
++    private static HttpStatusException error(HttpStatus status, String code) { return new HttpStatusException(status, code); }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+index 6b7f44d..a339a8c 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+@@ -37,6 +37,7 @@ public class RestRbacFilter implements HttpServerFilter {
+         if (!configuration.enabled() || protocol(request) || publicFavicon!=null && publicFavicon.matches(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+         if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
++        if (FlowExecutionCapabilities.matches(request)) return chain.proceed(request);
+         return Mono.defer(() -> {
+             if (!resolvers.isUnique()) return Mono.just(false);
+             var route = RouteAttributes.getRouteMatch(request).orElse(null);
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+index f8b32f6..74b9a6e 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+@@ -46,6 +46,7 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+     public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
+         if (!configuration.enabled() || RestRbacFilter.protocol(request) || publicFavicon!=null && publicFavicon.matches(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication != null && FlowExecutionCapabilities.matches(request)) return chain.proceed(request);
+         if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
+         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+         var route = RouteAttributes.getRouteMatch(request).orElse(null);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java
+new file mode 100644
+index 0000000..44d34f9
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java
+@@ -0,0 +1,102 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.serializers.JacksonMapper;
++import io.micronaut.context.annotation.*;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.*;
++import org.junit.jupiter.api.*;
++import reactor.core.publisher.Mono;
++import java.net.http.*;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicInteger;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++
++/** Real HTTP, explicit test identity/provider, H2 only; not production session acceptance. */
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.rbac.enabled",value="true")
++@Property(name="kestra.rbac.typed.enabled",value="true")
++@Property(name="kestra.rbac.evaluation.enabled",value="true")
++@Property(name="kestra.rbac.application-groups.enabled",value="false")
++@Property(name="micronaut.security.enabled",value="true")
++@Property(name="micronaut.security.filter.enabled",value="true")
++@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
++@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
++@Property(name="flow.capabilities.http.probe",value="true")
++@Property(name="flow.capabilities.http.identity",value="true")
++@Property(name="mcp.http.security.fixture",value="true")
++@Property(name="datasources.h2.url",value="jdbc:h2:mem:flow_capabilities_${random.uuid};DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE")
++class FlowExecutionCapabilitiesHttpTest {
++    static final String PATH="/api/v1/main/ui/flows/execution-capabilities";
++    static final String BODY="{\"formatVersion\":1,\"targets\":[{\"tenant\":\"main\",\"namespace\":\"company.sub\",\"flowId\":\"one\",\"capabilities\":[\"LATEST_EXECUTIONS_LIST\",\"EXECUTION_STATISTICS_READ\"]}]}";
++    @Inject EmbeddedServer server;
++    @Inject Policy policy;
++    @BeforeEach void reset(){policy.calls.set(0);policy.unavailable=false;}
++    @Test void projectsFiniteCapabilitiesWithNoStoreAndOneEvaluation() throws Exception {
++        var response=send(PATH,BODY,true,true,false);
++        assertThat(response.statusCode()).isEqualTo(200);
++        assertThat(response.headers().firstValue("Cache-Control")).contains("no-store");
++        var body=JacksonMapper.ofJson().readTree(response.body());
++        assertThat(body.path("formatVersion").asInt()).isEqualTo(1);
++        assertThat(body.path("results").get(0).path("capabilities").path("LATEST_EXECUTIONS_LIST").asText()).isEqualTo("UNAVAILABLE");
++        assertThat(policy.calls.get()).isEqualTo(3);
++    }
++    @Test void rejectsAnonymousCrossOriginDuplicateJsonAndOversizedBody() throws Exception {
++        assertThat(send(PATH,BODY,false,true,false).statusCode()).isEqualTo(401);
++        assertThat(send(PATH,BODY,true,false,false).statusCode()).isEqualTo(403);
++        assertThat(send(PATH,BODY.replace("\"formatVersion\":1","\"formatVersion\":1,\"formatVersion\":1"),true,true,false).statusCode()).isEqualTo(400);
++        assertThat(send(PATH," ".repeat(FlowExecutionCapabilities.MAX_BODY_BYTES+1),true,true,false).statusCode()).isEqualTo(413);
++        assertThat(policy.calls.get()).isZero();
++    }
++    @Test void jwtCookieWithoutCsrfCannotReachProjectionAndNearbyPathsDoNotDelegate() throws Exception {
++        assertThat(send(PATH,BODY,true,true,true).statusCode()).isEqualTo(403);
++        assertThat(send(PATH+"/other",BODY,true,true,false).statusCode()).isBetween(400,499);
++        assertThat(policy.calls.get()).isZero();
++    }
++    @Test void classifiedProviderFailureReturns503AndNeverAvailable() throws Exception {
++        policy.unavailable=true;
++        var response=send(PATH,BODY,true,true,false);
++        assertThat(response.statusCode()).isEqualTo(503);
++        var error=JacksonMapper.ofJson().readTree(response.body());
++        assertThat(error.path("code").asText()).isEqualTo("AUTHORIZATION_UNAVAILABLE");
++        assertThat(error.has("results")).isFalse();
++        assertThat(error.has("capabilities")).isFalse();
++        assertThat(response.headers().firstValue("Cache-Control")).contains("no-store");
++    }
++    @Test void publishesRequiredConfigurationBooleanFromHost() throws Exception {
++        var response=HttpClient.newHttpClient().send(HttpRequest.newBuilder(server.getURI().resolve("/api/v1/configs"))
++            .header("X-Flow-Capability-Test","alice").GET().build(),HttpResponse.BodyHandlers.ofString());
++        assertThat(response.statusCode()).isEqualTo(200);
++        assertThat(JacksonMapper.ofJson().readTree(response.body()).path("flowExecutionCapabilitiesRequired").booleanValue()).isTrue();
++    }
++    private HttpResponse<String> send(String path,String body,boolean identity,boolean origin,boolean cookie) throws Exception {
++        var builder=HttpRequest.newBuilder(server.getURI().resolve(path)).header("Content-Type","application/json");
++        if(identity)builder.header("X-Flow-Capability-Test","alice");
++        builder.header("Origin",origin?server.getURI().toString():"https://untrusted.example");
++        if(cookie)builder.header("Cookie","JWT=explicit-test-cookie");
++        return HttpClient.newHttpClient().send(builder.POST(HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString());
++    }
++    @Singleton @Requires(property="flow.capabilities.http.identity",value="true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request){
++            return "alice".equals(request.getHeaders().get("X-Flow-Capability-Test"))?Mono.just(Authentication.build("alice",List.of())):Mono.empty();
++        }
++    }
++    @Singleton @Requires(property="flow.capabilities.http.probe",value="true")
++    static class Policy implements AuthorizationEvaluationProviderV1 {
++        final AtomicInteger calls=new AtomicInteger();
++        volatile boolean unavailable;
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal,String tenant){
++            if(unavailable)return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1(){
++                public CompletionStage<Decision> authorize(Operation operation){calls.incrementAndGet();return CompletableFuture.completedFuture((operation.resource()==Resource.FLOW || operation.resource()==Resource.METADATA)?Decision.allow(operation.queryDomain()):Decision.deny("No execution query permission"));}
++                public CompletionStage<Void> close(){return CompletableFuture.completedFuture(null);}
++            });
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesMissingProviderHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesMissingProviderHttpTest.java
+new file mode 100644
+index 0000000..c47a65d
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesMissingProviderHttpTest.java
+@@ -0,0 +1,31 @@
++package io.kestra.webserver.rbac;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.serializers.JacksonMapper;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.runtime.server.EmbeddedServer;
++import jakarta.inject.Inject;
++import org.junit.jupiter.api.Test;
++import java.net.http.*;
++import static org.assertj.core.api.Assertions.*;
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.rbac.enabled",value="true")
++@Property(name="kestra.rbac.typed.enabled",value="true")
++@Property(name="kestra.rbac.evaluation.enabled",value="true")
++@Property(name="kestra.rbac.application-groups.enabled",value="false")
++@Property(name="micronaut.security.enabled",value="true")
++@Property(name="micronaut.security.filter.enabled",value="true")
++@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
++@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
++@Property(name="flow.capabilities.http.identity",value="true")
++@Property(name="mcp.http.security.fixture",value="true")
++class FlowExecutionCapabilitiesMissingProviderHttpTest {
++ @Inject EmbeddedServer server;
++ @Test void enabledWithoutProviderReturns503NeverOss() throws Exception {
++  var response=HttpClient.newHttpClient().send(HttpRequest.newBuilder(server.getURI().resolve(FlowExecutionCapabilitiesHttpTest.PATH))
++   .header("X-Flow-Capability-Test","alice").header("Content-Type","application/json").header("Origin",server.getURI().toString())
++   .POST(HttpRequest.BodyPublishers.ofString(FlowExecutionCapabilitiesHttpTest.BODY)).build(),HttpResponse.BodyHandlers.ofString());
++  assertThat(response.statusCode()).isEqualTo(503);
++ assertThat(response.headers().firstValue("Cache-Control")).contains("no-store");
++ }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesModeAHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesModeAHttpTest.java
+new file mode 100644
+index 0000000..de151ca
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesModeAHttpTest.java
+@@ -0,0 +1,35 @@
++package io.kestra.webserver.rbac;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.serializers.JacksonMapper;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.runtime.server.EmbeddedServer;
++import jakarta.inject.Inject;
++import org.junit.jupiter.api.Test;
++import java.net.http.*;
++import static org.assertj.core.api.Assertions.*;
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.rbac.enabled",value="false")
++@Property(name="kestra.rbac.typed.enabled",value="true")
++@Property(name="kestra.rbac.evaluation.enabled",value="false")
++@Property(name="kestra.rbac.application-groups.enabled",value="false")
++@Property(name="micronaut.security.enabled",value="true")
++@Property(name="micronaut.security.filter.enabled",value="true")
++@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
++@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
++@Property(name="flow.capabilities.http.identity",value="true")
++@Property(name="mcp.http.security.fixture",value="true")
++class FlowExecutionCapabilitiesModeAHttpTest {
++ @Inject EmbeddedServer server;
++ @Test void disabledPublishesFalseAndDoesNotRegisterProjection() throws Exception {
++  var response=HttpClient.newHttpClient().send(HttpRequest.newBuilder(server.getURI().resolve(FlowExecutionCapabilitiesHttpTest.PATH))
++   .header("X-Flow-Capability-Test","alice").header("Content-Type","application/json").header("Origin",server.getURI().toString())
++   .POST(HttpRequest.BodyPublishers.ofString(FlowExecutionCapabilitiesHttpTest.BODY)).build(),HttpResponse.BodyHandlers.ofString());
++  assertThat(response.statusCode()).isEqualTo(404);
++ var config=HttpClient.newHttpClient().send(HttpRequest.newBuilder(server.getURI().resolve("/api/v1/configs"))
++   .header("X-Flow-Capability-Test","alice").GET().build(),HttpResponse.BodyHandlers.ofString());
++  assertThat(config.statusCode()).isEqualTo(200);
++  assertThat(JacksonMapper.ofJson().readTree(config.body()).path("flowExecutionCapabilitiesRequired").isBoolean()).isTrue();
++  assertThat(JacksonMapper.ofJson().readTree(config.body()).path("flowExecutionCapabilitiesRequired").booleanValue()).isFalse();
++ }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
+new file mode 100644
+index 0000000..5dd2030
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
+@@ -0,0 +1,98 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.models.NamespaceDomain;
++import io.kestra.core.models.NamespaceDomain.*;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.*;
++import io.micronaut.http.exceptions.HttpStatusException;
++import jakarta.validation.Validation;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import java.nio.charset.StandardCharsets;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicInteger;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static io.kestra.webserver.rbac.FlowExecutionCapabilities.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class FlowExecutionCapabilitiesTest {
++    private final RbacAuthorizer.Principal principal = new RbacAuthorizer.Principal("alice",List.of(),null,null,List.of());
++    private final Target target = new Target("main","company.sub","flow-one",List.of(Capability.values()));
++    private FlowExecutionCapabilities parser() {
++        return new FlowExecutionCapabilities(null,null,Validation.byDefaultProvider().configure().messageInterpolator(new org.hibernate.validator.messageinterpolation.ParameterMessageInterpolator()).buildValidatorFactory().getValidator(),true);
++    }
++    private byte[] body(String targets) { return ("{\"formatVersion\":1,\"targets\":"+targets+"}").getBytes(StandardCharsets.UTF_8); }
++    private String json(String id) { return "{\"tenant\":\"main\",\"namespace\":\"company.sub\",\"flowId\":\""+id+"\",\"capabilities\":[\"EXECUTION_STATISTICS_READ\",\"LATEST_EXECUTIONS_LIST\"]}"; }
++    @Test void validatesFiniteBatchAndUpstreamFlowConstraints() {
++        assertThat(parser().parse("main",body("["+json("a")+"]"))).hasSize(1);
++        assertThat(parser().parse("main",body("["+String.join(",",java.util.stream.IntStream.range(0,100).mapToObj(i->json("f"+i)).toList())+"]"))).hasSize(100);
++        for(String targets:List.of("[]","["+json("a")+","+json("a")+"]","["+json("a").replace("flowId","unknown")+"]","["+json("a".repeat(101))+"]","["+json("a").replace("LATEST_EXECUTIONS_LIST","EXECUTION_STATISTICS_READ")+"]","["+json("a").replace("LATEST_EXECUTIONS_LIST","UNKNOWN")+"]","["+String.join(",",java.util.stream.IntStream.range(0,101).mapToObj(i->json("f"+i)).toList())+"]"))
++            assertThatThrownBy(()->parser().parse("main",body(targets))).isInstanceOf(HttpStatusException.class);
++        assertThatThrownBy(()->parser().parse("main",new byte[MAX_BODY_BYTES+1])).isInstanceOf(HttpStatusException.class).extracting("status").isEqualTo(HttpStatus.REQUEST_ENTITY_TOO_LARGE);
++        assertThatThrownBy(()->parser().parse("main", "{\"formatVersion\":1,\"formatVersion\":1,\"targets\":[]}".getBytes(StandardCharsets.UTF_8))).isInstanceOf(HttpStatusException.class);
++        assertThatThrownBy(()->parser().parse("other",body("["+json("a")+"]"))).isInstanceOf(HttpStatusException.class);
++    }
++    @Test void preservesActualQueryOperationsAndNeverUsesFlowIdAsExecutionId() {
++        var flow=flowRead(target);assertThat(flow.resourceId()).isEqualTo("flow-one");assertThat(flow.coverage()).isEqualTo(Coverage.SINGLE);
++        var latest=executionQuery(target,Capability.LATEST_EXECUTIONS_LIST);
++        assertThat(latest.source()).isEqualTo(Source.REST);assertThat(latest.action()).isEqualTo(Action.LIST);assertThat(latest.aggregate()).isEqualTo(Aggregate.NONE);
++        var statistics=executionQuery(target,Capability.EXECUTION_STATISTICS_READ);
++        assertThat(statistics.source()).isEqualTo(Source.DASHBOARD_AGGREGATE);assertThat(statistics.action()).isEqualTo(Action.READ);assertThat(statistics.aggregate()).isEqualTo(Aggregate.EXECUTION);
++        for(var op:List.of(latest,statistics)){assertThat(op.resourceId()).isNull();assertThat(op.coverage()).isEqualTo(Coverage.COMPLETE_QUERY);assertThat(op.sideEffect()).isEqualTo(SideEffect.READ_ONLY);}
++    }
++    @Test void mixedNamespacesComplementAndRestrictedIdsUseOneFrozenEvaluationWithoutDataLookup() {
++        var begins=new AtomicInteger();var closes=new AtomicInteger();var calls=new ArrayList<Operation>();
++        var term=new Term(Universe.NAMESPACE,true,List.of(),List.of(),List.of(),List.of("company.blocked"),IdScope.RESTRICTED_IDS,List.of("execution-not-flow-one"));
++        var domain=QueryDomain.structured(new NamespaceDomain(List.of(term)),true,false);
++        var fixture=fixture(op->{calls.add(op);return op.resource()==Resource.FLOW
++            ? ("hidden".equals(op.resourceId())?Decision.deny("hidden"):Decision.allow(op.queryDomain()))
++            : Decision.allow(domain);},begins,closes);
++        var response=fixture.query(principal,"main",List.of(target,new Target("main","company.blocked","f",target.capabilities()),new Target("main","company2","f",target.capabilities()),new Target("main","company.sub","hidden",target.capabilities()))).block();
++        assertThat(response.results().get(0).capabilities().values()).containsOnly(State.AVAILABLE);
++        assertThat(response.results().get(1).capabilities().values()).containsOnly(State.UNAVAILABLE);
++        assertThat(response.results().get(2).capabilities().values()).containsOnly(State.AVAILABLE);
++        assertThat(response.results().get(3).capabilities().values()).containsOnly(State.UNAVAILABLE);
++        assertThat(begins.get()).isEqualTo(1);assertThat(closes.get()).isEqualTo(1);
++        assertThat(calls.stream().filter(op->op.resource()==Resource.EXECUTION)).hasSize(6);
++    }
++    @Test void deniedOrEmptyQueryDomainsRemainUnavailable() {
++        for(var decision:List.of(Decision.deny("query intersection empty"),Decision.allow(QueryDomain.empty()))){
++            var fixture=fixture(op->op.resource()==Resource.FLOW?Decision.allow(op.queryDomain()):decision,new AtomicInteger(),new AtomicInteger());
++            assertThat(fixture.query(principal,"main",List.of(target)).block().results().getFirst().capabilities().values()).containsOnly(State.UNAVAILABLE);
++        }
++    }
++    @Test void strictJsonRejectsNestedDuplicatesTrailingValuesAndAcceptsExactBodyLimit() {
++        String valid = new String(body("["+json("a")+"]"), StandardCharsets.UTF_8);
++        assertThat(parser().parse("main", (valid+" ".repeat(MAX_BODY_BYTES-valid.getBytes(StandardCharsets.UTF_8).length)).getBytes(StandardCharsets.UTF_8))).hasSize(1);
++        for(String invalid : List.of(valid.replace("\"flowId\":\"a\"", "\"flowId\":\"a\",\"flowId\":\"b\""), valid+" {}",valid.replace("\"formatVersion\":1", "\"formatVersion\":1.0"), valid.replace("company.sub", "company..sub"),valid.replace("\"flowId\":\"a\"", "\"flowId\":\" a\"")))
++            assertThatThrownBy(()->parser().parse("main",invalid.getBytes(StandardCharsets.UTF_8))).isInstanceOf(HttpStatusException.class);
++    }
++    @Test void scopeQueryDomainsRemainCorrelatedAcrossIdsAndNamespaces() {
++        var read = new NamespaceDomain(List.of(new Term(Universe.NAMESPACE,false,List.of("company.sub"),List.of(),List.of(),List.of(),IdScope.RESTRICTED_IDS,List.of("e-one"))));
++        var disjointList = new NamespaceDomain(List.of(new Term(Universe.NAMESPACE,false,List.of("company.sub"),List.of(),List.of(),List.of(),IdScope.RESTRICTED_IDS,List.of("e-two"))));
++        // Minimal host-owned provider input: precomputed domains, not the real plugin policy implementation.
++        for(var domain : List.of(read.intersect(disjointList),new NamespaceDomain(List.of()),read.intersect(read))) {
++            var fixture=fixture(op->op.resource()==Resource.FLOW?Decision.allow(op.queryDomain()):Decision.allow(QueryDomain.structured(domain,true,false)),new AtomicInteger(),new AtomicInteger());
++            var states=fixture.query(principal,"main",List.of(target)).block().results().getFirst().capabilities().values();
++            assertThat(states).containsOnly(domain.terms().isEmpty()?State.UNAVAILABLE:State.AVAILABLE);
++        }
++    }
++    @Test void missingFrozenProviderFails503WithoutLegacyFallback() {
++        var evaluations=mock(AuthorizationEvaluations.class);when(evaluations.ready()).thenReturn(false);
++        assertThatThrownBy(()->new FlowExecutionCapabilities(null,evaluations,null,true).query(principal,"main",List.of(target)).block()).isInstanceOf(HttpStatusException.class).extracting("status").isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
++    }
++    @SuppressWarnings("unchecked")
++    private FlowExecutionCapabilities fixture(java.util.function.Function<Operation,Decision> policy,AtomicInteger begins,AtomicInteger closes){
++        BeanProvider<AuthorizationEvaluationProviderV1> providers=mock(BeanProvider.class);when(providers.isUnique()).thenReturn(true);
++        when(providers.get()).thenReturn((p,t)->{begins.incrementAndGet();return CompletableFuture.completedFuture(new AuthorizationEvaluationV1(){
++            public CompletionStage<Decision> authorize(Operation op){return CompletableFuture.completedFuture(policy.apply(op));}
++            public CompletionStage<Void> close(){closes.incrementAndGet();return CompletableFuture.completedFuture(null);}
++        });});
++        var config=mock(RbacConfiguration.class);when(config.enabled()).thenReturn(true);
++        var evaluations=new AuthorizationEvaluations(true,config,true,providers);
++        var gate=new TypedAuthorizationGate(mock(BeanProvider.class),evaluations);
++        return new FlowExecutionCapabilities(gate,evaluations,null,true);
++    }
++}

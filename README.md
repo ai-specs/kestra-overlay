@@ -967,8 +967,41 @@ MCP 工具业务仍须同时满足协议能力门和扩展应用的资源授权�
 重新执行自身镜像门与SDK949/几何64；具体结果和历史失败入口见 R-EE-RBAC 的候选记录。
 本地候选不能替代对应提交 CI、正式发布或消费项目验收。
 
-生产书签返回使用 `micronaut.security.redirect.prior-to-login: true`（候选 REQ-0403，
-须等待包含此补丁的正式镜像）。模式 A/B 共用框架返回 cookie。匿名访问受保护的业务
+生产书签返回使用 `micronaut.security.redirect.prior-to-login: true`。REQ-0403 已随
+提交 `d3247f96226668350efa359625272f4a16e02a4c` 的成功 CI `44407072165` 发布，正式镜像
+为 `ghcr.io/ai-specs/kestra-overlay@sha256:0bbf3c61e3c3e550b42338202cd6f9ea008db31ed14a706bb42805c5e18b6efd`。
+该发布事实不代表下方 REQ-0404a 候选已发布。模式 A/B 共用框架返回 cookie。匿名访问受保护的业务
 UI GET 后，登录 callback 返回同源原路径并保留 query；无书签仍按 `/ui/` 进入默认
 页面。关闭配置保留原行为。API、认证及静态资源路径不保存为书签；退出清除残留目标。
 此机制不授予目标页面权限，返回后仍执行正常授权。
+
+
+### Flow 列表有限执行能力（REQ-0404a 候选，未发布）
+
+本机制只覆盖原生 Flow 列表的末次执行日期、状态和每行执行统计，不代表完整 Flow
+详情页及其 Overview、Logs、Metrics、Triggers、Concurrency 已支持细粒度显示。
+不修改账号权限，不忽略业务403，不重写OSS Me权限方法。
+
+宿主已认证配置 `GET /api/v1/configs` 新增 boolean `flowExecutionCapabilitiesRequired`，
+值直接来自 `kestra.rbac.enabled`。false时原生列表保持OSS行为，不请求能力API；true时
+列表必须先按目标预检，缺typed/evaluation或唯一provider返回503，不回退OSS。
+
+`POST /api/v1/{tenant}/ui/flows/execution-capabilities` 使用same-origin session与既有CSRF，
+JSON `formatVersion:1`；`targets` 为1..100项，每项精确包含tenant/namespace/flowId/
+capabilities；固定枚举为EXECUTION_STATISTICS_READ、LATEST_EXECUTIONS_LIST，
+每项1..2且无重复，总能力项≤200，重复目标整批拒绝，原始正文≤128KiB。
+重复JSON字段、未知字段、未知版本/枚举、错误类型及不合法上游Flow标识整批400。
+namespace与flowId复用固定BASE的AbstractFlow字段验证规则，并接受现有typed
+namespace语义检查；不自定义较宽标识规则。当前仅main，目标tenant必须匹配路径。
+
+响应formatVersion为1，results按请求顺序返回同三元组与被请求枚举的AVAILABLE/
+UNAVAILABLE，不返回策略、授权域、角色或执行IDs；所有控制器响应no-store。
+先FLOW.READ，再以同一可信身份和冻结snapshot评估固定执行query。latest为
+LIST COMPLETE_QUERY；统计为READ COMPLETE_QUERY EXECUTION aggregate。
+当前插件这两类query均在同scope内求READ/LIST域交集，READ-only与LIST-only均不可用。
+AVAILABLE只表示可以尝试经过授权执行ID域过滤的该Flow查询，不代表有执行数据，
+不授予业务API权限；flowId不是executionId，能力查询不查当前执行存在性。
+
+结构错误400，跨源/目标tenant不匹配403，正文超限413，缺组件或可观察评估边界故障503；
+匿名由既有认证链拒绝。已有gate将部分未分类异常折叠deny，保留该限制，不宣称所有
+故障都能区分成503。完整发布、宿主独立真实浏览器门及部署仓生产验收之前不得计为交付。

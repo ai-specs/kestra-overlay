@@ -690,3 +690,14 @@ outside 处理。扩展不设置内部 popup 序号，不修改 vendor DOM。
 缺 jar 仅刷新不能装载 Micronaut bean；补放后必须重启 JVM，setup 页仅自动等待服务
 恢复，不执行热加载或匿名重启。正常 jar 启动首装不重启。定稿与验收见
 `r-oidc-server.md` 的“首个账号事务参与者”节；本条不是发布证据。
+
+
+### REQ-0404a 原生 Flow 列表有限能力（候选未发布）
+
+已接收入口B，消费方kestra-plugin-rbac下的原生Flow列表；已有Me恒true导致可选
+latest/每行chart主动发403。新增固定目标HTTP投影，不新增Java SPI，不复制插件策略。
+精确路由在认证后委派到控制器，控制器单次gate.boundary复用V2可信身份和冻结评估。
+固定FLOW.READ前置、执行query来源/动作/aggregate与原生业务语义一致。
+模式由公开configs boolean明确区分；模式A无请求、模式B缺组件503。
+范围仅列表；复合详情后续独立分类，不能复用两个枚举通行。
+详见r-ee-rbac.md的0404a接收段和README候选HTTP契约。
