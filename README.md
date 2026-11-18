@@ -206,6 +206,7 @@ services:
             filter:
               enabled: true
             redirect:
+              prior-to-login: true
               login-success: /ui/
               login-failure: /oidc/login?error=1
               unauthorized:
@@ -965,3 +966,9 @@ MCP 工具业务仍须同时满足协议能力门和扩展应用的资源授权�
 `64c978d7e490ed7378b125a268bff56d19417295ceb53c0379ed0486ed2ff3c5`，
 重新执行自身镜像门与SDK949/几何64；具体结果和历史失败入口见 R-EE-RBAC 的候选记录。
 本地候选不能替代对应提交 CI、正式发布或消费项目验收。
+
+生产书签返回使用 `micronaut.security.redirect.prior-to-login: true`（候选 REQ-0403，
+须等待包含此补丁的正式镜像）。模式 A/B 共用框架返回 cookie。匿名访问受保护的业务
+UI GET 后，登录 callback 返回同源原路径并保留 query；无书签仍按 `/ui/` 进入默认
+页面。关闭配置保留原行为。API、认证及静态资源路径不保存为书签；退出清除残留目标。
+此机制不授予目标页面权限，返回后仍执行正常授权。

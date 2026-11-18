@@ -76,6 +76,10 @@ datasources:
     username: kestra
     password: local-test-only
 kestra:
+  anonymous-usage-report:
+    enabled: false
+  ui-anonymous-usage-report:
+    enabled: false
   repository:
     type: postgres
   queue:
@@ -105,6 +109,7 @@ micronaut:
     filter:
       enabled: true
     redirect:
+      prior-to-login: true
       login-success: /ui/
       login-failure: /oidc/login?error=1
       unauthorized:
@@ -299,6 +304,8 @@ assert_status "invalid OIDC cookie cannot authenticate" 401 "$(curl -s -H 'Cooki
 if [ "${BB_BROWSER:-0}" = 1 ]; then
   prepare_directory_probe
   BB_BROWSER_BASE="$BASE" BB_BROWSER_SERVER="$SERVER" BB_BROWSER_POSTGRES="$PG" node "$(dirname "$0")/blackbox-ui-browser.cjs"
+  BB_BOOKMARK_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$SERVER")" BB_SETUP_MODE="$SETUP_MODE" BB_BROWSER_BASE="$BASE" BB_BOOKMARK_REPORT="$(dirname "$0")/../.work/bookmark-$SETUP_MODE.json"     node "$(dirname "$0")/bookmark-return-browser.cjs"
+  node "$(dirname "$0")/check-bookmark-return.cjs" "$(dirname "$0")/../.work/bookmark-$SETUP_MODE.json"
 fi
 docker restart "$SERVER" >/dev/null
 for attempt in $(seq 1 60); do

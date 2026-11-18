@@ -1,0 +1,289 @@
+# 需求: REQ-0403 生产OIDC浏览器书签返回与同源目标校验
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；复用Micronaut Security 4.15.2 PriorToLoginPersistence与IdTokenLoginHandler；不接插件模型
+# 触达上游文件: 5 个
+# 移除条件: 上游提供等价OIDC原URI保存、同源消费与退出清理机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
+index ed0f055..7c42c58 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
+@@ -29,6 +29,9 @@ public class OidcAuthorizationExceptionHandler {
+     static final String LOGIN_URL = "/oidc/login";
+
+     private final String loginUrl;
++    @jakarta.inject.Inject
++    @io.micronaut.core.annotation.Nullable
++    io.micronaut.security.errors.PriorToLoginPersistence<HttpRequest<?>, io.micronaut.http.MutableHttpResponse<?>> priorToLoginPersistence;
+
+     public OidcAuthorizationExceptionHandler(
+         @Value("${micronaut.security.redirect.unauthorized.url:/oidc/login}") final String loginUrl
+@@ -40,7 +43,14 @@ public class OidcAuthorizationExceptionHandler {
+     public HttpResponse<?> handle(final HttpRequest<?> request, final AuthorizationException exception) {
+         final String accept = request.getHeaders().get(HttpHeaders.ACCEPT);
+         if (accept != null && accept.contains("text/html")) {
+-            return HttpResponse.temporaryRedirect(URI.create(loginUrlWithFrom(request)));
++            final var response = HttpResponse.temporaryRedirect(URI.create(loginUrlWithFrom(request)));
++            if (priorToLoginPersistence != null && !exception.isForbidden()
++                && request.getMethod() == io.micronaut.http.HttpMethod.GET
++                && !request.getPath().startsWith("/api/")
++                && io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence.safe(request.getUri())) {
++                priorToLoginPersistence.onUnauthorized(request, response);
++            }
++            return response;
+         }
+         return HttpResponse.status(HttpStatus.UNAUTHORIZED);
+     }
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcBookmarkLogoutFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcBookmarkLogoutFilter.java
+new file mode 100644
+index 0000000..a4f2cbb
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcBookmarkLogoutFilter.java
+@@ -0,0 +1,23 @@
++package io.kestra.webserver.oidc.controllers;
++
++import io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.ResponseFilter;
++import io.micronaut.http.annotation.ServerFilter;
++
++/** Clear the return cookie after the existing logout chain, without changing session revocation. */
++@ServerFilter("/oidc/logout")
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "micronaut.security.redirect.prior-to-login", value = "true")
++public class OidcBookmarkLogoutFilter {
++    private final OidcPriorToLoginPersistence persistence;
++    public OidcBookmarkLogoutFilter(OidcPriorToLoginPersistence persistence) {
++        this.persistence = persistence;
++    }
++    @ResponseFilter
++    public void clear(HttpRequest<?> request, MutableHttpResponse<?> response) {
++        persistence.clear(request, response);
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java
+new file mode 100644
+index 0000000..7507100
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java
+@@ -0,0 +1,65 @@
++package io.kestra.webserver.oidc.services;
++
++import java.net.URI;
++import java.util.Locale;
++import java.util.Optional;
++import io.micronaut.context.annotation.Replaces;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.core.annotation.Nullable;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.security.config.TokenCookieConfiguration;
++import io.micronaut.security.errors.CookiePriorToLoginPersistence;
++import jakarta.inject.Singleton;
++
++/** Framework cookie lifecycle with same-origin validation at both trust boundaries. */
++@Singleton
++@Requires(property = "kestra.oidc.enabled", value = "true")
++@Requires(property = "micronaut.security.redirect.prior-to-login", value = "true")
++@Replaces(CookiePriorToLoginPersistence.class)
++public class OidcPriorToLoginPersistence extends CookiePriorToLoginPersistence {
++    public OidcPriorToLoginPersistence(@Nullable TokenCookieConfiguration configuration) {
++        super(configuration);
++    }
++
++    public static boolean safe(URI uri) {
++        if (uri == null || uri.isAbsolute() || uri.getRawAuthority() != null || uri.getRawFragment() != null
++            || uri.toString().length() > 2048) return false;
++        String path = uri.getRawPath();
++        if (path == null || !path.startsWith("/") || path.startsWith("//")) return false;
++        // Only the host business UI is a document return target. Auth/static/API routes
++        // are never bookmarks, even if a caller sends Accept: text/html.
++        if (!path.startsWith("/ui/") || path.equals("/ui/access-denied")) return false;
++        String lower = path.toLowerCase(Locale.ROOT);
++        if (path.contains("//")) return false;
++        String decodedPath = uri.getPath().toLowerCase(Locale.ROOT);
++        for (String excluded : new String[]{"/ui/assets", "/ui/login", "/ui/setup", "/ui/access-denied", "/ui/oauth", "/ui/oidc"}) {
++            if (decodedPath.equals(excluded) || decodedPath.startsWith(excluded + "/")) return false;
++        }
++        if (lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25")) return false;
++        for (String segment : uri.getPath().split("/", -1)) {
++            if (segment.equals(".") || segment.equals("..")) return false;
++        }
++        String decoded = uri.getPath();
++        if (uri.getQuery() != null) decoded += uri.getQuery();
++        return decoded.chars().noneMatch(c -> c < 32 || c == 127 || c == '\\');
++    }
++
++    @Override
++    public void onUnauthorized(HttpRequest<?> request, MutableHttpResponse<?> response) {
++        if (safe(request.getUri())) super.onUnauthorized(request, response);
++    }
++
++    @Override
++    public Optional<URI> getOriginalUri(HttpRequest<?> request, MutableHttpResponse<?> response) {
++        // Consume even malformed cookies; framework only clears values it can parse as URI.
++        clear(request, response);
++        return super.getOriginalUri(request, response).filter(OidcPriorToLoginPersistence::safe);
++    }
++
++    public void clear(HttpRequest<?> request, MutableHttpResponse<?> response) {
++        var cookie = io.micronaut.http.cookie.Cookie.of("ORIGINAL_URI", "");
++        configure(cookie, request);
++        response.cookie(cookie.maxAge(0));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcBookmarkContextTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcBookmarkContextTest.java
+new file mode 100644
+index 0000000..a75c52f
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcBookmarkContextTest.java
+@@ -0,0 +1,79 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.oidc.controllers.OidcAuthorizationExceptionHandler;
++import io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence;
++import io.micronaut.context.ApplicationContext;
++import io.micronaut.http.*;
++import io.micronaut.http.simple.SimpleHttpRequestFactory;
++import io.micronaut.security.errors.PriorToLoginPersistence;
++import io.micronaut.security.oauth2.endpoint.token.response.IdTokenLoginHandler;
++import io.micronaut.security.authentication.*;
++import org.junit.jupiter.api.Test;
++import java.util.Map;
++import static org.junit.jupiter.api.Assertions.*;
++
++class OidcBookmarkContextTest {
++    private ApplicationContext context(boolean enabled) {
++        var builder = ApplicationContext.builder().packages("io.micronaut.security", "io.kestra.webserver.oidc").deduceEnvironment(false)
++            .enableDefaultPropertySources(false)
++            .properties(Map.of("kestra.server-type", "WEBSERVER", "kestra.oidc.enabled", "true", "micronaut.security.enabled", "true",
++                "micronaut.security.authentication", "idtoken", "micronaut.security.redirect.enabled", "true",
++                "micronaut.security.redirect.prior-to-login", enabled,
++                "micronaut.security.redirect.login-success", "/ui/",
++                "micronaut.security.redirect.unauthorized.url", "/oauth/login/kestra"));
++        // Isolate only application beans; framework bean discovery, conditions, replacement,
++        // injection and the real ID-token handler remain active. No repository or PG beans.
++        var context = new io.micronaut.context.DefaultApplicationContext(
++            (io.micronaut.context.ApplicationContextConfiguration) builder) {
++            @Override
++            protected java.util.List<io.micronaut.inject.BeanDefinitionReference> resolveBeanDefinitionReferences() {
++                return super.resolveBeanDefinitionReferences().stream().filter(reference -> {
++                    String name = reference.getBeanDefinitionName();
++                    return !name.startsWith("io.kestra.")
++                        || name.contains("$OidcAuthorizationExceptionHandler$")
++                        || name.contains("$OidcPriorToLoginPersistence$");
++                }).toList();
++            }
++        };
++        context.getEnvironment().addPropertySource(io.micronaut.context.env.PropertySource.of("bookmark-test", Map.of(
++            "kestra.oidc.enabled", true, "micronaut.security.enabled", true,
++            "micronaut.security.authentication", "idtoken", "micronaut.security.redirect.enabled", true,
++            "micronaut.security.redirect.prior-to-login", enabled,
++            "micronaut.security.redirect.login-success", "/ui/",
++            "micronaut.security.redirect.unauthorized.url", "/oauth/login/kestra")));
++        return context.start();
++    }
++    @Test void enabledContextInjectsUniquePersistenceAndLoginHandlerConsumesCookie() {
++        try (var context = context(true)) {
++            var persistence = context.getBeansOfType(PriorToLoginPersistence.class);
++            assertEquals(1, persistence.size());
++            assertInstanceOf(OidcPriorToLoginPersistence.class, persistence.iterator().next());
++            var handler = context.getBean(OidcAuthorizationExceptionHandler.class);
++            var request = new SimpleHttpRequestFactory().get("/ui/main/flows?q=a%20b").accept(MediaType.TEXT_HTML);
++            var response = handler.handle(request, new AuthorizationException(null));
++            var cookie = response.getCookies().get("ORIGINAL_URI");
++            assertNotNull(cookie);
++            var login = context.getBean(IdTokenLoginHandler.class);
++            // Production handler parses the ID token from Authentication attributes.
++            var auth = Authentication.build("user", Map.of("openIdToken", new com.nimbusds.jwt.PlainJWT(new com.nimbusds.jwt.JWTClaimsSet.Builder().subject("user").expirationTime(java.util.Date.from(java.time.Instant.now().plusSeconds(300))).build()).serialize()));
++            var callback = new SimpleHttpRequestFactory().get("/oauth/callback/kestra").cookie(cookie);
++            var success = login.loginSuccess(auth, callback);
++            assertEquals("/ui/main/flows?q=a%20b", success.getHeaders().get("Location"));
++            assertEquals(0, success.getCookies().get("ORIGINAL_URI").getMaxAge());
++            var fallback = login.loginSuccess(auth, new SimpleHttpRequestFactory().get("/oauth/callback/kestra"));
++            assertEquals("/ui/", fallback.getHeaders().get("Location"));
++        }
++    }
++    @Test void disabledContextKeepsDefaultWithoutSavingBookmark() {
++        try (var context = context(false)) {
++            assertTrue(context.getBeansOfType(PriorToLoginPersistence.class).isEmpty());
++            var response = context.getBean(OidcAuthorizationExceptionHandler.class).handle(
++                new SimpleHttpRequestFactory().get("/ui/main/flows").accept(MediaType.TEXT_HTML), new AuthorizationException(null));
++            assertNull(response.getCookies().get("ORIGINAL_URI"));
++            var success = context.getBean(IdTokenLoginHandler.class).loginSuccess(
++                Authentication.build("user", Map.of("openIdToken", new com.nimbusds.jwt.PlainJWT(new com.nimbusds.jwt.JWTClaimsSet.Builder().subject("user").expirationTime(java.util.Date.from(java.time.Instant.now().plusSeconds(300))).build()).serialize())),
++                new SimpleHttpRequestFactory().get("/oauth/callback/kestra"));
++            assertEquals("/ui/", success.getHeaders().get("Location"));
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcBookmarkReturnTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcBookmarkReturnTest.java
+new file mode 100644
+index 0000000..bb5bff2
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcBookmarkReturnTest.java
+@@ -0,0 +1,62 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.oidc.controllers.OidcAuthorizationExceptionHandler;
++import io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence;
++import io.micronaut.http.*;
++import io.micronaut.http.cookie.Cookie;
++import io.micronaut.security.authentication.AuthorizationException;
++import java.net.URI;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class OidcBookmarkReturnTest {
++    @Test void targetValidation() {
++        for (String value : new String[]{"/ui/main/flows", "/ui/main/flows?q=a%20b&next=https%3A%2F%2Fexample.org", "/ui/%E4%B8%AD?x=%252f"})
++            assertTrue(OidcPriorToLoginPersistence.safe(URI.create(value)), value);
++        for (String value : new String[]{"https://evil.test/", "//evil.test/", "/%2f%2fevil", "/%5cevil", "/%252fevil", "/a/../b", "/a/%2e%2e/b", "/ui/assets/foo.js", "/ui/login", "/ui/setup", "/ui/access-denied/", "/ui//main/flows", "/ui/%61ssets/x", "/ui/%2F%2fevil", "/ui/%255Cevil", "/oidc/logout", "/assets/app.js", "/api/v1/main/flows", "/unknown", "/ui/#evil", "/ui/?q=%0d%0aLocation:evil"})
++            assertFalse(OidcPriorToLoginPersistence.safe(URI.create(value)), value);
++    }
++    @Test void frameworkCookieRoundTripAndConsumption() {
++        var persistence = new OidcPriorToLoginPersistence(null);
++        var original = new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/ui/main/flows?q=a%20b&x=%252f");
++        var response = HttpResponse.ok();
++        persistence.onUnauthorized(original, response);
++        var cookie = response.getCookies().get("ORIGINAL_URI");
++        assertNotNull(cookie);
++        assertTrue(cookie.isHttpOnly());
++        assertEquals(300, cookie.getMaxAge());
++        var callback = new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/oauth/callback/kestra").cookie(cookie);
++        var redirect = HttpResponse.ok();
++        assertEquals(original.getUri(), persistence.getOriginalUri(callback, redirect).orElseThrow());
++        assertEquals(0, redirect.getCookies().get("ORIGINAL_URI").getMaxAge());
++    }
++    @Test void tamperedCookiesAreCleared() {
++        var persistence = new OidcPriorToLoginPersistence(null);
++        for (String value : new String[]{"https://evil.test/", "//evil.test/", "/%2fevil", "invalid uri"}) {
++            var response = HttpResponse.ok();
++            assertTrue(persistence.getOriginalUri(new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/cb").cookie(Cookie.of("ORIGINAL_URI", value)), response).isEmpty());
++            assertEquals(0, response.getCookies().get("ORIGINAL_URI").getMaxAge());
++        }
++    }
++    @Test void handlerOnlySavesAnonymousDocumentGet() throws Exception {
++        var handler = new OidcAuthorizationExceptionHandler("/oauth/login/kestra");
++        var field = handler.getClass().getDeclaredField("priorToLoginPersistence"); field.setAccessible(true);
++        field.set(handler, new OidcPriorToLoginPersistence(null));
++        var response = handler.handle(new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/ui/main/flows").accept(MediaType.TEXT_HTML), new AuthorizationException(null));
++        assertNotNull(response.getCookies().get("ORIGINAL_URI"));
++        for (HttpRequest<?> request : new HttpRequest<?>[]{HttpRequest.POST("/ui/main/flows", "").accept(MediaType.TEXT_HTML), new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/api/v1/main/flows").accept(MediaType.TEXT_HTML), new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/ui/main/flows").accept(MediaType.APPLICATION_JSON)})
++            assertNull(handler.handle(request, new AuthorizationException(null)).getCookies().get("ORIGINAL_URI"));
++        assertNull(handler.handle(new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/ui/main/flows").accept(MediaType.TEXT_HTML), new AuthorizationException(io.micronaut.security.authentication.Authentication.build("user"))).getCookies().get("ORIGINAL_URI"));
++    }
++    @Test void noBookmarkAndDisabledHandlerKeepDefault() {
++        assertTrue(new OidcPriorToLoginPersistence(null).getOriginalUri(new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/cb"), HttpResponse.ok()).isEmpty());
++        var response = new OidcAuthorizationExceptionHandler("/oauth/login/kestra").handle(new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/ui/main/flows").accept(MediaType.TEXT_HTML), new AuthorizationException(null));
++        assertNull(response.getCookies().get("ORIGINAL_URI"));
++    }
++    @Test void logoutClearsWithSameCookieConfiguration() {
++        var response = HttpResponse.ok();
++        new OidcPriorToLoginPersistence(null).clear(new io.micronaut.http.simple.SimpleHttpRequestFactory().get("https://host/oidc/logout"), response);
++        var cookie = response.getCookies().get("ORIGINAL_URI");
++        assertEquals(0, cookie.getMaxAge()); assertEquals("/", cookie.getPath()); assertTrue(cookie.isSecure());
++    }
++}

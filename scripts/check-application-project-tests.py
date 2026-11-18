@@ -55,6 +55,9 @@ INITIAL_ACCOUNT_REQUIRED = {
 }
 
 REQUIRED = {
+    "io.kestra.webserver.oidc.OidcBookmarkReturnTest": 6,
+    "io.kestra.webserver.oidc.OidcBookmarkContextTest": 2,
+
     "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest": len(MCP_TRANSPORT_REQUIRED),
     "io.kestra.mcp.McpSessionLifecycleTest": len(MCP_LIFECYCLE_REQUIRED),
     "io.kestra.webserver.oidc.OidcInvalidCookieRecoveryHttpTest": 3,

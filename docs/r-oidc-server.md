@@ -1,5 +1,39 @@
 # R-OIDC-SERVER：内置 OAuth2/OIDC 授权服务器（能力契约、实施依据与验收）
 
+## 生产书签返回提案（2026-11-18，已授权最小修复，候选未发布）
+
+消费方为 `kestra-plugin-rbac`，模式 A 不装 RBAC 插件与模式 B 装载插件共用宿主认证机制，
+不接收插件角色、namespace 模型或页面特例。部署方匿名 GET `/ui/main/flows`，生产登录
+最终到 dashboard；仅有 flow 权限的测试账号因此触发 chart 403。不得扩权、忽略错误或
+登录后手动修正路径。部署证据入口为部署仓
+`.work/mode-b-permission-counterexamples/ego-final-1795011906283`；此入口是现场证据，
+不是本仓构建输入。本次正式输入为 d6c26ec，CI 44278423018，镜像摘要
+`sha256:571926cbc65f00646a03724ebb6045dbff1fd00214da2ed7197eb26c314fa889`。
+
+归因：0130 的 OIDC 异常处理器直接 307 到配置的 unauthorized URL，只带 `from`。
+Micronaut Security 4.15.2 的 CookieLoginHandler 不消费该 query，而从
+PriorToLoginPersistence 读取 ORIGINAL_URI，缺失时使用 login-success。现场打开
+`micronaut.security.redirect.prior-to-login=true` 并重新创建容器仍失败。
+源码和框架字节码均确认处理器未调用 onUnauthorized，故配置本身不能修复缺口。
+
+最小契约：仅在显式启用框架 prior-to-login 配置、未认证且受保护的浏览器文档 GET
+时调用框架持久化接口。API、非 GET 和已认证拒绝不保存目标，不重放原写请求。
+保存与消费均只接受解析后无 scheme/authority/fragment 的 `/ui/` 业务 URI；排除认证、
+拒绝页、静态目录及重复分隔符。未知同源非 UI 路径拒绝，不识别插件页面。拒绝反斜线、
+控制字符、路径中的编码分隔符、编码百分号和点段，query 保留原始编码而不递归解码。
+框架默认 cookie 是未签名输入，不能直接信任：消费必须再次校验，篡改为外部地址时
+清除并回退到现有默认入口。同源目标仍经过正常认证与授权，不因 cookie 获得权限。
+框架负责 cookie 配置、五分钟期限和成功消费清除；退出必须清除残留 cookie。
+认证中间页和临时改密不得覆盖目标，首装没有书签时继续默认入口。
+
+宿主承担 handler 激活、目标校验与退出清理；插件不增加接口、不保存返回目标。
+不改变 API 授权、默认首装入口、OAuth redirect_uri 校验或用户权限。
+升级必须重新核对框架 bean 条件、cookie 路径和登录 handler 的消费行为。
+本仓先运行无数据库定向测试及独立 BASE 重放等值检查；完整 CI、模式 A/B 生产
+登录、临时改密、退出换号和部署组合均须后续验证，不能以单元测试代替。
+发布必须通过所属独立 CI 及正式门；消费方不得使用候选作为正式输入。
+
+
 ## 显式退出与迟到401竞争（2026-11-05，候选未发布）
 
 组合CI41848443854的拒绝页实际button调用Authentication.logout。用户开始退出后，
@@ -1258,3 +1292,25 @@ selector 必须显式注册且匹配安装凭据中的第一方 UI client。独�
 先前段落中的“候选／未发布”描述提案与实施时状态；本条只确认指定提交的宿主公开机制、
 镜像级 MCP/OIDC/浏览器检查和发布，不确认独立插件业务、完整迁移或 Compose 组合。
 使用契约与范围以 README 的应用项目章节为准；后续提交须检查自身 CI，不沿用此记录。
+
+候选本地证据（2026-11-18）：新增 `0403-oidc-bookmark-return.patch`，仅修改异常处理器，
+新增安全框架持久化、退出响应过滤器及两组独立测试。最终 Gradle 两组 `6+2=8` 项通过，
+无失败或跳过；真实 Micronaut 上下文验证唯一替换 bean、开关、实际 handler 注入及真实
+IdTokenLoginHandler 消费。上下文只隔离无关宿主业务 bean，不模拟框架 handler。
+59 个补丁从 BASE 独立重放，395 个触达源码文件与 dev 逐字节一致；结构门 15/15。
+本地 arm64 候选 ID 为 `sha256:67ff9dfd84fd111e905e90934771f2f262685fc613fa299a87e70ea59e6198dc`，
+暂存 executable SHA-256 为 `334478eb71c10b919b9a1a51e0a0ebd0d59dd7462715caf671c3ef0e318a3a44`。
+完整 local-ci、生产书签/临时改密/模式 A 与模式 B 组合、正式 CI 及发布未由本轮定向门证明。
+原 URI cookie 沿用框架五分钟期限；耗时超过期限时使用默认入口，不延长认证流程或授予权限。
+
+候选完整本地门（2026-11-19，未正式发布）：独占 verify-pg 的原 local-ci 通过，
+后端129份XML/605项为603通过、0失败、2项原镜像专项skip；core3、UI130通过。
+新exe SHA-256为 `cd8a639de57b04cb0e4a8c015d7478b5724c183e2e052be413fc578dc551a3b6`，
+对应本地镜像ID为 `sha256:906518cc4478b955ef510dc9c557a40deaa952c7fdecb0256d7e4eab2f4e869e`。
+该新镜像通过classpath、OIDC35、MCP四份各1项零skip、form及env原门。
+form/env另各执行四项真实密码登录与OAuth callback书签专项：Flow书签返回、
+HTTP退出cookie清除、无目标默认dashboard、恶意外站cookie同源回退。各432诊断事件，
+无错误或来源完整性错误；退出专项明确是HTTP cookie检查，真实点击退出由原浏览器门覆盖。
+固定四具名checker核对输入hash、逐场景文档/事件、完整合并和结果字段，反例回归接CI。
+无产品源码变化的SDK949和geometry64在稳定清醒窗口全量通过；旧休眠污染轮保留，
+不拼接计数。正式CI与发布仍须针对最终提交执行，源码本地通过不等于已发布。
