@@ -88,6 +88,16 @@ jobs:
           path: .work/flow-execution-browser/
           include-hidden-files: true
           if-no-files-found: error
+      - name: Native Flow detail finite capabilities through Chromium
+        run: bash scripts/run-flow-detail-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/flow-detail-browser"
+      - name: Preserve native Flow detail browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-flow-detail-browser
+          path: .work/flow-detail-browser/
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Independent classpath authorization SPI bean discovery probe
         env:
           CANDIDATE_IMAGE: ${{ steps.candidate.outputs.image }}

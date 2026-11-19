@@ -439,3 +439,10 @@ REQ-0404a（R-EE-RBAC，入口B已接收，候选未发布）：原生Flow列表
 真实请求前能力投影，OSS Me永真不能表达外部typed决策。新增有限batch HTTP及原生
 列表按目标消费，复用现有SPI/冻结snapshot，不扩插件业务、不重写全局Me。
 仅latest/日期状态/逐行TimeSeries；完整详情待独立分类，不计本次通过。
+
+
+REQ-0404b（R-EE-RBAC，入口B已接收，候选未发布）：消费项目kestra-plugin-rbac反馈原生
+Flow-only详情Overview先查执行总数403，不能加载自身描述。复用0404a有限HTTP以v2分别
+投影默认10卡与已分类运行tab实际typed读取，局部拒绝；不重写Me，不新增SPI/策略存储，
+不改正常Flow编辑链。模式A原生行为保留；Concurrency仍未分类，不将安全拒绝计支持。
+37项原生共享计划和独立CI artifact负责此宿主消费者门，生产组合仍归部署仓。

@@ -1987,3 +1987,40 @@ guard最小移位后的完整localci通过：webserver619项中617通过、零�
 HTTP契约。最初tenant解析段仍属于0330的来源边界，故未采用该位置。
 结构含实际apply门17/17，60/60补丁应用，全部414个触达文件字节等值，旧59hash未变。
 移位后原41项与原生Ego/Playwright共享10项均重新执行通过；完整verify来源的原生Playwright10项也通过。旧产物不作为新源码证明。本地fullci候选仅用于验证，不是插件正式编译输入。
+
+
+## REQ-0404b 接收范围：原生 Flow 详情有限读取（2026-11-19，候选未发布）
+
+消费方kestra-plugin-rbac。主控生产second仅company.sub FLOW/KV与必要METADATA，直接
+刷新Overview时executions/search403阻断整页；edit刷新无新HTTP错误，正常编辑保存已
+有独立组合证据。不得把Overview遗留toast当作edit失败，不改正常source/edit链，不加执行权限。
+
+已接收：模式B移除Overview执行存在性前置，仍用原生Dashboard/Sections渲染固定10卡；
+4 ExecutionsKPI及pie/timeseries/recent共7卡按EXECUTION aggregate、描述按FLOW_DESCRIPTION、
+next按TRIGGER aggregate、logs按LOG aggregate分别预检。无权局部占位，不挂载数据组件，
+刷新/导出/lazy不得绕过门。固定定义摘要与实际BASE默认YAML独立检查，未知/变更/custom
+定义不因同名id/type获准。KPI分子/分母固定STATE条件不改变namespace/ID域，业务gate仍分别授权。
+
+有限HTTP增量v2的9枚举和边界见README。v1保持不变；无新Java SPI、策略副本或授权存储。
+可信主体、同一冻结评估、FLOW.READ前置与真实source/action/coverage/aggregate复用typed gate；
+COMPLETE_QUERY保留同scope READ/LIST求交，不按数据存在性判断，也不把Flow ID当关联资源ID。
+宿主投影复现既有消费者的最小ID支持限制（不改旧helper/调用行）；LOG/TRIGGER受限ID继续拒绝，未扩大旧授权。
+
+Executions/Logs/Triggers/Metrics在组件setup前按各自实际读取操作门控；列表和内部统计分离，
+Trigger展开日志独立LOG门。Metrics五种Flow/Task读取沿用现有METRIC.READ SINGLE适配，
+不把EXECUTION当作指标许可。运行写操作不因这些能力获准。ConcurrencyController仍无typed
+映射，不构造虚假操作，明确当前模式未支持；后续必须独立裁定count/search/PUT及嵌入列表。
+
+模式A不请求能力，保留OSS包括真实Refresh和custom配置装载。Flow目标切换以generation约束
+异步getDashboardId/defaults/definition/load及store提交；旧响应不得覆盖当前定义或source。
+可选投影保留30秒期限及换号/目标/卸载/刷新失效；短暂可见性变化不卸载新鲜表格。
+当前普通SDK facade未转发signal，0404a/b保证的是generation隔离和拒绝旧响应，不保证物理
+HTTP取消。身份用例必须等精确旧request真实终态和新权限稳定，不能把跨case晚达abort忽略。
+既有gate未分类故障折叠deny限制保留；可观察协议/服务错误显示局部error，不伪造空数据。
+
+独立门：v1回归、v2输入/来源/动作/ID/非空域与H2 HTTP；原生共享37项计划；模式A真刷新、
+延迟旧定义/旧目标反例；29个诊断及报告checker正负例。诊断503仅同文档同精确URL同request，
+且request→503→network console顺序成立；未知/跨文档/乱序不豁免。所有报告精确矩阵、事件
+完整性及结束source hash必须复核。CI独立artifact native-flow-detail-browser包含全部源码快照、
+输入、readiness、日志、诊断及截图，失败保留notRun；部署仓下载审计后再做生产组合。
+本段不将本地测试transport计作生产账号/存储授权，不以0404a绿色结果替代本批发布。

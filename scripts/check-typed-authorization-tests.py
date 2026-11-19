@@ -19,8 +19,8 @@ def check_http_origin_names(report):
 
 results = pathlib.Path(sys.argv[1])
 for suite, expected in {
-    "FlowExecutionCapabilitiesTest": 7,
-    "FlowExecutionCapabilitiesHttpTest": 5,
+    "FlowExecutionCapabilitiesTest": 12,
+    "FlowExecutionCapabilitiesHttpTest": 6,
     "FlowExecutionCapabilitiesMissingProviderHttpTest": 1,
     "FlowExecutionCapabilitiesModeAHttpTest": 1,
     "AiAuthorFlowBoundaryTest": 7,

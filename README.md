@@ -1005,3 +1005,41 @@ AVAILABLE只表示可以尝试经过授权执行ID域过滤的该Flow查询，�
 结构错误400，跨源/目标tenant不匹配403，正文超限413，缺组件或可观察评估边界故障503；
 匿名由既有认证链拒绝。已有gate将部分未分类异常折叠deny，保留该限制，不宣称所有
 故障都能区分成503。完整发布、宿主独立真实浏览器门及部署仓生产验收之前不得计为交付。
+
+
+### Flow 详情有限能力（REQ-0404b，已接收候选、未发布）
+
+只覆盖原生固定默认 Overview 及已分类运行 tab 的读取。模式 B 保留原生 10 卡，
+移除 execution search total 对整页的挂载前置；描述、执行统计、日志统计及触发器统计
+分别预检，无权卡片显示局部拒绝，不发其数据请求。Executions/Logs 的 LIST 与内部
+aggregate 分别判断；Triggers 行内日志另检查 LOG；Metrics 使用既有 METRIC.READ。
+Flow source/edit/graph/revisions/dependencies 的原链不依赖上述运行能力。
+Concurrency 尚未分类，明确显示当前授权模式未支持，不计本批功能支持。运行写能力不在本批。
+
+复用 `POST /api/v1/{tenant}/ui/flows/execution-capabilities`，新增 `formatVersion:2`。
+v1 两枚举、每目标1..2及其全部边界不变。v2精确相同目标形状，固定9枚举：
+`EXECUTION_STATISTICS_READ`、`LATEST_EXECUTIONS_LIST`、`FLOW_DESCRIPTION_READ`、
+`LOG_STATISTICS_READ`、`TRIGGER_STATISTICS_READ`、`FLOW_EXECUTIONS_LIST`、
+`FLOW_LOGS_LIST`、`FLOW_TRIGGERS_LIST`、`FLOW_METRICS_READ`。
+每目标1..9，最多100目标、总项≤200、正文≤128KiB；未知字段/枚举/版本、重复与非法
+目标整批拒绝。响应回显版本与有限状态，不返回角色、策略或domain。旧宿主不能处理v2时
+明确显示故障，不回退true。既有身份、同源/CSRF、no-store、冻结snapshot及异常语义不变。
+
+先检查目标 REST FLOW.READ；描述实际为 DASHBOARD_AGGREGATE FLOW.READ SINGLE /
+FLOW_DESCRIPTION；执行、LOG、TRIGGER统计分别是对应资源的 READ COMPLETE_QUERY /
+对应aggregate；运行列表是各自 REST LIST COMPLETE_QUERY；Metrics仍为既有 REST
+METRIC.READ SINGLE，资源ID为当前Flow ID。Flow ID不充当execution/log/trigger ID。
+当前provider的COMPLETE_QUERY仍按同scope READ/LIST域求交，非空能力不查业务数据存在性。
+LOG/TRIGGER受限ID查询尚无消费者适配，保持失败关闭，不丢限制或冒称已支持。
+
+固定卡片完整定义以内容摘要核对；未知、被改变或custom定义不借同名卡片放行。
+模式 A 不装插件且公开配置为false时不请求投影，保留原生显示、custom装载和实际刷新。
+模式 B 更新投影前清除旧generation，按30秒期限重查；新鲜投影可跨短暂focus/visibility
+变化保持，隐藏期间到期则清空。换号、换目标、卸载与显式刷新使旧generation失效。
+0404a/b的AbortController在当前BASE普通SDK facade中不保证物理HTTP取消；本契约保证
+旧响应不再恢复可选内容，业务API仍独立授权，不以浏览器投影代替服务端许可。
+
+宿主独立CI新增 `native-flow-detail-browser` artifact，要求37项（21行为、16主题/语言/
+宽度）具名计划全过、零失败/跳过/未运行，完整诊断、readiness/runId/sourceHash、输入
+摘要与源码快照可独立核对；失败也上传。测试transport明确不代表生产身份或数据库验收。
+本候选仍须完整本地门、正式CI和镜像发布，再由部署仓消费正式产物验证生产流程。

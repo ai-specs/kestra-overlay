@@ -701,3 +701,16 @@ latest/每行chart主动发403。新增固定目标HTTP投影，不新增Java SP
 模式由公开configs boolean明确区分；模式A无请求、模式B缺组件503。
 范围仅列表；复合详情后续独立分类，不能复用两个枚举通行。
 详见r-ee-rbac.md的0404a接收段和README候选HTTP契约。
+
+
+### REQ-0404b 原生 Flow 详情有限能力（已接收候选、未发布）
+
+0404a HTTP新增显式v2，v1不变；固定9种原生读取操作由同主体/冻结typed评估投影，不新增SPI。
+原生默认10卡分别预检，FLOW_DESCRIPTION可独立加载；运行tab的LIST/aggregate和行内LOG分开。
+宿主投影复现已有ID可执行限制，LOG/TRIGGER受限ID未适配仍拒绝。固定定义内容摘要防漂移，
+custom/未知定义未支持；Concurrency待独立typed分类，本批不算支持。
+模式A无投影HTTP，原生刷新/custom装载保留。Flow异步定义/装载提交有局部generation守卫。
+当前SDK普通facade不转发signal，0404a/b只承诺generation隔离、旧响应不恢复内容；不承诺
+物理HTTP取消。可信业务API继续最终授权。契约、来源与验收门见r-ee-rbac及README。
+独立CI artifact native-flow-detail-browser锁定37具名用例、源码/runner/readiness及纯诊断
+checker，失败留存；实际生产授权与副作用由部署仓验证，不进入宿主CI。

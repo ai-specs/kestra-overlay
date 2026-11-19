@@ -1,0 +1,1487 @@
+# 需求: REQ-0404b 原生Flow详情有限能力与局部拒绝
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；已接收、独占候选，未发布
+# 来源: 新写；固定BASE原生Flow详情实际生产Overview403及既有0404a有限机制
+# 触达上游文件: ui/scripts/translations/fingerprints.json, ui/src/components/dashboard/Dashboard.vue, ui/src/components/dashboard/sections/Sections.vue, ui/src/components/flows/FlowCapabilityState.vue, ui/src/components/flows/FlowRuntimeTab.vue, ui/src/components/flows/FlowTriggers.vue, ui/src/components/flows/Overview.vue, ui/src/components/flows/defaultFlowChartHashes.json, ui/src/components/flows/flowTabs.ts, ui/src/components/flows/useFlowDetailCapabilities.spec.ts, ui/src/components/flows/useFlowDetailCapabilities.ts, ui/src/stores/dashboard.ts, ui/src/translations/de.json, ui/src/translations/en.json, ui/src/translations/es.json, ui/src/translations/fr.json, ui/src/translations/hi.json, ui/src/translations/it.json, ui/src/translations/ja.json, ui/src/translations/ko.json, ui/src/translations/pl.json, ui/src/translations/pt.json, ui/src/translations/pt_BR.json, ui/src/translations/ru.json, ui/src/translations/zh_CN.json, ui/tests/flow-detail-capabilities/browser.mjs, ui/tests/flow-detail-capabilities/cases.mjs, ui/tests/flow-detail-capabilities/check-report.mjs, ui/tests/flow-detail-capabilities/check-report.test.mjs, ui/tests/flow-detail-capabilities/diagnostics.mjs, ui/tests/flow-detail-capabilities/diagnostics.test.mjs, ui/tests/flow-detail-capabilities/index.html, ui/tests/flow-detail-capabilities/main.ts, ui/tests/flow-detail-capabilities/playwright.mjs, ui/tests/flow-detail-capabilities/run-browser.mjs, ui/tests/flow-detail-capabilities/serve.mjs, ui/tests/flow-detail-capabilities/transport.ts, ui/tests/unit/stores/dashboardGeneration.spec.ts, webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java, webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java, webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java, webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java, webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
+# 移除条件: 上游提供等价原生Flow详情有限typed能力预检与按实际数据源局部拒绝机制
+diff --git a/ui/scripts/translations/fingerprints.json b/ui/scripts/translations/fingerprints.json
+index 3ceb699..0ff7388 100644
+--- a/ui/scripts/translations/fingerprints.json
++++ b/ui/scripts/translations/fingerprints.json
+@@ -809,6 +809,7 @@
+   "flowConcurrency|loadError": "4909848400a0",
+   "flowConcurrency|staleLimit|message": "eeda8b5d88b7",
+   "flowConcurrency|staleLimit|title": "d0c8c283de55",
++  "flowDetailCapabilities|unsupported": "5cade17ac8c5",
+   "flow_editor_stats|apps|suffix": "03de4a44ce6c",
+   "flow_editor_stats|apps|tooltip": "e155183c3ae8",
+   "flow_editor_stats|dependencies|suffix": "2e41b118eb20",
+diff --git a/ui/src/components/dashboard/Dashboard.vue b/ui/src/components/dashboard/Dashboard.vue
+index cb29578..abb5b67 100644
+--- a/ui/src/components/dashboard/Dashboard.vue
++++ b/ui/src/components/dashboard/Dashboard.vue
+@@ -27,7 +27,7 @@
+ </template>
+
+ <script setup lang="ts">
+-    import {computed, ref, useTemplateRef, watch} from "vue"
++    import {computed, onBeforeUnmount, ref, useTemplateRef, watch} from "vue"
+     import * as YAML_UTILS from "@kestra-io/topology/flow-yaml-utils"
+
+     import {Dashboard, Chart, ALLOWED_CREATION_ROUTES} from "./composables/useDashboards"
+@@ -110,21 +110,25 @@
+         dashboardComponent.value?.refreshCharts?.()
+     }
+     const getDefaultDashboardBundledInUI = async () => {
++        const namespace = route.params.namespace as string, flowId = route.params.id as string
+         const definitions = await dashboardStore.loadDefaultDefinitions()
+         if(props.isFlow){
+-            return processFlowYaml(definitions.flow, route.params.namespace as string, route.params.id as string)
++            return processFlowYaml(definitions.flow, namespace, flowId)
+         } else if(props.isNamespace){
+             return definitions.namespace
+         } else {
+             return definitions.main
+         }
+     }
+-    const useDefaultDashboardBundledInUI = async () => {
+-        dashboardStore.activeDashboard = {id: "default", charts: [], ...YAML_UTILS.parse(await getDefaultDashboardBundledInUI()), title: t("dashboards.default"), deleted: false}
++    const useDefaultDashboardBundledInUI = async (current = () => true) => {
++        const definition = await getDefaultDashboardBundledInUI()
++        if (!current()) return false
++        dashboardStore.activeDashboard = {id: "default", charts: [], ...YAML_UTILS.parse(definition), title: t("dashboards.default"), deleted: false}
+         isDashboardBundledWithUI.value = true
++        return true
+     }
+
+-    const load = async (id = "default") => {
++    const load = async (id = "default", current = () => true) => {
+         if (!ALLOWED_CREATION_ROUTES.includes(routeFamily(route.name))) {
+             return
+         }
+@@ -132,8 +136,9 @@
+         // When the backend cannot serve custom dashboards, ignore any requested id
+         // (URL, localStorage, tenant default) and render the bundled default directly.
+         if (miscStore.configs?.isCustomDashboardsEnabled === false) {
+-            await useDefaultDashboardBundledInUI()
++            if (!await useDefaultDashboardBundledInUI(current)) return
+             await loadCharts(dashboard.value.charts)
++            if (!current()) return
+             isRouteSettled.value = true
+             return
+         }
+@@ -164,7 +169,8 @@
+         isDashboardBundledWithUI.value = false
+         if (id === "default") {
+             // if requested dashboard is the default one, we first try to find if there is any configured in the DB by an admin
+-            const defaults = await dashboardStore.loadDefaults()
++            const defaults = await dashboardStore.loadDefaults(current)
++            if (!current()) return
+             switch (dashboardLocation.value){
+             case "home": id = defaults?.defaultHomeDashboard ?? id; break
+             case "namespace_overview": id = defaults?.defaultNamespaceOverviewDashboard ?? id; break
+@@ -173,11 +179,12 @@
+         }
+         if (id === "default") {
+             // we are in the case we will load the defaults bundled in the UI
+-            await useDefaultDashboardBundledInUI()
++            if (!await useDefaultDashboardBundledInUI(current)) return
+         } else {
+
+             // case a default dashboard exists in the DB, try to load it
+-            const maybeDashboard = await dashboardStore.load(id)
++            const maybeDashboard = await dashboardStore.load(id, current)
++            if (!current()) return
+
+             if(maybeDashboard){
+                 dashboardStore.activeDashboard = maybeDashboard
+@@ -190,19 +197,27 @@
+                     title: err,
+                     content: err,
+                 }
+-                await useDefaultDashboardBundledInUI()
++                if (!await useDefaultDashboardBundledInUI(current)) return
+             }
+         }
+
++        if (!current()) return
+         await loadCharts(dashboard.value.charts)
++        if (!current()) return
+         isRouteSettled.value = true
+     }
+
+-    watch([() => route.params.dashboard, () => route.params.tenant], async () => {
++    let flowDefinitionGeneration = 0
++    onBeforeUnmount(() => {flowDefinitionGeneration++})
++    watch([() => route.params.dashboard, () => route.params.tenant, () => props.isFlow ? JSON.stringify([route.params.namespace, route.params.id]) : undefined], async () => {
++        const ownGeneration = props.isFlow ? ++flowDefinitionGeneration : 0
++        const current = () => !props.isFlow || ownGeneration === flowDefinitionGeneration
++        if (props.isFlow) {charts.value = []; isRouteSettled.value = false}
+         if(route.params.tenant){
+             // at initial load after login tenant is not yet immediately available
+-            const dashboardId = await dashboardStore.getDashboardId(route)
+-            await load(dashboardId)
++            const dashboardId = await dashboardStore.getDashboardId(route, current)
++            if (!current()) return
++            await load(dashboardId, current)
+         }
+     }, {immediate: true})
+ </script>
+diff --git a/ui/src/components/dashboard/sections/Sections.vue b/ui/src/components/dashboard/sections/Sections.vue
+index ff2c796..8ce4f66 100644
+--- a/ui/src/components/dashboard/sections/Sections.vue
++++ b/ui/src/components/dashboard/sections/Sections.vue
+@@ -26,7 +26,7 @@
+                         </div>
+                         <div id="charts_buttons">
+                             <KsTooltip
+-                                v-if="isExportableChart(chart.type)"
++                                v-if="isExportableChart(chart.type) && chartState(chart) === 'available'"
+                                 :content="$t('dashboards.export')"
+                             >
+                                 <KsDropdown
+@@ -71,8 +71,9 @@
+                     </div>
+
+                     <div :ref="(el) => observeChartBlock(el, chart.id)" class="flex-grow-1">
++                        <FlowCapabilityState v-if="chartState(chart) !== 'available'" :state="chartState(chart)" />
+                         <component
+-                            v-if="activatedCharts.has(chart.id)"
++                            v-else-if="activatedCharts.has(chart.id)"
+                             :ref="(el: Element | ComponentPublicInstance | null) => registerChartComponent(el, chart.id)"
+                             :is="TYPES[chart.type as keyof typeof TYPES]"
+                             :chart
+@@ -96,7 +97,16 @@
+ </template>
+
+ <script setup lang="ts">
+-    import {computed, type ComponentPublicInstance} from "vue"
++    import {computed, ref, watch, type ComponentPublicInstance} from "vue"
++
++    import FlowCapabilityState from "../../flows/FlowCapabilityState.vue"
++    import {useOptionalFlowDetailProjection} from "../../flows/useFlowDetailCapabilities"
++    const projection = useOptionalFlowDetailProjection()
++    const verifiedCharts = ref(new Set<Chart>())
++    const verifyingCharts = ref(false)
++    let definitionGeneration = 0
++    const chartState = (chart: Chart) => !projection || projection.modeA.value ? "available"
++        : verifyingCharts.value ? "loading" : !props.showDefault || props.dashboard.id !== "default" || !verifiedCharts.value.has(chart) ? "unsupported" : projection.chartState(chart)
+
+     import type {Dashboard, Chart} from "../composables/useDashboards"
+     import {isKPIChart, isCanvasChart, isExportableChart, getChartTitle} from "../composables/useDashboards"
+@@ -132,7 +142,8 @@
+     }
+
+     // Only mounted charts are in the map, so a recycled one is skipped here and reloads when it scrolls back in.
+-    function refreshCharts() {
++    async function refreshCharts() {
++        if (projection && !projection.modeA.value) {await projection.refresh(); return}
+         chartsComponents.forEach((component) => component.refresh())
+     }
+
+@@ -147,6 +158,17 @@
+         padding?: boolean;
+     }>()
+
++    watch(() => props.charts, async charts => {
++        const current = ++definitionGeneration
++        verifiedCharts.value = new Set()
++        if (!projection || projection.modeA.value) return
++        verifyingCharts.value = true
++        try {
++            const results = await Promise.all((charts ?? []).map(async chart => ({chart, valid: await projection.verifyChart(chart)})))
++            if (current === definitionGeneration) verifiedCharts.value = new Set(results.filter(result => result.valid).map(result => result.chart))
++        } finally {if (current === definitionGeneration) verifyingCharts.value = false}
++    }, {immediate: true})
++
+     const chartTypesById = computed(() => new Map((props.charts ?? []).map((chart) => [chart.id, chart.type])))
+
+     const {activatedCharts, observeChartBlock, placeholderHeight} = useLazyChartBlocks(
+@@ -177,6 +199,7 @@
+     })
+
+     async function exportChart(chart: Chart, format: "CSV" | "ION") {
++        if (chartState(chart) !== "available") return
+         const {filters: chartFilters = [], ...pagination} = chartsComponents.get(chart.id)?.exportParameters?.() ?? {}
+
+         const exported = await dashboardStore.export(props.dashboard, chart, {
+diff --git a/ui/src/components/flows/FlowCapabilityState.vue b/ui/src/components/flows/FlowCapabilityState.vue
+new file mode 100644
+index 0000000..ed2541a
+--- /dev/null
++++ b/ui/src/components/flows/FlowCapabilityState.vue
+@@ -0,0 +1,12 @@
++<template>
++    <KsSkeleton v-if="state === 'loading'" animated :rows="3" />
++    <KsAlert v-else :type="state === 'error' ? 'error' : 'warning'" :closable="false" :data-flow-capability-state="state" role="status">
++        {{ state === 'unsupported' ? $t('flowDetailCapabilities.unsupported') : state === 'error' ? $t('errors.503.title') : $t('errors.403.title') }}
++        <KsButton v-if="state === 'error'" @click="projection?.refresh()">{{ $t('file_preview.retry') }}</KsButton>
++    </KsAlert>
++</template>
++<script setup lang="ts">
++    import {useOptionalFlowDetailProjection, type DetailState} from "./useFlowDetailCapabilities"
++    defineProps<{state: DetailState}>()
++    const projection = useOptionalFlowDetailProjection()
++</script>
+diff --git a/ui/src/components/flows/FlowRuntimeTab.vue b/ui/src/components/flows/FlowRuntimeTab.vue
+new file mode 100644
+index 0000000..e602ed7
+--- /dev/null
++++ b/ui/src/components/flows/FlowRuntimeTab.vue
+@@ -0,0 +1,21 @@
++<template>
++    <component v-if="tabState === 'available'" :is="components[tab]" v-bind="$attrs" />
++    <FlowCapabilityState v-else :state="tabState" />
++</template>
++<script setup lang="ts">
++    import {computed, defineAsyncComponent} from "vue"
++    import {provideFlowDetailProjection, type DetailCapability} from "./useFlowDetailCapabilities"
++    import FlowCapabilityState from "./FlowCapabilityState.vue"
++    defineOptions({inheritAttrs: false})
++    const props = defineProps<{tab: "executions" | "logs" | "triggers" | "metrics" | "concurrency"}>()
++    const projection = provideFlowDetailProjection()
++    const capabilities: Partial<Record<typeof props.tab, DetailCapability>> = {executions: "FLOW_EXECUTIONS_LIST", logs: "FLOW_LOGS_LIST", triggers: "FLOW_TRIGGERS_LIST", metrics: "FLOW_METRICS_READ"}
++    const components = {
++        executions: defineAsyncComponent(() => import("./FlowExecutions.vue")),
++        logs: defineAsyncComponent(() => import("../logs/LogsWrapper.vue")),
++        triggers: defineAsyncComponent(() => import("./FlowTriggers.vue")),
++        metrics: defineAsyncComponent(() => import("./FlowMetrics.vue")),
++        concurrency: defineAsyncComponent(() => import("./FlowConcurrency.vue")),
++    }
++    const tabState = computed(() => projection.modeA.value ? "available" : props.tab === "concurrency" ? "unsupported" : projection.state(capabilities[props.tab]!))
++</script>
+diff --git a/ui/src/components/flows/FlowTriggers.vue b/ui/src/components/flows/FlowTriggers.vue
+index 386cd91..4e20f38 100644
+--- a/ui/src/components/flows/FlowTriggers.vue
++++ b/ui/src/components/flows/FlowTriggers.vue
+@@ -49,7 +49,8 @@
+                         @resume="unpauseBackfill(props.row)"
+                         @stop="deleteBackfill(props.row)"
+                     />
+-                    <LogsWrapper class="m-3" :filters="{...props.row, triggerId: props.row.id}" purgeFilters :withCharts="false" :reloadLogs embed />
++                    <LogsWrapper v-if="!projection || projection.state('FLOW_LOGS_LIST') === 'available'" class="m-3" :filters="{...props.row, triggerId: props.row.id}" purgeFilters :withCharts="false" :reloadLogs embed />
++                    <FlowCapabilityState v-else :state="projection.state('FLOW_LOGS_LIST')" />
+                 </template>
+             </KsTableColumn>
+             <KsTableColumn
+@@ -353,6 +354,9 @@
+     import Vars from "../executions/Vars.vue"
+     import BackfillBanner from "./BackfillBanner.vue"
+     import Empty from "../layout/empty/Empty.vue"
++    import FlowCapabilityState from "./FlowCapabilityState.vue"
++    import {useOptionalFlowDetailProjection} from "./useFlowDetailCapabilities"
++    const projection = useOptionalFlowDetailProjection()
+     import LogsWrapper from "../logs/LogsWrapper.vue"
+     import TriggerEnableDialog from "../triggers/TriggerEnableDialog.vue"
+
+diff --git a/ui/src/components/flows/Overview.vue b/ui/src/components/flows/Overview.vue
+index cda02ad..a64620f 100644
+--- a/ui/src/components/flows/Overview.vue
++++ b/ui/src/components/flows/Overview.vue
+@@ -1,10 +1,10 @@
+ <template>
+     <Dashboard
+-        v-if="loaded && total && flow"
++        v-if="flow && (!projection.modeA.value || (loaded && total))"
+         :header="false"
+         isFlow
+     />
+-    <NoExecutions v-else-if="loaded && flow && !total" />
++    <NoExecutions v-else-if="projection.modeA.value && loaded && flow && !total" />
+ </template>
+
+ <script setup lang="ts">
+@@ -17,6 +17,8 @@
+     import NoExecutions from "../flows/NoExecutions.vue"
+     import {useFlowStore} from "../../stores/flow"
+
++    import {provideFlowDetailProjection} from "./useFlowDetailCapabilities"
++    const projection = provideFlowDetailProjection()
+     const flowStore = useFlowStore()
+     const flow = computed(() => flowStore.flow)
+     const executionsStore = useExecutionsStore()
+@@ -27,7 +29,7 @@
+     defineEmits(["expand-subflow"])
+
+     function fetchExecutions() {
+-        if (flow.value?.id) {
++        if (projection.modeA.value && flow.value?.id) {
+             loaded.value = false
+             executionsStore
+                 .findExecutions({"filters[namespace][EQUALS]": flow.value.namespace, "filters[flowId][EQUALS]": flow.value.id})
+diff --git a/ui/src/components/flows/defaultFlowChartHashes.json b/ui/src/components/flows/defaultFlowChartHashes.json
+new file mode 100644
+index 0000000..7f7e8f0
+--- /dev/null
++++ b/ui/src/components/flows/defaultFlowChartHashes.json
+@@ -0,0 +1,12 @@
++{
++  "kpi_success_ratio": "f90fc86f7a268c1b30b80304959cb00533aa6092753f49f8943ef24662431c22",
++  "kpi_failed_ratio": "d05ca71ffea514614987cada8de72113004e60b67b7cb8a71323eec73781e88f",
++  "kpi_in_progress": "eb0ef6572fc05a9b008155ff4c55abba527bce03c04c2a810e90cdd53120659a",
++  "kpi_pending": "697facdd95969c93258154178a1e17542a69f5cd067aea86ed6fa2bc2e8f4355",
++  "description": "690c8de3ce88b367aa102b9ccdef4f70485ca706e50f0f96507c04f2f489087e",
++  "total_executions_pie": "76c5ad9c8e07644cfe332f2e14591de68a66295be412053226345002cc6bc850",
++  "total_executions_timeseries": "a7159d222e69e6706b0d34ed6e67bd65da40bfc6376c232c45c7d1c89455dc03",
++  "recent_executions": "72e807df4c669a226f3e583aefcba17e7856d2015b8737ef36f82622254d0d99",
++  "next_executions": "fba094b417fe5c5a854b8a37465f60f66894a48270fc1e8cfb6db2f320b3ae4b",
++  "logs_timeseries": "f3218967e4dfcea9bf90a120a0eadcc0eb8e56b3ad73c24f67b72f31c0f293de"
++}
+diff --git a/ui/src/components/flows/flowTabs.ts b/ui/src/components/flows/flowTabs.ts
+index 83816f1..d668911 100644
+--- a/ui/src/components/flows/flowTabs.ts
++++ b/ui/src/components/flows/flowTabs.ts
+@@ -58,8 +58,8 @@ export const FLOW_TAB_ROUTES: RouteRecordRaw[] = [
+     {
+         name: `${FLOW_PARENT_ROUTE}/executions`,
+         path: "executions",
+-        component: () => import("./FlowExecutions.vue"),
+-        props: {embed: true},
++        component: () => import("./FlowRuntimeTab.vue"),
++        props: {tab: "executions", embed: true},
+         meta: {tab: "executions", title: "executions"},
+     },
+     {
+@@ -84,20 +84,22 @@ export const FLOW_TAB_ROUTES: RouteRecordRaw[] = [
+     {
+         name: `${FLOW_PARENT_ROUTE}/triggers`,
+         path: "triggers",
+-        component: () => import("./FlowTriggers.vue"),
++        component: () => import("./FlowRuntimeTab.vue"),
++        props: {tab: "triggers"},
+         meta: {tab: "triggers", title: "triggers"},
+     },
+     {
+         name: `${FLOW_PARENT_ROUTE}/logs`,
+         path: "logs",
+-        component: () => import("../logs/LogsWrapper.vue"),
+-        props: {showFilters: true, restoreurl: false},
++        component: () => import("./FlowRuntimeTab.vue"),
++        props: {tab: "logs", showFilters: true, restoreurl: false},
+         meta: {tab: "logs", title: "logs"},
+     },
+     {
+         name: `${FLOW_PARENT_ROUTE}/metrics`,
+         path: "metrics",
+-        component: () => import("./FlowMetrics.vue"),
++        component: () => import("./FlowRuntimeTab.vue"),
++        props: {tab: "metrics"},
+         meta: {tab: "metrics", title: "metrics"},
+     },
+     {
+@@ -110,7 +112,8 @@ export const FLOW_TAB_ROUTES: RouteRecordRaw[] = [
+     {
+         name: `${FLOW_PARENT_ROUTE}/concurrency`,
+         path: "concurrency",
+-        component: () => import("./FlowConcurrency.vue"),
++        component: () => import("./FlowRuntimeTab.vue"),
++        props: {tab: "concurrency"},
+         meta: {tab: "concurrency", title: "concurrency"},
+     },
+     {
+diff --git a/ui/src/components/flows/useFlowDetailCapabilities.spec.ts b/ui/src/components/flows/useFlowDetailCapabilities.spec.ts
+new file mode 100644
+index 0000000..6fce4d9
+--- /dev/null
++++ b/ui/src/components/flows/useFlowDetailCapabilities.spec.ts
+@@ -0,0 +1,52 @@
++import {afterEach, beforeEach, describe, expect, it, vi} from "vitest"
++import {createApp, nextTick, reactive} from "vue"
++const mocks = vi.hoisted(() => ({post: vi.fn(), route: undefined as any, misc: undefined as any, auth: undefined as any}))
++vi.mock("@kestra-io/kestra-sdk", () => ({useClient: () => ({post: mocks.post})}))
++vi.mock("override/utils/route", () => ({apiUrl: () => "/api/v1/main"}))
++vi.mock("vue-router", () => ({useRoute: () => mocks.route}))
++vi.mock("override/stores/misc", () => ({useMiscStore: () => mocks.misc}))
++vi.mock("override/stores/auth", () => ({useAuthStore: () => mocks.auth}))
++import {DETAIL_CAPABILITIES, DEFAULT_FLOW_CHARTS, provideFlowDetailProjection} from "./useFlowDetailCapabilities"
++const reply = (available: string[] = []) => ({data: {formatVersion: 2, results: [{tenant: "main", namespace: "company.sub", flowId: "one", capabilities: Object.fromEntries(DETAIL_CAPABILITIES.map(c => [c, available.includes(c) ? "AVAILABLE" : "UNAVAILABLE"]))}]}})
++let app: ReturnType<typeof createApp> | undefined
++const mount = () => {let projection!: ReturnType<typeof provideFlowDetailProjection>; app = createApp({setup() {projection = provideFlowDetailProjection(); return () => null}}); app.mount(document.createElement("div")); return projection}
++const settle = async () => {await Promise.resolve(); await nextTick(); await Promise.resolve()}
++beforeEach(() => {mocks.route = reactive({params: {tenant: "main", namespace: "company.sub", id: "one"}}); mocks.misc = reactive({configs: {flowExecutionCapabilitiesRequired: true as boolean | undefined}}); mocks.auth = reactive({user: {}, isLogged: true}); mocks.post.mockReset().mockResolvedValue(reply())})
++afterEach(() => {app?.unmount(); app = undefined; vi.useRealTimers(); vi.restoreAllMocks()})
++describe("finite native Flow detail projection", () => {
++    it("keeps description available while every runtime datasource is denied", async () => {mocks.post.mockResolvedValue(reply(["FLOW_DESCRIPTION_READ"])); const p = mount(); await settle(); expect(p.chartState({id: "description", source: {type: "FlowDescription", namespace: "company.sub", flowId: "one"}} as any)).toBe("available"); expect(p.state("EXECUTION_STATISTICS_READ")).toBe("unavailable"); expect(mocks.post.mock.calls[0][1].formatVersion).toBe(2); expect(mocks.post.mock.calls[0][1].targets[0].capabilities).toHaveLength(9)})
++    it("blocks unknown datasource and changed fixed chart mapping", async () => {mocks.post.mockResolvedValue(reply([...DETAIL_CAPABILITIES])); const p = mount(); await settle(); for (const [id, expected] of Object.entries(DEFAULT_FLOW_CHARTS)) expect(p.chartState({id, ...(expected.type === "FlowDescription" ? {source: {type: expected.type, namespace: "company.sub", flowId: "one"}} : {data: {type: `io.kestra.plugin.core.dashboard.data.${expected.type}`}})} as any)).toBe("available"); expect(p.chartState({id: "unknown", data: {type: "io.kestra.plugin.core.dashboard.data.Executions"}} as any)).toBe("unsupported"); expect(p.chartState({id: "description", source: {type: "Other"}} as any)).toBe("unsupported")})
++    it("does not let an older identity response restore permission", async () => {let done!: (value: unknown) => void; mocks.post.mockImplementationOnce(() => new Promise(resolve => {done = resolve})).mockResolvedValue(reply()); const p = mount(); mocks.auth.user = {changed: true}; await settle(); done(reply([...DETAIL_CAPABILITIES])); await settle(); expect(p.state("EXECUTION_STATISTICS_READ")).toBe("unavailable"); expect(mocks.post.mock.calls[0][2].signal.aborted).toBe(true)})
++    it("keeps configuration and protocol failures distinct from denied", async () => {mocks.misc.configs.flowExecutionCapabilitiesRequired = undefined; const p = mount(); await settle(); expect(p.state("FLOW_DESCRIPTION_READ")).toBe("error"); expect(mocks.post).not.toHaveBeenCalled(); mocks.post.mockResolvedValue({data: {formatVersion: 1, results: []}}); mocks.misc.configs.flowExecutionCapabilitiesRequired = true; await settle(); expect(p.state("FLOW_DESCRIPTION_READ")).toBe("error")})
++    it("mode A does not request capabilities and preserves all native charts", async () => {mocks.misc.configs.flowExecutionCapabilitiesRequired = false; const p = mount(); await settle(); expect(mocks.post).not.toHaveBeenCalled(); expect(p.chartState({id: "oss-custom"} as any)).toBe("available"); expect(p.state("FLOW_METRICS_READ")).toBe("available")})
++    it("does not unmount current permission on fresh focus or duplicate a pending request", async () => {
++        let done!: (value: unknown) => void
++        mocks.post.mockImplementationOnce(() => new Promise(resolve => {done = resolve}))
++        const p = mount()
++        window.dispatchEvent(new Event("focus"))
++        expect(mocks.post).toHaveBeenCalledTimes(1)
++        done(reply([...DETAIL_CAPABILITIES])); await settle()
++        window.dispatchEvent(new Event("focus")); await settle()
++        expect(mocks.post).toHaveBeenCalledTimes(1)
++        const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden")
++        document.dispatchEvent(new Event("visibilitychange"))
++        visibility.mockReturnValue("visible")
++        document.dispatchEvent(new Event("visibilitychange")); await settle()
++        expect(mocks.post).toHaveBeenCalledTimes(1)
++        expect(p.state("FLOW_EXECUTIONS_LIST")).toBe("available")
++    })
++    it("matches all ten trusted default definitions and rejects altered or custom data", async () => {
++        const fs = await import("node:fs"), yaml = await import("yaml")
++        const charts = yaml.parse(fs.readFileSync(`${process.cwd()}/../core/src/main/resources/dashboards/default_flow_definition.yaml`, "utf8")).charts
++        const p = mount(); await settle()
++        expect(charts).toHaveLength(10)
++        expect(charts.map((chart: any) => chart.id).sort()).toEqual(Object.keys(DEFAULT_FLOW_CHARTS).sort())
++        for (const chart of charts) {
++            if (chart.source) {chart.source.namespace = "company.sub"; chart.source.flowId = "one"}
++            expect(await p.verifyChart(chart)).toBe(true)
++            expect(await p.verifyChart({...chart, data: {...chart.data, where: [{field: "NAMESPACE", type: "EQUAL_TO", value: "other"}]}})).toBe(false)
++        }
++        expect(await p.verifyChart({...charts[4], source: {...charts[4].source, namespace: "other"}})).toBe(false)
++    })
++    it("expires and rechecks without retaining revoked projection", async () => {vi.useFakeTimers(); mocks.post.mockResolvedValueOnce(reply([...DETAIL_CAPABILITIES])).mockResolvedValue(reply()); const p = mount(); await settle(); expect(p.state("FLOW_EXECUTIONS_LIST")).toBe("available"); await vi.advanceTimersByTimeAsync(30_000); await settle(); expect(p.state("FLOW_EXECUTIONS_LIST")).not.toBe("available")})
++})
+diff --git a/ui/src/components/flows/useFlowDetailCapabilities.ts b/ui/src/components/flows/useFlowDetailCapabilities.ts
+new file mode 100644
+index 0000000..5ce1a37
+--- /dev/null
++++ b/ui/src/components/flows/useFlowDetailCapabilities.ts
+@@ -0,0 +1,102 @@
++import {computed, inject, onBeforeUnmount, onMounted, provide, ref, watch, type InjectionKey} from "vue"
++import {useRoute} from "vue-router"
++import {useClient} from "@kestra-io/kestra-sdk"
++import {apiUrl} from "override/utils/route"
++import {useMiscStore} from "override/stores/misc"
++import {useAuthStore} from "override/stores/auth"
++import chartHashes from "./defaultFlowChartHashes.json"
++import type {Chart} from "../dashboard/types"
++
++export const DETAIL_CAPABILITIES = ["EXECUTION_STATISTICS_READ", "LATEST_EXECUTIONS_LIST", "FLOW_DESCRIPTION_READ", "LOG_STATISTICS_READ", "TRIGGER_STATISTICS_READ", "FLOW_EXECUTIONS_LIST", "FLOW_LOGS_LIST", "FLOW_TRIGGERS_LIST", "FLOW_METRICS_READ"] as const
++export type DetailCapability = typeof DETAIL_CAPABILITIES[number]
++export type DetailState = "available" | "unavailable" | "loading" | "error" | "unsupported"
++export const DEFAULT_FLOW_CHARTS: Record<string, {type: string; capability: DetailCapability}> = {
++    kpi_success_ratio: {type: "ExecutionsKPI", capability: "EXECUTION_STATISTICS_READ"},
++    kpi_failed_ratio: {type: "ExecutionsKPI", capability: "EXECUTION_STATISTICS_READ"},
++    kpi_in_progress: {type: "ExecutionsKPI", capability: "EXECUTION_STATISTICS_READ"},
++    kpi_pending: {type: "ExecutionsKPI", capability: "EXECUTION_STATISTICS_READ"},
++    description: {type: "FlowDescription", capability: "FLOW_DESCRIPTION_READ"},
++    total_executions_pie: {type: "Executions", capability: "EXECUTION_STATISTICS_READ"},
++    total_executions_timeseries: {type: "Executions", capability: "EXECUTION_STATISTICS_READ"},
++    recent_executions: {type: "Executions", capability: "EXECUTION_STATISTICS_READ"},
++    next_executions: {type: "Triggers", capability: "TRIGGER_STATISTICS_READ"},
++    logs_timeseries: {type: "Logs", capability: "LOG_STATISTICS_READ"},
++}
++export interface FlowDetailProjection {
++    state(capability: DetailCapability): DetailState;
++    chartState(chart: Chart): DetailState;
++    verifyChart(chart: Chart): Promise<boolean>;
++    refresh(): Promise<void>;
++    modeA: Readonly<{value: boolean}>;
++}
++const key: InjectionKey<FlowDetailProjection> = Symbol("finite-flow-detail-projection")
++export const useOptionalFlowDetailProjection = () => inject(key, undefined)
++
++/** Local projection only; actual APIs continue authorizing every operation. */
++export function provideFlowDetailProjection() {
++    const route = useRoute(), misc = useMiscStore(), auth = useAuthStore(), client = useClient()
++    const states = ref<Partial<Record<DetailCapability, DetailState>>>({}), error = ref(false)
++    const modeA = computed(() => misc.configs?.flowExecutionCapabilitiesRequired === false)
++    let loadedAt = 0, pending = false
++    let generation = 0, controller: AbortController | undefined, timer: ReturnType<typeof setTimeout> | undefined
++    const target = () => JSON.stringify([route.params.tenant ?? "main", route.params.namespace, route.params.id])
++    const invalidate = () => {generation++; controller?.abort(); clearTimeout(timer); states.value = {}; error.value = false; loadedAt = 0; pending = false}
++    const state = (capability: DetailCapability): DetailState => modeA.value ? "available" : error.value ? "error" : states.value[capability] ?? "loading"
++    const refresh = async () => {
++        invalidate()
++        if (modeA.value) return
++        const current = generation, currentTarget = target()
++        if (misc.configs?.flowExecutionCapabilitiesRequired !== true) {error.value = true; return}
++        controller = new AbortController()
++        pending = true
++        try {
++            const tenant = String(route.params.tenant ?? "main"), namespace = String(route.params.namespace), flowId = String(route.params.id)
++            const response = await client.post(`${apiUrl()}/ui/flows/execution-capabilities`, {
++                formatVersion: 2, targets: [{tenant, namespace, flowId, capabilities: DETAIL_CAPABILITIES}],
++            }, {signal: controller.signal})
++            if (generation !== current || target() !== currentTarget) return
++            const body = response.data, result = body?.results?.[0]
++            if (body?.formatVersion !== 2 || body.results?.length !== 1 || result?.tenant !== tenant || result?.namespace !== namespace || result?.flowId !== flowId
++                || Object.keys(result?.capabilities ?? {}).length !== DETAIL_CAPABILITIES.length
++                || DETAIL_CAPABILITIES.some(capability => !["AVAILABLE", "UNAVAILABLE"].includes(result.capabilities[capability]))) throw new Error("Invalid Flow detail capability response")
++            loadedAt = Date.now()
++            states.value = Object.fromEntries(DETAIL_CAPABILITIES.map(capability => [capability, result.capabilities[capability] === "AVAILABLE" ? "available" : "unavailable"]))
++        } catch (_failure) {
++            if (generation !== current || target() !== currentTarget) return
++            states.value = {}; error.value = true; loadedAt = Date.now()
++            // The local error surface remains distinct from an authorization denial.
++        } finally {
++            if (generation === current) {
++                pending = false
++                if (!modeA.value) timer = setTimeout(() => {if (document.visibilityState === "visible") void refresh(); else invalidate()}, 30_000)
++            }
++        }
++    }
++    const chartState = (chart: Chart): DetailState => {
++        if (modeA.value) return "available"
++        if (chart.id === "description" && (chart.source?.namespace !== route.params.namespace || chart.source?.flowId !== route.params.id)) return "unsupported"
++        const expected = DEFAULT_FLOW_CHARTS[chart.id ?? ""], type = chart.source?.type ?? chart.data?.type
++        if (!expected || type !== (expected.type === "FlowDescription" ? "FlowDescription" : `io.kestra.plugin.core.dashboard.data.${expected.type}`)) return "unsupported"
++        return state(expected.capability)
++    }
++    const canonical = (value: any): any => value && typeof value === "object"
++        ? Array.isArray(value) ? value.map(canonical) : Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value
++    const verifyChart = async (chart: Chart) => {
++        const {content: _content, ...definition} = chart
++        if (chart.id === "description") {
++            if (chart.source?.namespace !== route.params.namespace || chart.source?.flowId !== route.params.id) return false
++            definition.source = {...chart.source, namespace: "--NAMESPACE--", flowId: "--FLOW--"}
++        }
++        const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonical(definition)))))].map(x => x.toString(16).padStart(2, "0")).join("")
++        return hash === (chartHashes as Record<string, string>)[chart.id ?? ""]
++    }
++    const projection: FlowDetailProjection = {state, chartState, verifyChart, refresh, modeA}
++    provide(key, projection)
++    watch(() => [target(), misc.configs?.flowExecutionCapabilitiesRequired, auth.user, auth.isLogged], () => {void refresh()}, {immediate: true, flush: "sync"})
++    // A fresh projection survives brief visibility changes; the existing timer still expires it while hidden.
++    const visible = () => {if (document.visibilityState === "visible" && !pending && (!loadedAt || Date.now() - loadedAt >= 30_000)) void refresh()}
++    const focus = visible
++    onMounted(() => {document.addEventListener("visibilitychange", visible); window.addEventListener("focus", focus)})
++    onBeforeUnmount(() => {invalidate(); document.removeEventListener("visibilitychange", visible); window.removeEventListener("focus", focus)})
++    return projection
++}
+diff --git a/ui/src/stores/dashboard.ts b/ui/src/stores/dashboard.ts
+index 8a310a5..70b1749 100644
+--- a/ui/src/stores/dashboard.ts
++++ b/ui/src/stores/dashboard.ts
+@@ -92,8 +92,9 @@ export const useDashboardStore = defineStore("dashboard", () => {
+     }
+
+     /** Loads the tenant default dashboards; an instance that cannot store dashboards has none and does not serve the route. */
+-    async function loadDefaults() {
++    async function loadDefaults(current = () => true) {
+         if (useMiscStore().configs?.isCustomDashboardsEnabled === false) {
++            if (!current()) return {}
+             defaultDashboards.value = {}
+             return defaultDashboards.value
+         }
+@@ -102,8 +103,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
+         // dashboards-admin in EE) but the same REST path, so go through the raw client to stay
+         // edition-agnostic (same approach as the custom-blueprint reads).
+         const {data} = await axios.get<DashboardSettings>(`${apiUrl()}/dashboards/settings/default-dashboards`)
+-        defaultDashboards.value = data
+-        return defaultDashboards.value
++        if (current()) defaultDashboards.value = data
++        return data
+     }
+
+     async function loadDefaultDefinitions() {
+@@ -154,7 +155,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
+         return KEY_MAP[routeFamily(route.name)]
+     }
+
+-    const getDashboardId = async (route: RouteLocation): Promise<string> => {
++    const getDashboardId = async (route: RouteLocation, current = () => true): Promise<string> => {
+         const routeName = route.name ? routeFamily(route.name) : undefined
+         if(!routeName || !DASHBOARD_ROUTES.includes(routeName)){
+             throw new Error("invalid route in getDashboard: "+routeName?.toString())
+@@ -173,7 +174,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
+         }
+
+         // tenant default
+-        const defaultTenantDashboard = await getTenantDefaultDashboardId(route)
++        const defaultTenantDashboard = await getTenantDefaultDashboardId(route, current)
+         if(defaultTenantDashboard) {
+             return defaultTenantDashboard
+         }
+@@ -191,11 +192,12 @@ export const useDashboardStore = defineStore("dashboard", () => {
+         return `userDashboard/${tenant}/${routeName}`
+     }
+
+-    async function getTenantDefaultDashboardId(route: RouteLocation) {
++    async function getTenantDefaultDashboardId(route: RouteLocation, current = () => true) {
+         const dashboardType = getDashboardType(route)
+
+         if (!dashboardType) return Promise.resolve(undefined)
+-        await loadDefaults()
++        await loadDefaults(current)
++        if (!current()) return undefined
+         switch (dashboardType) {
+             case "DASHBOARD_MAIN":
+                 return Promise.resolve(defaultDashboards.value?.defaultHomeDashboard)
+@@ -220,7 +222,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
+
+     const silent = {showMessageOnError: false} as Parameters<typeof DashboardsAPI.dashboard>[1]
+
+-    async function load(id: Dashboard["id"]) : Promise<Dashboard | undefined> {
++    async function load(id: Dashboard["id"], current = () => true) : Promise<Dashboard | undefined> {
+         let data
+         try{
+             data = await DashboardsAPI.dashboard({id}, silent) as Dashboard
+@@ -228,6 +230,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
+             return undefined
+         }
+
++        if (!current()) return undefined
+         activeDashboard.value = data
+         sourceCode.value = data.sourceCode ?? ""
+         sourceCodeOrigin.value = sourceCode.value
+diff --git a/ui/src/translations/de.json b/ui/src/translations/de.json
+index e52d18f..5a9b323 100644
+--- a/ui/src/translations/de.json
++++ b/ui/src/translations/de.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Installiere Kestra als App für schnelleren Zugriff und eine Vollbild-Ansicht.",
+       "install": "Installieren",
+       "dismiss": "Nicht jetzt"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Diese Seite wird im aktuellen Autorisierungsmodus nicht unterstützt."
+     }
+   }
+ }
+diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
+index 1b56efe..9762103 100644
+--- a/ui/src/translations/en.json
++++ b/ui/src/translations/en.json
+@@ -6,6 +6,9 @@
+       "cta": "See what changed"
+     },
+     "loading": "Loading...",
++    "flowDetailCapabilities": {
++      "unsupported": "This page is not supported in the current authorization mode."
++    },
+     "more actions": "More actions",
+     "recipe": {
+       "create_flow": "Create flow",
+diff --git a/ui/src/translations/es.json b/ui/src/translations/es.json
+index cc2f80b..eed7149 100644
+--- a/ui/src/translations/es.json
++++ b/ui/src/translations/es.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Instala Kestra como una aplicación para un acceso más rápido y una experiencia a pantalla completa.",
+       "install": "Instalar",
+       "dismiss": "Ahora no"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Esta página no es compatible con el modo de autorización actual."
+     }
+   }
+ }
+diff --git a/ui/src/translations/fr.json b/ui/src/translations/fr.json
+index d169024..457732e 100644
+--- a/ui/src/translations/fr.json
++++ b/ui/src/translations/fr.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Installez Kestra comme application pour un accès plus rapide et une expérience plein écran.",
+       "install": "Installer",
+       "dismiss": "Pas maintenant"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Cette page n’est pas prise en charge dans le mode d’autorisation actuel."
+     }
+   }
+ }
+diff --git a/ui/src/translations/hi.json b/ui/src/translations/hi.json
+index 31dd181..23982be 100644
+--- a/ui/src/translations/hi.json
++++ b/ui/src/translations/hi.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "तेज़ पहुंच और पूर्ण-स्क्रीन अनुभव के लिए Kestra को ऐप के रूप में इंस्टॉल करें।",
+       "install": "इंस्टॉल करें",
+       "dismiss": "अभी नहीं"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "वर्तमान प्राधिकरण मोड में यह पृष्ठ समर्थित नहीं है।"
+     }
+   }
+ }
+diff --git a/ui/src/translations/it.json b/ui/src/translations/it.json
+index e31ebb6..9ee6046 100644
+--- a/ui/src/translations/it.json
++++ b/ui/src/translations/it.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Installa Kestra come app per un accesso più rapido e un'esperienza a schermo intero.",
+       "install": "Installa",
+       "dismiss": "Non ora"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Questa pagina non è supportata nella modalità di autorizzazione corrente."
+     }
+   }
+ }
+diff --git a/ui/src/translations/ja.json b/ui/src/translations/ja.json
+index 1145fe9..7209146 100644
+--- a/ui/src/translations/ja.json
++++ b/ui/src/translations/ja.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "より高速なアクセスとフルスクリーン体験のために、Kestra をアプリとしてインストールします。",
+       "install": "インストール",
+       "dismiss": "後で"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "現在の認可モードでは、このページはサポートされていません。"
+     }
+   }
+ }
+diff --git a/ui/src/translations/ko.json b/ui/src/translations/ko.json
+index cbd7f15..618ac4a 100644
+--- a/ui/src/translations/ko.json
++++ b/ui/src/translations/ko.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "더 빠른 접근과 전체 화면 경험을 위해 Kestra를 앱으로 설치하세요.",
+       "install": "설치",
+       "dismiss": "나중에"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "현재 권한 부여 모드에서는 이 페이지를 지원하지 않습니다."
+     }
+   }
+ }
+diff --git a/ui/src/translations/pl.json b/ui/src/translations/pl.json
+index 346f4f8..0abb1b7 100644
+--- a/ui/src/translations/pl.json
++++ b/ui/src/translations/pl.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Zainstaluj Kestrę jako aplikację, aby mieć szybszy dostęp i pełnoekranowy widok.",
+       "install": "Zainstaluj",
+       "dismiss": "Nie teraz"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Ta strona nie jest obsługiwana w bieżącym trybie autoryzacji."
+     }
+   }
+ }
+diff --git a/ui/src/translations/pt.json b/ui/src/translations/pt.json
+index e0ba61f..bfd3fe4 100644
+--- a/ui/src/translations/pt.json
++++ b/ui/src/translations/pt.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Instale o Kestra como uma aplicação para um acesso mais rápido e uma experiência em ecrã inteiro.",
+       "install": "Instalar",
+       "dismiss": "Agora não"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Esta página não é suportada no modo de autorização atual."
+     }
+   }
+ }
+diff --git a/ui/src/translations/pt_BR.json b/ui/src/translations/pt_BR.json
+index 8c84c2d..894d594 100644
+--- a/ui/src/translations/pt_BR.json
++++ b/ui/src/translations/pt_BR.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Instale o Kestra como um aplicativo para acesso mais rápido e uma experiência em tela cheia.",
+       "install": "Instalar",
+       "dismiss": "Agora não"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Esta página não é compatível com o modo de autorização atual."
+     }
+   }
+ }
+diff --git a/ui/src/translations/ru.json b/ui/src/translations/ru.json
+index 98d2fe6..5a7946d 100644
+--- a/ui/src/translations/ru.json
++++ b/ui/src/translations/ru.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "Установите Kestra как приложение для более быстрого доступа и полноэкранного режима.",
+       "install": "Установить",
+       "dismiss": "Не сейчас"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "Эта страница не поддерживается в текущем режиме авторизации."
+     }
+   }
+ }
+diff --git a/ui/src/translations/zh_CN.json b/ui/src/translations/zh_CN.json
+index 0585f66..03a7ddd 100644
+--- a/ui/src/translations/zh_CN.json
++++ b/ui/src/translations/zh_CN.json
+@@ -2640,6 +2640,9 @@
+       "install_description": "将 Kestra 安装为应用,以获得更快的访问速度和全屏体验。",
+       "install": "安装",
+       "dismiss": "暂不"
++    },
++    "flowDetailCapabilities": {
++      "unsupported": "当前授权模式尚未支持此页面。"
+     }
+   }
+ }
+diff --git a/ui/tests/flow-detail-capabilities/browser.mjs b/ui/tests/flow-detail-capabilities/browser.mjs
+new file mode 100644
+index 0000000..07c3210
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/browser.mjs
+@@ -0,0 +1,18 @@
++const task = await taskSpace(browserSpace ?? "0404b native Flow detail test transport")
++const nativePage=task.page("p1")
++await nativePage.goto("about:blank")
++await nativePage.cdp("Page.stopLoading")
++await nativePage.cdp("egoAutomated.disable")
++await nativePage.events()
++const {createDiagnostics} = await import(diagnosticPath)
++const listeners=new Map()
++const session={send:(method,params)=>nativePage.cdp(method,params),on:(name,handler)=>{listeners.set(name,[...(listeners.get(name)??[]),handler])},off:(name,handler)=>listeners.set(name,(listeners.get(name)??[]).filter(value=>value!==handler)),detach:async()=>{}}
++const collector=createDiagnostics(session)
++await collector.attach()
++const diagnostics={currentDocument:()=>collector.currentDocument(),snapshot:async()=>{for(const event of await nativePage.events())for(const handler of listeners.get(event.method)??[])handler(event.params);return collector.snapshot()}}
++const page={
++ viewport:(width=1280)=>nativePage.cdp("Emulation.setDeviceMetricsOverride",{width,height:900,deviceScaleFactor:1,mobile:false}),
++ goto:(...args)=>nativePage.goto(...args),click:(...args)=>nativePage.click(...args),waitForSelector:(...args)=>nativePage.waitForSelector(...args),
++ waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.snapshot(),
++}
++await runNativeFlowDetailPlan({page,reportRoot,diagnostics,diagnosticPath,spaceId:task.spaceId})
+diff --git a/ui/tests/flow-detail-capabilities/cases.mjs b/ui/tests/flow-detail-capabilities/cases.mjs
+new file mode 100644
+index 0000000..574ac50
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/cases.mjs
+@@ -0,0 +1,52 @@
++import fs from "node:fs/promises"
++import crypto from "node:crypto"
++import assert from "node:assert/strict"
++import {classifyDiagnostics} from "./diagnostics.mjs"
++export const CASE_NAMES=["flow-only-overview-description-nine-local-denials-no403","all-allowed-overview-ten-native-cards","execution-only-datasource-isolation","log-only-datasource-isolation","trigger-only-datasource-isolation","empty-data-does-not-deny-capability","provider503-is-visible-and-does-not-mount-data","old-host-version-is-visible-protocol-error","unknown-fixed-definition-is-unsupported","denied-runtime-deep-links-do-not-mount","concurrency-explicitly-unsupported-no-runtime-request","execution-list-allowed-statistics-denied","logs-list-allowed-statistics-denied","trigger-list-allowed-expanded-log-denied","metrics-native-read-chain","identity-switch-cancels-stale-projection","native-refresh-rechecks-and-reloads-allowed-charts","expiry-unmounts-revoked-charts","mode-a-native-without-capability-request","same-component-flow-target-switch-reloads-description","late-old-flow-definition-cannot-replace-current-target",...['en','zh_CN'].flatMap(locale=>['light','dark','dark-2','syncWithSystem'].flatMap(theme=>[1280,390].map(width=>`visual-${locale}-${theme}-${width}`)))]
++export const SOURCE_PATHS=["../../src/components/flows/Overview.vue","../../src/components/flows/FlowRuntimeTab.vue","../../src/components/flows/FlowCapabilityState.vue","../../src/components/flows/useFlowDetailCapabilities.ts","../../src/components/flows/defaultFlowChartHashes.json","../../src/components/flows/flowTabs.ts","../../src/components/flows/FlowTriggers.vue","../../src/components/flows/FlowMetrics.vue","../../src/components/flows/FlowExecutions.vue","../../src/components/executions/Executions.vue","../../src/components/logs/LogsWrapper.vue","../../src/components/dashboard/Dashboard.vue","../../src/components/dashboard/sections/Sections.vue","../../src/components/dashboard/composables/useDashboards.ts","../../src/stores/executions.ts","../../src/stores/logs.ts","../../src/stores/dashboard.ts","../../packages/kestra-sdk/src/client-facade.ts","../../../core/src/main/resources/dashboards/default_flow_definition.yaml","../../src/translations/en.json","../../src/translations/zh_CN.json","./cases.mjs","./index.html","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./diagnostics.test.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./check-report.mjs","./check-report.test.mjs","../../package-lock.json"]
++export async function runNativeFlowDetailPlan({page,reportRoot,diagnostics,diagnosticPath,spaceId=null}){
++ await fs.mkdir(reportRoot,{recursive:true});await page.viewport()
++ const hashInputs=async()=>{const inputs={};for(const p of SOURCE_PATHS)inputs[p]=crypto.createHash("sha256").update(await fs.readFile(new URL(p,import.meta.url))).digest("hex");inputs['overlay:sdk-browser-diagnostics.cjs']=crypto.createHash("sha256").update(await fs.readFile(diagnosticPath)).digest("hex");return inputs}
++ const report={completed:false,passedGate:false,transport:"explicit-test-transport",component:"native Overview/Dashboard/Sections/FlowRuntimeTab/Executions/LogsWrapper/FlowTriggers/FlowMetrics",inputs:await hashInputs(),spaceId,startedAt:new Date().toISOString(),cases:CASE_NAMES.map(name=>({name,status:"notRun"})),notRun:CASE_NAMES.length};let prior=new Set()
++ const persist=async()=>fs.writeFile(`${reportRoot}/browser.json`,JSON.stringify(report,null,2)+'\n')
++ const control=async(value)=>{const r=await fetch('http://127.0.0.1:5189/test/control',{method:'POST',body:JSON.stringify({phaseId:crypto.randomUUID(),delay:0,chartFailure:false,unknown:false,empty:false,searchTotal:0,definitionDelay:0,...value})});assert.equal(r.status,200)}
++ const evidence=async()=>(await fetch('http://127.0.0.1:5189/test/evidence')).json()
++ const dom=async()=>page.evaluate(()=>({text:document.body.innerText,blocks:document.querySelectorAll('.dashboard-block').length,denied:document.querySelectorAll('[data-flow-capability-state="unavailable"]').length,unsupported:document.querySelectorAll('[data-flow-capability-state="unsupported"]').length,errors:document.querySelectorAll('[data-flow-capability-state="error"]').length,appErrors:[...window.probe.errors],overflow:document.documentElement.scrollWidth>innerWidth}))
++ const navigate=async(tab='overview')=>{await page.goto(`http://127.0.0.1:5189/main/flows/edit/company.sub/one/${tab}`);await page.waitForSelector('#test-transport',{state:'visible'});await diagnostics.snapshot()}
++ const fresh=async(value,tab='overview')=>{await page.goto('about:blank');await diagnostics.snapshot();await control(value);await navigate(tab)}
++ const ready=async()=>{await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.some(c=>c.url.includes('/execution-capabilities')&&c.completed)},undefined,{timeout:20000});await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));await diagnostics.snapshot()}
++ const scrollCharts=async()=>{const ids=['kpi_success_ratio','kpi_failed_ratio','kpi_in_progress','kpi_pending','description','total_executions_pie','total_executions_timeseries','recent_executions','next_executions','logs_timeseries'];for(let index=0;index<ids.length;index++){await page.evaluate(i=>document.querySelectorAll('.dashboard-block')[i]?.scrollIntoView(),index);await page.waitForFunction(async ({index,id})=>{const block=document.querySelectorAll('.dashboard-block')[index];if(!block||block.querySelector('[data-flow-capability-state]'))return true;const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.some(c=>c.chart===id&&c.completed)},{index,id:ids[index]},{timeout:15000})}}
++ const chartCalls=s=>s.calls.filter(c=>c.url.includes('/charts/preview'))
++ const business=s=>s.calls.filter(c=>!c.url.includes('/execution-capabilities')&&!c.url.includes('/defaults/definitions'))
++ const expectCharts=async(count)=>page.waitForFunction(async n=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.filter(c=>c.url.includes('/charts/preview')&&c.completed).length>=n},count,{timeout:20000})
++ const record=async(name,run)=>{const test=report.cases.find(c=>c.name===name);test.status='running';test.startedAt=new Date().toISOString();await persist();try{await run(test);const snapshot=await diagnostics.snapshot();test.documentId=diagnostics.currentDocument();test.eventIds=snapshot.events.filter(e=>!prior.has(e.id)).map(e=>e.id);test.diagnostics=classifyDiagnostics(snapshot,name,test.documentId,prior);prior=new Set(snapshot.events.map(e=>e.id));assert.deepEqual(test.diagnostics.unexpected,[],'Unexpected source-associated browser failures');assert.deepEqual((await dom()).appErrors,[]);test.status='passed'}catch(error){test.status='failed';test.error=String(error);throw error}finally{test.finishedAt=new Date().toISOString();test.network=await evidence();test.dom=await dom();report.notRun=report.cases.filter(c=>c.status==='notRun').length;report.diagnostics=await diagnostics.snapshot();await persist()}}
++ await persist()
++ try{
++ await record(CASE_NAMES[0],async()=>{await fresh({mode:'none'},);await ready();await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description'));const s=await evidence(),v=await dom();assert.equal(v.blocks,10);assert.equal(v.denied,9);assert.deepEqual(chartCalls(s).map(c=>c.chart),['description']);assert(!s.calls.some(c=>c.url.includes('/executions/')));assert(!s.calls.some(c=>c.status>=400));await page.screenshot({path:`${reportRoot}/flow-only.png`})})
++ await record(CASE_NAMES[1],async()=>{await fresh({mode:'all'},);await ready();await scrollCharts();await expectCharts(10);const s=await evidence();assert.equal(new Set(chartCalls(s).map(c=>c.chart)).size,10);assert.equal((await dom()).denied,0);assert(!s.calls.some(c=>c.status>=400));await page.screenshot({path:`${reportRoot}/all-allowed.png`})})
++ for(const [name,mode,count] of [[CASE_NAMES[2],'execution',8],[CASE_NAMES[3],'log',2],[CASE_NAMES[4],'trigger',2]])await record(name,async()=>{await fresh({mode},);await ready();await scrollCharts();await expectCharts(count);const s=await evidence();assert.equal(new Set(chartCalls(s).map(c=>c.chart)).size,count);assert.equal((await dom()).denied,10-count);assert(!s.calls.some(c=>c.status>=400))})
++ await record(CASE_NAMES[5],async()=>{await fresh({mode:'all',empty:true},);await ready();await scrollCharts();await expectCharts(10);assert.equal((await dom()).denied,0);assert((await dom()).text.includes('Native Flow description'))})
++ await record(CASE_NAMES[6],async()=>{await fresh({mode:'failure'},);await page.waitForSelector('[data-flow-capability-state="error"]',{state:'visible'});assert.equal(business(await evidence()).length,0)})
++ await record(CASE_NAMES[7],async()=>{await fresh({mode:'old'},);await page.waitForSelector('[data-flow-capability-state="error"]',{state:'visible'});assert.equal(business(await evidence()).length,0)})
++ await record(CASE_NAMES[8],async()=>{await fresh({mode:'none',unknown:true},);await ready();await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description'));assert.equal((await dom()).unsupported,1);assert(!chartCalls(await evidence()).some(c=>c.chart==='unknown'))})
++ await record(CASE_NAMES[9],async()=>{for(const tab of ['executions','logs','triggers','metrics']){await fresh({mode:'none'},tab);await ready();assert.equal((await dom()).denied,1);assert.equal(business(await evidence()).length,0)}})
++ await record(CASE_NAMES[10],async()=>{await fresh({mode:'all'},'concurrency');await ready();assert.equal((await dom()).unsupported,1);assert.equal(business(await evidence()).length,0);assert((await dom()).text.includes('current authorization mode'))})
++ await record(CASE_NAMES[11],async()=>{await fresh({mode:'execution-list'},'executions');await ready();await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.some(c=>c.url.includes('/executions/search')&&c.completed)});assert.equal(chartCalls(await evidence()).length,0);assert.equal((await dom()).denied,1)})
++ await record(CASE_NAMES[12],async()=>{await fresh({mode:'log-list'},'logs');await ready();await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.filter(c=>c.url.includes('/logs/search')&&c.completed).length>=6});assert.equal(chartCalls(await evidence()).length,0);assert.equal((await dom()).denied,1)})
++ await record(CASE_NAMES[13],async()=>{await fresh({mode:'trigger'},'triggers');await ready();await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.some(c=>c.url.includes('/triggers/')&&c.completed)});await page.waitForSelector('button[aria-label="Expand this row"]',{state:'visible'});await page.click('button[aria-label="Expand this row"]',{label:'expand native trigger log'});await page.waitForSelector('[data-flow-capability-state="unavailable"]',{state:'visible'});assert(!(await evidence()).calls.some(c=>c.url.includes('/logs/search')))})
++ await record(CASE_NAMES[14],async()=>{await fresh({mode:'metric'},'metrics');await ready();await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.filter(c=>c.url.includes('/metrics/')).length>=2});assert(!(await evidence()).calls.some(c=>c.url.includes('/executions/')))})
++ await record(CASE_NAMES[15],async(test)=>{await fresh({mode:'all',delay:1000},);await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.some(c=>c.url.includes('/execution-capabilities')&&!c.completed)});const oldPhase=(await evidence()).phaseId;const before=await diagnostics.snapshot();const oldRequest=before.events.filter(e=>e.kind==='request'&&e.url==='http://127.0.0.1:5189/api/v1/main/ui/flows/execution-capabilities'&&e.documentId===diagnostics.currentDocument()).at(-1);assert(oldRequest);test.supersededRequestId=oldRequest.requestId;await control({mode:'none',delay:0});await page.click('#switch-identity',{label:'switch pending test identity'});await ready();await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description'));await page.waitForFunction(async id=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.phases.some(p=>p.phaseId===id&&p.calls.some(c=>c.url.includes('/execution-capabilities')&&c.completed))},oldPhase);const deadline=Date.now()+15000;let terminal;while(Date.now()<deadline){const snapshot=await diagnostics.snapshot();terminal=snapshot.events.find(e=>e.requestId===oldRequest.requestId&&['http-response','request-failed'].includes(e.kind));if(terminal)break;await page.evaluate(()=>new Promise(r=>requestAnimationFrame(r)))}assert(terminal,'superseded exact request must terminate before this case ends');test.supersededTerminal=terminal;await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));assert.equal((await dom()).denied,9);assert.deepEqual(chartCalls(await evidence()).map(c=>c.chart),['description'])})
++ await record(CASE_NAMES[16],async()=>{await fresh({mode:'all'},);await ready();await scrollCharts();await expectCharts(10);await control({mode:'all'});await page.evaluate(()=>document.querySelector('#filter')?.scrollIntoView());await page.click('button:has-text("Refresh data")',{label:'refresh native allowed charts'});await ready();await scrollCharts();await expectCharts(10);assert((await evidence()).calls.some(c=>c.url.includes('/execution-capabilities')));assert.equal(new Set(chartCalls(await evidence()).map(c=>c.chart)).size,10)})
++ await record(CASE_NAMES[17],async()=>{await fresh({mode:'all'},);await ready();await scrollCharts();await expectCharts(10);await control({mode:'none'});await page.waitForFunction(()=>document.querySelectorAll('[data-flow-capability-state="unavailable"]').length===9,undefined,{timeout:40000});assert.deepEqual(chartCalls(await evidence()).map(c=>c.chart),['description'])})
++ await record(CASE_NAMES[18],async()=>{await fresh({mode:'all',searchTotal:1},'overview?modeA=true');await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description'));await scrollCharts();await expectCharts(10);assert(!(await evidence()).calls.some(c=>c.url.includes('/execution-capabilities')));await control({mode:'all',searchTotal:1});await page.evaluate(()=>document.querySelector('#filter')?.scrollIntoView());await page.click('button:has-text("Refresh data")',{label:'refresh native OSS charts'});await expectCharts(1);assert(!(await evidence()).calls.some(c=>c.url.includes('/execution-capabilities')));assert(chartCalls(await evidence()).length>0)})
++ await record(CASE_NAMES[19],async()=>{await fresh({mode:'none'},);await ready();await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description'));await control({mode:'none'});await page.click('#target-other',{label:'switch native Flow target'});await page.waitForFunction(()=>location.pathname.includes('/company2/two/overview'));await ready();await expectCharts(1);const requests=chartCalls(await evidence());assert(requests.every(c=>c.body.chart.includes('namespace: company2')&&c.body.chart.includes('flowId: two')));assert.equal((await dom()).denied,9)})
++ await record(CASE_NAMES[20],async()=>{await fresh({mode:'none',definitionDelay:1000});await page.waitForFunction(async()=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.calls.some(c=>c.url.includes('/defaults/definitions')&&!c.completed)});const oldPhase=(await evidence()).phaseId;await control({mode:'none'});await page.click('#target-other',{label:'switch delayed Flow target'});await page.waitForFunction(()=>location.pathname.includes('/company2/two/overview'));await ready();await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description company2/two'));await page.waitForFunction(async id=>{const s=await fetch('/test/evidence').then(r=>r.json());return s.phases.some(p=>p.phaseId===id&&p.calls.some(c=>c.url.includes('/defaults/definitions')&&c.completed))},oldPhase);assert(!(await dom()).text.includes('Stale definition'));assert.equal((await dom()).unsupported,0);assert.equal((await dom()).denied,9);assert(chartCalls(await evidence()).every(c=>c.body.chart.includes('namespace: company2')&&c.body.chart.includes('flowId: two')))})
++ for(const name of CASE_NAMES.slice(21))await record(name,async(test)=>{const match=/^visual-(en|zh_CN)-(light|dark|dark-2|syncWithSystem)-(1280|390)$/.exec(name);assert(match);await fresh({mode:'none'},);await ready();await page.viewport(Number(match[3]));await page.evaluate(async({locale,theme})=>{await window.probe.language(locale);await window.probe.theme(theme)},{locale:match[1],theme:match[2]});await page.waitForFunction(()=>document.body.innerText.includes('Native Flow description'));const v=await dom();assert.equal(v.blocks,10);assert.equal(v.denied,9);assert(!v.overflow,'native cards overflow narrow viewport');assert(!v.text.includes('errors.403.title'));
++const locale=JSON.parse(await fs.readFile(new URL(`../../src/translations/${match[1]}.json`,import.meta.url),'utf8'))[match[1]];
++assert(v.text.includes(locale.errors['403'].title),'actual denied translation');
++test.visual=await page.evaluate(()=>{const resolve=token=>{const el=document.createElement('span');el.style.backgroundColor=`var(${token})`;document.body.append(el);const color=getComputedStyle(el).backgroundColor;el.remove();return color};const card=document.querySelector('.dashboard-block > div'),style=getComputedStyle(card);return{theme:document.documentElement.className,background:style.backgroundColor,border:style.borderTopColor,surface:resolve('--ks-bg-surface'),borderToken:resolve('--ks-border-default'),denialText:getComputedStyle(document.querySelector('[data-flow-capability-state="unavailable"]')).color}});
++assert.equal(test.visual.background,test.visual.surface,'native card surface token');assert.equal(test.visual.border,test.visual.borderToken,'native card border token');assert.notEqual(test.visual.denialText,'rgba(0, 0, 0, 0)');await page.screenshot({path:`${reportRoot}/${name}.png`})})
++ report.completed=true;report.passed=report.cases.filter(c=>c.status==='passed').length;assert.deepEqual(await hashInputs(),report.inputs,'source changed during browser plan');report.inputsRechecked=true;report.passedGate=report.passed===CASE_NAMES.length
++ }finally{report.finishedAt=new Date().toISOString();await persist()}
++ return report
++}
+diff --git a/ui/tests/flow-detail-capabilities/check-report.mjs b/ui/tests/flow-detail-capabilities/check-report.mjs
+new file mode 100644
+index 0000000..18c3520
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/check-report.mjs
+@@ -0,0 +1,46 @@
++import fs from "node:fs"
++import crypto from "node:crypto"
++import {fileURLToPath} from "node:url"
++import {CASE_NAMES, SOURCE_PATHS} from "./cases.mjs"
++import {classifyDiagnostics} from "./diagnostics.mjs"
++const errorKinds = new Set(["console-error", "page-error", "http-error", "request-failed", "diagnostic-integrity-error"])
++const timestamp = value => typeof value === "string" && Number.isFinite(Date.parse(value))
++export function validateReport(report) {
++    if (report.transport !== "explicit-test-transport" || report.completed !== true || report.passedGate !== true || report.inputsRechecked !== true
++        || report.passed !== CASE_NAMES.length || report.notRun !== 0 || !timestamp(report.startedAt) || !timestamp(report.finishedAt)
++        || !Array.isArray(report.cases) || JSON.stringify(report.cases.map(c => c.name)) !== JSON.stringify(CASE_NAMES)) throw new Error("Exact shared native detail matrix is incomplete")
++    const events = report.diagnostics?.events, documents = report.diagnostics?.documents
++    if (!Array.isArray(events) || !Array.isArray(documents)) throw new Error("Missing diagnostic events/documents")
++    const knownDocuments = new Set(documents.map(d => d.id)), byId = new Map()
++    for (const event of events) {
++        if (typeof event.id !== "string" || !event.id || byId.has(event.id)) throw new Error("Missing or duplicate global diagnostic event ID")
++        byId.set(event.id, event)
++    }
++    const covered = new Set()
++    for (const c of report.cases) {
++        if (c.status !== "passed" || !c.network || !c.dom || !timestamp(c.startedAt) || !timestamp(c.finishedAt) || Date.parse(c.finishedAt) < Date.parse(c.startedAt)
++            || typeof c.documentId !== "string" || !c.documentId || !knownDocuments.has(c.documentId) || !Array.isArray(c.eventIds) || !c.diagnostics || c.diagnostics.unexpected?.length !== 0)
++            throw new Error(`Missing complete case/source evidence: ${c.name}`)
++        let position = -1
++        for (const id of c.eventIds) {
++            if (!byId.has(id) || covered.has(id)) throw new Error("Invented or multiply assigned case event ID")
++            const next = events.indexOf(byId.get(id))
++            if (next <= position) throw new Error("Case events are duplicated or out of order")
++            position = next; covered.add(id)
++        }
++        const ids = new Set(c.eventIds), prior = new Set(events.filter(e => !ids.has(e.id)).map(e => e.id))
++        if (JSON.stringify(classifyDiagnostics(report.diagnostics, c.name, c.documentId, prior)) !== JSON.stringify(c.diagnostics)) throw new Error("Diagnostic classification changed")
++        if (c.name.startsWith("visual-") && (!c.visual || !c.visual.surface || c.visual.background !== c.visual.surface || c.visual.border !== c.visual.borderToken)) throw new Error("Missing native computed-style evidence")
++    }
++    if (events.some(e => errorKinds.has(e.kind) && !covered.has(e.id))) throw new Error("Uncovered browser diagnostic")
++    const keys = [...SOURCE_PATHS, "overlay:sdk-browser-diagnostics.cjs"]
++    if (JSON.stringify(Object.keys(report.inputs ?? {})) !== JSON.stringify(keys) || keys.some(k => !/^[a-f0-9]{64}$/.test(report.inputs[k]))) throw new Error("Missing exact public source input inventory")
++    return {tests: CASE_NAMES.length, passed: report.passed, failed: 0, skipped: 0, notRun: 0}
++}
++if (process.argv[1] === fileURLToPath(import.meta.url)) {
++    const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))
++    const result = validateReport(report)
++    for (const p of SOURCE_PATHS) if (report.inputs[p] !== crypto.createHash("sha256").update(fs.readFileSync(new URL(p, import.meta.url))).digest("hex")) throw new Error(`Source changed: ${p}`)
++    if (!process.argv[3] || report.inputs["overlay:sdk-browser-diagnostics.cjs"] !== crypto.createHash("sha256").update(fs.readFileSync(process.argv[3])).digest("hex")) throw new Error("Collector changed")
++    console.log(JSON.stringify(result))
++}
+diff --git a/ui/tests/flow-detail-capabilities/check-report.test.mjs b/ui/tests/flow-detail-capabilities/check-report.test.mjs
+new file mode 100644
+index 0000000..425c2e7
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/check-report.test.mjs
+@@ -0,0 +1,21 @@
++import test from "node:test"
++import assert from "node:assert/strict"
++import {validateReport} from "./check-report.mjs"
++import {CASE_NAMES, SOURCE_PATHS} from "./cases.mjs"
++const complete = () => ({transport:"explicit-test-transport",completed:true,passedGate:true,inputsRechecked:true,passed:CASE_NAMES.length,notRun:0,startedAt:"2026-11-19T00:00:00Z",finishedAt:"2026-11-19T00:01:00Z",inputs:Object.fromEntries([...SOURCE_PATHS,"overlay:sdk-browser-diagnostics.cjs"].map(p=>[p,"a".repeat(64)])),diagnostics:{documents:[{id:"document-one"}],events:CASE_NAMES.map((_,i)=>({id:`e${i}`,kind:"request",documentId:"document-one",requestId:`r${i}`,url:"http://test.example/"}))},cases:CASE_NAMES.map((name,i)=>({name,status:"passed",startedAt:"2026-11-19T00:00:00Z",finishedAt:"2026-11-19T00:01:00Z",documentId:"document-one",eventIds:[`e${i}`],diagnostics:{expected:[],unexpected:[]},network:{},dom:{},...(name.startsWith("visual-")?{visual:{surface:"rgb(1, 2, 3)",background:"rgb(1, 2, 3)",border:"rgb(4, 5, 6)",borderToken:"rgb(4, 5, 6)"}}:{})}))})
++test("accepts the exact complete named matrix",()=>assert.equal(validateReport(complete()).passed,CASE_NAMES.length))
++for(const [name,mutate] of [
++ ["invented case event ID",r=>{r.cases[0].eventIds=["invented"]}],
++ ["duplicate global event ID",r=>{r.diagnostics.events.push({...r.diagnostics.events[0]})}],
++ ["duplicate event in case",r=>{r.cases[0].eventIds.push(r.cases[0].eventIds[0])}],
++ ["event assigned across cases",r=>{r.cases[1].eventIds=r.cases[0].eventIds}],
++ ["empty source document",r=>{r.cases[0].documentId=""}],
++ ["unknown source document",r=>{r.cases[0].documentId="invented"}],
++ ["missing case finish",r=>{delete r.cases[0].finishedAt}],
++ ["unfinished case",r=>{r.cases[0].status="notRun"}],
++ ["wrong matrix order",r=>{r.cases.reverse()}],
++ ["missing source input",r=>{delete r.inputs[SOURCE_PATHS[0]]}],
++ ["missing native style evidence",r=>{delete r.cases.find(c=>c.name.startsWith("visual-")).visual}],
++ ["uncovered diagnostic",r=>{r.diagnostics.events.push({id:"uncovered",kind:"page-error",documentId:"document-one",text:"real error"})}],
++ ["forged classifier result",r=>{r.cases[0].diagnostics.expected=[{id:"fake"}]}],
++])test(`rejects ${name}`,()=>{const r=complete();mutate(r);assert.throws(()=>validateReport(r))})
+diff --git a/ui/tests/flow-detail-capabilities/diagnostics.mjs b/ui/tests/flow-detail-capabilities/diagnostics.mjs
+new file mode 100644
+index 0000000..800be54
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/diagnostics.mjs
+@@ -0,0 +1,20 @@
++export function classifyDiagnostics(snapshot, caseName, currentDocument, previousIds = new Set()) {
++    const expected = [], unexpected = [], events = snapshot.events
++    const capability = "http://127.0.0.1:5189/api/v1/main/ui/flows/execution-capabilities"
++    for (const event of events.filter(e => !previousIds.has(e.id) && ["console-error", "page-error", "http-error", "request-failed", "diagnostic-integrity-error"].includes(e.kind))) {
++        const requestId = event.requestId ?? event.networkRequestId
++        const request = events.find(e => e.kind === "request" && e.requestId === requestId && e.documentId === currentDocument && e.url === capability)
++        const own = event.documentId === currentDocument && event.url === capability && request && events.indexOf(request) < events.indexOf(event)
++        let reason = null
++        if (caseName === "provider503-is-visible-and-does-not-mount-data" && own) {
++            if (event.kind === "http-error" && event.status === 503) reason = "exact current-document capability 503 after its request"
++            const response = events.find(e => e.kind === "http-error" && e.requestId === requestId && e.documentId === currentDocument && e.url === capability && e.status === 503
++                && events.indexOf(request) < events.indexOf(e) && events.indexOf(e) < events.indexOf(event))
++            if (event.kind === "console-error" && event.source === "network" && response) reason = "network console after the same current-document capability 503"
++        }
++        if (caseName === "identity-switch-cancels-stale-projection" && own && event.kind === "request-failed" && event.canceled === true && event.error === "net::ERR_ABORTED")
++            reason = "exact pending capability canceled by test identity switch"
++        ;(reason ? expected : unexpected).push({...event, ...(reason ? {expectedReason: reason} : {})})
++    }
++    return {expected, unexpected}
++}
+diff --git a/ui/tests/flow-detail-capabilities/diagnostics.test.mjs b/ui/tests/flow-detail-capabilities/diagnostics.test.mjs
+new file mode 100644
+index 0000000..a3197a8
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/diagnostics.test.mjs
+@@ -0,0 +1,27 @@
++import test from "node:test"
++import assert from "node:assert/strict"
++import {classifyDiagnostics} from "./diagnostics.mjs"
++const url = "http://127.0.0.1:5189/api/v1/main/ui/flows/execution-capabilities", doc = "current-document"
++const plan = "provider503-is-visible-and-does-not-mount-data"
++const healthy = () => [
++    {id:"1",kind:"request",documentId:doc,requestId:"r1",url},
++    {id:"2",kind:"http-error",documentId:doc,requestId:"r1",url,status:503},
++    {id:"3",kind:"console-error",documentId:doc,networkRequestId:"r1",url,source:"network",text:"Failed to load resource: 503"},
++]
++test("accepts only exact same-document ordered capability503 and network console", () => {const r=classifyDiagnostics({events:healthy()},plan,doc);assert.equal(r.expected.length,2);assert.deepEqual(r.unexpected,[])})
++for (const [name, change] of [
++    ["old response document",e=>{e[1].documentId="old"}],
++    ["old request document",e=>{e[0].documentId="old"}],
++    ["old console document",e=>{e[2].documentId="old"}],
++    ["request URL mismatch",e=>{e[0].url+="/other"}],
++    ["response URL mismatch",e=>{e[1].url+="/other"}],
++    ["console URL mismatch",e=>{e[2].url+="/other"}],
++    ["response403",e=>{e[1].status=403}],
++    ["console from JavaScript",e=>{e[2].source="console-api"}],
++    ["orphan console request",e=>{e[2].networkRequestId="other"}],
++    ["response before request",e=>{[e[0],e[1]]=[e[1],e[0]]}],
++    ["console before response",e=>{[e[1],e[2]]=[e[2],e[1]]}],
++]) test(`rejects ${name}`,()=>{const e=healthy();change(e);const r=classifyDiagnostics({events:e},plan,doc);assert(r.unexpected.length>0);assert(!r.expected.some(x=>x.kind==="console-error"))})
++test("does not exempt a previous-document503 in a later case",()=>{const e=healthy().map(x=>({...x,documentId:"old"}));const r=classifyDiagnostics({events:e},plan,doc);assert.equal(r.expected.length,0);assert.equal(r.unexpected.length,2)})
++test("does not exempt a503 outside the explicit provider failure case",()=>{const r=classifyDiagnostics({events:healthy()},"all-allowed-overview-ten-native-cards",doc);assert.equal(r.expected.length,0);assert.equal(r.unexpected.length,2)})
++test("cancellation requires exact source identity and real abort",()=>{const request=healthy()[0],failed={id:"4",kind:"request-failed",documentId:doc,requestId:"r1",url,canceled:true,error:"net::ERR_ABORTED"};assert.equal(classifyDiagnostics({events:[request,failed]},"identity-switch-cancels-stale-projection",doc).expected.length,1);for(const bad of [{...failed,documentId:"old"},{...failed,url:url+"/other"},{...failed,canceled:false},{...failed,error:"net::ERR_FAILED"}])assert.equal(classifyDiagnostics({events:[request,bad]},"identity-switch-cancels-stale-projection",doc).expected.length,0)})
+diff --git a/ui/tests/flow-detail-capabilities/index.html b/ui/tests/flow-detail-capabilities/index.html
+new file mode 100644
+index 0000000..261dc1d
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/index.html
+@@ -0,0 +1 @@
++<!doctype html><html><head><meta charset="UTF-8"><title>0404b native Flow detail explicit test transport</title></head><body><div id="app"></div><script type="module" src="/tests/flow-detail-capabilities/main.ts"></script></body></html>
+diff --git a/ui/tests/flow-detail-capabilities/main.ts b/ui/tests/flow-detail-capabilities/main.ts
+new file mode 100644
+index 0000000..05e9f88
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/main.ts
+@@ -0,0 +1,31 @@
++import {createApp, h, nextTick} from "vue"
++import {createPinia} from "pinia"
++import {createI18n} from "vue-i18n"
++import {createRouter, createWebHistory, RouterView} from "vue-router"
++import DesignSystem, {registerDesignSystemI18n, setMomentInstance, setDateFormatter} from "@kestra-io/design-system"
++import moment from "moment-timezone"
++import {configureClient} from "@kestra-io/kestra-sdk"
++import Overview from "../../src/components/flows/Overview.vue"
++import FlowRuntimeTab from "../../src/components/flows/FlowRuntimeTab.vue"
++import {auth, misc, evidence, Me, flow} from "./transport"
++import en from "../../src/translations/en.json"
++import zh from "../../src/translations/zh_CN.json"
++import "element-plus/dist/index.css"
++import "../../src/styles/app.scss"
++window.KESTRA_BASE_PATH=""
++if(new URLSearchParams(location.search).get("modeA")==="true") misc.configs.flowExecutionCapabilitiesRequired=false
++configureClient({baseUrl:location.origin,throwOnError:true})
++const routes:any[]=[{name:"flows/update/overview",path:"/:tenant/flows/edit/:namespace/:id/overview",component:Overview},...["executions","logs","triggers","metrics","concurrency"].map(tab=>({name:`flows/update/${tab}`,path:`/:tenant/flows/edit/:namespace/:id/${tab}`,component:FlowRuntimeTab,props:{tab,embed:true,showFilters:true,restoreurl:false}}))]
++for(const [index,name] of ["executions/update","flows/update","namespaces/update","flows/list","executions/list","logs/list","flows/create","dashboards/update"].entries())routes.push({name,path:`/target${index}/:id?`,component:{render:()=>null}})
++const router=createRouter({history:createWebHistory(),routes})
++router.afterEach(to=>{if(to.params.namespace) Object.assign(flow.flow,{namespace:String(to.params.namespace),id:String(to.params.id)})})
++await router.push(location.pathname)
++await router.isReady()
++const app=createApp({setup(){return()=>h("main",[h("p",{id:"test-transport"},"Native Flow detail / explicit test transport / no production identity"),h("nav",{"aria-label":"Explicit test transport controls"},[...["overview","executions","logs","triggers","metrics","concurrency"].map(tab=>h("button",{id:`tab-${tab}`,onClick:()=>router.push(`/main/flows/edit/company.sub/one/${tab}`)},tab)),h("button",{id:"target-other",onClick:()=>router.push("/main/flows/edit/company2/two/overview")},"Other Flow"),h("button",{id:"switch-identity",onClick:()=>{auth.user=new Me()}},"Switch test identity")]),h(RouterView)])}})
++const i18n=createI18n({legacy:false,locale:"en",messages:{en:en.en,zh_CN:zh.zh_CN},missingWarn:false,fallbackWarn:false})
++await registerDesignSystemI18n(i18n)
++setMomentInstance(moment);setDateFormatter(value=>moment(value).format("YYYY-MM-DD HH:mm"))
++app.use(createPinia()).use(router).use(i18n).use(DesignSystem)
++app.config.errorHandler=error=>{evidence.errors.push(String(error));console.error(error)}
++;(window as any).probe={errors:evidence.errors,async mode(value:boolean){misc.configs.flowExecutionCapabilitiesRequired=value;await nextTick()},async language(value:"en"|"zh_CN"){i18n.global.locale.value=value;await nextTick()},async theme(value:string){document.documentElement.className=value === "dark-2" ? "dark dark-2" : value === "syncWithSystem" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark syncWithSystem" : "light syncWithSystem") : value;misc.theme=value;await nextTick()},async refresh(){window.dispatchEvent(new Event("focus"));await nextTick()}}
++app.mount("#app")
+diff --git a/ui/tests/flow-detail-capabilities/playwright.mjs b/ui/tests/flow-detail-capabilities/playwright.mjs
+new file mode 100644
+index 0000000..4c5cff1
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/playwright.mjs
+@@ -0,0 +1,17 @@
++import {chromium} from "playwright"
++import path from "node:path"
++import {runNativeFlowDetailPlan} from "./cases.mjs"
++const browser=await chromium.launch({headless:true})
++const context=await browser.newContext({viewport:{width:1280,height:900}})
++const nativePage=await context.newPage()
++const diagnosticPath=path.resolve(process.argv[3]??"../../../scripts/sdk-browser-diagnostics.cjs")
++const {createDiagnostics}=await import(diagnosticPath)
++const diagnostics=createDiagnostics(await context.newCDPSession(nativePage))
++await diagnostics.attach()
++const page={
++ viewport:async(width=1280)=>nativePage.setViewportSize({width,height:900}),goto:(...args)=>nativePage.goto(...args),click:(selector)=>nativePage.click(selector),
++ waitForSelector:(...args)=>nativePage.waitForSelector(...args),waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),
++ screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.locator("body").innerText(),
++}
++try {await runNativeFlowDetailPlan({page,diagnostics,diagnosticPath,reportRoot:path.resolve(process.argv[2]??"../../reports/browser-playwright")})}
++finally {await browser.close()}
+diff --git a/ui/tests/flow-detail-capabilities/run-browser.mjs b/ui/tests/flow-detail-capabilities/run-browser.mjs
+new file mode 100644
+index 0000000..0f8ff5c
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/run-browser.mjs
+@@ -0,0 +1,9 @@
++import fs from "node:fs"
++import path from "node:path"
++import {execFileSync} from "node:child_process"
++const area=path.dirname(new URL(import.meta.url).pathname)
++const reportRoot=path.resolve(process.argv[2] ?? "../../reports/browser")
++const browserSpace=process.argv[3] ? Number(process.argv[3]) : null
++const diagnosticPath=path.resolve(process.argv[4]??"../../../scripts/sdk-browser-diagnostics.cjs")
++const input=`const diagnosticPath=${JSON.stringify(diagnosticPath)}; const {runNativeFlowDetailPlan}=await import(${JSON.stringify(new URL("./cases.mjs",import.meta.url).href)}); const reportRoot=${JSON.stringify(reportRoot)}; const browserSpace=${JSON.stringify(browserSpace)};\n`+fs.readFileSync(path.join(area,"browser.mjs"),"utf8")
++process.stdout.write(execFileSync("ego-browser",["nodejs"],{input,encoding:"utf8",maxBuffer:8*1024*1024}))
+diff --git a/ui/tests/flow-detail-capabilities/serve.mjs b/ui/tests/flow-detail-capabilities/serve.mjs
+new file mode 100644
+index 0000000..cda4df7
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/serve.mjs
+@@ -0,0 +1,34 @@
++import {createServer} from "vite"
++import vue from "@vitejs/plugin-vue"
++import path from "node:path"
++import fs from "node:fs"
++import {createHash} from "node:crypto"
++import YAML from "yaml"
++const root=process.cwd(),area=path.join(root,"tests/flow-detail-capabilities")
++const definition=fs.readFileSync(path.join(root,"../core/src/main/resources/dashboards/default_flow_definition.yaml"),"utf8")
++const state={sourceHash:createHash("sha256").update(fs.readFileSync(new URL(import.meta.url))).digest("hex"),runId:process.env.FLOW_DETAIL_RUN_ID??"manual",mode:"none",phaseId:"initial",phases:[],calls:[],delay:0,chartFailure:false,unknown:false,empty:false,searchTotal:0,definitionDelay:0}
++const allowed=(cap,mode)=>cap==="FLOW_DESCRIPTION_READ"||mode==="all"||mode==="execution-list"&&cap==="FLOW_EXECUTIONS_LIST"||mode==="log-list"&&cap==="FLOW_LOGS_LIST"||mode==="execution"&&["EXECUTION_STATISTICS_READ","FLOW_EXECUTIONS_LIST"].includes(cap)||mode==="log"&&["LOG_STATISTICS_READ","FLOW_LOGS_LIST"].includes(cap)||mode==="trigger"&&["TRIGGER_STATISTICS_READ","FLOW_TRIGGERS_LIST"].includes(cap)||mode==="metric"&&cap==="FLOW_METRICS_READ"
++const stores=["src/stores/flow","src/stores/dashboard","src/stores/api","src/stores/core","src/override/stores/misc","src/override/stores/auth"]
++const blanks=["src/components/flows/FlowRun.vue","src/components/flows/FlowRunActions.vue","src/components/flows/TriggerAvatar.vue","src/components/flows/TriggerFlow.vue","src/components/layout/MarkdownTooltip.vue"]
++const read=async req=>{let body="";for await(const part of req)body+=part;return body?JSON.parse(body):{}}
++const json=(res,body,status=200)=>{res.statusCode=status;res.setHeader("Content-Type","application/json");res.end(JSON.stringify(body))}
++const server=await createServer({configFile:false,root,mode:"test",server:{host:"127.0.0.1",port:5189,strictPort:true,fs:{allow:[root]}},resolve:{alias:[{find:"override",replacement:path.join(root,"src/override")}],dedupe:["vue","vue-router","pinia","vue-i18n","echarts"]},define:{"window.KESTRA_BASE_PATH":JSON.stringify("")},plugins:[{name:"explicit-native-detail-transport",enforce:"pre",resolveId(source,importer){const resolved=source.startsWith("override/")?path.join(root,"src/override",source.slice(9)):source.startsWith(".")&&importer?path.resolve(path.dirname(importer),source):source.startsWith("/src/")?path.join(root,source):source;const bare=resolved.replace(/\.(ts|js)$/u,"");if(stores.some(p=>path.join(root,p)===bare))return "\0detail-transport";if(blanks.includes(path.relative(root,resolved)))return "\0detail-blank";if(bare===path.join(root,"src/composables/useRestoreUrl"))return "\0detail-restore";if(bare===path.join(root,"src/components/filter/configurations"))return "\0detail-filter"},load(id){if(id==="\0detail-transport")return `export * from ${JSON.stringify(path.join(area,"transport.ts"))}`;if(id==="\0detail-blank")return 'export default {render(){return null}}';if(id==="\0detail-restore")return 'import {ref} from "vue";export default ()=>({loadInit:ref(true)})';if(id==="\0detail-filter")return 'import {ref} from "vue";export const useDashboardFilter=()=>ref({fields:[]});export const useFlowDashboardFilter=useDashboardFilter,useNamespaceDashboardFilter=useDashboardFilter;export const useFlowMetricFilter=()=>ref({fields:[]});export const useExecutionFilter=()=>ref({fields:[],keys:[{key:"namespace"},{key:"flowId"},{key:"timeRange"},{key:"level"}]});export const useFlowExecutionFilter=useExecutionFilter,useLogFilter=useExecutionFilter,useTriggerFilter=useExecutionFilter'},configureServer(server){server.middlewares.use(async(req,res,next)=>{try{
++ if(req.url.startsWith("/test/control")){state.phases.push({phaseId:state.phaseId,mode:state.mode,calls:state.calls});Object.assign(state,await read(req));state.calls=[];return json(res,{ok:true,phaseId:state.phaseId})}
++ if(req.url.startsWith("/test/evidence"))return json(res,state)
++ if(req.url.startsWith("/api/")){
++ const body=req.method==="POST"?await read(req):null;const record={phaseId:state.phaseId,receivedAt:new Date().toISOString(),url:req.url,method:req.method,referer:req.headers.referer??null,body,status:200,completed:false};state.calls.push(record)
++ const send=(data,status=200)=>{record.status=status;record.completed=true;return json(res,data,status)}
++ if(req.url.includes("/ui/flows/execution-capabilities")){const mode=state.mode,delay=state.delay;await new Promise(r=>setTimeout(r,delay));if(mode==="failure")return send({code:"AUTHORIZATION_UNAVAILABLE"},503);return send({formatVersion:mode==="old"?1:2,results:body.targets.map(t=>({...t,capabilities:Object.fromEntries(t.capabilities.map(c=>[c,allowed(c,mode)?"AVAILABLE":"UNAVAILABLE"]))}))})}
++ if(req.url.includes("/dashboards/defaults/definitions")){const parsed=YAML.parse(definition),delay=state.definitionDelay;if(delay)parsed.charts.find(c=>c.id==="description").chartOptions.displayName="Stale definition must not appear";if(state.unknown)parsed.charts.push({id:"unknown",type:"io.kestra.plugin.core.dashboard.chart.KPI",data:{type:"Unknown"},chartOptions:{displayName:"Unknown"}});await new Promise(r=>setTimeout(r,delay));return send({flow:YAML.stringify(parsed)})}
++ if(req.url.includes("/dashboards/charts/")){const chart=YAML.parse(body.chart);const type=chart.source?.type??chart.data?.type;const cap=type==="FlowDescription"?"FLOW_DESCRIPTION_READ":type?.endsWith("Logs")?"LOG_STATISTICS_READ":type?.endsWith("Triggers")?"TRIGGER_STATISTICS_READ":"EXECUTION_STATISTICS_READ";record.chart=chart.id;record.datasource=type;if(state.chartFailure||!allowed(cap,state.mode))return send({message:"business denied"},403);if(type==="FlowDescription")return send({total:1,results:[{description:`Native Flow description ${chart.source.namespace}/${chart.source.flowId}`}]});if(state.empty)return send({total:0,results:[]});if(chart.id==="total_executions_pie")return send({total:1,results:[{id:1,state:"SUCCESS"}]});if(type.endsWith("ExecutionsKPI"))return send({total:1,results:[{value:0.75}]});return send({total:1,results:[{id:"exec-one",namespace:"company.sub",flow:"one",flowId:"one",nextExec:"2026-11-19T00:00:00Z",state:"SUCCESS",start_date:"2026-11-19T00:00:00Z",date:"2026-11-19T00:00:00Z",level:"INFO",total:1,duration:0.5}]})}
++ if(req.url.includes("/executions/search")){if(!allowed("FLOW_EXECUTIONS_LIST",state.mode))return send({},403);return send({total:state.searchTotal,results:[]})}
++ if(req.url.includes("/logs/search")){if(!allowed("FLOW_LOGS_LIST",state.mode))return send({},403);return send({total:1,results:[{timestamp:"2026-11-19T00:00:00Z",level:"INFO",message:"native log",namespace:"company.sub",flowId:"one"}]})}
++ if(req.url.includes("/triggers/company.sub/one")){if(!allowed("FLOW_TRIGGERS_LIST",state.mode))return send({},403);return send({total:1,results:[{id:"timer",namespace:"company.sub",flowId:"one",type:"io.kestra.plugin.core.trigger.Schedule"}]})}
++ if(req.url.includes("/metrics/")){if(!allowed("FLOW_METRICS_READ",state.mode))return send({},403);return send(req.url.includes("/aggregates/")?{aggregations:[],groupBy:"HOUR"}:[])}
++ if(req.url.includes("/plugins/"))return send({})
++ return send({message:"Unclassified test transport request"},500)
++ }
++ if(req.url==="/"||req.url.startsWith("/main/flows")){res.setHeader("Content-Type","text/html");return res.end(await server.transformIndexHtml(req.url,fs.readFileSync(path.join(area,"index.html"),"utf8")))}
++ next()
++ }catch(error){json(res,{error:String(error)},500)}})}} ,vue()],css:{preprocessorOptions:{scss:{silenceDeprecations:["legacy-js-api","import","global-builtin","color-functions"]}}}})
++await server.listen();console.log("0404b explicit transport native Flow detail on http://127.0.0.1:5189")
+diff --git a/ui/tests/flow-detail-capabilities/transport.ts b/ui/tests/flow-detail-capabilities/transport.ts
+new file mode 100644
+index 0000000..098c286
+--- /dev/null
++++ b/ui/tests/flow-detail-capabilities/transport.ts
+@@ -0,0 +1,30 @@
++import {reactive} from "vue"
++export const evidence = reactive({errors: [] as string[]})
++export class Me {hasAny(){return true} hasAnyActionOnAnyNamespace(){return true} isAllowed(){return true} hasAnyAction(){return true}}
++export const auth = reactive({user: new Me(), isLogged: true})
++export const misc = reactive({configs: {flowExecutionCapabilitiesRequired: true, isCustomDashboardsEnabled: false, chartDefaultDuration: "PT24H"}, theme: "light"})
++export const flow = reactive({flow: {id: "one", namespace: "company.sub", description: "Native Flow description", labels: [], triggers: [{id: "timer",type: "io.kestra.plugin.core.trigger.Schedule", cron: "* * * * *"}]}, metrics: [] as string[], tasksWithMetrics: [],
++    async loadTasksWithMetrics() {return request("/api/v1/main/metrics/tasks/company.sub/one")},
++    async loadFlowMetrics() {flow.metrics = await request("/api/v1/main/metrics/names/company.sub/one"); return flow.metrics},
++    async loadFlowAggregatedMetrics() {return request("/api/v1/main/metrics/aggregates/company.sub/one/count")},
++})
++async function request(url: string, options?: any) {const r=await fetch(url,options); if(!r.ok){evidence.errors.push(`${url} ${r.status}`);throw new Error(`${url} ${r.status}`)} return r.json()}
++export const executions = reactive({executions: [] as any[], total: 0, flow: undefined, async findExecutions(options: any) {const r=await request(`/api/v1/main/executions/search?${new URLSearchParams(options)}`);executions.executions=r.results;executions.total=r.total;return r}, async loadNamespaces(){return []}})
++export const dashboard = reactive({activeDashboard: undefined as any,
++    async getDashboardId(){return "default"}, async loadDefaultDefinitions(){return request("/api/v1/main/dashboards/defaults/definitions")},
++    async chartPreview(input: any){return request("/api/v1/main/dashboards/charts/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)})},
++    async export(_dashboard: any, chart: any, globalFilter: any, format: string){await request(`/api/v1/main/dashboards/charts/export?format=${format}`,{method:"POST",body:JSON.stringify({chart:chart.content,globalFilter})});return true},
++})
++export const logs = reactive({logs: [] as any[], total: 0, isCursorMode:false, async findLogs(options:any){const r=await request(`/api/v1/main/logs/search?${new URLSearchParams(options)}`);logs.logs=r.results;logs.total=r.total;return r}})
++export const useFlowStore=()=>flow
++export const useExecutionsStore=()=>executions
++export const useDashboardStore=()=>dashboard
++export const useLogsStore=()=>logs
++export const useAuthStore=()=>auth
++export const useMiscStore=()=>misc
++export const useApiStore=()=>({posthogEvents(){}})
++export const useCoreStore=()=>({message:undefined})
++export const DEFAULT_DASHBOARD={id:"default",charts:[]}
++export const Label={FLOW:"flow"}
++
++export const API_URL="/api/v1/main"
+diff --git a/ui/tests/unit/stores/dashboardGeneration.spec.ts b/ui/tests/unit/stores/dashboardGeneration.spec.ts
+new file mode 100644
+index 0000000..71702f5
+--- /dev/null
++++ b/ui/tests/unit/stores/dashboardGeneration.spec.ts
+@@ -0,0 +1,30 @@
++import {beforeEach, describe, expect, it, vi} from "vitest"
++import {createPinia, setActivePinia} from "pinia"
++const mocks = vi.hoisted(() => ({dashboard: vi.fn(), get: vi.fn()}))
++vi.mock("@kestra-io/kestra-sdk", () => ({useClient: () => ({get: mocks.get})}))
++vi.mock("@kestra-io/kestra-sdk/dashboards", () => ({dashboard: mocks.dashboard}))
++vi.mock("../../../src/stores/plugins", () => ({usePluginsStore: () => ({}), removeRefPrefix: (v: unknown) => v}))
++vi.mock("../../../src/stores/unsavedChanges", () => ({useUnsavedChangesStore: () => ({unsavedChange: false})}))
++vi.mock("../../../src/stores/bookmarks", () => ({useBookmarksStore: () => ({})}))
++vi.mock("override/stores/misc", () => ({useMiscStore: () => ({configs: {isCustomDashboardsEnabled: true}})}))
++import {useDashboardStore} from "../../../src/stores/dashboard"
++beforeEach(() => {setActivePinia(createPinia()); mocks.dashboard.mockReset(); mocks.get.mockReset()})
++describe("Flow dashboard asynchronous commit boundary", () => {
++    it("does not commit an older dashboard after its Flow generation expired", async () => {
++        let resolve!: (value: unknown) => void, current = true
++        mocks.dashboard.mockImplementationOnce(() => new Promise(done => {resolve = done})).mockResolvedValue({id: "new", sourceCode: "new source", charts: []})
++        const store = useDashboardStore(), old = store.load("old", () => current)
++        current = false
++        await store.load("new")
++        resolve({id: "old", sourceCode: "stale source", charts: []})
++        expect(await old).toBeUndefined()
++        expect(store.activeDashboard?.id).toBe("new")
++        expect(store.sourceCode).toBe("new source")
++    })
++    it("preserves ordinary mode A dashboard loading when no generation guard is supplied", async () => {
++        mocks.dashboard.mockResolvedValue({id: "mode-a", sourceCode: "native source", charts: []})
++        const store = useDashboardStore()
++        expect((await store.load("mode-a"))?.id).toBe("mode-a")
++        expect(store.activeDashboard?.id).toBe("mode-a")
++    })
++})
+diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java
+index dd0bae5..9e1c6ea 100644
+--- a/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java
++++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java
+@@ -35,7 +35,7 @@ public final class FlowExecutionCapabilitiesController {
+             // Keep the existing API CSRF filter; additionally require the native browser's same-origin POST.
+             if (!hostResolver.resolve(request).equals(request.getHeaders().get(HttpHeaders.ORIGIN)))
+                 return Mono.just(error(HttpStatus.FORBIDDEN, "ORIGIN_MISMATCH"));
+-            var targets = capabilities.parse(tenant, body);
++            var targets = capabilities.parseRequest(tenant, body);
+             var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+             return capabilities.query(principal, tenant, targets).map(result -> (MutableHttpResponse<?>) HttpResponse.ok(result))
+                 .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, PropagatedContext.empty()
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java b/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java
+index 2f6aaff..e58a985 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java
+@@ -20,7 +20,12 @@ import static io.kestra.webserver.rbac.TypedAuthorization.*;
+ @Singleton
+ public final class FlowExecutionCapabilities {
+     public static final int MAX_BODY_BYTES = 128 * 1024;
+-    public enum Capability { EXECUTION_STATISTICS_READ, LATEST_EXECUTIONS_LIST }
++    public enum Capability {
++        EXECUTION_STATISTICS_READ, LATEST_EXECUTIONS_LIST,
++        FLOW_DESCRIPTION_READ, LOG_STATISTICS_READ, TRIGGER_STATISTICS_READ,
++        FLOW_EXECUTIONS_LIST, FLOW_LOGS_LIST, FLOW_TRIGGERS_LIST, FLOW_METRICS_READ
++    }
++    public record Request(int formatVersion, List<Target> targets) {}
+     public enum State { AVAILABLE, UNAVAILABLE }
+     public record Target(String tenant, String namespace, String flowId, List<Capability> capabilities) {}
+     public record Result(String tenant, String namespace, String flowId, Map<Capability, State> capabilities) {}
+@@ -46,6 +51,10 @@ public final class FlowExecutionCapabilities {
+     }
+
+     public List<Target> parse(String tenant, byte[] bytes) {
++        return parseRequest(tenant, bytes).targets();
++    }
++
++    public Request parseRequest(String tenant, byte[] bytes) {
+         if (bytes.length > MAX_BODY_BYTES) throw error(HttpStatus.REQUEST_ENTITY_TOO_LARGE, "REQUEST_TOO_LARGE");
+         try {
+             JsonNode root;
+@@ -56,7 +65,8 @@ public final class FlowExecutionCapabilities {
+             }
+             fields(root, Set.of("formatVersion", "targets"));
+             if (!root.path("formatVersion").isIntegralNumber() || !root.path("formatVersion").canConvertToInt()
+-                || root.path("formatVersion").intValue() != 1) throw error(HttpStatus.BAD_REQUEST, "UNSUPPORTED_VERSION");
++                || !Set.of(1, 2).contains(root.path("formatVersion").intValue())) throw error(HttpStatus.BAD_REQUEST, "UNSUPPORTED_VERSION");
++            int version = root.path("formatVersion").intValue();
+             JsonNode targets = root.path("targets");
+             if (!targets.isArray() || targets.isEmpty() || targets.size() > 100) throw invalid();
+             var result = new ArrayList<Target>();
+@@ -72,11 +82,12 @@ public final class FlowExecutionCapabilities {
+                 flowRead(new Target(tenant, namespace, id, List.of())); // existing typed namespace semantics
+                 if (!unique.add(List.of(tenant, namespace, id))) throw invalid();
+                 var requested = node.path("capabilities");
+-                if (!requested.isArray() || requested.isEmpty() || requested.size() > 2) throw invalid();
++                if (!requested.isArray() || requested.isEmpty() || requested.size() > (version == 1 ? 2 : 9)) throw invalid();
+                 var capabilities = new ArrayList<Capability>();
+                 for (JsonNode value : requested) {
+                     if (!value.isTextual()) throw invalid();
+                     var capability = Capability.valueOf(value.textValue());
++                    if (version == 1 && capability != Capability.EXECUTION_STATISTICS_READ && capability != Capability.LATEST_EXECUTIONS_LIST) throw invalid();
+                     if (capabilities.contains(capability)) throw invalid();
+                     capabilities.add(capability);
+                 }
+@@ -84,24 +95,27 @@ public final class FlowExecutionCapabilities {
+                 if (count > 200) throw invalid();
+                 result.add(new Target(tenant, namespace, id, List.copyOf(capabilities)));
+             }
+-            return List.copyOf(result);
++            return new Request(version, List.copyOf(result));
+         } catch (HttpStatusException failure) { throw failure; }
+         catch (Exception invalid) { throw invalid(); }
+     }
+
+     public Mono<Response> query(RbacAuthorizer.Principal principal, String tenant, List<Target> targets) {
++        return query(principal, tenant, new Request(1, targets));
++    }
++
++    public Mono<Response> query(RbacAuthorizer.Principal principal, String tenant, Request request) {
+         return Mono.defer(() -> {
+             if (!typed || !evaluations.ready()) return Mono.error(error(HttpStatus.SERVICE_UNAVAILABLE, "AUTHORIZATION_UNAVAILABLE"));
+-            return gate.boundary(principal, tenant, () -> Flux.fromIterable(targets).concatMap(target ->
++            return gate.boundary(principal, tenant, () -> Flux.fromIterable(request.targets()).concatMap(target ->
+                 gate.authorize(principal, flowRead(target)).flatMap(flow -> {
+                     if (!flow.allowed()) return Mono.just(unavailable(target));
+                     return Flux.fromIterable(target.capabilities()).concatMap(capability ->
+-                        gate.authorize(principal, executionQuery(target, capability)).map(decision -> Map.entry(capability,
+-                            decision.allowed() && !decision.scope().intersect(domain(target, false)).effectiveDomain().terms().isEmpty()
+-                                ? State.AVAILABLE : State.UNAVAILABLE)))
++                        gate.authorize(principal, operation(target, capability)).map(decision -> Map.entry(capability,
++                            available(target, capability, decision) ? State.AVAILABLE : State.UNAVAILABLE)))
+                         .collect(LinkedHashMap<Capability, State>::new, (map, entry) -> map.put(entry.getKey(), entry.getValue()))
+                         .map(states -> new Result(target.tenant(), target.namespace(), target.flowId(), Collections.unmodifiableMap(states)));
+-                }))).collectList().map(results -> new Response(1, List.copyOf(results)))
++                }))).collectList().map(results -> new Response(request.formatVersion(), List.copyOf(results)))
+                 .timeout(Duration.ofSeconds(10));
+         });
+     }
+@@ -116,6 +130,33 @@ public final class FlowExecutionCapabilities {
+             latest ? Action.LIST : Action.READ, target.tenant(), latest ? target.namespace() : null, null,
+             domain(target, latest), Coverage.COMPLETE_QUERY, latest ? Aggregate.NONE : Aggregate.EXECUTION, SideEffect.READ_ONLY);
+     }
++    static Operation operation(Target target, Capability capability) {
++        return switch (capability) {
++            case EXECUTION_STATISTICS_READ, LATEST_EXECUTIONS_LIST -> executionQuery(target, capability);
++            case FLOW_DESCRIPTION_READ -> new Operation(CONTRACT_VERSION, Source.DASHBOARD_AGGREGATE, Resource.FLOW,
++                Action.READ, target.tenant(), target.namespace(), target.flowId(), domain(target, false),
++                Coverage.SINGLE, Aggregate.FLOW_DESCRIPTION, SideEffect.READ_ONLY);
++            case FLOW_METRICS_READ -> new Operation(CONTRACT_VERSION, Source.REST, Resource.METRIC,
++                Action.READ, target.tenant(), target.namespace(), target.flowId(), domain(target, false),
++                Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY);
++            case LOG_STATISTICS_READ, TRIGGER_STATISTICS_READ -> new Operation(CONTRACT_VERSION, Source.DASHBOARD_AGGREGATE,
++                capability == Capability.LOG_STATISTICS_READ ? Resource.LOG : Resource.TRIGGER,
++                Action.READ, target.tenant(), null, null, domain(target, false), Coverage.COMPLETE_QUERY,
++                capability == Capability.LOG_STATISTICS_READ ? Aggregate.LOG : Aggregate.TRIGGER, SideEffect.READ_ONLY);
++            case FLOW_EXECUTIONS_LIST, FLOW_LOGS_LIST, FLOW_TRIGGERS_LIST -> new Operation(CONTRACT_VERSION, Source.REST,
++                capability == Capability.FLOW_EXECUTIONS_LIST ? Resource.EXECUTION : capability == Capability.FLOW_LOGS_LIST ? Resource.LOG : Resource.TRIGGER,
++                Action.LIST, target.tenant(), capability == Capability.FLOW_TRIGGERS_LIST ? target.namespace() : null,
++                null, domain(target, true), Coverage.COMPLETE_QUERY, Aggregate.NONE, SideEffect.READ_ONLY);
++        };
++    }
++    private static boolean available(Target target, Capability capability, Decision decision) {
++        if (!decision.allowed()) return false;
++        var operation = operation(target, capability);
++        var scope = decision.scope().intersect(domain(target, false));
++        return !scope.effectiveDomain().terms().isEmpty()
++            && (operation.coverage() != Coverage.COMPLETE_QUERY
++                || TypedNamespaceAccessControl.supportsProjectedQueryIds(operation.resource(), scope));
++    }
+     private static QueryDomain domain(Target target, boolean paginated) {
+         return new QueryDomain(List.of(target.namespace()), List.of(), List.of(), true, paginated);
+     }
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+index 6f00f8f..250f663 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+@@ -123,6 +123,13 @@ public final class TypedNamespaceAccessControl implements NamespaceAccessControl
+         return namespaceProjection(scope);
+     }
+
++    /** Mirrors existing namespace-only consumer limits; never removes restricted IDs. */
++    static boolean supportsProjectedQueryIds(Resource resource, QueryDomain scope) {
++        return resource == Resource.FLOW || resource == Resource.EXECUTION
++            || scope.effectiveDomain().terms().stream().noneMatch(term ->
++                term.idScope() == io.kestra.core.models.NamespaceDomain.IdScope.RESTRICTED_IDS);
++    }
++
+     @Override
+     public AccessScope namespaceScopeWithResourceDomains(QueryFilter.Resource resource) {
+         return namespaceScope(resource);
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java
+index 44d34f9..9c4d08d 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java
+@@ -74,6 +74,22 @@ class FlowExecutionCapabilitiesHttpTest {
+         assertThat(response.statusCode()).isEqualTo(200);
+         assertThat(JacksonMapper.ofJson().readTree(response.body()).path("flowExecutionCapabilitiesRequired").booleanValue()).isTrue();
+     }
++    @Test void versionTwoHttpKeepsDescriptionWhileRuntimeResourcesAreDenied() throws Exception {
++        String caps=String.join(",",Arrays.stream(FlowExecutionCapabilities.Capability.values()).map(c -> "\""+c.name()+"\"").toList());
++        String body=BODY.replace("\"formatVersion\":1","\"formatVersion\":2").replace("\"LATEST_EXECUTIONS_LIST\",\"EXECUTION_STATISTICS_READ\"",caps);
++        var response=send(PATH,body,true,true,false);
++        assertThat(response.statusCode()).isEqualTo(200);
++        assertThat(response.headers().firstValue("Cache-Control")).contains("no-store");
++        var result=JacksonMapper.ofJson().readTree(response.body());
++        assertThat(result.path("formatVersion").asInt()).isEqualTo(2);
++        var states=result.path("results").get(0).path("capabilities");
++        assertThat(states.size()).isEqualTo(9);
++        assertThat(states.path("FLOW_DESCRIPTION_READ").asText()).isEqualTo("AVAILABLE");
++        assertThat(states.path("FLOW_EXECUTIONS_LIST").asText()).isEqualTo("UNAVAILABLE");
++        assertThat(states.path("LOG_STATISTICS_READ").asText()).isEqualTo("UNAVAILABLE");
++        assertThat(policy.calls.get()).isEqualTo(10);
++        assertThat(send(PATH,body.replace("\"formatVersion\":2","\"formatVersion\":1"),true,true,false).statusCode()).isEqualTo(400);
++    }
+     private HttpResponse<String> send(String path,String body,boolean identity,boolean origin,boolean cookie) throws Exception {
+         var builder=HttpRequest.newBuilder(server.getURI().resolve(path)).header("Content-Type","application/json");
+         if(identity)builder.header("X-Flow-Capability-Test","alice");
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
+index 5dd2030..8aaf884 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
+@@ -19,7 +19,7 @@ import static org.mockito.Mockito.*;
+
+ class FlowExecutionCapabilitiesTest {
+     private final RbacAuthorizer.Principal principal = new RbacAuthorizer.Principal("alice",List.of(),null,null,List.of());
+-    private final Target target = new Target("main","company.sub","flow-one",List.of(Capability.values()));
++    private final Target target = new Target("main","company.sub","flow-one",List.of(Capability.EXECUTION_STATISTICS_READ, Capability.LATEST_EXECUTIONS_LIST));
+     private FlowExecutionCapabilities parser() {
+         return new FlowExecutionCapabilities(null,null,Validation.byDefaultProvider().configure().messageInterpolator(new org.hibernate.validator.messageinterpolation.ParameterMessageInterpolator()).buildValidatorFactory().getValidator(),true);
+     }
+@@ -83,6 +83,75 @@ class FlowExecutionCapabilitiesTest {
+         var evaluations=mock(AuthorizationEvaluations.class);when(evaluations.ready()).thenReturn(false);
+         assertThatThrownBy(()->new FlowExecutionCapabilities(null,evaluations,null,true).query(principal,"main",List.of(target)).block()).isInstanceOf(HttpStatusException.class).extracting("status").isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+     }
++    @Test void versionTwoHasFinitePlanWhileVersionOneRejectsEveryNewEnum() {
++        var nine = Arrays.stream(Capability.values()).map(c -> "\""+c+"\"").toList();
++        String target = json("detail").replace("[\"EXECUTION_STATISTICS_READ\",\"LATEST_EXECUTIONS_LIST\"]", "["+String.join(",",nine)+"]");
++        var bytes = body("["+target+"]");
++        assertThatThrownBy(() -> parser().parse("main", bytes)).isInstanceOf(HttpStatusException.class);
++        var request = parser().parseRequest("main", new String(bytes, StandardCharsets.UTF_8).replace("\"formatVersion\":1", "\"formatVersion\":2").getBytes(StandardCharsets.UTF_8));
++        assertThat(request.formatVersion()).isEqualTo(2);
++        assertThat(request.targets().getFirst().capabilities()).containsExactly(Capability.values());
++        for (var capability : Capability.values()) {
++            if (capability.ordinal() < 2) continue;
++            var v1 = body("["+json("a").replace("EXECUTION_STATISTICS_READ",capability.name())+"]");
++            assertThatThrownBy(() -> parser().parse("main", v1)).isInstanceOf(HttpStatusException.class);
++        }
++        String twoHundred = "["+String.join(",",java.util.stream.IntStream.range(0,100).mapToObj(i -> json("f"+i)).toList())+"]";
++        assertThat(parser().parseRequest("main", new String(body(twoHundred), StandardCharsets.UTF_8).replace("\"formatVersion\":1","\"formatVersion\":2").getBytes(StandardCharsets.UTF_8)).targets()).hasSize(100);
++        String tooMany = twoHundred.replaceFirst("LATEST_EXECUTIONS_LIST", "LATEST_EXECUTIONS_LIST\",\"FLOW_DESCRIPTION_READ");
++        assertThatThrownBy(() -> parser().parseRequest("main", new String(body(tooMany),StandardCharsets.UTF_8).replace("\"formatVersion\":1","\"formatVersion\":2").getBytes(StandardCharsets.UTF_8))).isInstanceOf(HttpStatusException.class);
++    }
++    @Test void descriptionAndMetricsUseTheirActualSourceAggregateAndFlowIdentity() {
++        var description = operation(target, Capability.FLOW_DESCRIPTION_READ);
++        assertThat(description.source()).isEqualTo(Source.DASHBOARD_AGGREGATE);
++        assertThat(description.resource()).isEqualTo(Resource.FLOW);
++        assertThat(description.aggregate()).isEqualTo(Aggregate.FLOW_DESCRIPTION);
++        var metric = operation(target, Capability.FLOW_METRICS_READ);
++        assertThat(metric.source()).isEqualTo(Source.REST);
++        assertThat(metric.resource()).isEqualTo(Resource.METRIC);
++        assertThat(metric.aggregate()).isEqualTo(Aggregate.NONE);
++        for (var op : List.of(description,metric)) {
++            assertThat(op.action()).isEqualTo(Action.READ);
++            assertThat(op.resourceId()).isEqualTo("flow-one");
++            assertThat(op.namespace()).isEqualTo("company.sub");
++            assertThat(op.coverage()).isEqualTo(Coverage.SINGLE);
++        }
++    }
++    @Test void listsAndAggregatesNeverUseFlowIdAsTheirResourceId() {
++        for (var capability : List.of(Capability.FLOW_EXECUTIONS_LIST,Capability.FLOW_LOGS_LIST,Capability.FLOW_TRIGGERS_LIST,Capability.LOG_STATISTICS_READ,Capability.TRIGGER_STATISTICS_READ)) {
++            var op = operation(target, capability);
++            assertThat(op.resourceId()).isNull();
++            assertThat(op.coverage()).isEqualTo(Coverage.COMPLETE_QUERY);
++            assertThat(op.queryDomain().effectiveDomain().contains("company.sub")).isTrue();
++            assertThat(op.queryDomain().effectiveDomain().contains("company2")).isFalse();
++            assertThat(op.source()).isEqualTo(capability.name().endsWith("LIST") ? Source.REST : Source.DASHBOARD_AGGREGATE);
++            assertThat(op.action()).isEqualTo(capability.name().endsWith("LIST") ? Action.LIST : Action.READ);
++            assertThat(op.aggregate()).isEqualTo(capability == Capability.LOG_STATISTICS_READ ? Aggregate.LOG : capability == Capability.TRIGGER_STATISTICS_READ ? Aggregate.TRIGGER : Aggregate.NONE);
++        }
++    }
++    @Test void versionTwoProjectsIndependentResourcesWithoutAnyDataRepository() {
++        var detail = new Target("main","company.sub","one",List.of(Capability.values()));
++        var begins = new AtomicInteger(); var closes = new AtomicInteger();
++        var service = fixture(op -> op.resource() == Resource.FLOW || op.resource() == Resource.LOG ? Decision.allow(op.queryDomain()) : Decision.deny("not granted"),begins,closes);
++        var response = service.query(principal,"main",new Request(2,List.of(detail))).block();
++        assertThat(response.formatVersion()).isEqualTo(2);
++        var states=response.results().getFirst().capabilities();
++        assertThat(states.get(Capability.FLOW_DESCRIPTION_READ)).isEqualTo(State.AVAILABLE);
++        assertThat(states.get(Capability.LOG_STATISTICS_READ)).isEqualTo(State.AVAILABLE);
++        assertThat(states.get(Capability.FLOW_LOGS_LIST)).isEqualTo(State.AVAILABLE);
++        assertThat(states.get(Capability.EXECUTION_STATISTICS_READ)).isEqualTo(State.UNAVAILABLE);
++        assertThat(states.get(Capability.TRIGGER_STATISTICS_READ)).isEqualTo(State.UNAVAILABLE);
++        assertThat(begins.get()).isEqualTo(1); assertThat(closes.get()).isEqualTo(1);
++    }
++    @Test void unsupportedLogAndTriggerIdsFailClosedWhileExecutionIdsRemainSupported() {
++        var ids = QueryDomain.structured(new NamespaceDomain(List.of(new Term(Universe.NAMESPACE,false,List.of("company.sub"),List.of(),List.of(),List.of(),IdScope.RESTRICTED_IDS,List.of("a-real-resource-id")))),true,false);
++        var detail = new Target("main","company.sub","one",List.of(Capability.values()));
++        var service = fixture(op -> op.resource() == Resource.FLOW || op.resource() == Resource.METRIC ? Decision.allow(op.queryDomain()) : Decision.allow(ids),new AtomicInteger(),new AtomicInteger());
++        var states=service.query(principal,"main",new Request(2,List.of(detail))).block().results().getFirst().capabilities();
++        assertThat(states.get(Capability.FLOW_EXECUTIONS_LIST)).isEqualTo(State.AVAILABLE);
++        assertThat(states.get(Capability.EXECUTION_STATISTICS_READ)).isEqualTo(State.AVAILABLE);
++        for(var c:List.of(Capability.LOG_STATISTICS_READ,Capability.TRIGGER_STATISTICS_READ,Capability.FLOW_LOGS_LIST,Capability.FLOW_TRIGGERS_LIST)) assertThat(states.get(c)).isEqualTo(State.UNAVAILABLE);
++    }
+     @SuppressWarnings("unchecked")
+     private FlowExecutionCapabilities fixture(java.util.function.Function<Operation,Decision> policy,AtomicInteger begins,AtomicInteger closes){
+         BeanProvider<AuthorizationEvaluationProviderV1> providers=mock(BeanProvider.class);when(providers.isUnique()).thenReturn(true);
