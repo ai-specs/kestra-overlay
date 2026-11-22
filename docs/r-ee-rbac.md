@@ -1,3 +1,78 @@
+## REQ-0406：Flow 首屏配置重载与身份失效补偿（2026-11-23，入口 C 已接收，未发布）
+
+本节发布事实优先于下方历史候选记录：0405 已随宿主 `84fe614` / CI `44463537757`
+五个 job 成功并推广镜像，主控已下载审计；0406 仍未发布。下方 0404a/b 候选标题保留
+接收时的历史状态，不能用于否定该正式输入，也不能证明本次修复或生产组合已通过。
+
+消费项目为 `kestra-plugin-rbac`。主控在正式宿主 `84fe614` / 镜像 digest
+`sha256:e53cee7718204388fdf3da2460ed0a191446298ce1bd0b98fd8f392daa297a69`
+与插件 `c45cd91` 的模式 B 生产组合中，以 `company.reference` 的受限测试账号完成
+首次改密和登录，直接进入 `/ui/main/flows`。原生 search 200、同 cookie 查询 total=1，
+页面却显示 No Flows Found；点击原生 Refresh data 后立即显示，reload 再次为空。
+部署仓证据入口为 `.work/mode-b-permission-counterexamples/target-ui-diagnostic/` 下
+`ego-initial.json`、`ego-after-native-refresh.txt` 与 `ego-pinia-timeline.json`。
+182–185ms 期间能力开关和登录状态均为 true，misc 变更仍引发 Flow store 清空。
+主控另在同一独占组合关闭 RBAC 并移除 jar 挂载，模式 A 的 configRequired=false；
+自然首屏仍空，同 cookie API total=1，原生刷新立即恢复，证据为同目录 `ego-mode-a.json`。
+这些路径只用于审查，不是宿主构建输入；生产范围与身份验收仍由部署仓负责。
+
+现机制不足：0404 用 `watch(() => [sources...])` 返回新数组，App 异步重新加载 configs
+时，即使 boolean 未变化，数组引用变化仍触发 identityChanged。该回调同步清空列表并
+递增 pageGeneration；在途 search 的 commit:false 结果因此被丢弃，已提交列表也会清空。
+既有表格不因 data 清空而自动重载，故页面停留在空列表。现有十项测试预置稳定 configs，
+没有真实 App 初始化的同值对象替换，也只验证身份切换清空，没有验证新身份加载恢复。
+
+接收的最小修复为 0406 增量补丁：监听独立来源并按值比较；同值 configs 对象替换不得
+清空列表或丢弃在途结果。真实 user、登录状态、tenant 或能力模式变化仍须同步清空旧列表、
+失效能力并隔离旧响应；已挂载且登录状态允许时，按当前分页、排序和筛选补偿一次加载。
+变化合并到 Vue 更新后调度，卸载取消补偿，退出不得重新请求。未知模式不得当成 OSS；
+undefined→true/false 必须在安全失效后恢复当前查询。不得仅删除安全失效来修复首屏。
+SDK 仍只保证代次隔离，不宣称物理 HTTP 取消。无新 Java SPI、HTTP 字段、权限策略或
+业务模型；模式 A 不装插件且 false 时保留 OSS 查询，模式 B 继续逐目标能力预检和服务端授权。
+
+宿主回归门保留原十项及原诊断/source hash 审计；新增同值配置替换（请求前/在途/提交后）、
+undefined→true/false、真实身份/tenant/模式变化后的延迟旧响应与当前查询恢复、退出和卸载
+禁止补偿。真实浏览器使用原生列表与 Refresh data；明确测试 transport 不代表生产身份。
+独立门必须具名、零失败/跳过/未运行并绑定最终输入。完整本地门、正式 CI 与镜像发布由
+主控另行协调；部署仓随后使用兼容正式产物复测模式 A/B 生产登录、直接访问、reload、
+原生刷新、授权列表及无执行权限时不发 latest/chart，保留拒绝与副作用门。本段仅表示
+缺陷接收和候选设计，不表示修复已发布、插件兼容已验证或 Compose 验收通过。
+
+本地验证（2026-11-23，未发布）：最终原生列表 Ego/Playwright 各21/21、详情各37/37，
+均零失败/跳过/未运行，严格诊断与结束输入 hash 复算通过。CI 驱动曾将 async predicate
+的 Promise 当成成功；本机 Chromium 的 async false 反例证实。两个原生门的 Playwright
+适配器现共用有界 await evaluate helper，仅 literal true 成功；6项离线反例和实际浏览器
+false超时/false到true/throw检查通过，不放宽业务断言或诊断分类。合法 total=50、size=25
+租户切换确认旧 held 与补偿请求均保留 page=2、排序和筛选，并显示25行。
+
+完整原 local-ci.sh 通过：脚本自测29、namespace6、后端625（623通过，2项既有镜像专用
+assume，不计通过）、core3、UI18文件153项、翻译/构建和 executable。镜像 MCP 原门
+随后实际执行4份XML，包含先前两项镜像专用检查，均零失败/错误/跳过。后续仅10个浏览器
+测试/适配文件变化；原完整门的 inputs.json 与XML保留，不伪称以新hash重跑后端。
+两个 Git 测试 delta 刷新验证树后，最终62补丁/443触达文件在 dev、全新重放树及完整门
+验证树逐字节相同；结构17/0。4711个生产输入及实际资源内容完全相同，聚合hash和
+executable未变，绑定证明见 `fullci/final-source-rebinding.json`。0404仅移出两处接线，
+其他23文件与正式61补丁树一致；0406接管BASE独立边界，触达17文件。
+
+本机 arm64 候选镜像 `kestra-overlay:flow-list-initial-20261123` 的 digest 为
+`sha256:6c994ee50ef5440d46e845c3c28cacb5c94f32e53936a478460a1081d561b2c6`，使用
+原Dockerfile、固定 IMAGE_BASE c5115b、零外部jar及 staged executable SHA-256
+`3f1dcc1d030695f1af2aa235f5b10f1511cf73114c0d4ced0ce8db6865e72ecb`。
+classpath H2、OIDC35、MCP、form/env原镜像门已串行通过，每门结束docker ps为空。
+SDK公开输入从此实际候选镜像提取；geometry64/64、SDK949/949完整通过，零失败/跳过/未运行，
+SDK严格报告、当前source/build hash、诊断零错误及两门同一buildId复核通过。
+所有本轮证据位于本仓 `.work/flow-list-initial-20261123/`，最终列表报告为
+`driver-fixed-ego/` 与 `driver-fixed-playwright/`，详情为 `detail-driver-fixed-ego/` 与
+`detail-driver-fixed-playwright/`，原完整门/最终绑定为 `fullci/`，结构为
+`replay-all-gates-final-structure.log`。正式CI、镜像推送/推广及部署仓生产组合未执行。
+
+宿主原生列表浏览器报告附属公开产物为 `published-classifier.mjs`：
+`scripts/run-flow-execution-browser.sh` 在 driver 执行前，将最终已重放验证树的
+`ui/tests/flow-execution-capabilities/diagnostics.mjs` 原字节复制到 OUTPUT。正式
+`native-flow-execution-browser` artifact 一同发布该文件。消费方从对应正式成功 CI
+实际下载，并核对其 SHA-256 与独立输入锁及报告 `inputs["./diagnostics.mjs"]` 一致；
+不得只从0404初始new-file段推断已被0406修改的最终源。不新增业务API或授权契约。
+
 # R-EE-RBAC：OSS 上的外部细粒度授权能力（需求文档）
 
 ## 2026-11-18 namespace 补集与未解析操作收窄提案

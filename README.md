@@ -1,3 +1,13 @@
+2026-11-23 REQ-0406 本地候选（未发布）：修复原生 Flow 列表在模式 A/B 首屏的同值
+configs 重载误清空，并保留真实身份、租户和模式变化的同步失效、旧响应隔离及当前查询
+补偿。Playwright 原生列表和必需详情门共用有界 async 条件等待适配器；不是新增业务
+API、Java SPI 或授权放宽。候选本机 arm64 镜像为
+`kestra-overlay:flow-list-initial-20261123`，digest
+`sha256:6c994ee50ef5440d46e845c3c28cacb5c94f32e53936a478460a1081d561b2c6`。
+它只用于本地验收，未推送、未推广，不得作为正式插件编译输入或生产部署版本。
+正式 CI、双架构发布与部署仓生产组合仍须完成；当前证据与限制见
+[R-EE-RBAC 的 REQ-0406](docs/r-ee-rbac.md)。
+
 2026-11-17 REQ-0400 本地候选（未发布）：原生 GET `/api/v1/main/ai/providers`
 精确使用租户 `AI.READ`，只返回既有 `id/displayName/isDefault`。该许可不授予模型执行、
 流程读取或旧 generateFlow；未知 AiController 方法和路径失败关闭。关闭 RBAC 的模式 A

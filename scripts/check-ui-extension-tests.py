@@ -5,6 +5,7 @@ import sys
 
 
 REQUIRED = {
+    "src/components/flows/useFlowListIdentity.spec.ts": 9,
     "src/components/flows/useFlowExecutionCapabilities.spec.ts": 4,
     "src/components/flows/useFlowDetailCapabilities.spec.ts": 8,
     "tests/unit/stores/dashboardGeneration.spec.ts": 2,

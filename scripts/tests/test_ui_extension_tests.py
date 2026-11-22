@@ -25,7 +25,8 @@ class UiExtensionReportTest(unittest.TestCase):
             GATE.check(self.report())
 
     def test_requires_exact_added_shadow_tests(self):
-        self.assertEqual(sum(GATE.REQUIRED.values()), 144)
+        self.assertEqual(sum(GATE.REQUIRED.values()), 153)
+        self.assertEqual(GATE.REQUIRED["src/components/flows/useFlowListIdentity.spec.ts"], 9)
         self.assertEqual(GATE.REQUIRED["src/components/flows/useFlowExecutionCapabilities.spec.ts"], 4)
         self.assertEqual(GATE.REQUIRED["src/components/flows/useFlowDetailCapabilities.spec.ts"], 8)
         self.assertEqual(GATE.REQUIRED["tests/unit/stores/dashboardGeneration.spec.ts"], 2)

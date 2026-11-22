@@ -18,7 +18,7 @@ const area=path.resolve('tests/flow-detail-capabilities');const {CASE_NAMES,SOUR
 const [output,repo]=process.argv.slice(2),sha=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const inputs=Object.fromEntries(SOURCE_PATHS.map(p=>[p,sha(path.resolve(area,p))]));inputs['overlay:sdk-browser-diagnostics.cjs']=sha(path.join(repo,'scripts/sdk-browser-diagnostics.cjs'));
 fs.writeFileSync(path.join(output,'browser.json'),JSON.stringify({completed:false,passedGate:false,transport:'explicit-test-transport',phase:'transport-startup',inputs,cases:CASE_NAMES.map(name=>({name,status:'notRun'})),notRun:CASE_NAMES.length},null,2)+'\n');
-const patches=execFileSync('git',['-C',repo,'ls-files','patches'],{encoding:'utf8'}).trim().split('\n').filter(p=>p.endsWith('.patch'));
+const patches=execFileSync('git',['-C',repo,'ls-files','--cached','--others','--exclude-standard','patches'],{encoding:'utf8'}).trim().split('\n').filter(p=>p.endsWith('.patch'));
 fs.writeFileSync(path.join(output,'inputs.json'),JSON.stringify({transportRunId:process.env.FLOW_DETAIL_RUN_ID,overlayCommit:execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),base:fs.readFileSync(path.join(repo,'patches/BASE'),'utf8'),patches:Object.fromEntries(patches.map(p=>[p,sha(path.join(repo,p))])),runnerSha256:sha(path.join(repo,'scripts/run-flow-detail-browser.sh')),sources:inputs},null,2)+'\n');
 const hostRoot=path.resolve('..');
 for(const relative of SOURCE_PATHS){const input=path.resolve(area,relative),hostRelative=path.relative(hostRoot,input);if(hostRelative.startsWith('..'))throw new Error('Source escapes host tree');const destination=path.join(output,'source/host',hostRelative);fs.mkdirSync(path.dirname(destination),{recursive:true});fs.copyFileSync(input,destination)}
@@ -46,6 +46,7 @@ JS
   if [ "$attempt" = 60 ]; then echo 'Detail transport did not start'; exit 1; fi
   sleep 1
 done
+node --test tests/flow-execution-capabilities/wait-for-condition.test.mjs > "$OUTPUT/driver-unit.log" 2>&1
 node tests/flow-detail-capabilities/playwright.mjs "$OUTPUT" "$REPO/scripts/sdk-browser-diagnostics.cjs" > "$OUTPUT/driver.log" 2>&1
 node tests/flow-detail-capabilities/check-report.mjs "$OUTPUT/browser.json" "$REPO/scripts/sdk-browser-diagnostics.cjs" > "$OUTPUT/check.json"
 

@@ -5,7 +5,7 @@
 # 触达上游文件: 24 个
 # 移除条件: 上游提供等价有限页面能力投影与原生Flow列表逐目标消费
 diff --git a/ui/src/components/flows/Flows.vue b/ui/src/components/flows/Flows.vue
-index fe0e185..6f88909 100644
+index fe0e185..711433b 100644
 --- a/ui/src/components/flows/Flows.vue
 +++ b/ui/src/components/flows/Flows.vue
 @@ -20,6 +20,7 @@
@@ -59,7 +59,7 @@ index fe0e185..6f88909 100644
      import action from "../../models/action"
      import resource from "../../models/resource"
 
-@@ -391,6 +394,51 @@
+@@ -391,6 +394,49 @@
 
      const lastExecutionByFlowReady = ref(false)
      const latestExecutions = ref<any[]>([])
@@ -89,7 +89,6 @@ index fe0e185..6f88909 100644
 +        flowStore.total = 0
 +        optionalExecutionError.value = undefined
 +    }
-+    watch(() => [authStore.user, authStore.isLogged, route.params.tenant, miscStore.configs?.flowExecutionCapabilitiesRequired], identityChanged, {flush: "sync"})
 +    const activateExecutionContent = () => {
 +        if (miscStore.configs?.flowExecutionCapabilitiesRequired !== true) return
 +        clearExecutionContent()
@@ -104,14 +103,13 @@ index fe0e185..6f88909 100644
 +        window.addEventListener("focus", focusExecutionContent)
 +    })
 +    onBeforeUnmount(() => {
-+        identityChanged()
 +        document.removeEventListener("visibilitychange", activateExecutionContent)
 +        window.removeEventListener("focus", focusExecutionContent)
 +    })
      const file = ref<HTMLInputElement | null>(null)
 
      const optionalColumns = ref<ColumnConfig[]>([
-@@ -485,26 +533,42 @@
+@@ -485,26 +531,42 @@
 
      async function loadData({page, size, sort}: {page: number; size: number; sort?: string}) {
          if (!loadInit.value) return

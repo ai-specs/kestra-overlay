@@ -1,0 +1,715 @@
+# 需求: REQ-0406 原生Flow首屏配置重载与身份失效补偿
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core
+# 来源: 新写；2026-11-23入口C已接收；正式84fe614的模式A/B首屏失败证据；独占BASE加61补丁的增量提交
+# 触达上游文件: 17 个
+# 移除条件: 上游提供等价原生Flow列表按值失效及挂载后当前查询补偿
+diff --git a/ui/src/components/flows/Flows.vue b/ui/src/components/flows/Flows.vue
+index 711433b..817cae2 100644
+--- a/ui/src/components/flows/Flows.vue
++++ b/ui/src/components/flows/Flows.vue
+@@ -341,6 +341,7 @@
+     import {useFlowExecutionCapabilities} from "./useFlowExecutionCapabilities"
+     import action from "../../models/action"
+     import resource from "../../models/resource"
++    import {useFlowListIdentity} from "./useFlowListIdentity"
+
+     import {useToast} from "../../utils/toast"
+
+@@ -438,6 +439,14 @@
+         window.removeEventListener("focus", focusExecutionContent)
+     })
+     const file = ref<HTMLInputElement | null>(null)
++    useFlowListIdentity({
++        auth: authStore,
++        tenant: () => route.params.tenant,
++        mode: () => miscStore.configs?.flowExecutionCapabilitiesRequired,
++        invalidate: identityChanged,
++        reload: () => dataTable.value?.reload(),
++        failed: failure => { optionalExecutionError.value = failure },
++    })
+
+     const optionalColumns = ref<ColumnConfig[]>([
+         {
+diff --git a/ui/src/components/flows/useFlowListIdentity.spec.ts b/ui/src/components/flows/useFlowListIdentity.spec.ts
+new file mode 100644
+index 0000000..88e2bce
+--- /dev/null
++++ b/ui/src/components/flows/useFlowListIdentity.spec.ts
+@@ -0,0 +1,66 @@
++import {describe, it, expect, vi} from "vitest"
++import {defineComponent, h, nextTick, reactive} from "vue"
++import {mount} from "@vue/test-utils"
++import {useFlowListIdentity} from "./useFlowListIdentity"
++function fixture(mode: boolean | undefined = true) {
++    const state = reactive({user: {} as unknown, isLogged: true, tenant: "main", configs: {required: mode}})
++    const invalidate = vi.fn(), reload = vi.fn<() => Promise<void>>().mockResolvedValue(), failed = vi.fn()
++    const wrapper = mount(defineComponent({setup() {
++        useFlowListIdentity({auth: state, tenant: () => state.tenant, mode: () => state.configs.required, invalidate, reload, failed})
++        return () => h("div")
++    }}))
++    return {state, invalidate, reload, failed, wrapper}
++}
++describe("Flow list identity lifecycle", () => {
++    it.each([false, true])("preserves mode %s on same-value async config replacement", async mode => {
++        const f = fixture(mode)
++        await Promise.resolve(); f.state.configs = {required: mode}; await nextTick()
++        expect(f.invalidate).not.toHaveBeenCalled(); expect(f.reload).not.toHaveBeenCalled(); f.wrapper.unmount()
++    })
++    it("invalidates synchronously and coalesces identity, tenant and mode into one reload", async () => {
++        const f = fixture()
++        f.state.user = {}; f.state.tenant = "next"; f.state.configs = {required: false}
++        expect(f.invalidate).toHaveBeenCalledTimes(3); expect(f.reload).not.toHaveBeenCalled()
++        await nextTick(); expect(f.reload).toHaveBeenCalledTimes(1); f.wrapper.unmount()
++    })
++    it.each([false, true])("recovers from unknown mode to %s without OSS fallback", async mode => {
++        const f = fixture(); f.state.configs.required = undefined
++        await nextTick(); expect(f.reload).not.toHaveBeenCalled()
++        f.state.configs = {required: mode}; expect(f.invalidate).toHaveBeenCalledTimes(2)
++        await nextTick(); expect(f.reload).toHaveBeenCalledTimes(1); f.wrapper.unmount()
++    })
++    it("does not reload after logout or without a user; reloads when identity returns", async () => {
++        const f = fixture(); f.state.isLogged = false
++        await nextTick(); expect(f.reload).not.toHaveBeenCalled()
++        f.state.user = undefined; f.state.isLogged = true
++        await nextTick(); expect(f.reload).not.toHaveBeenCalled()
++        f.state.user = {}; await nextTick(); expect(f.reload).toHaveBeenCalledTimes(1); f.wrapper.unmount()
++    })
++    it("unmount cancels a queued reload and invalidates synchronously", async () => {
++        const f = fixture(); f.state.user = {}; f.wrapper.unmount()
++        expect(f.invalidate).toHaveBeenCalledTimes(2); await nextTick(); expect(f.reload).not.toHaveBeenCalled()
++    })
++    it("reports current reload errors but ignores an old identity failure", async () => {
++        const f = fixture(); let reject!: (failure: unknown) => void
++        f.reload.mockImplementationOnce(() => new Promise((_, fail) => {reject = fail}))
++        f.state.user = {}; await nextTick(); f.state.user = {}; await nextTick()
++        reject(new Error("old identity")); await nextTick(); expect(f.failed).not.toHaveBeenCalled()
++        f.reload.mockRejectedValueOnce(new Error("current failure")); f.state.user = {}
++        await nextTick(); await nextTick(); expect(f.failed).toHaveBeenCalledWith(new Error("current failure")); f.wrapper.unmount()
++    })
++    it("retains a pre-mount change until mounted, even while native initial load is pending", async () => {
++        const state = reactive({user: {}, isLogged: true, mode: true})
++        const invalidate = vi.fn(), reload = vi.fn().mockResolvedValue(undefined)
++        const wrapper = mount(defineComponent({setup() {
++            useFlowListIdentity({auth:state,tenant:()=>"main",mode:()=>state.mode,invalidate,reload,failed:vi.fn()})
++            state.user = {}
++            expect(invalidate).toHaveBeenCalledTimes(1)
++            expect(reload).not.toHaveBeenCalled()
++            return () => h("div")
++        }}))
++        await nextTick()
++        expect(reload).toHaveBeenCalledTimes(1)
++        wrapper.unmount()
++    })
++
++})
+diff --git a/ui/src/components/flows/useFlowListIdentity.ts b/ui/src/components/flows/useFlowListIdentity.ts
+new file mode 100644
+index 0000000..b4499b2
+--- /dev/null
++++ b/ui/src/components/flows/useFlowListIdentity.ts
+@@ -0,0 +1,45 @@
++import {nextTick, onBeforeUnmount, onMounted, watch} from "vue"
++
++export function useFlowListIdentity(options: {
++    auth: {user: unknown; isLogged: boolean}
++    tenant: () => unknown
++    mode: () => boolean | undefined
++    invalidate: () => void
++    reload: () => Promise<void> | undefined
++    failed: (failure: unknown) => void
++}) {
++    let mounted = false
++    let queued = false
++    let revision = 0
++    let pending = false
++    const queueCurrentQuery = () => {
++        if (!mounted || queued) return
++        queued = true
++        void nextTick(async () => {
++            queued = false
++            if (!mounted || !options.auth.isLogged || !options.auth.user || typeof options.mode() !== "boolean") return
++            pending = false
++            const current = revision
++            try {
++                await options.reload()
++            } catch (failure) {
++                if (mounted && current === revision) options.failed(failure)
++            }
++        })
++    }
++    watch([() => options.auth.user, () => options.auth.isLogged, options.tenant, options.mode], () => {
++        revision++
++        options.invalidate()
++        pending = true
++        queueCurrentQuery()
++    }, {flush: "sync"})
++    onMounted(() => {
++        mounted = true
++        if (pending) queueCurrentQuery()
++    })
++    onBeforeUnmount(() => {
++        mounted = false
++        revision++
++        options.invalidate()
++    })
++}
+diff --git a/ui/tests/flow-detail-capabilities/cases.mjs b/ui/tests/flow-detail-capabilities/cases.mjs
+index 574ac50..9535c54 100644
+--- a/ui/tests/flow-detail-capabilities/cases.mjs
++++ b/ui/tests/flow-detail-capabilities/cases.mjs
+@@ -3,7 +3,7 @@ import crypto from "node:crypto"
+ import assert from "node:assert/strict"
+ import {classifyDiagnostics} from "./diagnostics.mjs"
+ export const CASE_NAMES=["flow-only-overview-description-nine-local-denials-no403","all-allowed-overview-ten-native-cards","execution-only-datasource-isolation","log-only-datasource-isolation","trigger-only-datasource-isolation","empty-data-does-not-deny-capability","provider503-is-visible-and-does-not-mount-data","old-host-version-is-visible-protocol-error","unknown-fixed-definition-is-unsupported","denied-runtime-deep-links-do-not-mount","concurrency-explicitly-unsupported-no-runtime-request","execution-list-allowed-statistics-denied","logs-list-allowed-statistics-denied","trigger-list-allowed-expanded-log-denied","metrics-native-read-chain","identity-switch-cancels-stale-projection","native-refresh-rechecks-and-reloads-allowed-charts","expiry-unmounts-revoked-charts","mode-a-native-without-capability-request","same-component-flow-target-switch-reloads-description","late-old-flow-definition-cannot-replace-current-target",...['en','zh_CN'].flatMap(locale=>['light','dark','dark-2','syncWithSystem'].flatMap(theme=>[1280,390].map(width=>`visual-${locale}-${theme}-${width}`)))]
+-export const SOURCE_PATHS=["../../src/components/flows/Overview.vue","../../src/components/flows/FlowRuntimeTab.vue","../../src/components/flows/FlowCapabilityState.vue","../../src/components/flows/useFlowDetailCapabilities.ts","../../src/components/flows/defaultFlowChartHashes.json","../../src/components/flows/flowTabs.ts","../../src/components/flows/FlowTriggers.vue","../../src/components/flows/FlowMetrics.vue","../../src/components/flows/FlowExecutions.vue","../../src/components/executions/Executions.vue","../../src/components/logs/LogsWrapper.vue","../../src/components/dashboard/Dashboard.vue","../../src/components/dashboard/sections/Sections.vue","../../src/components/dashboard/composables/useDashboards.ts","../../src/stores/executions.ts","../../src/stores/logs.ts","../../src/stores/dashboard.ts","../../packages/kestra-sdk/src/client-facade.ts","../../../core/src/main/resources/dashboards/default_flow_definition.yaml","../../src/translations/en.json","../../src/translations/zh_CN.json","./cases.mjs","./index.html","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./diagnostics.test.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./check-report.mjs","./check-report.test.mjs","../../package-lock.json"]
++export const SOURCE_PATHS=["../../src/components/flows/Overview.vue","../../src/components/flows/FlowRuntimeTab.vue","../../src/components/flows/FlowCapabilityState.vue","../../src/components/flows/useFlowDetailCapabilities.ts","../../src/components/flows/defaultFlowChartHashes.json","../../src/components/flows/flowTabs.ts","../../src/components/flows/FlowTriggers.vue","../../src/components/flows/FlowMetrics.vue","../../src/components/flows/FlowExecutions.vue","../../src/components/executions/Executions.vue","../../src/components/logs/LogsWrapper.vue","../../src/components/dashboard/Dashboard.vue","../../src/components/dashboard/sections/Sections.vue","../../src/components/dashboard/composables/useDashboards.ts","../../src/stores/executions.ts","../../src/stores/logs.ts","../../src/stores/dashboard.ts","../../packages/kestra-sdk/src/client-facade.ts","../../../core/src/main/resources/dashboards/default_flow_definition.yaml","../../src/translations/en.json","../../src/translations/zh_CN.json","./cases.mjs","./index.html","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./diagnostics.test.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","../flow-execution-capabilities/wait-for-condition.mjs","../flow-execution-capabilities/wait-for-condition.test.mjs","./check-report.mjs","./check-report.test.mjs","../../package-lock.json"]
+ export async function runNativeFlowDetailPlan({page,reportRoot,diagnostics,diagnosticPath,spaceId=null}){
+  await fs.mkdir(reportRoot,{recursive:true});await page.viewport()
+  const hashInputs=async()=>{const inputs={};for(const p of SOURCE_PATHS)inputs[p]=crypto.createHash("sha256").update(await fs.readFile(new URL(p,import.meta.url))).digest("hex");inputs['overlay:sdk-browser-diagnostics.cjs']=crypto.createHash("sha256").update(await fs.readFile(diagnosticPath)).digest("hex");return inputs}
+diff --git a/ui/tests/flow-detail-capabilities/playwright.mjs b/ui/tests/flow-detail-capabilities/playwright.mjs
+index 4c5cff1..eace2cf 100644
+--- a/ui/tests/flow-detail-capabilities/playwright.mjs
++++ b/ui/tests/flow-detail-capabilities/playwright.mjs
+@@ -1,3 +1,4 @@
++import {waitForCondition} from "../flow-execution-capabilities/wait-for-condition.mjs"
+ import {chromium} from "playwright"
+ import path from "node:path"
+ import {runNativeFlowDetailPlan} from "./cases.mjs"
+@@ -10,7 +11,7 @@ const diagnostics=createDiagnostics(await context.newCDPSession(nativePage))
+ await diagnostics.attach()
+ const page={
+  viewport:async(width=1280)=>nativePage.setViewportSize({width,height:900}),goto:(...args)=>nativePage.goto(...args),click:(selector)=>nativePage.click(selector),
+- waitForSelector:(...args)=>nativePage.waitForSelector(...args),waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),
++ waitForSelector:(...args)=>nativePage.waitForSelector(...args),waitForFunction:(...args)=>waitForCondition(nativePage,...args),evaluate:(...args)=>nativePage.evaluate(...args),
+  screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.locator("body").innerText(),
+ }
+ try {await runNativeFlowDetailPlan({page,diagnostics,diagnosticPath,reportRoot:path.resolve(process.argv[2]??"../../reports/browser-playwright")})}
+diff --git a/ui/tests/flow-execution-capabilities/browser.mjs b/ui/tests/flow-execution-capabilities/browser.mjs
+index 9e1b846..d84800c 100644
+--- a/ui/tests/flow-execution-capabilities/browser.mjs
++++ b/ui/tests/flow-execution-capabilities/browser.mjs
+@@ -15,4 +15,4 @@ const page={
+  goto:(...args)=>nativePage.goto(...args),click:(...args)=>nativePage.click(...args),waitForSelector:(...args)=>nativePage.waitForSelector(...args),
+  waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.snapshot(),
+ }
+-await runNativeFlowListPlan({page,reportRoot,diagnostics,diagnosticPath,spaceId:task.spaceId})
++await runNativeFlowListPlan({page,reportRoot,diagnostics,diagnosticPath,spaceId:task.spaceId,baseUrl})
+diff --git a/ui/tests/flow-execution-capabilities/cases.mjs b/ui/tests/flow-execution-capabilities/cases.mjs
+index 764b580..ea149a9 100644
+--- a/ui/tests/flow-execution-capabilities/cases.mjs
++++ b/ui/tests/flow-execution-capabilities/cases.mjs
+@@ -1,24 +1,27 @@
++import {STARTUP_CASES, RECOVERY_CASES, runStartupCases, runRecoveryCases} from "./lifecycle-cases.mjs"
+ import {classifyDiagnostics} from "./diagnostics.mjs"
+ export const CASE_NAMES = [
++ ...STARTUP_CASES,
+  "none-native-list-no-latest-no-chart-no-expected403","mixed-native-target-row-latest-and-chart","all-native-allowed-path-preserved","provider503-native-clears-content-and-displays-error",
+  "identity-switch-ignores-pending-flow-response","identity-switch-cancels-pending-latest-and-unmounts-chart","identity-switch-cancels-pending-capability-projection",
+  "pagination-ignores-older-flow-page-response","current-page-30s-expiry-rechecks-and-unmounts-revoked-content","mode-a-native-oss-without-capability-request",
++ ...RECOVERY_CASES,
+ ]
+-export async function runNativeFlowListPlan({page, reportRoot, diagnostics, diagnosticPath, spaceId=null}) {
++export async function runNativeFlowListPlan({page, reportRoot, diagnostics, diagnosticPath, spaceId=null,baseUrl="http://127.0.0.1:5178"}) {
+ const fs=await import("node:fs/promises");const assert=(await import("node:assert/strict")).default
+ await page.viewport()
+ const crypto=await import("node:crypto")
+-const sourcePaths=["../../src/components/flows/Flows.vue","../../src/components/flows/useFlowExecutionCapabilities.ts","../../src/stores/executions.ts","./cases.mjs","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./check-report.mjs","../../package-lock.json"]
++const sourcePaths=["../../src/components/flows/Flows.vue","../../src/components/flows/useFlowListIdentity.ts","../../src/components/flows/useFlowExecutionCapabilities.ts","../../src/stores/executions.ts","./cases.mjs","./lifecycle-cases.mjs","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./wait-for-condition.mjs","./wait-for-condition.test.mjs","./check-report.mjs","../../package-lock.json"]
+ const inputs={}
+ for(const relative of sourcePaths)inputs[relative]=crypto.createHash("sha256").update(await fs.readFile(new URL(relative,import.meta.url))).digest("hex")
+ inputs["overlay:sdk-browser-diagnostics.cjs"]=crypto.createHash("sha256").update(await fs.readFile(diagnosticPath)).digest("hex")
+-const report = {completed:false,passedGate:false,notRun:10,inputs,transport:"explicit-test-transport",component:"native Flows.vue / KsDataTable / TimeSeries",locale:"en",width:1280,spaceId,startedAt:new Date().toISOString(),cases:CASE_NAMES.map(name=>({name,status:"notRun",stimulus:name.startsWith("pagination-")?"test transport invokes native loadData; not a native pagination click":"native test page"}))}
++const report = {completed:false,passedGate:false,notRun:CASE_NAMES.length,baseUrl,inputs,transport:"explicit-test-transport",component:"native Flows.vue / KsDataTable / TimeSeries",locale:"en",width:1280,spaceId,startedAt:new Date().toISOString(),cases:CASE_NAMES.map(name=>({name,status:"notRun",stimulus:name.startsWith("pagination-")?"test transport invokes native loadData; not a native pagination click":"native test page"}))}
+ await fs.mkdir(reportRoot,{recursive:true})
+ const control = async value => {
+-    const r=await fetch("http://127.0.0.1:5178/test/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({flowDelay:0,latestDelay:0,capabilityDelay:0,...value})})
++    const r=await fetch(`${baseUrl}/test/control`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({flowDelay:0,latestDelay:0,capabilityDelay:0,rowPrefix:"",holdKind:null,flowTotal:2,...value})})
+     assert.equal(r.status,200)
+ }
+-const evidence = async () => (await fetch("http://127.0.0.1:5178/test/evidence")).json()
++const evidence = async () => (await fetch(`${baseUrl}/test/evidence`)).json()
+ const stable = async () => {
+     await page.waitForFunction(async()=>{const state=await fetch("/test/evidence").then(r=>r.json());return state.calls.some(c=>c.kind==="capability"&&c.completed)},undefined,{timeout:15000})
+     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+@@ -36,15 +39,16 @@ const record = async (name,run) => {
+         await run(test)
+         const snapshot=await diagnostics.snapshot()
+         test.eventIds=snapshot.events.filter(event=>!lastEvents.has(event.id)).map(event=>event.id)
+-        test.diagnostics=classifyDiagnostics(snapshot,name,test.documentId,lastEvents)
++        test.diagnostics=classifyDiagnostics(snapshot,name,test.documentId,lastEvents,baseUrl)
+         lastEvents=new Set(snapshot.events.map(event=>event.id))
+         assert.deepEqual(test.diagnostics.unexpected,[],"Unexpected source-associated browser errors")
+         test.status="passed"
+-    } catch(error){test.status="failed";test.error=String(error);throw error}
++    } catch(error){test.status="failed";test.error=String(error);await page.screenshot({path:`${reportRoot}/${name}-failed.png`});throw error}
+     finally {test.finishedAt=new Date().toISOString();test.network=await evidence();test.dom=await dom();report.notRun=report.cases.filter(test=>test.status==="notRun").length;report.diagnostics=await diagnostics.snapshot();await persist()}
+ }
+ try {
+- await control({mode:"none"});await page.goto("http://127.0.0.1:5178/main/flows");await page.waitForSelector("#transport-mixed",{state:"visible"});await stable()
++ await runStartupCases({record,page,control,evidence,dom,assert,baseUrl,diagnostics})
++ await control({mode:"none"});await page.goto(`${baseUrl}/main/flows`);await page.waitForSelector("#transport-mixed",{state:"visible"});await stable()
+  await record("none-native-list-no-latest-no-chart-no-expected403",async()=>{
+     const state=await evidence(),view=await dom()
+     assert.equal(view.rows.length,2);assert.equal(view.canvases,0)
+@@ -68,27 +72,29 @@ try {
+     await page.click("#transport-failure",{label:"show capability service failure"});await stable();await page.waitForSelector('[role="alert"]',{state:"visible"})
+     const state=await evidence(),view=await dom();assert.equal(view.canvases,0);assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0);assert(state.calls.some(c=>c.kind==="capability"&&c.status===503));assert(view.alerts.length>0)
+  })
+- await record("identity-switch-ignores-pending-flow-response",async()=>{
+-    await control({mode:"all",flowDelay:1200});await page.click("#refresh-native",{label:"start delayed flow request"})
+-    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows")})
+-    await page.click("#transport-switch",{label:"switch identity during flow"})
+-    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows"&&c.completed)})
++ for(const [name,delay,kind] of [
++    ["identity-switch-ignores-pending-flow-response","flowDelay","flows"],
++    ["identity-switch-cancels-pending-latest-and-unmounts-chart","latestDelay","latest"],
++    ["identity-switch-cancels-pending-capability-projection","capabilityDelay","capability"],
++ ]) await record(name,async()=>{
++    await control({mode:"all",holdKind:kind,rowPrefix:"old-"})
++    await page.click("#refresh-native",{label:"start delayed old identity"})
++    await page.waitForFunction(async kind=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind===kind&&c.held&&!c.completed)},kind)
++    await control({keepCalls:true,mode:"none",rowPrefix:"fresh-"})
++    await page.evaluate(async()=>{
++        const state=await fetch("/test/evidence").then(r=>r.json())
++        if(!state.calls.some(c=>c.held&&!c.completed))throw new Error("Old request must still be held at identity change")
++        await window.probe.switchAccount()
++        await fetch("/test/release",{method:"POST"})
++    })
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return window.probe.state().total===2&&s.calls.filter(c=>c.kind==="flows").length===2&&s.calls.every(c=>c.completed)})
+     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
+-    const state=await evidence(),view=await dom();assert.equal(view.rows.length,0);assert.equal(view.canvases,0);assert.equal(state.calls.filter(c=>["latest","chart","capability"].includes(c.kind)).length,0)
+- })
+- await record("identity-switch-cancels-pending-latest-and-unmounts-chart",async()=>{
+-    await control({mode:"all",latestDelay:1200});await page.click("#refresh-native",{label:"start delayed latest request"});await stable()
+-    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="latest")})
+-    await page.click("#transport-switch",{label:"switch identity during latest"})
+-    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="latest"&&c.completed)})
+-    const view=await dom();assert.equal(view.rows.length,0);assert.equal(view.canvases,0);assert.equal(view.rows.flatMap(r=>r.executionLinks).length,0)
+- })
+- await record("identity-switch-cancels-pending-capability-projection",async()=>{
+-    await control({mode:"all",capabilityDelay:1200});await page.click("#refresh-native",{label:"start delayed capability request"})
+-    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="capability")})
+-    await page.click("#transport-switch",{label:"switch identity during capability"})
+-    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="capability"&&c.completed)})
+-    const state=await evidence(),view=await dom();assert.equal(view.rows.length,0);assert.equal(view.canvases,0);assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0)
++    const state=await evidence(),view=await dom()
++    assert.equal((await page.evaluate(()=>window.probe.state())).cleared,true,"identity invalidation must clear synchronously")
++    assert.equal(view.rows.length,2);assert(view.rows.every(row=>row.text.includes("fresh-")&&!row.text.includes("old-")))
++    assert.equal(view.canvases,0);assert.equal(view.rows.reduce((sum,row)=>sum+row.executionLinks,0),0)
++    if(kind==="flows")assert(state.calls.filter(c=>c.kind==="capability").every(c=>c.body.targets.every(target=>target.flowId.startsWith("fresh-"))))
++    assert(state.calls.filter(c=>c.kind==="capability").at(-1).body.targets.every(target=>target.flowId.startsWith("fresh-")))
+  })
+  await record("pagination-ignores-older-flow-page-response",async()=>{
+     await control({mode:"all",flowDelay:1200});await page.evaluate(()=>window.probe.loadPage(1))
+@@ -110,6 +116,7 @@ try {
+     await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===2)
+     const state=await evidence();assert.equal(state.calls.filter(c=>c.kind==="capability").length,0);assert.equal(state.calls.filter(c=>c.kind==="latest")[0].body.length,2)
+  })
++ await runRecoveryCases({record,page,control,evidence,dom,assert,baseUrl,diagnostics})
+  for(const relative of sourcePaths)assert.equal(crypto.createHash("sha256").update(await fs.readFile(new URL(relative,import.meta.url))).digest("hex"),inputs[relative],`Input changed during run: ${relative}`)
+  assert.equal(crypto.createHash("sha256").update(await fs.readFile(diagnosticPath)).digest("hex"),inputs["overlay:sdk-browser-diagnostics.cjs"])
+  report.inputsRechecked=true;report.completed=true;report.passedGate=true
+diff --git a/ui/tests/flow-execution-capabilities/check-report.mjs b/ui/tests/flow-execution-capabilities/check-report.mjs
+index 8a5845b..1e0a089 100644
+--- a/ui/tests/flow-execution-capabilities/check-report.mjs
++++ b/ui/tests/flow-execution-capabilities/check-report.mjs
+@@ -1,8 +1,10 @@
++import {STARTUP_CASES, RECOVERY_CASES} from "./lifecycle-cases.mjs"
+ import fs from "node:fs"
+ import crypto from "node:crypto"
+ import {classifyDiagnostics} from "./diagnostics.mjs"
+ const report=JSON.parse(fs.readFileSync(process.argv[2],"utf8"))
+ const expected=[
++ ...STARTUP_CASES,
+  "none-native-list-no-latest-no-chart-no-expected403",
+  "mixed-native-target-row-latest-and-chart",
+  "all-native-allowed-path-preserved",
+@@ -13,25 +15,26 @@ const expected=[
+  "pagination-ignores-older-flow-page-response",
+  "current-page-30s-expiry-rechecks-and-unmounts-revoked-content",
+  "mode-a-native-oss-without-capability-request",
++ ...RECOVERY_CASES,
+ ]
+-if(report.transport!=="explicit-test-transport" || report.locale!=="en" || report.width!==1280 || !report.finishedAt || report.passed!==10
++if(report.transport!=="explicit-test-transport" || report.locale!=="en" || report.width!==1280 || !report.finishedAt || report.passed!==21
+  || !report.completed || !report.passedGate || !report.inputsRechecked || report.notRun!==0
+  || report.cases.some(c=>!c.diagnostics||c.diagnostics.unexpected?.length!==0)
+  || JSON.stringify(report.cases?.map(c=>c.name))!==JSON.stringify(expected) || report.cases.some(c=>c.status!=="passed"||!c.network||!c.dom||!c.finishedAt))
+- throw new Error("Native Flow list report must execute the exact ten cases without failure, skip or notRun")
++ throw new Error("Native Flow list report must execute the exact twenty-one cases without failure, skip or notRun")
+ const covered=new Set()
+ for(const test of report.cases){
+  if(!test.documentId||!Array.isArray(test.eventIds))throw new Error("Missing case document and diagnostic event association")
+  const delta=report.diagnostics.events.filter(event=>test.eventIds.includes(event.id))
+  if(delta.length!==test.eventIds.length||test.eventIds.some(id=>covered.has(id)))throw new Error("Missing or duplicated diagnostic events")
+  test.eventIds.forEach(id=>covered.add(id))
+- const classified=classifyDiagnostics({...report.diagnostics,events:report.diagnostics.events},test.name,test.documentId,new Set(report.diagnostics.events.filter(event=>!test.eventIds.includes(event.id)).map(event=>event.id)))
++ const classified=classifyDiagnostics({...report.diagnostics,events:report.diagnostics.events},test.name,test.documentId,new Set(report.diagnostics.events.filter(event=>!test.eventIds.includes(event.id)).map(event=>event.id)),report.baseUrl)
+  if(classified.unexpected.length||JSON.stringify(classified)!==JSON.stringify(test.diagnostics))throw new Error("Unclassified or forged case diagnostics")
+ }
+ if(report.diagnostics.events.some(event=>["console-error","page-error","http-error","request-failed","diagnostic-integrity-error"].includes(event.kind)&&!covered.has(event.id)))throw new Error("Browser error outside executed cases")
+-const sources=["../../src/components/flows/Flows.vue","../../src/components/flows/useFlowExecutionCapabilities.ts","../../src/stores/executions.ts","./cases.mjs","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./check-report.mjs","../../package-lock.json"]
++const sources=["../../src/components/flows/Flows.vue","../../src/components/flows/useFlowListIdentity.ts","../../src/components/flows/useFlowExecutionCapabilities.ts","../../src/stores/executions.ts","./cases.mjs","./lifecycle-cases.mjs","./main.ts","./transport.ts","./serve.mjs","./diagnostics.mjs","./browser.mjs","./run-browser.mjs","./playwright.mjs","./wait-for-condition.mjs","./wait-for-condition.test.mjs","./check-report.mjs","../../package-lock.json"]
+ if(JSON.stringify(Object.keys(report.inputs??{}))!==JSON.stringify([...sources,"overlay:sdk-browser-diagnostics.cjs"]))throw new Error("Missing exact native source provenance")
+ for(const relative of sources){const sha=crypto.createHash("sha256").update(fs.readFileSync(new URL(relative,import.meta.url))).digest("hex");if(report.inputs[relative]!==sha)throw new Error(`Source changed since browser run: ${relative}`)}
+ const diagnosticPath=process.argv[3]
+ if(!diagnosticPath||report.inputs["overlay:sdk-browser-diagnostics.cjs"]!==crypto.createHash("sha256").update(fs.readFileSync(diagnosticPath)).digest("hex"))throw new Error("Missing or changed host diagnostic collector")
+-console.log(JSON.stringify({suite:"native-flow-execution-capabilities",tests:10,passed:10,failures:0,skipped:0,notRun:0,inputs:report.inputs}))
++console.log(JSON.stringify({suite:"native-flow-execution-capabilities",tests:21,passed:21,failures:0,skipped:0,notRun:0,inputs:report.inputs}))
+diff --git a/ui/tests/flow-execution-capabilities/diagnostics.mjs b/ui/tests/flow-execution-capabilities/diagnostics.mjs
+index 93e56c3..f90f4ef 100644
+--- a/ui/tests/flow-execution-capabilities/diagnostics.mjs
++++ b/ui/tests/flow-execution-capabilities/diagnostics.mjs
+@@ -1,9 +1,9 @@
+ // Shared policy: recognize only exact, source-bound expected failures for this finite test plan.
+-export function classifyDiagnostics(snapshot, caseName, currentDocument, previousIds = new Set()) {
++export function classifyDiagnostics(snapshot, caseName, currentDocument, previousIds = new Set(), baseUrl="http://127.0.0.1:5178") {
+     const errors=snapshot.events.filter(event=>!previousIds.has(event.id)&&["console-error","page-error","http-error","request-failed","diagnostic-integrity-error"].includes(event.kind))
+     const expected=[],unexpected=[]
+-    const exactCapability="http://127.0.0.1:5178/api/v1/main/ui/flows/execution-capabilities"
+-    const exactLatest="http://127.0.0.1:5178/api/v1/main/executions/latest"
++    const exactCapability=`${baseUrl}/api/v1/main/ui/flows/execution-capabilities`
++    const exactLatest=`${baseUrl}/api/v1/main/executions/latest`
+     for(const event of errors){
+         let reason=null
+         const sameDocument=event.documentId===currentDocument
+diff --git a/ui/tests/flow-execution-capabilities/lifecycle-cases.mjs b/ui/tests/flow-execution-capabilities/lifecycle-cases.mjs
+new file mode 100644
+index 0000000..53b5360
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/lifecycle-cases.mjs
+@@ -0,0 +1,103 @@
++export const STARTUP_CASES = [
++ "mode-a-natural-first-load-same-config-in-flight",
++ "mode-a-natural-first-load-same-config-after-commit",
++ "mode-b-natural-first-load-same-config-in-flight",
++ "mode-b-natural-first-load-same-config-after-commit",
++ "unknown-to-mode-a-recovers-delayed-first-load",
++ "unknown-to-mode-b-recovers-delayed-first-load",
++]
++export const RECOVERY_CASES = [
++ "mode-b-to-a-recovers-current-query-with-stale-response",
++ "mode-a-to-b-recovers-current-query-with-stale-response",
++ "tenant-change-recovers-filter-sort-and-page",
++ "logout-suppresses-reload-and-login-recovers",
++ "unmount-cancels-queued-identity-reload",
++]
++export async function runStartupCases({record,page,control,evidence,dom,assert,baseUrl,diagnostics}) {
++ for(const name of STARTUP_CASES) await record(name,async test=>{
++    const modeA=name.includes("mode-a"), unknown=name.startsWith("unknown"), committed=name.endsWith("after-commit")
++    await control({mode:modeA?"all":"none",flowDelay:committed?0:350,rowPrefix:""})
++    await page.goto(`${baseUrl}/main/flows?configAfter=${committed?"committed":"pending"}&initialMode=${unknown?"unknown":String(!modeA)}&finalMode=${!modeA}`)
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return window.probe?.state().configApplied&&window.probe.state().total===2&&s.calls.filter(c=>c.kind==="flows").every(c=>c.completed)})
++    test.documentId=diagnostics.currentDocument()
++    const prefix=unknown?"fresh-":committed?"":"stale-"
++    await page.waitForFunction(expected=>{
++        const rows=[...document.querySelectorAll("tbody tr")]
++        return rows.length===expected.length&&expected.every((target,index)=>{
++            const row=rows[index],links=[...row.querySelectorAll("a")]
++            return row.getClientRects().length>0&&links.some(a=>a.textContent.trim()===target.id)
++                &&links.some(a=>a.textContent.trim()===target.namespace)
++        })
++    },[{id:`${prefix}one`,namespace:"company.sub"},{id:`${prefix}two`,namespace:"other"}])
++    await page.waitForFunction(()=>window.probe.state().nativeRowsReported)
++    if(modeA)await page.waitForFunction(()=>document.querySelectorAll(".row-graph canvas").length===2)
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.every(c=>c.completed)})
++    const state=await evidence(),view=await dom(),flowCalls=state.calls.filter(c=>c.kind==="flows")
++    assert.equal(view.rows.length,2);assert.equal(view.errors.length,0)
++    assert.equal(flowCalls.length,unknown?2:1,"natural first load and only a real change may require compensation")
++    if(unknown)assert(view.rows.every(row=>row.text.includes("fresh-")&&!row.text.includes("stale-")))
++    if(modeA){assert.equal(state.calls.filter(c=>c.kind==="capability").length,0)}
++    else {assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0)}
++ })
++}
++export async function runRecoveryCases({record,page,control,evidence,dom,assert,baseUrl,diagnostics}) {
++ const settled=async(total=2)=>{
++    await page.waitForFunction(async total=>{const s=await fetch("/test/evidence").then(r=>r.json());return window.probe.state().total===total&&s.calls.filter(c=>c.kind==="flows").length>=2&&s.calls.every(c=>c.completed)},total)
++    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
++ }
++ for(const [name,from,to] of [[RECOVERY_CASES[0],true,false],[RECOVERY_CASES[1],false,true]]) await record(name,async test=>{
++    await control({mode:"all",rowPrefix:""})
++    await page.goto(`${baseUrl}/main/flows?configAfter=committed&initialMode=${from}&finalMode=${from}`)
++    await page.waitForFunction(()=>window.probe?.state().configApplied&&window.probe.state().total===2)
++    test.documentId=diagnostics.currentDocument()
++    await control({mode:"all",holdKind:"flows",rowPrefix:"old-"})
++    await page.click('text="Refresh data"',{label:"start old mode request"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows"&&c.held&&!c.completed)})
++    await control({keepCalls:true,mode:to?"none":"all",rowPrefix:"fresh-"})
++    await page.evaluate(async value=>{await window.probe.replaceConfig(value);await fetch("/test/release",{method:"POST"})},to)
++    await settled()
++    const state=await evidence(),view=await dom()
++    assert.equal(view.rows.length,2);assert(view.rows.every(row=>row.text.includes("fresh-")&&!row.text.includes("old-")))
++    if(!to)assert.equal(state.calls.filter(c=>c.kind==="capability").length,0)
++    else assert.equal(state.calls.filter(c=>c.kind==="latest"||c.kind==="chart").length,0)
++ })
++ await record(RECOVERY_CASES[2],async test=>{
++    await control({mode:"none",flowTotal:50})
++    await page.goto(`${baseUrl}/main/flows?page=2&size=25&sort=id:desc&filters[q][EQUALS]=retained`)
++    await page.waitForFunction(()=>window.probe?.state().total===50)
++    test.documentId=diagnostics.currentDocument()
++    await page.evaluate(()=>window.probe.page(2))
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows"&&c.url.includes("page=2")&&c.completed)})
++    assert.equal(await page.evaluate(()=>new URL(location.href).searchParams.get("page")),"2")
++    assert.equal((await evidence()).calls.filter(c=>c.kind==="flows").at(-1).url.includes("page=2"),true)
++    await control({mode:"none",flowTotal:50,holdKind:"flows",rowPrefix:"old-"})
++    await page.click('text="Refresh data"',{label:"start old tenant request"})
++    await page.waitForFunction(async()=>{const s=await fetch("/test/evidence").then(r=>r.json());return s.calls.some(c=>c.kind==="flows"&&c.held&&!c.completed)})
++    await control({keepCalls:true,mode:"none",flowTotal:50,rowPrefix:"fresh-"})
++    const heldQuery=new URL((await evidence()).calls.find(c=>c.kind==="flows"&&c.held&&!c.completed).url,baseUrl).searchParams
++    assert.equal(heldQuery.get("page"),"2");assert.equal(heldQuery.get("sort"),"id:desc");assert.equal(heldQuery.get("filters[q][EQUALS]"),"retained")
++    await page.evaluate(async()=>{await window.probe.tenant();await fetch("/test/release",{method:"POST"})})
++    await settled(50)
++    const state=await evidence(),view=await dom(),query=new URL(state.calls.filter(c=>c.kind==="flows").at(-1).url,baseUrl).searchParams
++    assert.equal(query.get("page"),"2");assert.equal(query.get("sort"),"id:desc");assert.equal(query.get("filters[q][EQUALS]"),"retained")
++    const flowQueries=state.calls.filter(c=>c.kind==="flows").map(c=>new URL(c.url,baseUrl).searchParams)
++    assert.equal(flowQueries.length,2)
++    for(const actual of flowQueries){assert.equal(actual.get("page"),"2");assert.equal(actual.get("sort"),"id:desc");assert.equal(actual.get("filters[q][EQUALS]"),"retained")}
++    assert(view.rows.every(row=>row.text.includes("fresh-")&&!row.text.includes("old-")))
++    assert(state.calls.filter(c=>c.kind==="capability").some(c=>c.body.targets.every(target=>target.tenant==="next")))
++ })
++ await record(RECOVERY_CASES[3],async()=>{
++    await control({mode:"none"})
++    await page.evaluate(()=>window.probe.logout())
++    assert.equal((await dom()).rows.length,0);assert.equal((await evidence()).calls.length,0)
++    await page.evaluate(()=>window.probe.login())
++    await page.waitForFunction(()=>window.probe.state().total===2)
++    assert.equal((await evidence()).calls.filter(c=>c.kind==="flows").length,1)
++ })
++ await record(RECOVERY_CASES[4],async()=>{
++    await control({mode:"none"})
++    await page.evaluate(()=>window.probe.unmountAfterIdentity())
++    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
++    assert.equal((await evidence()).calls.length,0);assert.equal((await dom()).rows.length,0)
++ })
++}
+diff --git a/ui/tests/flow-execution-capabilities/main.ts b/ui/tests/flow-execution-capabilities/main.ts
+index 6ea8114..08b15b6 100644
+--- a/ui/tests/flow-execution-capabilities/main.ts
++++ b/ui/tests/flow-execution-capabilities/main.ts
+@@ -1,4 +1,4 @@
+-import {createApp, h, ref, nextTick} from "vue"
++import {createApp, h, ref, nextTick, onMounted, watch} from "vue"
+ import {createPinia} from "pinia"
+ import {createI18n} from "vue-i18n"
+ import {createRouter, createWebHistory} from "vue-router"
+@@ -6,7 +6,7 @@ import DesignSystem, {registerDesignSystemI18n, setMomentInstance, setDateFormat
+ import moment from "moment-timezone"
+ import {configureClient} from "@kestra-io/kestra-sdk"
+ import Flows from "../../src/components/flows/Flows.vue"
+-import {auth, misc, evidence} from "./transport"
++import {auth, misc, evidence, flow} from "./transport"
+ import {Me} from "../../src/override/stores/auth"
+ import en from "../../src/translations/en.json"
+ import "element-plus/dist/index.css"
+@@ -17,22 +17,34 @@ const router = createRouter({history: createWebHistory(), routes: [
+     {name: "flows/list", path: "/:tenant/flows", component: {render: () => null}},
+     ...["flows/update", "namespaces/update", "executions/update", "flows/create", "flows/search"].map((name, i) => ({name, path: `/target${i}/:id?`, component: {render: () => null}})),
+ ]})
+-await router.push("/main/flows")
++await router.push(location.pathname + location.search)
+ await router.isReady()
++const startup = new URLSearchParams(location.search)
++if (startup.has("configAfter")) misc.configs.flowExecutionCapabilitiesRequired = startup.get("initialMode") === "unknown" ? undefined as any : startup.get("initialMode") === "true"
+ const native = ref<any>()
+ const component = {
+     setup() {
++        const visible = ref(true)
++        watch(() => flow.flows, rows => {if(rows.length) {evidence.nativeRowsReported=false;void fetch("/test/native-rows", {method:"POST"}).then(r=>r.json()).then(()=>{evidence.nativeRowsReported=true})}}, {flush:"sync"})
++        onMounted(() => {
++            if(startup.has("configAfter")) void fetch(`/test/configs?after=${startup.get("configAfter")}&mode=${startup.get("finalMode")}&initial=${startup.get("initialMode")}`).then(r=>r.json()).then(config=>{misc.configs=config;evidence.configApplied=true})
++        })
+         let pendingPages = 0
+         const load = () => native.value.$.setupState.loadData({page: 1, size: 25})
+         const loadPage = (page: number) => {pendingPages++;void native.value.$.setupState.loadData({page, size: 25}).finally(() => {pendingPages--})}
+-        ;(window as any).probe = {load, loadPage, pendingPages: () => pendingPages, async switchAccount() {auth.user = new Me(); await nextTick()}, async mode(value: boolean) {misc.configs.flowExecutionCapabilitiesRequired = value; await nextTick()}, errors: evidence.errors, errorList: () => [...evidence.errors], clearErrors: () => {evidence.errors.splice(0)},
++        ;(window as any).probe = {load, loadPage, pendingPages: () => pendingPages, async switchAccount() {auth.user = new Me(); evidence.cleared=flow.flows.length===0&&flow.total===0; await nextTick()}, async mode(value: boolean) {misc.configs.flowExecutionCapabilitiesRequired = value; await nextTick()}, async replaceConfig(value: boolean | undefined) {misc.configs={...misc.configs,flowExecutionCapabilitiesRequired:value as any};await nextTick()},
++            async logout() {auth.isLogged=false;await nextTick()}, async login() {auth.isLogged=true;await nextTick()},
++            async page(value:number) {await router.push({query:{...router.currentRoute.value.query,page:String(value)}})},
++            async tenant() {await router.push({params:{tenant:"next"},query:router.currentRoute.value.query})},
++            async unmountAfterIdentity() {auth.user=new Me();visible.value=false;await nextTick()},
++            state: () => ({rows:flow.flows,total:flow.total,cleared:evidence.cleared,configApplied:evidence.configApplied,nativeRowsReported:evidence.nativeRowsReported}), errors: evidence.errors, errorList: () => [...evidence.errors], clearErrors: () => {evidence.errors.splice(0)},
+             mountedCharts: () => document.querySelectorAll(".row-graph canvas").length}
+         const setMode = async (mode: string) => {await fetch("/test/control", {method: "POST", body: JSON.stringify({mode, flowDelay: 0, latestDelay: 0, capabilityDelay: 0})}); await load()}
+         return () => h("main", [h("nav", {"aria-label": "Explicit test transport controls"}, [
+             ...["none", "mixed", "all", "failure"].map(mode => h("button", {id: `transport-${mode}`, onClick: () => setMode(mode)}, mode)),
+             h("button", {id: "transport-switch", onClick: () => (window as any).probe.switchAccount()}, "Switch test identity"),
+         ]), h("p", {id: "test-transport"}, "0404a native Flow list / explicit test transport / no production identity"),
+-            h("button", {id: "refresh-native", onClick: load}, "Refresh native list"), h(Flows, {ref: native, topbar: false, fitHeight: false})])
++            h("button", {id: "refresh-native", onClick: load}, "Refresh native list"), visible.value ? h(Flows, {ref: native, topbar: false, fitHeight: false}) : null])
+     },
+ }
+ const app = createApp(component)
+diff --git a/ui/tests/flow-execution-capabilities/playwright.mjs b/ui/tests/flow-execution-capabilities/playwright.mjs
+index c7e71a3..8faaa42 100644
+--- a/ui/tests/flow-execution-capabilities/playwright.mjs
++++ b/ui/tests/flow-execution-capabilities/playwright.mjs
+@@ -1,3 +1,4 @@
++import {waitForCondition} from "./wait-for-condition.mjs"
+ import {chromium} from "playwright"
+ import path from "node:path"
+ import {runNativeFlowListPlan} from "./cases.mjs"
+@@ -10,8 +11,8 @@ const diagnostics=createDiagnostics(await context.newCDPSession(nativePage))
+ await diagnostics.attach()
+ const page={
+  viewport:async()=>{},goto:(...args)=>nativePage.goto(...args),click:(selector)=>nativePage.click(selector),
+- waitForSelector:(...args)=>nativePage.waitForSelector(...args),waitForFunction:(...args)=>nativePage.waitForFunction(...args),evaluate:(...args)=>nativePage.evaluate(...args),
++ waitForSelector:(...args)=>nativePage.waitForSelector(...args),waitForFunction:(...args)=>waitForCondition(nativePage,...args),evaluate:(...args)=>nativePage.evaluate(...args),
+  screenshot:(...args)=>nativePage.screenshot(...args),snapshot:()=>nativePage.locator("body").innerText(),
+ }
+-try {await runNativeFlowListPlan({page,diagnostics,diagnosticPath,reportRoot:path.resolve(process.argv[2]??"../../reports/browser-playwright")})}
++try {await runNativeFlowListPlan({baseUrl:`http://127.0.0.1:${process.env.FLOW_BROWSER_PORT ?? 5178}`,page,diagnostics,diagnosticPath,reportRoot:path.resolve(process.argv[2]??"../../reports/browser-playwright")})}
+ finally {await browser.close()}
+diff --git a/ui/tests/flow-execution-capabilities/run-browser.mjs b/ui/tests/flow-execution-capabilities/run-browser.mjs
+index 0bd60c1..8cc52f8 100644
+--- a/ui/tests/flow-execution-capabilities/run-browser.mjs
++++ b/ui/tests/flow-execution-capabilities/run-browser.mjs
+@@ -5,5 +5,5 @@ const area=path.dirname(new URL(import.meta.url).pathname)
+ const reportRoot=path.resolve(process.argv[2] ?? "../../reports/browser")
+ const browserSpace=process.argv[3] ? Number(process.argv[3]) : null
+ const diagnosticPath=path.resolve(process.argv[4]??"../../../scripts/sdk-browser-diagnostics.cjs")
+-const input=`const diagnosticPath=${JSON.stringify(diagnosticPath)}; const {runNativeFlowListPlan}=await import(${JSON.stringify(new URL("./cases.mjs",import.meta.url).href)}); const reportRoot=${JSON.stringify(reportRoot)}; const browserSpace=${JSON.stringify(browserSpace)};\n`+fs.readFileSync(path.join(area,"browser.mjs"),"utf8")
++const input=`const diagnosticPath=${JSON.stringify(diagnosticPath)}; const {runNativeFlowListPlan}=await import(${JSON.stringify(new URL("./cases.mjs",import.meta.url).href)}); const reportRoot=${JSON.stringify(reportRoot)}; const browserSpace=${JSON.stringify(browserSpace)}; const baseUrl=${JSON.stringify(`http://127.0.0.1:${process.env.FLOW_BROWSER_PORT ?? 5178}`)};\n`+fs.readFileSync(path.join(area,"browser.mjs"),"utf8")
+ process.stdout.write(execFileSync("ego-browser",["nodejs"],{input,encoding:"utf8",maxBuffer:8*1024*1024}))
+diff --git a/ui/tests/flow-execution-capabilities/serve.mjs b/ui/tests/flow-execution-capabilities/serve.mjs
+index c2be2a1..48adf12 100644
+--- a/ui/tests/flow-execution-capabilities/serve.mjs
++++ b/ui/tests/flow-execution-capabilities/serve.mjs
+@@ -14,7 +14,15 @@ const mockIds = new Map(stores.map(p => [path.join(root,p), "\0flow-probe-transp
+ mockIds.set(path.join(root,"src/override/stores/auth"), "\0flow-probe-auth")
+ const read = async req => {let text=""; for await(const part of req)text+=part;return text ? JSON.parse(text) : {}}
+ const json = (res, body, status=200) => {res.statusCode=status;res.setHeader("Content-Type","application/json");res.end(JSON.stringify(body))}
+-const server = await createServer({configFile: false, root, mode: "test", server: {host:"127.0.0.1",port: 5178,strictPort:true,fs:{allow:[root]}},
++const held = new Set()
++const hold = async record => {
++    if(state.holdKind!==record.kind)return
++    record.held=true;held.add(record)
++    const deadline=Date.now()+30000
++    while(!record.released){if(Date.now()>deadline)throw new Error("Held request was not explicitly released");await new Promise(resolve=>setTimeout(resolve,10))}
++    held.delete(record)
++}
++const server = await createServer({configFile: false, root, mode: "test", server: {host:"127.0.0.1",port: Number(process.env.FLOW_BROWSER_PORT ?? 5178),strictPort:true,fs:{allow:[root]}},
+     resolve: {alias: [{find:"override",replacement:path.join(root,"src/override")}],dedupe:["vue","vue-router","pinia","vue-i18n","echarts"]},
+     define: {"window.KESTRA_BASE_PATH": JSON.stringify("")},
+     plugins: [{name:"explicit-flow-test-transport", enforce:"pre",
+@@ -37,17 +45,25 @@ const server = await createServer({configFile: false, root, mode: "test", server
+         },
+         configureServer(server) {server.middlewares.use(async(req,res,next)=>{
+             try {
+-                if(req.url.startsWith("/test/control")){Object.assign(state,await read(req));state.calls=[];return json(res,{ok:true})}
++                if(req.url.startsWith("/test/control")){const change=await read(req);if(!change.keepCalls)state.calls=[];Object.assign(state,change);state.nativeRows=false;state.configReturned=false;return json(res,{ok:true})}
++                if(req.url.startsWith("/test/native-rows")){state.nativeRows=true;return json(res,{ok:true})}
++                if(req.url.startsWith("/test/configs")){
++                    const query=new URL(req.url,"http://localhost").searchParams;
++                    const deadline=Date.now()+10000;
++                    while(!(query.get("after")==="committed"?state.nativeRows:state.calls.some(c=>c.kind==="flows"))){if(Date.now()>deadline)throw new Error("Native first load did not reach config barrier");await new Promise(resolve=>setTimeout(resolve,10))}
++                    if(query.get("initial")==="unknown"){state.rowPrefix="fresh-";state.flowDelay=0}state.configReturned=true;return json(res,{flowExecutionCapabilitiesRequired:query.get("mode")==="true",chartDefaultDuration:"PT24H"})
++                }
++                if(req.url.startsWith("/test/release")){for(const record of held)record.released=true;return json(res,{ok:true})}
+                 if(req.url.startsWith("/test/evidence"))return json(res,state)
+-                if(req.url.startsWith("/test/flows")){const record={kind:"flows",url:req.url,completed:false};state.calls.push(record);const copy=structuredClone(rows);if(req.url.includes("page=1")&&state.flowDelay>0)copy.forEach(row=>row.id="stale-"+row.id);const delay=state.flowDelay;await new Promise(r=>setTimeout(r,delay));record.completed=true;return json(res,{results:copy,total:2})}
++                if(req.url.startsWith("/test/flows")){const record={kind:"flows",url:req.url,prefix:state.rowPrefix??"",completed:false};state.calls.push(record);const page=Number(new URL(req.url,"http://localhost").searchParams.get("page"));const copy=state.flowTotal===50?Array.from({length:25},(_,index)=>({...structuredClone(rows[index%2]),id:`page${page}-${index+1}`})):structuredClone(rows);if(state.rowPrefix)copy.forEach(row=>row.id=state.rowPrefix+row.id);if(req.url.includes("page=1")&&state.flowDelay>0)copy.forEach(row=>row.id="stale-"+row.id);const total=state.flowTotal??2;const delay=state.flowDelay;await hold(record);await new Promise(r=>setTimeout(r,delay));record.completed=true;return json(res,{results:copy,total})}
+                 if(req.url.startsWith("/api/v1/main/ui/flows/execution-capabilities")){
+                     const body=await read(req);const record={kind:"capability",body,completed:false,status:200};state.calls.push(record);const mode=state.mode,delay=state.capabilityDelay;
+-                    await new Promise(r=>setTimeout(r,delay));record.completed=true;if(mode==="failure"){record.status=503;return json(res,{code:"AUTHORIZATION_UNAVAILABLE"},503)}
++                    await hold(record);await new Promise(r=>setTimeout(r,delay));record.completed=true;if(mode==="failure"){record.status=503;return json(res,{code:"AUTHORIZATION_UNAVAILABLE"},503)}
+                     return json(res,{formatVersion:1,results:body.targets.map(t=>({...t,capabilities:Object.fromEntries(t.capabilities.map(c=>[c,mode==="all"||mode==="mixed"&&t.namespace==="company.sub"?"AVAILABLE":"UNAVAILABLE"]))}))})
+                 }
+                 if(req.url.includes("/executions/latest")){
+                     const body=await read(req);const record={kind:"latest",body,completed:false,status:200};state.calls.push(record);const mode=state.mode,delay=state.latestDelay;
+-                    await new Promise(r=>setTimeout(r,delay));record.completed=true;if(mode==="none"){record.status=403;return json(res,{message:"denied"},403)}
++                    await hold(record);await new Promise(r=>setTimeout(r,delay));record.completed=true;if(mode==="none"){record.status=403;return json(res,{message:"denied"},403)}
+                     return json(res,body.map(t=>({id:`execution-${t.id}`,flowId:t.id,namespace:t.namespace,startDate:"2026-11-19T00:00:00Z",status:"SUCCESS"})))
+                 }
+                 if(req.url.includes("/dashboards/charts/preview")){
+@@ -60,4 +76,4 @@ const server = await createServer({configFile: false, root, mode: "test", server
+         })},
+     },vue()],css:{preprocessorOptions:{scss:{silenceDeprecations:["legacy-js-api","import","global-builtin","color-functions"]}}}})
+ await server.listen()
+-console.log("0404a explicit transport native Flows.vue at http://127.0.0.1:5178")
++console.log(`0404a explicit transport native Flows.vue at http://127.0.0.1:${process.env.FLOW_BROWSER_PORT ?? 5178}`)
+diff --git a/ui/tests/flow-execution-capabilities/transport.ts b/ui/tests/flow-execution-capabilities/transport.ts
+index a69b4f1..f38ce77 100644
+--- a/ui/tests/flow-execution-capabilities/transport.ts
++++ b/ui/tests/flow-execution-capabilities/transport.ts
+@@ -1,11 +1,11 @@
+ import {reactive} from "vue"
+ import {Me} from "../../src/override/stores/auth"
+-export const evidence = reactive({errors: [] as string[]})
++export const evidence = reactive({errors: [] as string[], cleared:false, configApplied:false, nativeRowsReported:false})
+ export const auth = reactive({user: new Me(), isLogged: true})
+ export const misc = reactive({configs: {flowExecutionCapabilitiesRequired: true, chartDefaultDuration: "PT24H"}})
+ export const flow = reactive({flows: [] as any[], total: 0,
+     async findFlows(options: any) {
+-        const response = await fetch(`/test/flows?page=${options.page}`).then(r => r.json())
++        const response = await fetch(`/test/flows?${new URLSearchParams(Object.entries(options).filter(([key])=>key!=="commit").map(([key,value])=>[key,String(value)]))}`).then(r => r.json())
+         if (options.commit !== false) {flow.flows = response.results; flow.total = response.total}
+         return response
+     },
+diff --git a/ui/tests/flow-execution-capabilities/wait-for-condition.mjs b/ui/tests/flow-execution-capabilities/wait-for-condition.mjs
+new file mode 100644
+index 0000000..cf85d26
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/wait-for-condition.mjs
+@@ -0,0 +1,21 @@
++export async function waitForCondition(page, predicate, argument, options = {}) {
++    const timeout = options.timeout ?? 30000
++    if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("A finite positive condition timeout is required")
++    const deadline = Date.now() + timeout
++    while (true) {
++        const remaining = deadline - Date.now()
++        if (remaining <= 0) throw new Error(`Condition timed out after ${timeout}ms at ${page.url()}`)
++        let timer
++        try {
++            const value = await Promise.race([
++                page.evaluate(predicate, argument),
++                new Promise((_, reject) => {timer = setTimeout(() => reject(new Error(`Condition timed out after ${timeout}ms at ${page.url()}`)), remaining)}),
++            ])
++            if (value === true) return true
++        } finally {
++            clearTimeout(timer)
++        }
++        if (Date.now() >= deadline) throw new Error(`Condition timed out after ${timeout}ms at ${page.url()}`)
++        await page.waitForTimeout(Math.min(25, deadline - Date.now()))
++    }
++}
+diff --git a/ui/tests/flow-execution-capabilities/wait-for-condition.test.mjs b/ui/tests/flow-execution-capabilities/wait-for-condition.test.mjs
+new file mode 100644
+index 0000000..ed4537c
+--- /dev/null
++++ b/ui/tests/flow-execution-capabilities/wait-for-condition.test.mjs
+@@ -0,0 +1,34 @@
++import {test} from "node:test"
++import assert from "node:assert/strict"
++import {waitForCondition} from "./wait-for-condition.mjs"
++const page = evaluate => ({evaluate, url:()=>"data:text/html,offline-condition-probe", waitForTimeout:delay=>new Promise(resolve=>setTimeout(resolve,delay))})
++test("awaits async false then true and forwards the argument",async()=>{
++    let attempts=0
++    const result=await waitForCondition(page(async(fn,arg)=>{await new Promise(resolve=>setTimeout(resolve,2));attempts++;return fn(arg,attempts)}),(expected,attempt)=>attempt>=expected,3,{timeout:500})
++    assert.equal(result,true);assert.equal(attempts,3)
++})
++test("async false times out instead of treating a Promise as success",async()=>{
++    let attempts=0
++    await assert.rejects(waitForCondition(page(async()=>{attempts++;return false}),()=>false,undefined,{timeout:60}),/Condition timed out after 60ms at data:/)
++    assert(attempts>=2)
++})
++test("only literal true succeeds",async()=>{
++    let attempts=0
++    await waitForCondition(page(async()=>++attempts===3?true:{truthy:true}),()=>true,undefined,{timeout:500})
++    assert.equal(attempts,3)
++})
++test("propagates predicate and document errors without retrying",async()=>{
++    for(const message of ["predicate failure","Execution context was destroyed"]){
++        const failure=new Error(message);let attempts=0
++        await assert.rejects(waitForCondition(page(async()=>{attempts++;throw failure}),()=>false),error=>error===failure)
++        assert.equal(attempts,1)
++    }
++})
++test("bounds a predicate which never settles",async()=>{
++    const started=Date.now()
++    await assert.rejects(waitForCondition(page(()=>new Promise(()=>{})),()=>false,undefined,{timeout:40}),/Condition timed out/)
++    assert(Date.now()-started<1000)
++})
++test("rejects unlimited or invalid deadlines",async()=>{
++    for(const timeout of [0,-1,Infinity,NaN])await assert.rejects(waitForCondition(page(async()=>true),()=>true,undefined,{timeout}),/finite positive/)
++})

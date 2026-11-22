@@ -714,3 +714,21 @@ custom/未知定义未支持；Concurrency待独立typed分类，本批不算支
 物理HTTP取消。可信业务API继续最终授权。契约、来源与验收门见r-ee-rbac及README。
 独立CI artifact native-flow-detail-browser锁定37具名用例、源码/runner/readiness及纯诊断
 checker，失败留存；实际生产授权与副作用由部署仓验证，不进入宿主CI。
+
+
+### REQ-0406 原生 Flow 首屏与身份失效补偿（2026-11-23，入口 C 已接收，候选未发布）
+
+正式 84fe614 的 0404 单 getter 返回数组，misc configs 同值替换也触发身份失效；
+路由守卫先加载配置，App 的异步通用资源初始化再次替换对象，导致列表清空或在途结果
+因 generation 变化被丢弃。原表格不因 data 清空自动查询。模式 A/B 均有生产失败证据。
+最小候选使用独立 watch 来源按值比较；真正身份、tenant、登录或模式变化同步失效，
+已挂载且身份与模式有效时合并补偿当前表格查询。挂载前的变化保留 pending；卸载和
+退出禁止补偿。能力未知仍失败关闭，旧响应仍受 pageGeneration 约束，不新增 SPI 或策略。
+新增自然首屏测试按父组件异步 configs 与子表格原生 mount 加载时序验证模式 A/B，
+不得用手动刷新替代首屏成功；原十项保留并增加新身份恢复检查。具名输入和实际结果见
+r-ee-rbac.md 顶部接收段及当前独占目录的定向报告。正式发布与生产组合仍由主控验收。
+
+0406 CI适配补足：原生列表与必需详情门的Playwright适配器共用有界异步条件helper，
+await页面evaluate且仅true成功；保留原21/37业务断言和异常分类。helper/test均进入两门
+SOURCE输入锁，正式入口实际运行6项离线反例。未改SDK和onboarding驱动：本轮只读核对
+未发现其使用同类async waitForFunction路径，不由此扩大其已验证范围。
