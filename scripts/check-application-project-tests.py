@@ -54,6 +54,15 @@ INITIAL_ACCOUNT_REQUIRED = {
     "io.kestra.webserver.oidc.OidcInstallationReceiptTest": 2,
 }
 
+MCP_BACKGROUND_REFRESH_REQUIRED = {
+    "modeABackgroundRefreshDoesNotInheritCallerConnectionOrAuthorization",
+    "modeBBackgroundRefreshDoesNotInheritCallerConnectionOrAuthorization",
+    "refreshReadsAfterCallerConnectionClosesAndSubscriptionOccursElsewhere",
+    "concurrentCallerConnectionsRemainSeparateFromBackgroundReads",
+    "backgroundSqlFailureDoesNotCloseOrReplaceCallerConnection",
+    "subscriptionIsLazyAndCloseEvictsServerWithoutLaterRefreshReads",
+}
+
 REQUIRED = {
     "io.kestra.webserver.oidc.OidcBookmarkReturnTest": 6,
     "io.kestra.webserver.oidc.OidcBookmarkContextTest": 2,
@@ -84,6 +93,7 @@ REQUIRED = {
     "io.kestra.webserver.oidc.OauthAuthorizationErrorRoutingTest": 6,
     "io.kestra.mcp.McpCallDiagnosticTest": 1,
     "io.kestra.mcp.McpAsyncIdentityContextTest": 5,
+    "io.kestra.mcp.McpBackgroundRefreshContextTest": len(MCP_BACKGROUND_REFRESH_REQUIRED),
     "io.kestra.webserver.oidc.TrustedIdentityV1Test": 1,
     "io.kestra.webserver.oidc.ApplicationGroupScopeIssuanceTest": 4,
     "io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1Test": 5,
@@ -118,6 +128,10 @@ def check(results, required=None):
             names = [case.get("name", "").removesuffix("()") for case in report.findall("testcase")]
             if len(names) != len(MCP_LIFECYCLE_REQUIRED) or set(names) != MCP_LIFECYCLE_REQUIRED:
                 raise SystemExit("FAIL: MCP lifecycle must execute all seventeen exact named cases")
+        if suite == "io.kestra.mcp.McpBackgroundRefreshContextTest":
+            names = [case.get("name", "").removesuffix("()") for case in report.findall("testcase")]
+            if len(names) != len(MCP_BACKGROUND_REFRESH_REQUIRED) or set(names) != MCP_BACKGROUND_REFRESH_REQUIRED:
+                raise SystemExit("FAIL: MCP background refresh must execute all six exact named cases")
         if suite == "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest":
             names = [case.get("name", "").removesuffix("()") for case in report.findall("testcase")]
             if len(names) != len(MCP_TRANSPORT_REQUIRED) or set(names) != MCP_TRANSPORT_REQUIRED:

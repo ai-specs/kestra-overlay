@@ -1,8 +1,61 @@
-## REQ-0406：Flow 首屏配置重载与身份失效补偿（2026-11-23，入口 C 已接收，未发布）
+## REQ-0407：MCP 后台工具刷新隔离调用方连接上下文（2026-11-23，已授权实施，未发布）
 
-本节发布事实优先于下方历史候选记录：0405 已随宿主 `84fe614` / CI `44463537757`
-五个 job 成功并推广镜像，主控已下载审计；0406 仍未发布。下方 0404a/b 候选标题保留
-接收时的历史状态，不能用于否定该正式输入，也不能证明本次修复或生产组合已通过。
+消费项目为 `kestra-plugin-rbac`，但修复归宿主后台机制，不引入插件业务模型或权限例外。
+部署仓 CI `45092941429` 使用正式宿主 `e27864c` 与插件 `3645f7b`，在
+wrong-application-group 检查期间，01:35:33 后台刷新报告 Connection is closed；
+01:36:12 刷新查询被取消，随后 FlowInterface 队列查询报告 transaction aborted 并触发
+宿主 fatal 关闭。原始证据为部署仓报告 `fragments.hostFatalDiagnostics`、
+`hostExitDiagnostics` 及对应 queue-fatal 摘要。未执行 dependencyFault 表改名。
+
+独立 H2 机制复现使用真实 ApplicationContext、Micronaut ConnectionOperations.executeRead、
+真实 McpServerHandlerTransport.refreshTools 和 McpToolService spy。调用方 Test worker
+持有的 Connection 与 boundedElastic 后台读取的 Connection 是同一 Java 对象，后台同时
+继承 PropagatedContext marker。安全隔离断言原实现红：1失败、0跳过；在后台发布与订阅
+边界使用 empty PropagatedContext 的对照绿：1通过、0跳过。证据位于本仓忽略目录
+`.work/queue-context-20261123/logs/run-red.log`、`run-empty.log` 及对应 XML。
+这证明连接上下文传播机制；未用 H2 冒充 PostgreSQL 取消、fatal 或生产组合验收。
+取消请求的最初来源、CI 中实际连接身份及同步 findRevisions 的责任尚未由该探针证明。
+
+0170 的 subscribeOn 只改变线程，Micronaut 自动传播仍携带 ConnectionStatus；0366 仅验证
+工具调用身份路径，不能覆盖后台刷新。最小接收范围为 0407：后台工具刷新发布和订阅必须
+显式采用空 PropagatedContext，不继承队列连接、事务、授权 evaluation 或 HTTP request；
+tenant/server 参数显式捕获不变。工具调用的可信身份和权限路径不变，不增加公共 SPI。
+模式 A/B 均适用。错误继续按既有 Mono 错误信号交付；不得修改队列 fatal、重试、自动重启
+或拒绝断言。已有并发 server 注册、工具更新与关闭生命周期必须保留。
+
+宿主定向门覆盖调用方关闭后后台实际读取、并发隔离、业务错误不污染调用方连接、模式
+A/B 和后台上下文清理，新增6项与既有15项共21项通过。生产变更仅限 refreshTools；
+0170 原调度块交由0407接管，其他文件段逐字节不变。63补丁重放444文件与已测源码
+逐字节一致，结构检查17/0，独立索引 cached diff 检查退出0，不使用空白或来源豁免。
+
+本地验证（2026-11-23）：完整原 local-ci 退出0，脚本自测30、后端631项零失败/错误、
+其中2项既有镜像专用 assume 不计通过；core3、UI153、翻译/构建与 executable 通过。
+本机 arm64 候选镜像 ID 为
+`sha256:36da750c7cbbe8a0dfeabc3fc05be49dfc10b24af6983263543a5019286ec96f`，
+实际提取 executable 的 SHA-256 为
+`68822c4eb9dccd8e660e87c43d239086e4885ce15e704dbcd1ba6c8f3fba8c21`，
+与本轮构建一致；镜像内532个UI资源与10个公开SDK资源逐hash一致，零内置插件jar。
+classpath、OIDC35、MCP4份XML（含原镜像专用检查）、form、env串行通过；form/env
+分别归档11份认证报告与截图，每门结束核对本owner容器、网络、卷为空。原生列表21与
+详情37零失败/跳过/未运行；显式测试transport不代表生产身份、数据库或插件组合。
+本轮镜像公开输入SDK949/949、geometry64/64通过，零失败/跳过/未运行；最终审计通过。
+
+完整报告位于忽略目录 `.work/queue-context-20261123/`。正式CI、双架构发布、镜像推广
+及部署仓生产组合验收均未执行。候选未发布，不得作为正式插件编译输入或生产版本。
+
+证据保留限制：原完整 local-ci 的631项后端XML未在MCP镜像门覆盖前封存。原运行日志
+及主控当时读取的计数审计保留，但摘要不能代替原XML。随后原后端完整选择命令实际
+单独重跑，134份XML（631项、零失败/错误、2项既有镜像专用跳过）保存于
+`backend-retest-xml/`，命令与日志位于 `logs/backend-rearchive-command.sh` 和
+`logs/backend-rearchive.log`。这些是相关后端重测，不冒称原完整门报告，也不与原门
+core/UI报告拼接为一次新完整运行。原core3、UI153报告另存于 `fullci-evidence/`。
+
+## REQ-0406：Flow 首屏配置重载与身份失效补偿（2026-11-23，正式发布；下文保留接收记录）
+
+本节发布事实优先于下方历史候选记录：0406 已随宿主 `e27864c` / CI `45069032782`
+正式发布，digest `sha256:116c5503bbca8b889c65de95ae86afdf196be461f1201dabda7e5f2fc8b492f8`。
+0405 已随宿主 `84fe614` / CI `44463537757` 发布。下方候选标题保留接收时的历史状态，
+不能用于否定正式输入，也不能证明本轮0407候选已发布或生产组合通过。
 
 消费项目为 `kestra-plugin-rbac`。主控在正式宿主 `84fe614` / 镜像 digest
 `sha256:e53cee7718204388fdf3da2460ed0a191446298ce1bd0b98fd8f392daa297a69`

@@ -1,0 +1,274 @@
+# 需求: REQ-0407 MCP后台工具刷新隔离调用方连接与授权上下文
+# 消费扩展仓: ai-specs/kestra-plugin-rbac
+# 状态: core；定向H2验证，完整CI与发布未执行
+# 来源: CI45092941429正式e27864c失败与真实Micronaut/H2同Connection红复现；独占Git增量生成
+# 触达上游文件: 2 个（宿主刷新方法与独立H2回归测试）
+# 移除条件: 上游提供等价MCP后台刷新发布与订阅的空上下文隔离
+diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
+index 3afc739f28dcaf5e1c8434eed498cbe1b4b77b2d..19d8f02e98ac7e32ec368e176a734904ba4afbda 100644
+--- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
++++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
+@@ -110,9 +110,15 @@ public class McpServerHandlerTransport {
+     }
+
+     public Mono<Void> refreshTools(String tenantId, String serverId) {
+-        return Flux.fromIterable(keysFor(tenantId, serverId))
+-            .concatMap(key -> Optional.ofNullable(servers.get(key)).map(this::refreshTools).orElseGet(Mono::empty))
+-            .then();
++        var background = io.micronaut.core.propagation.PropagatedContext.empty();
++        try (var ignored = background.propagate()) {
++            return Mono.from(io.micronaut.core.async.propagation.ReactivePropagation.propagate(background,
++                Flux.defer(() -> Flux.fromIterable(keysFor(tenantId, serverId)))
++                    .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
++                    .concatMap(key -> Optional.ofNullable(servers.get(key)).map(this::refreshTools).orElseGet(Mono::empty))
++                    .then()))
++                .contextWrite(context -> io.micronaut.core.async.propagation.ReactorPropagation.addPropagatedContext(context, background));
++        }
+     }
+
+     public Mono<Void> evictAndNotify(String tenantId, String serverId) {
+diff --git a/webserver/src/test/java/io/kestra/mcp/McpBackgroundRefreshContextTest.java b/webserver/src/test/java/io/kestra/mcp/McpBackgroundRefreshContextTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a3de09d36d56dd1c33e902424410edcd1baee9b
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/mcp/McpBackgroundRefreshContextTest.java
+@@ -0,0 +1,239 @@
++package io.kestra.mcp;
++
++import java.sql.Connection;
++import java.time.Duration;
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Supplier;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.kestra.core.runners.FlowInputOutput;
++import io.kestra.core.runners.FlowMetaStoreInterface;
++import io.kestra.core.services.ExecutionOutputService;
++import io.kestra.core.services.ExecutionStreamingService;
++import io.kestra.webserver.mcp.McpCapabilityGate;
++import io.micronaut.context.ApplicationContext;
++import io.micronaut.context.event.ApplicationEventPublisher;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++import io.micronaut.data.connection.ConnectionOperations;
++import io.micronaut.http.HttpRequest;
++import io.modelcontextprotocol.server.McpServerFeatures;
++import jakarta.inject.Inject;
++import org.junit.jupiter.api.Test;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments = "h2")
++class McpBackgroundRefreshContextTest {
++    record JdbcMarker(String value) implements PropagatedContextElement {}
++
++    @Inject ConnectionOperations<Connection> connections;
++    @Inject ApplicationContext applicationContext;
++
++    @Test
++    void modeABackgroundRefreshDoesNotInheritCallerConnectionOrAuthorization() {
++        assertIsolation(false);
++    }
++
++    @Test
++    void modeBBackgroundRefreshDoesNotInheritCallerConnectionOrAuthorization() {
++        assertIsolation(true);
++    }
++
++    private void assertIsolation(boolean enabled) {
++        try (var fixture = new RefreshFixture(enabled)) {
++            var original = new AtomicReference<Connection>();
++            fixture.read = () -> {
++                assertClean();
++                assertThat(Thread.currentThread().getName()).startsWith("boundedElastic-");
++                connections.executeRead(status -> {
++                    assertThat(status.getConnection()).isNotSameAs(original.get());
++                    assertThat(readOne(status.getConnection())).isEqualTo(1);
++                    return null;
++                });
++                return List.of();
++            };
++            connections.executeRead(status -> {
++                original.set(status.getConnection());
++                try (var ignored = caller("queue").propagate()) {
++                    fixture.transport.refreshTools("main", "default").block(Duration.ofSeconds(10));
++                    assertThat(connections.getConnectionStatus().getConnection()).isSameAs(original.get());
++                    assertThat(PropagatedContext.getOrEmpty().find(JdbcMarker.class)).isPresent();
++                }
++                return null;
++            });
++            verify(fixture.service).listToolSpecsForServer(eq("main"), eq("default"), any());
++        }
++    }
++
++    @Test
++    void refreshReadsAfterCallerConnectionClosesAndSubscriptionOccursElsewhere() {
++        try (var fixture = new RefreshFixture(false)) {
++            var original = new AtomicReference<Connection>();
++            var operation = connections.executeRead(status -> {
++                original.set(status.getConnection());
++                try (var ignored = caller("assembly").propagate()) {
++                    return fixture.transport.refreshTools("main", "default");
++                }
++            });
++            assertThat(original.get()).satisfies(connection -> {
++                try { assertThat(connection.isClosed()).isTrue(); }
++                catch (java.sql.SQLException exception) { throw new IllegalStateException(exception); }
++            });
++            fixture.read = () -> {
++                assertClean();
++                return connections.executeRead(status -> {
++                    assertThat(status.getConnection()).isNotSameAs(original.get());
++                    assertThat(readOne(status.getConnection())).isEqualTo(1);
++                    return List.of();
++                });
++            };
++            try (var ignored = caller("subscription").propagate()) {
++                operation.block(Duration.ofSeconds(10));
++            }
++        }
++    }
++
++    @Test
++    void concurrentCallerConnectionsRemainSeparateFromBackgroundReads() throws Exception {
++        try (var fixture = new RefreshFixture(true); var executor = Executors.newFixedThreadPool(2)) {
++            var entered = new CountDownLatch(2);
++            var release = new CountDownLatch(1);
++            var originals = new java.util.concurrent.CopyOnWriteArrayList<Connection>();
++            fixture.read = () -> {
++                assertClean();
++                entered.countDown();
++                await(release);
++                return connections.executeRead(status -> {
++                    assertThat(originals).doesNotContain(status.getConnection());
++                    assertThat(readOne(status.getConnection())).isEqualTo(1);
++                    return List.of();
++                });
++            };
++            var first = executor.submit(() -> concurrentRefresh(fixture, originals, "first"));
++            var second = executor.submit(() -> concurrentRefresh(fixture, originals, "second"));
++            try { assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue(); }
++            finally { release.countDown(); }
++            first.get(10, TimeUnit.SECONDS);
++            second.get(10, TimeUnit.SECONDS);
++            assertThat(originals).hasSize(2);
++            assertThat(originals.get(0)).isNotSameAs(originals.get(1));
++        }
++    }
++
++    private void concurrentRefresh(RefreshFixture fixture, List<Connection> originals, String marker) {
++        connections.executeRead(status -> {
++            originals.add(status.getConnection());
++            try (var ignored = caller(marker).propagate()) {
++                fixture.transport.refreshTools("main", "default").block(Duration.ofSeconds(10));
++                assertThat(connections.getConnectionStatus().getConnection()).isSameAs(status.getConnection());
++            }
++            return null;
++        });
++    }
++
++    @Test
++    void backgroundSqlFailureDoesNotCloseOrReplaceCallerConnection() {
++        try (var fixture = new RefreshFixture(true)) {
++            fixture.read = () -> {
++                assertClean();
++                return connections.executeRead(status -> {
++                    try (var statement = status.getConnection().createStatement()) {
++                        statement.executeQuery("select * from missing_queue_probe_table");
++                        throw new AssertionError("missing table must fail");
++                    } catch (java.sql.SQLException exception) {
++                        throw new IllegalStateException("background database read failed", exception);
++                    }
++                });
++            };
++            connections.executeRead(status -> {
++                try (var ignored = caller("queue-error").propagate()) {
++                    assertThatThrownBy(() -> fixture.transport.refreshTools("main", "default").block(Duration.ofSeconds(10)))
++                        .isInstanceOf(IllegalStateException.class).hasMessageContaining("background database read failed");
++                    assertThat(connections.getConnectionStatus().getConnection()).isSameAs(status.getConnection());
++                    assertThat(readOne(status.getConnection())).isEqualTo(1);
++                }
++                return null;
++            });
++        }
++    }
++
++    @Test
++    void subscriptionIsLazyAndCloseEvictsServerWithoutLaterRefreshReads() {
++        try (var fixture = new RefreshFixture(false)) {
++            var operation = fixture.transport.refreshTools("main", "default");
++            verify(fixture.service, never()).listToolSpecsForServer(any(), any(), any());
++            fixture.transport.close();
++            operation.block(Duration.ofSeconds(10));
++            verify(fixture.service, never()).listToolSpecsForServer(any(), any(), any());
++        }
++    }
++
++    private PropagatedContext caller(String marker) {
++        return PropagatedContext.getOrEmpty().plus(new JdbcMarker(marker))
++            .plus(new AuthorizationEvaluationContext(new Object()))
++            .plus(new AuthorizationInvocationContext(HttpRequest.GET("/queue-probe"), false));
++    }
++
++    private void assertClean() {
++        assertThat(applicationContext.isRunning()).isTrue();
++        assertThat(PropagatedContext.getOrEmpty().find(JdbcMarker.class)).isEmpty();
++        assertThat(AuthorizationEvaluationContext.current()).isEmpty();
++        assertThat(AuthorizationInvocationContext.currentRequest()).isEmpty();
++        assertThat(connections.findConnectionStatus()).isEmpty();
++    }
++
++    private static int readOne(Connection connection) {
++        try (var statement = connection.createStatement(); var rows = statement.executeQuery("select 1")) {
++            assertThat(rows.next()).isTrue();
++            return rows.getInt(1);
++        } catch (java.sql.SQLException exception) { throw new IllegalStateException(exception); }
++    }
++
++    private static void await(CountDownLatch latch) {
++        try { assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue(); }
++        catch (InterruptedException exception) {
++            Thread.currentThread().interrupt();
++            throw new IllegalStateException(exception);
++        }
++    }
++
++    private static final class RefreshFixture implements AutoCloseable {
++        final McpToolService service;
++        final McpServerHandlerTransport transport;
++        volatile Supplier<List<McpServerFeatures.AsyncToolSpecification>> read = List::of;
++
++        RefreshFixture(boolean enabled) {
++            var providers = mock(io.micronaut.context.BeanProvider.class);
++            var gate = new McpCapabilityGate(enabled, true, false, providers,
++                new io.kestra.webserver.rbac.RbacConfiguration(enabled, false),
++                mock(io.kestra.webserver.rbac.RbacGate.class));
++            service = spy(new McpToolService(mock(DispatchQueueInterface.class), mock(FlowRepositoryInterface.class),
++                mock(FlowToolSchemaMapper.class), mock(ExecutionStreamingService.class), mock(ApplicationEventPublisher.class),
++                new McpConfig(new McpConfig.ToolCacheConfig(10L, Duration.ofMinutes(1)), null, Duration.ofSeconds(5)),
++                mock(FlowInputOutput.class), mock(FlowMetaStoreInterface.class), mock(ExecutionOutputService.class),
++                mock(McpToolAccessControl.class), gate));
++            doAnswer(invocation -> read.get()).when(service).listToolSpecsForServer(any(), any(), any());
++            var access = new DefaultMcpToolAccessControl();
++            transport = new McpServerHandlerTransport(mock(McpErrorResponseMapper.class), service, mock(McpServerCache.class),
++                mock(McpSessionService.class), access, gate);
++            transport.getServerHandler(KestraMcpTransportContext.builder().tenantId("main").serverId("default")
++                .userId(enabled ? "verified-caller" : null).clientId("probe-client").resource("probe-resource")
++                .scopes(enabled ? List.of("mcp:flows:read") : List.of()).build());
++            clearInvocations(service);
++        }
++
++        @Override public void close() { transport.close(); }
++    }
++}

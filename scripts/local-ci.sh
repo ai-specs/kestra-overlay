@@ -66,7 +66,7 @@ echo "== scoped tests (filter: $TESTS) =="
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpSessionLifecycleTest --tests io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest --tests io.kestra.mcp.McpDynamicToolListTest \
-  --tests io.kestra.mcp.McpCallDiagnosticTest --tests io.kestra.mcp.McpAsyncIdentityContextTest --tests 'io.kestra.webserver.ui.*' \
+  --tests io.kestra.mcp.McpCallDiagnosticTest --tests io.kestra.mcp.McpAsyncIdentityContextTest --tests io.kestra.mcp.McpBackgroundRefreshContextTest --tests 'io.kestra.webserver.ui.*' \
   --tests io.kestra.webserver.controllers.api.AiAgentControllerTest --tests io.kestra.webserver.controllers.api.AiOutputLifecycleTest \
   --tests io.kestra.webserver.controllers.api.AiTurnSchedulingTest --tests io.kestra.webserver.services.ai.agent.AiModeLifecycleTest \
   --tests io.kestra.webserver.services.ai.agent.tool.ToolCatalogTest --console=plain)

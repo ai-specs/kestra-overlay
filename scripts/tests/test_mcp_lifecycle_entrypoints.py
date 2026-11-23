@@ -7,6 +7,7 @@ class McpLifecycleEntrypointsTest(unittest.TestCase):
         scripts = Path(__file__).parents[1]
         for name in ("build.sh", "local-ci.sh"):
             text = (scripts / name).read_text()
-            for suite in ("io.kestra.mcp.McpSessionLifecycleTest", "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest"):
+            for suite in ("io.kestra.mcp.McpSessionLifecycleTest", "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest",
+                          "io.kestra.mcp.McpBackgroundRefreshContextTest"):
                 with self.subTest(entrypoint=name, suite=suite):
                     self.assertIn("--tests " + suite, text)

@@ -1,5 +1,18 @@
 # kestra 扩展机制原理：编译 / 重启 / 外部 jar（调查记录）
 
+## REQ-0407 MCP 后台刷新上下文隔离（2026-11-23，候选未发布）
+
+Micronaut ConnectionOperations 通过 PropagatedContext 携带 ConnectionStatus，
+Reactor subscribeOn 不提供事务隔离。真实 H2 复现确认调用方与后台是同一 Connection。
+0407 候选在 refreshTools 发布与订阅边界显式采用空上下文，保留 tenant/server 参数、
+原异步调度、错误信号和关闭机制，不继承队列事务、请求或授权 evaluation。
+工具调用可信身份路径不变。0170 原 refresh 调度块迁入0407，避免两个补丁共享来源行。
+六项真实 H2 安全回归与既有十五项 MCP 回归通过；完整原localCI退出0，后端631项
+零失败/错误、2项镜像专用跳过不计通过，core3与UI153通过。本机候选classpath、
+OIDC35、MCP4、form/env、原生列表21/详情37、geometry64与SDK949通过，零失败/跳过/未运行。
+正式CI、发布和生产组合未执行。原完整门后端XML未及时封存，随后单独实际后端重测
+的134份XML不能冒称原完整门报告。失败证据、报告来源与责任见 `r-ee-rbac.md` REQ-0407。
+
 ## namespace 补集与特殊功能分类（2026-11-18，本地门通过，未正式发布）
 
 0401/0402候选已通过本地完整localCI、classpath、OIDC35、MCP、form/env（各含

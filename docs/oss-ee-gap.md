@@ -1,3 +1,12 @@
+2026-11-23 R-EE-RBAC / REQ-0407（已授权实施，候选未发布）：
+正式组合 CI45092941429 的 MCP 后台刷新与队列 fatal，结合真实 Micronaut/H2 同连接
+传播红复现，接收后台 refreshTools 发布与订阅空上下文隔离。无新权限、业务模型或公开
+SPI；工具调用身份路径不变，不修改队列 fatal/retry。六项 H2 与十五项既有 MCP 回归通过；
+完整原localCI退出0（后端631含2项镜像专用跳过、core3、UI153），本机arm64候选的
+classpath、OIDC35、MCP4、form/env及原生列表21/详情37、geometry64和SDK949通过，零失败/跳过/未运行。
+正式CI、镜像发布与生产组合未执行。原后端XML未及时封存及单独相关重测来源见
+`r-ee-rbac.md` REQ-0407；不得把重测报告冒称原完整门XML。
+
 2026-11-18 R-EE-RBAC namespace 补集与未解析操作收窄（入口 B/C，最小方向已接收，待源码授权，未实现/测试/发布）：
 消费 `ai-specs/kestra-plugin-rbac`；默认首装 outside Flow/KV 写越界由部署仓真实复现。
 插件策略覆盖归插件修复；宿主缺口为精确排除不能表达子树补集，以及正式 resolver 将

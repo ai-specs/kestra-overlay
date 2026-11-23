@@ -1,12 +1,15 @@
-2026-11-23 REQ-0406 本地候选（未发布）：修复原生 Flow 列表在模式 A/B 首屏的同值
-configs 重载误清空，并保留真实身份、租户和模式变化的同步失效、旧响应隔离及当前查询
-补偿。Playwright 原生列表和必需详情门共用有界 async 条件等待适配器；不是新增业务
-API、Java SPI 或授权放宽。候选本机 arm64 镜像为
-`kestra-overlay:flow-list-initial-20261123`，digest
-`sha256:6c994ee50ef5440d46e845c3c28cacb5c94f32e53936a478460a1081d561b2c6`。
-它只用于本地验收，未推送、未推广，不得作为正式插件编译输入或生产部署版本。
-正式 CI、双架构发布与部署仓生产组合仍须完成；当前证据与限制见
-[R-EE-RBAC 的 REQ-0406](docs/r-ee-rbac.md)。
+2026-11-23 REQ-0407 候选（未发布）：MCP 后台工具刷新显式隔离队列连接、事务和请求
+授权上下文。真实 Micronaut/H2 红复现确认原实现跨 boundedElastic 复用调用方 Connection；
+候选保持原工具调用身份、权限、错误与关闭路径，不修改队列 fatal/retry，不增加自动重启。
+候选本机 arm64 镜像 `kestra-overlay:queue-context-20261123` 只用于本地验收，未推送、
+未推广，不得作为正式插件编译输入或生产部署版本。实际验证范围与限制见
+[R-EE-RBAC 的 REQ-0407](docs/r-ee-rbac.md)。
+
+REQ-0406 已随正式宿主 `e27864c` 发布，CI `45069032782`，正式镜像 digest 为
+`sha256:116c5503bbca8b889c65de95ae86afdf196be461f1201dabda7e5f2fc8b492f8`。
+它修复原生 Flow 列表模式 A/B 首屏同值 configs 重载误清空，保留身份失效与当前查询
+补偿，并统一原生列表和详情浏览器的有界异步等待。该正式输入不包含本轮0407候选；
+部署组合仍由部署仓验收，宿主发布不能代替生产组合通过。
 
 2026-11-17 REQ-0400 本地候选（未发布）：原生 GET `/api/v1/main/ai/providers`
 精确使用租户 `AI.READ`，只返回既有 `id/displayName/isDefault`。该许可不授予模型执行、

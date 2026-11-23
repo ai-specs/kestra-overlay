@@ -12,6 +12,27 @@ SUITE = "io.kestra.mcp.McpSessionLifecycleTest"
 
 
 class McpLifecycleGateTest(unittest.TestCase):
+    def test_background_refresh_requires_six_exact_successful_cases(self):
+        suite = "io.kestra.mcp.McpBackgroundRefreshContextTest"
+        self.assertEqual(GATE.REQUIRED[suite], 6)
+        for mutation in ("valid", "missing", "skip", "failure", "error", "reduced", "renamed", "duplicate"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as location:
+                directory = Path(location)
+                names = sorted(GATE.MCP_BACKGROUND_REFRESH_REQUIRED)
+                if mutation == "reduced": names.pop()
+                if mutation == "renamed": names[0] = "wrong-case"
+                if mutation == "duplicate": names[0] = names[1]
+                cases = "".join(f'<testcase name="{name}()"/>' for name in names)
+                if mutation != "missing":
+                    (directory / f"TEST-{suite}.xml").write_text(
+                        f'<testsuite tests="{len(names)}" skipped="{int(mutation == "skip")}" '
+                        f'failures="{int(mutation == "failure")}" errors="{int(mutation == "error")}">{cases}</testsuite>')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    if mutation == "valid":
+                        GATE.check(directory, {suite: 6})
+                    else:
+                        with self.assertRaises(SystemExit): GATE.check(directory, {suite: 6})
+
     def report(self, directory, *, skip=0, failure=0, error=0, names=None):
         names = sorted(GATE.MCP_LIFECYCLE_REQUIRED) if names is None else names
         cases = "".join(f'<testcase name="{name}()"/>' for name in names)
