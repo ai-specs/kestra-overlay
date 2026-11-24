@@ -27,11 +27,11 @@ index 67160a9..9b6ff6e 100644
 +        </main>
 +    </div>
  </template>
- 
+
  <script setup lang="ts">
 +    import ExtensionLinks from "../extensions/ExtensionLinks.vue"
      import * as Authentication from "../../utils/authentication"
- 
+
      async function returnToLogin() {
 @@ -14,3 +19,64 @@
          if (!Authentication.isOidc()) window.location.assign("/ui/login")

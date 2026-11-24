@@ -1,17 +1,17 @@
 # 需求: REQ-0261 依赖图查询在SQL读取前约束两端flow owner namespace
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；Flow/Namespace dependencies 的 topology repository 未消费现有namespace ACL
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；Flow/Namespace dependencies 的 topology repository 未消费现有namespace ACL
 # 触达上游文件: 2 个（topology查询激活与真实H2条件探针）
 # 移除条件: 上游OSS依赖图查询统一消费namespace ACL
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java
-index e6db099..eb9dc27 100644
+index 51eb2d3..6a27ccc 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowTopologyRepository.java
 @@ -14,6 +14,11 @@ import io.kestra.core.repositories.FlowTopologyRepositoryInterface;
  public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRepository implements FlowTopologyRepositoryInterface {
      protected final io.kestra.jdbc.AbstractJdbcRepository<FlowTopology> jdbcRepository;
- 
+
 +    private Condition topologyAccess() {
 +        return aclCondition(io.kestra.core.models.QueryFilter.Resource.FLOW, "source_namespace")
 +            .and(aclCondition(io.kestra.core.models.QueryFilter.Resource.FLOW, "destination_namespace"));
@@ -26,7 +26,7 @@ index e6db099..eb9dc27 100644
                      .from(this.jdbcRepository.getTable())
 -                    .where(DSL.or(ors));
 +                    .where(DSL.or(ors)).and(topologyAccess());
- 
+
                  return this.jdbcRepository.fetch(from);
              });
 @@ -73,7 +78,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
@@ -35,7 +35,7 @@ index e6db099..eb9dc27 100644
                      .from(this.jdbcRepository.getTable())
 -                    .where(DSL.or(ors));
 +                    .where(DSL.or(ors)).and(topologyAccess());
- 
+
                  return this.jdbcRepository.fetch(from);
              });
 @@ -96,7 +101,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
@@ -44,7 +44,7 @@ index e6db099..eb9dc27 100644
                      .from(this.jdbcRepository.getTable())
 -                    .where(tenantSource.and(tenantDest).and(sourceCondition));
 +                    .where(tenantSource.and(tenantDest).and(sourceCondition)).and(topologyAccess());
- 
+
                  return this.jdbcRepository.fetch(from);
              });
 @@ -120,7 +125,7 @@ public abstract class AbstractJdbcFlowTopologyRepository extends AbstractJdbcRep
@@ -53,7 +53,7 @@ index e6db099..eb9dc27 100644
                      .from(this.jdbcRepository.getTable())
 -                    .where(DSL.or(ors));
 +                    .where(DSL.or(ors)).and(topologyAccess());
- 
+
                  return this.jdbcRepository.fetch(from);
              });
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedTopologyScopeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedTopologyScopeTest.java

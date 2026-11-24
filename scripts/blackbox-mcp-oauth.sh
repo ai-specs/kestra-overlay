@@ -10,6 +10,7 @@ RESOURCE_OWNER="${BB_RESOURCE_OWNER:-$NET}"
 PG="overlay-mcp-pg-$$"
 PG_DATA="$PG-data"
 APP="overlay-mcp-app-$$"
+source "$(dirname "${BASH_SOURCE[0]}")/image-test-postgres.sh"
 TEMP_DIR=$(mktemp -d)
 REPORT_DIR="${BB_REPORT_DIR:-}"
 SDK_RUN=0
@@ -25,24 +26,33 @@ cleanup() {
     docker inspect -f 'MCP acceptance container: status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$APP" 2>/dev/null || true
     docker logs --tail 600 "$APP" 2>&1 | python3 -c 'import re,sys; [print("[redacted credential-bearing line]" if re.search(r"token|password|secret|cookie|authorization|Bearer|state=|code=|eyJ[A-Za-z0-9_-]+\.", line, re.I) else line, end="" if line.endswith("\n") else "\n") for line in sys.stdin]' || true
   fi
+  if [ "${BB_PG_ACTIVE:-0}" = 1 ]; then
+    image_pg_resources_cleanup "$RESOURCE_OWNER" "$NET" || code=1
+  else
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  fi
   rm -rf "$TEMP_DIR"
+  image_pg_cleanup || code=1
   return "$code"
 }
 trap cleanup EXIT
+image_pg_init local-ci-only
 docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
+if [ "$BB_PG_ACTIVE" = 0 ]; then
 if docker volume inspect "$PG_DATA" >/dev/null 2>&1; then echo 'FAIL: test database volume already exists'; exit 1; fi
 docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$PG_DATA" >/dev/null
 docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" -v "$PG_DATA:/var/lib/postgresql" -p 127.0.0.1::5432 -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-ci-only "${BB_PG_IMAGE:-postgres:18}" >/dev/null
+
+fi
 cat > "$TEMP_DIR/config.yml" <<EOF
 datasources:
   postgres:
-    url: jdbc:postgresql://$PG:5432/kestra
+    url: jdbc:postgresql://$PG:5432/$BB_DB
     driverClassName: org.postgresql.Driver
-    username: kestra
-    password: local-ci-only
+    username: $BB_DB_USER
+    password: $BB_DB_PASSWORD
 kestra:
   url: $BASE/
   repository:
@@ -96,7 +106,7 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 [ "$PG_READY" = 1 ] || { echo 'FAIL PostgreSQL readiness timeout'; exit 1; }
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$APP" --network "$BB_APP_NETWORK" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
   -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd!' \
   "$IMAGE" server standalone >/dev/null
 READY=0
@@ -114,9 +124,9 @@ HASHED_UI_CLIENT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM o
 }
 echo 'PASS production bootstrap stores a versioned hash instead of the UI client secret'
 if [ "${MCP_PRISTINE_PROBE:-0}" = 1 ]; then exit 0; fi
-PG_PORT=$(docker port "$PG" 5432/tcp | sed 's/.*://')
+if [ "$BB_PG_ACTIVE" = 0 ]; then PG_PORT=$(docker port "$PG" 5432/tcp | sed 's/.*://'); fi
 FIXTURE_EXIT=0
-(cd "$WORK" && OIDC_FIXTURE_JDBC="jdbc:postgresql://127.0.0.1:$PG_PORT/kestra" \
+(cd "$WORK" && OIDC_FIXTURE_DB_USER="$BB_DB_USER" OIDC_FIXTURE_DB_PASSWORD="$BB_DB_PASSWORD" OIDC_FIXTURE_JDBC="jdbc:postgresql://127.0.0.1:$PG_PORT/$BB_DB" \
   ./gradlew :webserver:test --rerun --tests io.kestra.webserver.oidc.OidcSecondUserFixtureTest --console=plain) || FIXTURE_EXIT=$?
 preserve_report fixture-second-user "$WORK/webserver/build/test-results/test/TEST-io.kestra.webserver.oidc.OidcSecondUserFixtureTest.xml"
 [ "$FIXTURE_EXIT" = 0 ] || exit "$FIXTURE_EXIT"
@@ -159,7 +169,7 @@ COUNT=$(docker exec "$PG" psql -U kestra -Atc "SELECT count(*) FROM executions W
 [ "$COUNT" = 1 ] || { echo 'FAIL revoked session created execution'; exit 1; }
 docker rm -f "$APP" >/dev/null
 printf '\nkestra.mcp.rbac.enabled: true\n' >> "$TEMP_DIR/config.yml"
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$APP" --network "$NET" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$APP" --network "$BB_APP_NETWORK" -p "$PORT:8080" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" \
   "$IMAGE" server standalone >/dev/null
 READY=0
 for attempt in $(seq 1 60); do

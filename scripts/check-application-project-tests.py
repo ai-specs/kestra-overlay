@@ -24,6 +24,12 @@ MCP_LIFECYCLE_REQUIRED = {
 }
 
 MCP_TRANSPORT_REQUIRED = {
+    "shouldReturnNotFoundWhenDeletingUnknownSession",
+    "shouldReturnNotFoundWhenAnotherCallerPostsToSession",
+    "shouldIssueNewSessionIdWhenInitializeCarriesClientSessionId",
+    "shouldReturnNotFoundAndKeepSessionWhenAnotherCallerDeletesSession",
+    "shouldReturnNotFoundWhenAnotherCallerUsesSessionHeldOnAnotherNode",
+    "shouldReturnNotFoundWhenAnotherCallerOpensSseStreamOnSession",
     "shouldRejectRequestWhenServerIsShuttingDown",
     "shouldReturnMethodNotAllowedWhenUnsupportedHttpMethodReceived",
     "shouldRejectRequestWhenRequestHasInvalidResponseType",
@@ -135,12 +141,20 @@ def check(results, required=None):
         if suite == "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest":
             names = [case.get("name", "").removesuffix("()") for case in report.findall("testcase")]
             if len(names) != len(MCP_TRANSPORT_REQUIRED) or set(names) != MCP_TRANSPORT_REQUIRED:
-                raise SystemExit("FAIL: MCP transport must execute all seventeen exact named cases")
+                raise SystemExit("FAIL: MCP transport must execute all twenty-three exact named cases")
         print(f"PASS: {suite}: {expected} tests executed, no failures or skips")
 
 
+UPSTREAM_MIGRATION_REQUIRED = {"io.kestra.jdbc.migration.V2_0_11PluginAutoInstallMigrationTest": 7}
+MCP_REPOSITORY_REQUIRED = {"io.kestra.repository.h2.H2McpSessionRepositoryTest": 14}
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[2] == "--initial-account-only":
+    if len(sys.argv) == 3 and sys.argv[2] == "--upstream-migration-only":
+        check(pathlib.Path(sys.argv[1]), UPSTREAM_MIGRATION_REQUIRED)
+    elif len(sys.argv) == 3 and sys.argv[2] == "--mcp-repository-only":
+        check(pathlib.Path(sys.argv[1]), MCP_REPOSITORY_REQUIRED)
+    elif len(sys.argv) == 3 and sys.argv[2] == "--initial-account-only":
         check(pathlib.Path(sys.argv[1]), INITIAL_ACCOUNT_REQUIRED)
     elif len(sys.argv) == 2:
         check(pathlib.Path(sys.argv[1]))

@@ -5,19 +5,20 @@
 # 触达上游文件：webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java；webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java；webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
 # 移除条件：上游为有限流式HTTP正文提供等价的流源授权、逐记录撤权、空闲快照过期和取消释放机制。
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
+index 5f6ee6e..bae81eb 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
-@@ -210,6 +210,9 @@
+@@ -214,6 +214,9 @@ public class ExecutionController {
+     @Inject
      private SseConnectionMetrics sseConnectionMetrics;
 
-     @Inject
++    @Inject
 +    private io.kestra.webserver.rbac.FiniteBodyAuthorization finiteBodyAuthorization;
 +
-+    @Inject
+     @Inject
      protected BroadcastQueueInterface<ExecutionKilled> killQueue;
 
-     @Inject
-@@ -2806,12 +2809,9 @@
+@@ -2861,12 +2864,9 @@ public class ExecutionController {
              in = ParameterIn.QUERY
          ) @QueryFilterFormat(Resource.EXECUTION) List<QueryFilter> filters) {
 
@@ -35,6 +36,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/Executi
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java
 new file mode 100644
+index 0000000..77e3212
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/FiniteBodyAuthorization.java
 @@ -0,0 +1,62 @@
@@ -102,6 +104,7 @@ new file mode 100644
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
 new file mode 100644
+index 0000000..38c8ee9
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/DeferredCsvAuthorizationTest.java
 @@ -0,0 +1,149 @@

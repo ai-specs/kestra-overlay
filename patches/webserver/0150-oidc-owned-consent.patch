@@ -2,7 +2,7 @@
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
 # 版本接线: REQ-0383保持V1语义；预览显式传递resource，资源版本解释归0160与0383
-# 来源: 新写；RFC7591/7636/6749 + PostgreSQL 事务；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；RFC7591/7636/6749 + PostgreSQL 事务；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 16 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java

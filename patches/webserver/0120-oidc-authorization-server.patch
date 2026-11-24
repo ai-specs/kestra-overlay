@@ -16,7 +16,7 @@
 # 移除条件：同 REQ-0100
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..62fdba7e18c1fcd7733873c9120a9ca2e922b44e
+index 0000000..62fdba7
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 @@ -0,0 +1,82 @@
@@ -104,7 +104,7 @@ index 0000000000000000000000000000000000000000..62fdba7e18c1fcd7733873c9120a9ca2
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..8dfc57d8d82849d58224aa65ee070416b7ce699d
+index 0000000..8dfc57d
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcDiscoveryController.java
 @@ -0,0 +1,78 @@
@@ -188,7 +188,7 @@ index 0000000000000000000000000000000000000000..8dfc57d8d82849d58224aa65ee070416
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..30730afa5ef8bcaf83fdd6b0177f870ae799ca64
+index 0000000..e0d42e0
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcProviderController.java
 @@ -0,0 +1,485 @@
@@ -679,7 +679,7 @@ index 0000000000000000000000000000000000000000..30730afa5ef8bcaf83fdd6b0177f870a
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_92OidcServerTokenMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_92OidcServerTokenMigration.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..cf712f03138456da7756b0a12a8549288961579e
+index 0000000..cf712f0
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_92OidcServerTokenMigration.java
 @@ -0,0 +1,47 @@
@@ -732,7 +732,7 @@ index 0000000000000000000000000000000000000000..cf712f03138456da7756b0a12a854928
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/NimbusHttpAdapter.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/NimbusHttpAdapter.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b1615fbe9ced3f9e4b096089bf19a15f9ccf0f0
+index 0000000..2b1615f
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/NimbusHttpAdapter.java
 @@ -0,0 +1,47 @@
@@ -785,7 +785,7 @@ index 0000000000000000000000000000000000000000..2b1615fbe9ced3f9e4b096089bf19a15
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..21d117314bd5893a889d392c55d3550451796fa2
+index 0000000..21d1173
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcAuthorizationCodeService.java
 @@ -0,0 +1,195 @@
@@ -986,7 +986,7 @@ index 0000000000000000000000000000000000000000..21d117314bd5893a889d392c55d35504
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e2e2a6e6a30d149225e992a7c0347eeb474ac4c
+index 0000000..8e2e2a6
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcSessionService.java
 @@ -0,0 +1,134 @@
@@ -1126,7 +1126,7 @@ index 0000000000000000000000000000000000000000..8e2e2a6e6a30d149225e992a7c0347ee
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b9c05c62770f0b966813deb9ca32137710b6b52
+index 0000000..1b9c05c
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTokenService.java
 @@ -0,0 +1,341 @@
@@ -1473,7 +1473,7 @@ index 0000000000000000000000000000000000000000..1b9c05c62770f0b966813deb9ca32137
 +}
 diff --git a/webserver/src/main/resources/migrations/2.0.92-oidc-server-token-postgres.sql b/webserver/src/main/resources/migrations/2.0.92-oidc-server-token-postgres.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..fafe23350e37ef374651109686097daaf43203da
+index 0000000..fafe233
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.92-oidc-server-token-postgres.sql
 @@ -0,0 +1,38 @@
@@ -1517,7 +1517,7 @@ index 0000000000000000000000000000000000000000..fafe23350e37ef374651109686097daa
 +CREATE INDEX IF NOT EXISTS idx_oidc_token_type ON oidc_token (token_type);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..2759acb21a1471bba3d7dd1c12181c69076e9f4d
+index 0000000..2759acb
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAuthorizationCodeServiceTest.java
 @@ -0,0 +1,145 @@
@@ -1668,7 +1668,7 @@ index 0000000000000000000000000000000000000000..2759acb21a1471bba3d7dd1c12181c69
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcDiscoveryControllerTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcDiscoveryControllerTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..c5325c5614ab68bc2a72ca512335fe55070e9c93
+index 0000000..c5325c5
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcDiscoveryControllerTest.java
 @@ -0,0 +1,35 @@
@@ -1709,7 +1709,7 @@ index 0000000000000000000000000000000000000000..c5325c5614ab68bc2a72ca512335fe55
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..dff7ea2fc3589df9767174e7f067081b732cbdb3
+index 0000000..dff7ea2
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTokenServiceTest.java
 @@ -0,0 +1,122 @@

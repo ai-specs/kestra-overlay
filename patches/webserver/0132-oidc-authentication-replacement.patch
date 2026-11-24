@@ -36,7 +36,7 @@ index 0dc5c01..63a4a25 100644
 +    <DrillDownDrawer v-if="!extensionFallback" />
      <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous" />
  </template>
- 
+
 @@ -29,7 +29,7 @@
      import {useDocStore} from "./stores/doc"
      import {useMiscStore} from "override/stores/misc"
@@ -52,30 +52,30 @@ index 0dc5c01..63a4a25 100644
      import {revealApp} from "./utils/loaderReveal"
 +    import ExtensionFallbackLayout from "./components/extensions/ExtensionFallbackLayout.vue"
 +    import {useExtensionFallback} from "./extensions/entry"
- 
+
      // Dev-only, dynamically imported so the component is entirely absent from production bundles:
      // `import.meta.env.DEV` is statically replaced with `false` by Vite in prod builds, so this
 @@ -67,6 +69,7 @@
      provide(SAVED_FILTER_ANALYTICS_INJECTION_KEY, trackSavedFilter)
- 
+
      const route = useRoute()
 +    const extensionFallback = useExtensionFallback(route)
- 
+
      const envName = computed(() => layoutStore.envName || miscStore.configs?.environment?.name)
- 
+
 @@ -83,7 +86,7 @@
              return newUid
          })()
- 
+
 -        if (!config.isBasicAuthInitialized || !BasicAuth.isLoggedIn()) {
 +        if (!Authentication.isLoggedIn()) {
              return null
          }
- 
+
 @@ -107,8 +110,8 @@
          revealApp(() => { loaded.value = true })
      }
- 
+
 -    watch(() => route?.meta?.anonymous, async (anonymous) => {
 -        if (!anonymous && BasicAuth.isLoggedIn()) {
 +    watch([() => route?.meta?.anonymous, () => route.name, extensionFallback], async ([anonymous]) => {
@@ -84,13 +84,13 @@ index 0dc5c01..63a4a25 100644
                  await loadGeneralResources()
              } catch (error) {
 diff --git a/ui/src/main.ts b/ui/src/main.ts
-index ff14ec0..3764c6a 100644
+index 42941b4..7d69d87 100644
 --- a/ui/src/main.ts
 +++ b/ui/src/main.ts
 @@ -6,6 +6,8 @@ import {setupPreloadErrorReloadHandler} from "./utils/preloadErrorReload"
- 
+
  setupPreloadErrorReloadHandler()
- 
+
 +import {isExtensionRoute, resolveExtensionEntry, setExtensionFallback} from "./extensions/entry"
 +
  import App from "./App.vue"
@@ -105,8 +105,8 @@ index ff14ec0..3764c6a 100644
  import {getCsrfToken} from "./utils/csrf"
  import {useCoreStore} from "./stores/core"
  import {useLayoutStore} from "./stores/layout"
-@@ -35,8 +37,12 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
- 
+@@ -36,8 +38,12 @@ app.provide(TASK_ICON_INJECTION_KEY, TaskIcon)
+
  // Fail closed: an error probing the pre-auth endpoints is no evidence that setup is needed.
  const handleAuthError = (to: {fullPath: string}, error: unknown) => {
 -    if ((error as {response?: {status?: number}} | null)?.response?.status === 401) {
@@ -120,28 +120,28 @@ index ff14ec0..3764c6a 100644
          const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
          return {name: "login", query: fromPath ? {from: fromPath} : {}}
      } 
-@@ -55,7 +61,7 @@ function setupAxios(router: Router) {
+@@ -56,7 +62,7 @@ function setupAxios(router: Router) {
          document.body.classList.add("login")
          unsavedChangesStore.unsavedChange = false
          layoutStore.setTopNavbar(undefined)
 -        BasicAuth.logout()
 +        Authentication.setAuthenticated(false)
      }
+
  
- 
-@@ -63,7 +69,7 @@ function setupAxios(router: Router) {
+@@ -64,7 +70,7 @@ function setupAxios(router: Router) {
          coreStore,
          router,
          beforeLogout,
 -        isLoggedIn: () => !!BasicAuth.isLoggedIn(),
 +        isLoggedIn: () => Authentication.isLoggedIn(),
      })
- 
+
      // Add CSRF token to every request - covers both generated-endpoint calls and
-@@ -79,18 +85,52 @@ function setupAxios(router: Router) {
+@@ -80,18 +86,52 @@ function setupAxios(router: Router) {
      return useClient()
  }
- 
+
 +let entryController: AbortController | undefined
 +
  // FIXME: any - guard args are untyped in the GuardFn interface
@@ -153,7 +153,7 @@ index ff14ec0..3764c6a 100644
      if(to.path === from.path && to.query === from.query) {
          return // Prevent navigation if the path and query are the same
      }
- 
+
      try {
          const miscStore = useMiscStore()
 +        async function loadRouteConfigs() {
@@ -188,21 +188,21 @@ index ff14ec0..3764c6a 100644
 +            }
 +            return
 +        }
- 
+
          if(!loginConfig.isBasicAuthInitialized) {
              // Since, Configs takes preference
-@@ -122,7 +162,7 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+@@ -123,7 +163,7 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
              return
          }
- 
+
 -        const hasCredentials = BasicAuth.isLoggedIn()
 +        const hasCredentials = Authentication.isLoggedIn()
- 
+
          if (!hasCredentials) {
              const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
-@@ -136,10 +176,11 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+@@ -137,10 +177,11 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
          }
- 
+
          // Now that the user is authenticated, load the full instance configuration.
 -        await miscStore.loadConfigs()
 +        await loadRouteConfigs()
@@ -213,24 +213,24 @@ index ff14ec0..3764c6a 100644
 +        return handleAuthError(to, error) ?? (isExtensionRoute(to) ? {name: "access-denied", replace: true} : undefined)
      }
  }
- 
+
 diff --git a/ui/src/override/components/auth/Auth.vue b/ui/src/override/components/auth/Auth.vue
 index 062ce49..662d49a 100644
 --- a/ui/src/override/components/auth/Auth.vue
 +++ b/ui/src/override/components/auth/Auth.vue
 @@ -59,7 +59,7 @@
      import Slack from "vue-material-design-icons/Slack.vue"
- 
+
      import KS_LOGO from "../../../assets/ks-logo-small.svg"
 -    import * as BasicAuth from "../../../utils/basicAuth"
 +    import * as Authentication from "../../../utils/authentication"
- 
+
      const SLACK_URL = "https://kestra.io/slack?utm_source=app&utm_medium=referral&utm_campaign=top-auth"
- 
+
 @@ -73,8 +73,9 @@
          params: {tenant: route.params.tenant},
      }))
- 
+
 -    const logout = () => {
 -        BasicAuth.logout()
 +    const logout = async () => {
@@ -240,7 +240,7 @@ index 062ce49..662d49a 100644
          router.push({name: "login"})
      }
 diff --git a/ui/src/override/stores/misc.ts b/ui/src/override/stores/misc.ts
-index 4eb0608..e960664 100644
+index ec473be..2c8ea11 100644
 --- a/ui/src/override/stores/misc.ts
 +++ b/ui/src/override/stores/misc.ts
 @@ -1,7 +1,7 @@
@@ -254,13 +254,110 @@ index 4eb0608..e960664 100644
  import {initPosthogIfEnabled} from "../../utils/posthog"
 @@ -64,7 +64,7 @@ export const useMiscStore = defineStore("misc", () => {
      }
- 
-     async function loadAllUsages() {
+
+     async function loadAllUsages(days = 1) {
 -        if (configs.value?.isBasicAuthInitialized && BasicAuth.isLoggedIn()) {
 +        if (Authentication.isLoggedIn()) {
-             const response = await axios.get(`${apiUrl()}/usages/all`)
+             const response = await axios.get(`${apiUrl()}/usages/all`, {params: {days}})
              return response.data
          }
+diff --git a/ui/src/utils/authentication-recovery.spec.ts b/ui/src/utils/authentication-recovery.spec.ts
+new file mode 100644
+index 0000000..f56c752
+--- /dev/null
++++ b/ui/src/utils/authentication-recovery.spec.ts
+@@ -0,0 +1,91 @@
++import {afterEach, beforeEach, describe, expect, it, vi} from "vitest"
++import * as Authentication from "./authentication"
++import {createExtensionRequest} from "../extensions/runtime"
++import {setupKestraHttp} from "./kestraHttp"
++
++const probe = vi.hoisted(() => ({request: vi.fn(), errors: [] as Function[]}))
++vi.mock("./basicAuth", () => ({isLoggedIn: () => true, logout: vi.fn()}))
++vi.mock("@kestra-io/kestra-sdk", () => ({
++    configureClient: () => ({request: probe.request, interceptors: {
++        request: {use: vi.fn()}, response: {use: vi.fn()}, error: {use: (handler: Function) => probe.errors.push(handler)},
++    }}),
++    useClient: () => ({}), asProblem: () => undefined,
++}))
++
++beforeEach(() => {
++    vi.stubGlobal("window", {location: {origin: "http://localhost:3000", pathname: "/ui/main/flows", assign: vi.fn()}})
++    Authentication.configureOidc(true)
++    Authentication.setAuthenticated(true)
++    probe.request.mockReset()
++    probe.errors.length = 0
++})
++afterEach(() => {vi.unstubAllGlobals(); document.head.replaceChildren()})
++
++describe("OIDC request recovery", () => {
++    it("preserves explicit logout when an earlier capability request returns 401", async () => {
++        let reject!: (error: unknown) => void
++        probe.request.mockImplementationOnce(() => new Promise((_, fail) => {reject = fail}))
++        const client = setupKestraHttp({}, {isLoggedIn: () => true})
++        const failure = {status: 401}
++        const pending = client.request("/api/v1/main/extensions/probe/capabilities")
++        const rejected = expect(pending).rejects.toBe(failure)
++        await Authentication.logout()
++        reject(failure)
++        await rejected
++        Authentication.recoverUnauthorized({response: {status: 401}})
++        expect(window.location.assign).toHaveBeenCalledExactlyOnceWith("/oidc/logout")
++        expect(Authentication.isLoggedIn()).toBe(false)
++    })
++    it("recovers concurrent SDK failures after login once without replaying a write", async () => {
++        probe.request.mockRejectedValue({status: 401})
++        const beforeLogout = vi.fn()
++        const client = setupKestraHttp({}, {isLoggedIn: () => true, onUnauthorized: () => true, beforeLogout})
++        await Promise.allSettled([client.request("/api/v1/main/flows", {method: "POST"}), client.request("/api/v1/main/flows")])
++        expect(probe.request).toHaveBeenCalledTimes(2)
++        expect(window.location.assign).toHaveBeenCalledExactlyOnceWith("/oauth/login/kestra")
++        expect(Authentication.isLoggedIn()).toBe(false)
++        expect(beforeLogout).toHaveBeenCalled()
++    })
++
++    it("recognizes response.status failures and preserves the original error", async () => {
++        const error = {response: {status: 401}}
++        probe.request.mockRejectedValue(error)
++        const client = setupKestraHttp({}, {isLoggedIn: () => true})
++        await expect(client.request("/api/v1/main/flows")).rejects.toBe(error)
++        expect(window.location.assign).toHaveBeenCalledOnce()
++    })
++
++    it("preserves extension 401 responses and sends a write only once", async () => {
++        const meta = document.createElement("meta")
++        meta.name = "csrf-token"
++        meta.content = "test-csrf"
++        document.head.append(meta)
++        const response = new Response(null, {status: 401})
++        const fetcher = vi.fn(async () => response)
++        const request = createExtensionRequest(new AbortController().signal, "/api/v1/main", fetcher, Authentication.recoverUnauthorized)
++        await expect(request("/api/v1/main/flows", {method: "POST"})).resolves.toBe(response)
++        expect(fetcher).toHaveBeenCalledOnce()
++        expect(window.location.assign).toHaveBeenCalledOnce()
++    })
++
++    it("leaves 403, 503 and network failures outside authentication recovery", async () => {
++        const client = setupKestraHttp({}, {isLoggedIn: () => true})
++        for (const error of [{status: 403}, {response: {status: 503}}, new TypeError("Network unavailable")]) {
++            probe.request.mockRejectedValueOnce(error)
++            await expect(client.request("/api/v1/main/flows")).rejects.toBe(error)
++        }
++        for (const status of [403, 503]) {
++            await createExtensionRequest(new AbortController().signal, "/api/v1/main", async () => new Response(null, {status}), Authentication.recoverUnauthorized)("/api/v1/main/flows")
++        }
++        expect(window.location.assign).not.toHaveBeenCalled()
++        expect(Authentication.isLoggedIn()).toBe(true)
++    })
++
++    it("does not recover a late extension response after caller cancellation", async () => {
++        const caller = new AbortController()
++        const response = new Response(null, {status: 401})
++        const fetcher = vi.fn(async () => {caller.abort(); return response})
++        await expect(createExtensionRequest(new AbortController().signal, "/api/v1/main", fetcher, Authentication.recoverUnauthorized)("/api/v1/main/flows", {signal: caller.signal})).resolves.toBe(response)
++        expect(window.location.assign).not.toHaveBeenCalled()
++    })
++})
 diff --git a/ui/src/utils/authentication.spec.ts b/ui/src/utils/authentication.spec.ts
 new file mode 100644
 index 0000000..87b39ac
@@ -356,10 +453,10 @@ index 3d85aa3..f0e8f20 100644
 +import * as Authentication from "./authentication"
  import type {Router} from "vue-router"
  import {configureClient, useClient, asProblem, type ProblemDetail} from "@kestra-io/kestra-sdk"
- 
+
 @@ -140,6 +141,10 @@ export function setupKestraHttp(
      } = options
- 
+
      function navigateToLogin() {
 +        if (Authentication.isOidc()) {
 +            Authentication.login()
@@ -381,10 +478,10 @@ index 3d85aa3..f0e8f20 100644
                      const shouldRetry = await onUnauthorized(navigateToLogin, kestraError)
                      if (shouldRetry) return fn(...args)
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-index 5fd488c..438f276 100644
+index 0b84e99..0ed75fb 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-@@ -270,6 +270,9 @@ public class MiscController {
+@@ -278,6 +278,9 @@ public class MiscController {
          description = "On success, issues an HttpOnly session cookie holding the credentials, plus a non-HttpOnly flag cookie the UI reads to know it is logged in."
      )
      public MutableHttpResponse<?> login(HttpRequest<?> request, @Body LoginRequest loginRequest) {
@@ -393,8 +490,8 @@ index 5fd488c..438f276 100644
 +        }
          BasicAuthService service = basicAuthService
              .orElseThrow(() -> new IllegalStateException("basicAuthService bean is required in OSS"));
- 
-@@ -287,6 +290,9 @@ public class MiscController {
+
+@@ -295,6 +298,9 @@ public class MiscController {
      @ExecuteOn(TaskExecutors.IO)
      @Operation(tags = { "Misc" }, summary = "Clear the basic auth session cookie.")
      public MutableHttpResponse<?> logout() {
@@ -450,7 +547,7 @@ index 0a32216..be5d295 100644
 @@ -103,27 +105,43 @@ public class OidcLoginController {
          return trimmed;
      }
- 
+
 -    /** The login form — self-contained HTML (no external assets), CSP-friendly. */
 +    /** The login form follows host theme/language preferences without booting the business UI. */
      private String loginPageHtml(final String from, final boolean failed) {
@@ -582,102 +679,5 @@ index 041d3c8..631ae99 100644
          assertEquals(0L, cleared.getMaxAge(), "logout must clear the cookie");
 +        assertEquals(0L, response.getCookie("JWT").orElseThrow().getMaxAge());
      }
- 
+
      @Test
-diff --git a/ui/src/utils/authentication-recovery.spec.ts b/ui/src/utils/authentication-recovery.spec.ts
-new file mode 100644
-index 0000000..f56c752
---- /dev/null
-+++ b/ui/src/utils/authentication-recovery.spec.ts
-@@ -0,0 +1,91 @@
-+import {afterEach, beforeEach, describe, expect, it, vi} from "vitest"
-+import * as Authentication from "./authentication"
-+import {createExtensionRequest} from "../extensions/runtime"
-+import {setupKestraHttp} from "./kestraHttp"
-+
-+const probe = vi.hoisted(() => ({request: vi.fn(), errors: [] as Function[]}))
-+vi.mock("./basicAuth", () => ({isLoggedIn: () => true, logout: vi.fn()}))
-+vi.mock("@kestra-io/kestra-sdk", () => ({
-+    configureClient: () => ({request: probe.request, interceptors: {
-+        request: {use: vi.fn()}, response: {use: vi.fn()}, error: {use: (handler: Function) => probe.errors.push(handler)},
-+    }}),
-+    useClient: () => ({}), asProblem: () => undefined,
-+}))
-+
-+beforeEach(() => {
-+    vi.stubGlobal("window", {location: {origin: "http://localhost:3000", pathname: "/ui/main/flows", assign: vi.fn()}})
-+    Authentication.configureOidc(true)
-+    Authentication.setAuthenticated(true)
-+    probe.request.mockReset()
-+    probe.errors.length = 0
-+})
-+afterEach(() => {vi.unstubAllGlobals(); document.head.replaceChildren()})
-+
-+describe("OIDC request recovery", () => {
-+    it("preserves explicit logout when an earlier capability request returns 401", async () => {
-+        let reject!: (error: unknown) => void
-+        probe.request.mockImplementationOnce(() => new Promise((_, fail) => {reject = fail}))
-+        const client = setupKestraHttp({}, {isLoggedIn: () => true})
-+        const failure = {status: 401}
-+        const pending = client.request("/api/v1/main/extensions/probe/capabilities")
-+        const rejected = expect(pending).rejects.toBe(failure)
-+        await Authentication.logout()
-+        reject(failure)
-+        await rejected
-+        Authentication.recoverUnauthorized({response: {status: 401}})
-+        expect(window.location.assign).toHaveBeenCalledExactlyOnceWith("/oidc/logout")
-+        expect(Authentication.isLoggedIn()).toBe(false)
-+    })
-+    it("recovers concurrent SDK failures after login once without replaying a write", async () => {
-+        probe.request.mockRejectedValue({status: 401})
-+        const beforeLogout = vi.fn()
-+        const client = setupKestraHttp({}, {isLoggedIn: () => true, onUnauthorized: () => true, beforeLogout})
-+        await Promise.allSettled([client.request("/api/v1/main/flows", {method: "POST"}), client.request("/api/v1/main/flows")])
-+        expect(probe.request).toHaveBeenCalledTimes(2)
-+        expect(window.location.assign).toHaveBeenCalledExactlyOnceWith("/oauth/login/kestra")
-+        expect(Authentication.isLoggedIn()).toBe(false)
-+        expect(beforeLogout).toHaveBeenCalled()
-+    })
-+
-+    it("recognizes response.status failures and preserves the original error", async () => {
-+        const error = {response: {status: 401}}
-+        probe.request.mockRejectedValue(error)
-+        const client = setupKestraHttp({}, {isLoggedIn: () => true})
-+        await expect(client.request("/api/v1/main/flows")).rejects.toBe(error)
-+        expect(window.location.assign).toHaveBeenCalledOnce()
-+    })
-+
-+    it("preserves extension 401 responses and sends a write only once", async () => {
-+        const meta = document.createElement("meta")
-+        meta.name = "csrf-token"
-+        meta.content = "test-csrf"
-+        document.head.append(meta)
-+        const response = new Response(null, {status: 401})
-+        const fetcher = vi.fn(async () => response)
-+        const request = createExtensionRequest(new AbortController().signal, "/api/v1/main", fetcher, Authentication.recoverUnauthorized)
-+        await expect(request("/api/v1/main/flows", {method: "POST"})).resolves.toBe(response)
-+        expect(fetcher).toHaveBeenCalledOnce()
-+        expect(window.location.assign).toHaveBeenCalledOnce()
-+    })
-+
-+    it("leaves 403, 503 and network failures outside authentication recovery", async () => {
-+        const client = setupKestraHttp({}, {isLoggedIn: () => true})
-+        for (const error of [{status: 403}, {response: {status: 503}}, new TypeError("Network unavailable")]) {
-+            probe.request.mockRejectedValueOnce(error)
-+            await expect(client.request("/api/v1/main/flows")).rejects.toBe(error)
-+        }
-+        for (const status of [403, 503]) {
-+            await createExtensionRequest(new AbortController().signal, "/api/v1/main", async () => new Response(null, {status}), Authentication.recoverUnauthorized)("/api/v1/main/flows")
-+        }
-+        expect(window.location.assign).not.toHaveBeenCalled()
-+        expect(Authentication.isLoggedIn()).toBe(true)
-+    })
-+
-+    it("does not recover a late extension response after caller cancellation", async () => {
-+        const caller = new AbortController()
-+        const response = new Response(null, {status: 401})
-+        const fetcher = vi.fn(async () => {caller.abort(); return response})
-+        await expect(createExtensionRequest(new AbortController().signal, "/api/v1/main", fetcher, Authentication.recoverUnauthorized)("/api/v1/main/flows", {signal: caller.signal})).resolves.toBe(response)
-+        expect(window.location.assign).not.toHaveBeenCalled()
-+    })
-+})

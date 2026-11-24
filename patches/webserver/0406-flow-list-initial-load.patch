@@ -1,14 +1,14 @@
 # 需求: REQ-0406 原生Flow首屏配置重载与身份失效补偿
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；2026-11-23入口C已接收；正式84fe614的模式A/B首屏失败证据；独占BASE加61补丁的增量提交
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；2026-11-23入口C已接收；正式84fe614的模式A/B首屏失败证据；独占BASE加61补丁的增量提交
 # 触达上游文件: 17 个
 # 移除条件: 上游提供等价原生Flow列表按值失效及挂载后当前查询补偿
 diff --git a/ui/src/components/flows/Flows.vue b/ui/src/components/flows/Flows.vue
-index 711433b..817cae2 100644
+index f994de9..7bdc43f 100644
 --- a/ui/src/components/flows/Flows.vue
 +++ b/ui/src/components/flows/Flows.vue
-@@ -341,6 +341,7 @@
+@@ -348,6 +348,7 @@
      import {useFlowExecutionCapabilities} from "./useFlowExecutionCapabilities"
      import action from "../../models/action"
      import resource from "../../models/resource"
@@ -16,7 +16,7 @@ index 711433b..817cae2 100644
 
      import {useToast} from "../../utils/toast"
 
-@@ -438,6 +439,14 @@
+@@ -445,6 +446,14 @@
          window.removeEventListener("focus", focusExecutionContent)
      })
      const file = ref<HTMLInputElement | null>(null)

@@ -12,13 +12,13 @@
 # 移除条件：上游 /configs 原生支持第三方 OIDC 部署形态（预期不会发生）
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-index 160c2ab..5fd488c 100644
+index ca857ef..0b84e99 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-@@ -72,6 +72,16 @@ public class MiscController {
+@@ -79,6 +79,16 @@ public class MiscController {
      @Inject
      Optional<BasicAuthService> basicAuthService = Optional.empty();
- 
+
 +    /**
 +     * Whether an authentication method is configured for the instance. Under the dsh OIDC
 +     * deployment {@code micronaut.security.enabled=true} and {@link BasicAuthService} is
@@ -31,8 +31,8 @@ index 160c2ab..5fd488c 100644
 +
      @Inject
      Optional<AiServiceManager> aiServiceManager = Optional.empty();
- 
-@@ -181,11 +191,14 @@ public class MiscController {
+
+@@ -188,11 +198,14 @@ public class MiscController {
          description = "Public endpoint available to unauthenticated users; exposes only what the login/setup UI needs."
      )
      public LoginConfiguration getLoginConfiguration() {
@@ -41,15 +41,15 @@ index 160c2ab..5fd488c 100644
 +        // OSS Basic Auth deployment the flag is false and the UI keeps its SPA login page.
 +        return new LoginConfiguration(isBasicAuthInitialized(), securityEnabled);
      }
- 
+
      private boolean isBasicAuthInitialized() {
 -        return basicAuthService.map(BasicAuthService::isBasicAuthInitialized).orElse(false);
 +        // OIDC deployment (security enabled, BasicAuthService absent) counts as configured auth.
 +        return basicAuthService.map(BasicAuthService::isBasicAuthInitialized).orElse(securityEnabled);
      }
- 
+
      /**
-@@ -242,9 +255,12 @@ public class MiscController {
+@@ -250,9 +263,12 @@ public class MiscController {
      @ExecuteOn(TaskExecutors.IO)
      @Operation(tags = { "Misc" }, summary = "Retrieve the instance configuration.", description = "Global endpoint available to all users.")
      public List<String> getBasicAuthConfigErrors() {
@@ -63,10 +63,10 @@ index 160c2ab..5fd488c 100644
 +        }
 +        return basicAuthService.get().validationErrors();
      }
- 
+
      @Post("/login")
-@@ -392,7 +408,15 @@ public class MiscController {
- 
+@@ -400,7 +416,15 @@ public class MiscController {
+
      /**
       * Minimal configuration exposed to unauthenticated callers for the login/setup UI.
 +     *

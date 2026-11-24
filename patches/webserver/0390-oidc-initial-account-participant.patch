@@ -127,10 +127,10 @@ index 0000000..5cc6005
 +    return () => { stopped = true }
 +}
 diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
-index a2d1af2..1b56efe 100644
+index 2ec2953..4d51a62 100644
 --- a/ui/src/translations/en.json
 +++ b/ui/src/translations/en.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Failed"
        }
      },
@@ -596,7 +596,7 @@ index 0000000..b9249ae
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcInitialAccountHttpTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcInitialAccountHttpTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..60fc4a4f626f361ef6b8a5a97956d34411b7bc6b
+index 0000000..60fc4a4
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcInitialAccountHttpTest.java
 @@ -0,0 +1,156 @@

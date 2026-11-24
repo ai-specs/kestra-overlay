@@ -1,12 +1,12 @@
 # 需求: REQ-0250 提供版本化 typed RBAC operation 契约，隔离上游路由适配与外部策略
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；R-EE-RBAC typed operation 架构与上游升级稳定性要求
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；R-EE-RBAC typed operation 架构与上游升级稳定性要求
 # 触达上游文件: 5 个（公开契约、失败关闭执行门与契约测试）
 # 移除条件: 上游 OSS 提供等价稳定 typed 授权 operation、query scope 和 aggregate 契约
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..c684ab936f7839d22191174962873829ca34e01c
+index 0000000..c684ab9
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
 @@ -0,0 +1,245 @@
@@ -257,7 +257,7 @@ index 0000000000000000000000000000000000000000..c684ab936f7839d22191174962873829
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..12070e1017743e2d746e53ce86f3f5ef1ad45b12
+index 0000000..12070e1
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 @@ -0,0 +1,37 @@
@@ -300,7 +300,7 @@ index 0000000000000000000000000000000000000000..12070e1017743e2d746e53ce86f3f5ef
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..213990f643e49b1c99bd09068635daf266647d84
+index 0000000..213990f
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationResolver.java
 @@ -0,0 +1,10 @@
@@ -316,7 +316,7 @@ index 0000000000000000000000000000000000000000..213990f643e49b1c99bd09068635daf2
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..42f90ee0b321d7fd736496431e80479648d14bb0
+index 0000000..42f90ee
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationContractTest.java
 @@ -0,0 +1,123 @@
@@ -445,7 +445,7 @@ index 0000000000000000000000000000000000000000..42f90ee0b321d7fd736496431e804796
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..773a35cb139ae3181c8a39da10ac71f3e547ca48
+index 0000000..773a35c
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedAuthorizationGateTest.java
 @@ -0,0 +1,54 @@

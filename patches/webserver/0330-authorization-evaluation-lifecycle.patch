@@ -1,7 +1,7 @@
 # 需求: REQ-0330 完整授权评估生命周期
 # 消费扩展仓: kestra-plugin-rbac
 # 状态: core；HTTP来源显式绑定已接收、本地候选；独立红绿与受影响后端通过，完整本地门及CI/发布待验收
-# 来源: 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档；2026-10-30入口C事件循环阻塞证据，初始化仅传播请求来源；2026-10-31入口B接收真实HTTP边界最小来源绑定
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；依据已发布 TypedAuthorization Operation/Decision 与接收文档；2026-10-30入口C事件循环阻塞证据，初始化仅传播请求来源；2026-10-31入口B接收真实HTTP边界最小来源绑定
 # 触达上游文件: 23 个（通用生命周期、typed gate、引用桥接与独立探针）
 # 移除条件: 上游提供等价完整评估生命周期及安全上下文传播
 # 测试消费修复: 2026-11-01主控授权；两条REST完整响应测试用Flux.single及10秒有界block等待终结；保留全部断言与取消专项门，不改生产Java；20文件不扩面。
@@ -58,7 +58,7 @@ index 0000000..a8516e4
 +
 +public record AuthorizationQueryContext(Object reference) implements PropagatedContextElement {}
 diff --git a/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java b/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
-index 685d8f4..d1e6ba5 100644
+index 7d6b470..aaa1671 100644
 --- a/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
 +++ b/core/src/main/java/io/kestra/core/runners/FlowInputOutput.java
 @@ -172,8 +172,9 @@ public class FlowInputOutput {
@@ -349,6 +349,29 @@ index 0000000..0c3bf4c
 +        }
 +    }
 +}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java
+new file mode 100644
+index 0000000..bc97b6c
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java
+@@ -0,0 +1,17 @@
++package io.kestra.webserver.rbac;
++
++public final class AuthorizationUnavailableException extends RuntimeException {
++    public AuthorizationUnavailableException() {
++        super("Authorization dependency is unavailable");
++    }
++
++    static AuthorizationUnavailableException classified(Throwable failure) {
++        for(int depth=0;depth<16;depth++) {
++            if(failure instanceof AuthorizationUnavailableException unavailable)return unavailable;
++            if(!(failure instanceof java.util.concurrent.CompletionException || failure instanceof java.util.concurrent.ExecutionException)
++                || failure.getCause()==null || failure.getCause()==failure)return null;
++            failure=failure.getCause();
++        }
++        return null;
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
 index 9488059..ca33508 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
@@ -365,10 +388,50 @@ index 9488059..ca33508 100644
      public Mono<Boolean> authorize(RbacAuthorizer.Principal principal, RbacAuthorizer.Resource resource,
          RbacAuthorizer.Action action, boolean completeQuery) {
          return Mono.defer(() -> {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+new file mode 100644
+index 0000000..7b06505
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+@@ -0,0 +1,33 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import jakarta.inject.Singleton;
++import java.util.List;
++import reactor.core.publisher.Flux;
++
++/** Fresh authorization at the stream source, inside framework-captured response context. */
++@Singleton
++public final class SseAuthorization {
++    private final TypedAuthorizationGate gate;
++    public SseAuthorization(TypedAuthorizationGate gate) { this.gate = gate; }
++
++    public <T> Flux<T> bind(Flux<T> source) {
++        if (!gate.evaluationEnabled()) return source;
++        var owner = AuthorizationEvaluations.current();
++        var request = AuthorizationInvocationContext.currentRequest().orElse(null);
++        if (owner == null || request == null || AuthorizationInvocationContext.isInternal() || owner.restPlan.isEmpty())
++            return Flux.error(AuthorizationEvaluations.denied());
++        // Capture immutable requirements and HTTP origin, never the old owner, connection or transaction.
++        var principal = owner.principal;
++        String tenant = owner.tenant;
++        var plan = List.copyOf(owner.restPlan);
++        var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
++        return gate.boundary(principal, tenant, () -> Flux.fromIterable(plan)
++            .concatMap(operation -> gate.authorize(principal, operation))
++            .all(TypedAuthorization.Decision::allowed)
++            .flatMapMany(allowed -> allowed ? source : Flux.error(AuthorizationEvaluations.denied())))
++            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, origin));
++    }
++}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
+index 12070e1..ca2e4aa 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorizationGate.java
-@@ -10,16 +10,42 @@
+@@ -10,16 +10,42 @@ import static io.kestra.webserver.rbac.TypedAuthorization.*;
  @Singleton
  public final class TypedAuthorizationGate {
      private final BeanProvider<TypedAuthorizationResolver> policies;
@@ -472,6 +535,40 @@ index 06722d6..6696616 100644
      }
 
      private Mono<byte[]> body(HttpRequest<?> request) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java b/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
+index a024e78..2edf622 100644
+--- a/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
++++ b/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
+@@ -26,11 +26,19 @@ import reactor.core.publisher.Flux;
+ @Singleton
+ public class SseConnectionMetrics {
+     private final MetricRegistry metricRegistry;
++    private final io.kestra.webserver.rbac.SseAuthorization authorization;
+     private final Map<String, AtomicInteger> activeByType = new ConcurrentHashMap<>();
+
+-    @Inject
++    /** Compatibility for isolated metrics tests; production uses the required injected helper. */
+     public SseConnectionMetrics(MetricRegistry metricRegistry) {
+         this.metricRegistry = metricRegistry;
++        this.authorization = null;
++    }
++
++    @Inject
++    public SseConnectionMetrics(MetricRegistry metricRegistry, io.kestra.webserver.rbac.SseAuthorization authorization) {
++        this.metricRegistry = metricRegistry;
++        this.authorization = java.util.Objects.requireNonNull(authorization);
+     }
+
+     /**
+@@ -47,7 +55,7 @@ public class SseConnectionMetrics {
+      */
+     public <T> Flux<Event<T>> track(Flux<Event<T>> flux, String type, Runnable onClose) {
+         AtomicInteger active = active(type);
+-        return flux
++        return (authorization == null ? flux : authorization.bind(flux))
+             .doOnSubscribe(subscription ->
+             {
+                 active.incrementAndGet();
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpEvaluationLifecycleTest.java
 new file mode 100644
 index 0000000..415af8f
@@ -624,6 +721,126 @@ index 0000000..415af8f
 +            verify(streaming, timeout(5000)).unregisterSubscriber(anyString(), anyString());
 +            if (revokeOutput) verifyNoInteractions(outputs);
 +        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java
+new file mode 100644
+index 0000000..9d584ed
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java
+@@ -0,0 +1,114 @@
++package io.kestra.webserver.rbac;
++
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.http.HttpRequest;
++import io.netty.channel.DefaultEventLoop;
++import java.time.Duration;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++
++/** A CompletionStage return type alone does not make a close factory non-blocking. */
++class AuthorizationCleanupSchedulingTest {
++    private record TransactionProbe(java.sql.Connection connection) implements PropagatedContextElement {}
++
++    private static PropagatedContext callerContext() {
++        return PropagatedContext.empty().plus(new AuthorizationInvocationContext(HttpRequest.GET("/cleanup-probe"), false))
++            .plus(new TransactionProbe(org.mockito.Mockito.mock(java.sql.Connection.class)));
++    }
++    private static AuthorizationEvaluationV1 blockingClose(CountDownLatch entered, CountDownLatch unlock,
++        AtomicInteger closed, AtomicReference<Thread> thread, AtomicReference<PropagatedContext> context) {
++        return new AuthorizationEvaluationV1() {
++            public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
++                return CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
++            }
++            public java.util.concurrent.CompletionStage<Void> close() {
++                closed.incrementAndGet(); thread.set(Thread.currentThread()); context.set(PropagatedContext.getOrEmpty());
++                entered.countDown();
++                boolean interrupted = false;
++                while (true) {
++                    try { unlock.await(); break; } catch (InterruptedException ignored) { interrupted = true; }
++                }
++                if (interrupted) Thread.currentThread().interrupt();
++                return CompletableFuture.completedFuture(null);
++            }
++        };
++    }
++
++    @Test
++    void cancelAndBlockingCloseMustNotBlockEventLoop() throws Exception {
++        var loop = new DefaultEventLoop();
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var acquired = new CountDownLatch(1);
++        var heartbeat = new CountDownLatch(1); var returned = new CountDownLatch(1); var closed = new AtomicInteger();
++        var thread = new AtomicReference<Thread>(); var context = new AtomicReference<PropagatedContext>();
++        var handle = blockingClose(entered, unlock, closed, thread, context);
++        var subscription = evaluations((principal, tenant) -> CompletableFuture.completedFuture(handle))
++            .boundary(PRINCIPAL, "main", () -> { acquired.countDown(); return Mono.never(); }).subscribe();
++        boolean heartBeats; boolean cancellationReturns;
++        try {
++            assertThat(acquired.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.execute(() -> {
++                try (var scope = callerContext().propagate()) { subscription.dispose(); returned.countDown(); }
++            });
++            loop.execute(heartbeat::countDown);
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
++            cancellationReturns = returned.getCount() == 0;
++            System.out.printf("cancel-close barrier: heartbeat=%s cancelReturned=%s closes=%d%n", heartBeats, cancellationReturns, closed.get());
++        } finally {
++            unlock.countDown(); subscription.dispose();
++            assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
++        }
++        assertThat(heartBeats).as("blocking close factory must not block the cancelling event loop").isTrue();
++        assertThat(cancellationReturns).isTrue(); assertThat(loop.inEventLoop(thread.get())).isFalse();
++        assertThat(context.get().getAllElements()).isEmpty();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed).hasValue(1));
++    }
++
++    @Test
++    void lateHandleBlockingCloseMustNotBlockCompletingEventLoop() throws Exception {
++        var loop = new DefaultEventLoop();
++        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var registered = new CountDownLatch(1);
++        var heartbeat = new CountDownLatch(1); var returned = new CountDownLatch(1); var closed = new AtomicInteger();
++        var thread = new AtomicReference<Thread>(); var context = new AtomicReference<PropagatedContext>();
++        var pending = new CompletableFuture<AuthorizationEvaluationV1>() {
++            @Override public CompletableFuture<AuthorizationEvaluationV1> whenComplete(
++                java.util.function.BiConsumer<? super AuthorizationEvaluationV1, ? super Throwable> callback) {
++                var result = super.whenComplete(callback); registered.countDown(); return result;
++            }
++        };
++        var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", Mono::never).subscribe();
++        var handle = blockingClose(entered, unlock, closed, thread, context);
++        boolean heartBeats; boolean completionReturns;
++        try {
++            assertThat(registered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
++            loop.execute(() -> {
++                try (var scope = callerContext().propagate()) { pending.complete(handle); returned.countDown(); }
++            });
++            loop.execute(heartbeat::countDown);
++            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
++            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
++            completionReturns = returned.getCount() == 0;
++            System.out.printf("late-close barrier: heartbeat=%s completeReturned=%s closes=%d%n", heartBeats, completionReturns, closed.get());
++        } finally {
++            unlock.countDown(); subscription.dispose();
++            assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
++            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
++        }
++        assertThat(heartBeats).as("late close factory must not block the completion event loop").isTrue();
++        assertThat(completionReturns).isTrue(); assertThat(loop.inEventLoop(thread.get())).isFalse();
++        assertThat(context.get().getAllElements()).isEmpty(); assertThat(pending).isNotCancelled();
++        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed).hasValue(1));
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationHttpTest.java
@@ -1213,184 +1430,258 @@ index 0000000..196530e
 +        assertThat(provider.closes.get()).isEqualTo(1);
 +    }
 +}
-diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationHttpOriginBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationHttpOriginBoundaryTest.java
 new file mode 100644
+index 0000000..3b167df
 --- /dev/null
-+++ b/webserver/src/main/java/io/kestra/webserver/rbac/AuthorizationUnavailableException.java
-@@ -0,0 +1,17 @@
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationHttpOriginBoundaryTest.java
+@@ -0,0 +1,243 @@
 +package io.kestra.webserver.rbac;
 +
-+public final class AuthorizationUnavailableException extends RuntimeException {
-+    public AuthorizationUnavailableException() {
-+        super("Authorization dependency is unavailable");
-+    }
-+
-+    static AuthorizationUnavailableException classified(Throwable failure) {
-+        for(int depth=0;depth<16;depth++) {
-+            if(failure instanceof AuthorizationUnavailableException unavailable)return unavailable;
-+            if(!(failure instanceof java.util.concurrent.CompletionException || failure instanceof java.util.concurrent.ExecutionException)
-+                || failure.getCause()==null || failure.getCause()==failure)return null;
-+            failure=failure.getCause();
-+        }
-+        return null;
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java
-new file mode 100644
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java
-@@ -0,0 +1,110 @@
-+package io.kestra.webserver.rbac;
-+
-+import io.kestra.core.junit.annotations.KestraTest;
-+import io.kestra.core.repositories.FlowRepositoryInterface;
-+import io.micronaut.context.annotation.Property;
-+import io.micronaut.context.annotation.Requires;
-+import io.micronaut.runtime.server.EmbeddedServer;
-+import io.micronaut.security.authentication.Authentication;
-+import io.micronaut.security.filters.AuthenticationFetcher;
-+import jakarta.inject.Inject;
-+import jakarta.inject.Singleton;
-+import java.net.http.HttpClient;
-+import java.net.http.HttpRequest;
-+import java.net.http.HttpResponse;
-+import java.util.List;
-+import java.util.Optional;
-+import java.util.concurrent.CompletableFuture;
-+import java.util.concurrent.CompletionStage;
-+import org.junit.jupiter.api.Test;
-+import reactor.core.publisher.Mono;
-+import static io.kestra.webserver.rbac.TypedAuthorization.*;
-+import static org.junit.jupiter.api.Assertions.*;
-+
-+@KestraTest(environments="h2")
-+@Property(name="kestra.server-type",value="WEBSERVER")
-+@Property(name="kestra.rbac.enabled",value="true")
-+@Property(name="kestra.rbac.typed.enabled",value="true")
-+@Property(name="kestra.rbac.evaluation.enabled",value="true")
-+@Property(name="micronaut.security.enabled",value="true")
-+@Property(name="micronaut.security.filter.enabled",value="true")
-+@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
-+@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
-+@Property(name="mcp.http.security.fixture",value="true")
-+@Property(name="authorization.unavailable.probe",value="true")
-+class AuthorizationUnavailableHttpTest {
-+    @Inject EmbeddedServer server;
-+    @Inject FlowRepositoryInterface flows;
-+
-+    @Test void explicitDependencyFailuresAre503AcrossSynchronousAndAsynchronousStages()throws Exception {
-+        for(String mode:List.of("identity-sql","begin-sync","begin-async","authorize-sync","authorize-async","wrapped-async")) {
-+            var response=send(mode,"/api/v1/main/flows","POST");
-+            assertEquals(503,response.statusCode(),mode);
-+            assertTrue(response.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
-+            var problem=io.kestra.core.serializers.JacksonMapper.ofJson().readTree(response.body());
-+            assertEquals(503,problem.path("status").intValue());
-+            assertFalse(response.body().contains("secret-probe"));assertFalse(response.body().contains("AuthorizationUnavailableException"));
-+            assertTrue(flows.findByIdWithoutAcl("main","dependency.probe","never-created",Optional.empty()).isEmpty());
-+        }
-+    }
-+
-+    @Test void unknownErrorsDecisionsAndUnknownRoutesRetain403()throws Exception {
-+        for(String mode:List.of("unknown-begin","unknown-authorize","deny","unknown-wrapper")) {
-+            assertEquals(403,send(mode,"/api/v1/main/flows","POST").statusCode(),mode);
-+            assertTrue(flows.findByIdWithoutAcl("main","dependency.probe","never-created",Optional.empty()).isEmpty());
-+        }
-+        assertEquals(403,send("allow","/not-a-route","GET").statusCode());
-+        assertEquals(401,send("anonymous","/api/v1/configs","GET").statusCode());
-+    }
-+
-+    HttpResponse<String> send(String mode,String path,String method)throws Exception {
-+        var builder=HttpRequest.newBuilder(server.getURI().resolve(path)).header("X-Unavailable-Probe",mode);
-+        if(method.equals("POST"))builder.header("Content-Type","application/x-yaml").POST(HttpRequest.BodyPublishers.ofString("namespace: dependency.probe\nid: never-created\ntasks: []"));
-+        else builder.GET();
-+        return HttpClient.newHttpClient().send(builder.build(),HttpResponse.BodyHandlers.ofString());
-+    }
-+
-+    @Singleton
-+    @Requires(property="authorization.unavailable.probe",value="true")
-+    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
-+        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
-+            String mode=request.getHeaders().get("X-Unavailable-Probe");
-+            return mode==null||mode.equals("anonymous")?Mono.empty():Mono.just(Authentication.build(mode,List.of()));
-+        }
-+    }
-+
-+    @Singleton
-+    @Requires(property="authorization.unavailable.probe",value="true")
-+    static class Policy implements AuthorizationEvaluationProviderV1 {
-+        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal,String tenant) {
-+            String mode=principal.subject();
-+            if(mode.equals("identity-sql"))return identitySqlFailure();
-+            if(mode.equals("begin-sync"))throw new AuthorizationUnavailableException();
-+            if(mode.equals("begin-async"))return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
-+            if(mode.equals("unknown-begin"))throw new IllegalStateException("secret-probe");
-+            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
-+                public CompletionStage<Decision> authorize(Operation operation) {
-+                    if(mode.equals("authorize-sync"))throw new AuthorizationUnavailableException();
-+                    if(mode.equals("authorize-async"))return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
-+                    if(mode.equals("wrapped-async"))return CompletableFuture.failedFuture(new java.util.concurrent.CompletionException(new AuthorizationUnavailableException()));
-+                    if(mode.equals("unknown-authorize"))throw new IllegalStateException("secret-probe");
-+                    if(mode.equals("unknown-wrapper"))return CompletableFuture.failedFuture(new IllegalStateException("secret-probe",new AuthorizationUnavailableException()));
-+                    return CompletableFuture.completedFuture(mode.equals("allow")?Decision.allow(QueryDomain.unrestricted()):Decision.deny("denied"));
-+                }
-+                public CompletionStage<Void> close(){return CompletableFuture.completedFuture(null);}
-+            });
-+        }
-+
-+        CompletionStage<AuthorizationEvaluationV1> identitySqlFailure() {
-+            var source=org.mockito.Mockito.mock(javax.sql.DataSource.class);
-+            try {org.mockito.Mockito.when(source.getConnection()).thenThrow(new java.sql.SQLException("secret-probe SQL"));}
-+            catch(java.sql.SQLException failure){throw new AssertionError(failure);}
-+            var projections=org.mockito.Mockito.mock(io.micronaut.context.BeanProvider.class);
-+            org.mockito.Mockito.when(projections.isUnique()).thenReturn(true);
-+            var configuration=new io.kestra.webserver.oidc.OidcConfiguration();configuration.setIssuer("https://issuer.example");
-+            var identity=new io.kestra.webserver.oidc.services.OidcTrustedIdentity(projections,
-+                org.mockito.Mockito.mock(io.kestra.webserver.oidc.OidcProtocolStateV1.class),configuration,source);
-+            identity.currentForAuthorization();throw new AssertionError("Unavailable identity must not open an evaluation");
-+        }
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java
-new file mode 100644
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java
-@@ -0,0 +1,34 @@
-+package io.kestra.webserver.rbac;
-+
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationQueryContext;
 +import io.kestra.webserver.oidc.TrustedIdentityV1;
 +import io.kestra.webserver.oidc.TrustedIdentityV2;
-+import io.micronaut.context.BeanProvider;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.core.propagation.PropagatedContextElement;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.time.Duration;
 +import java.util.List;
++import java.util.Set;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
 +import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Flux;
 +import reactor.core.publisher.Mono;
-+import static org.junit.jupiter.api.Assertions.*;
-+import static org.mockito.Mockito.*;
++import reactor.core.scheduler.Schedulers;
 +
-+class AuthorizationUnavailableBoundaryTest {
-+    @Test void applicationGroupBoundaryUsesNewDefaultCompatibleEntryAndPreservesExplicitUnavailable() {
-+        var identities=mock(BeanProvider.class);var legacy=mock(BeanProvider.class);var modern=mock(BeanProvider.class);
-+        var identity=mock(TrustedIdentityV2.class);
-+        when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);when(modern.isUnique()).thenReturn(true);
-+        when(identity.currentForAuthorization()).thenThrow(new AuthorizationUnavailableException());
-+        var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,legacy,modern,identities,true);
-+        var principal=new RbacAuthorizer.Principal("actor",List.of(),null,null,List.of());
-+        assertThrows(AuthorizationUnavailableException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
-+        verify(identity).currentForAuthorization();verify(identity,never()).current();
++import static io.kestra.webserver.rbac.AuthorizationEvaluationRestTest.request;
++import static io.kestra.webserver.rbac.AuthorizationEvaluationRestTest.filter;
++import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.bean;
++import static org.assertj.core.api.Assertions.*;
++
++/** Host-only mock identity/lock entry: no plugin, database, HTTP server or container. */
++class AuthorizationHttpOriginBoundaryTest {
++    private static final Duration LIMIT = Duration.ofSeconds(3);
++    private record TransactionProbe(java.sql.Connection connection) implements PropagatedContextElement {}
++
++    private static TrustedIdentityV1.Identity identity(String subject) {
++        return new TrustedIdentityV1.Identity(1, "https://issuer.example", subject, "ui", Set.of("ui"), "main",
++            "group", Set.of("openid"), Set.of(), 1, 1, 1);
++    }
++    private static TrustedIdentityV2 reader(java.util.function.Supplier<TrustedIdentityV1.Identity> read) {
++        return new TrustedIdentityV2() {
++            public Identity current() { throw new AssertionError("Must use ordinary authorization entry"); }
++            public Identity current(java.sql.Connection connection) { throw new AssertionError("No borrowed connection"); }
++            public Identity currentForAuthorization() { return read.get(); }
++        };
++    }
++    private static AuthorizationEvaluationV1 handle(AtomicInteger closes) {
++        return new AuthorizationEvaluationV1() {
++            public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
++                return CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
++            }
++            public java.util.concurrent.CompletionStage<Void> close() {
++                assertThat(PropagatedContext.getOrEmpty().getAllElements()).isEmpty();
++                closes.incrementAndGet();
++                return CompletableFuture.completedFuture(null);
++            }
++        };
++    }
++    private static AuthorizationEvaluations service(TrustedIdentityV1 identities, AuthorizationEvaluationProviderV2 provider) {
++        return new AuthorizationEvaluations(true, new RbacConfiguration(true, false), true, bean(null), bean(provider), bean(identities), true);
++    }
++    private static TypedAuthorizationGate gate(AuthorizationEvaluations evaluations) {
++        return new TypedAuthorizationGate(bean(null), evaluations);
++    }
++    // A real filter request must remain the origin even without FIRST-filter ambient context.
++    @Test
++    void actualHttpRequestWithoutAmbientOriginSurvivesAsyncInitialization() {
++        var request = request();
++        var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow();
++        var checkedIdentity = new AtomicInteger();
++        var lockEntry = new AtomicInteger();
++        var begins = new AtomicInteger();
++        var closes = new AtomicInteger();
++        var effects = new AtomicInteger();
++        var initializedOn = new java.util.concurrent.atomic.AtomicReference<Thread>();
++        var subscribedOn = new java.util.concurrent.atomic.AtomicReference<Thread>();
++        var identities = new io.kestra.webserver.oidc.TrustedIdentityV2() {
++            public Identity current() { throw new AssertionError("Must use ordinary authorization entry"); }
++            public Identity current(java.sql.Connection connection) { throw new AssertionError("No borrowed connection"); }
++            public Identity currentForAuthorization() {
++                checkedIdentity.incrementAndGet();
++                initializedOn.set(Thread.currentThread());
++                // Same pre-lock lookup as OidcTrustedIdentity.currentForAuthorization().
++                var actual = io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest()
++                    .orElseThrow(() -> new IllegalStateException("Missing HTTP origin before security lock"));
++                assertThat(actual).isSameAs(request);
++                assertThat(actual.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class)).contains(authentication);
++                var origin = io.kestra.core.repositories.AuthorizationInvocationContext.current().orElseThrow();
++                assertThat(origin.internal()).isFalse();
++                assertThat(origin.request()).isSameAs(request);
++                assertThat(io.kestra.core.repositories.AuthorizationEvaluationContext.current()).isEmpty();
++                assertThat(io.micronaut.core.propagation.PropagatedContext.getOrEmpty().getAllElements()).containsExactly(origin);
++                lockEntry.incrementAndGet(); // No JDBC: marks the production method's subsequent security-lock entry.
++                return new Identity(1, "https://issuer.example", "alice", "ui", Set.of("ui"), "main",
++                    "group", Set.of("openid"), Set.of(), 1, 1, 1);
++            }
++        };
++        AuthorizationEvaluationProviderV2 provider = (identity, tenant) -> {
++            begins.incrementAndGet();
++            assertThat(identity.subject()).isEqualTo(authentication.getName());
++            assertThat(tenant).isEqualTo("main");
++            return java.util.concurrent.CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
++                    return java.util.concurrent.CompletableFuture.completedFuture(
++                        TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
++                }
++                public java.util.concurrent.CompletionStage<Void> close() {
++                    closes.incrementAndGet();
++                    return java.util.concurrent.CompletableFuture.completedFuture(null);
++                }
++            });
++        };
++        var evaluations = new AuthorizationEvaluations(true, new RbacConfiguration(true, false), true,
++            AuthorizationEvaluationTest.bean(null), AuthorizationEvaluationTest.bean(provider), AuthorizationEvaluationTest.bean(identities), true);
++        var gate = new TypedAuthorizationGate(AuthorizationEvaluationTest.bean(null), evaluations);
++        try (var scope = io.micronaut.core.propagation.PropagatedContext.empty().propagate()) {
++            assertThat(io.kestra.core.repositories.AuthorizationInvocationContext.current()).isEmpty();
++            assertThat(io.micronaut.http.context.ServerRequestContext.currentRequest()).isEmpty();
++            var response = Mono.defer(() -> {
++                subscribedOn.set(Thread.currentThread());
++                assertThat(io.kestra.core.repositories.AuthorizationInvocationContext.current()).isEmpty();
++                return reactor.core.publisher.Flux.from(filter(gate).doFilter(request, actual -> {
++                    assertThat(actual).isSameAs(request);
++                    effects.incrementAndGet();
++                    return Mono.just(HttpResponse.ok());
++                })).single();
++            }).subscribeOn(Schedulers.single()).block(java.time.Duration.ofSeconds(3));
++            assertThat(response.code()).as("actual HTTP origin must survive boundary initialization; checked=%s lock=%s", checkedIdentity, lockEntry).isEqualTo(200);
++        }
++        assertThat(initializedOn.get()).isNotSameAs(subscribedOn.get());
++        assertThat(checkedIdentity).hasValue(1);
++        assertThat(lockEntry).hasValue(1);
++        assertThat(begins).hasValue(1);
++        assertThat(effects).hasValue(1);
++        assertThat(closes).hasValue(1);
++    }
++    @Test
++    void concurrentRequestsOverrideStaleOriginsAndTrimTransactions() throws Exception {
++        var left = request(); var right = request();
++        right.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("bob", List.of("reader")));
++        var entered = new CountDownLatch(2); var unlock = new CountDownLatch(1);
++        var reads = new AtomicInteger(); var begins = new AtomicInteger();
++        var closes = new AtomicInteger(); var effects = new AtomicInteger();
++        var seen = java.util.concurrent.ConcurrentHashMap.<HttpRequest<?>>newKeySet();
++        var expected = java.util.Map.<String,HttpRequest<?>>of("alice",left,"bob",right);
++        var identities = reader(() -> {
++            var actual = AuthorizationInvocationContext.currentRequest().orElseThrow();
++            var auth = actual.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow();
++            assertThat(actual).isSameAs(expected.get(auth.getName()));
++            var origin = AuthorizationInvocationContext.current().orElseThrow();
++            assertThat(origin.request()).isSameAs(actual); assertThat(origin.internal()).isFalse();
++            assertThat(PropagatedContext.getOrEmpty().getAllElements()).containsExactly(origin);
++            assertThat(AuthorizationEvaluationContext.current()).isEmpty();
++            assertThat(PropagatedContext.getOrEmpty().find(TransactionProbe.class)).isEmpty();
++            assertThat(PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class)).isEmpty();
++            seen.add(actual); reads.incrementAndGet(); entered.countDown();
++            boolean interrupted = false;
++            while (true) {
++                try { assertThat(unlock.await(3, TimeUnit.SECONDS)).isTrue(); break; }
++                catch (InterruptedException ignored) { interrupted = true; }
++            }
++            if (interrupted) Thread.currentThread().interrupt();
++            return identity(auth.getName());
++        });
++        var evaluations = service(identities,(trusted,tenant) -> {
++            assertThat(AuthorizationInvocationContext.currentRequest()).contains(expected.get(trusted.subject()));
++            assertThat(tenant).isEqualTo("main"); begins.incrementAndGet();
++            return CompletableFuture.completedFuture(handle(closes));
++        });
++        var gate = gate(evaluations);
++        var connection = (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
++            new Class<?>[]{java.sql.Connection.class}, (proxy,method,args) -> { throw new AssertionError("Transaction must not propagate"); });
++        var caller = PropagatedContext.empty().plus(new TransactionProbe(connection))
++            .plus(new AuthorizationEvaluationContext(new Object())).plus(new AuthorizationQueryContext(new Object()));
++        var staleHttp = caller.plus(new AuthorizationInvocationContext(HttpRequest.GET("/wrong-source"),false));
++        var staleInternal = caller.plus(new AuthorizationInvocationContext(null,true));
++        java.util.function.BiFunction<HttpRequest<?>,PropagatedContext,Mono<io.micronaut.http.MutableHttpResponse<?>>> run = (actual,ambient) ->
++            Flux.from(filter(gate).doFilter(actual, continued -> {
++                assertThat(continued).isSameAs(actual);
++                assertThat(AuthorizationInvocationContext.currentRequest()).contains(actual);
++                effects.incrementAndGet(); return Mono.just(HttpResponse.ok());
++            })).single().contextWrite(context -> ReactorPropagation.addPropagatedContext(context,ambient));
++        var result = Mono.zip(run.apply(left,staleHttp),run.apply(right,staleInternal)).toFuture();
++        try { assertThat(entered.await(3, TimeUnit.SECONDS)).as("both independent HTTP identities must enter").isTrue(); }
++        finally { unlock.countDown(); }
++        var responses = result.get(3,TimeUnit.SECONDS);
++        assertThat(responses.getT1().code()).isEqualTo(200); assertThat(responses.getT2().code()).isEqualTo(200);
++        assertThat(seen).containsExactlyInAnyOrder(left,right);
++        assertThat(reads).hasValue(2); assertThat(begins).hasValue(2);
++        assertThat(effects).hasValue(2); assertThat(closes).hasValue(2);
 +    }
 +
-+    @Test void missingOrDuplicateProvidersAndLegacyUnknownFailuresKeepExistingDenial() {
-+        var identities=mock(BeanProvider.class);var legacy=mock(BeanProvider.class);var modern=mock(BeanProvider.class);
-+        var identity=mock(TrustedIdentityV1.class);when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);
-+        var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,legacy,modern,identities,true);
-+        var principal=new RbacAuthorizer.Principal("actor",List.of(),null,null,List.of());
-+        assertThrows(IllegalStateException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
-+        verifyNoInteractions(identity);
-+        when(modern.isUnique()).thenReturn(true);when(identity.current()).thenThrow(new IllegalStateException("unknown"));
-+        assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast()).getClass());
++    @Test
++    void missingOriginOutsideHttpFilterStillFailsClosed() {
++        var lockEntry = new AtomicInteger(); var begins = new AtomicInteger(); var effects = new AtomicInteger();
++        var identities = reader(() -> {
++            var actual = AuthorizationInvocationContext.currentRequest().orElseThrow(() -> new IllegalStateException("Missing origin"));
++            assertThat(actual).isNotNull(); lockEntry.incrementAndGet(); return identity("alice");
++        });
++        var evaluations = service(identities,(trusted,tenant) -> {
++            begins.incrementAndGet(); return CompletableFuture.completedFuture(handle(new AtomicInteger()));
++        });
++        try(var scope = PropagatedContext.empty().propagate()) {
++            assertThat(ServerRequestContext.currentRequest()).isEmpty();
++            assertThatThrownBy(() -> evaluations.boundary(AuthorizationEvaluationTest.PRINCIPAL,"main",() -> {
++                effects.incrementAndGet(); return Mono.just(true);
++            }).blockLast(LIMIT)).isInstanceOf(IllegalStateException.class);
++        }
++        assertThat(lockEntry).hasValue(0); assertThat(begins).hasValue(0); assertThat(effects).hasValue(0);
++    }
++
++    @Test
++    void requestWithoutAuthenticationStillReturns401BeforeIdentityOrBusiness() {
++        var reads = new AtomicInteger(); var effects = new AtomicInteger();
++        var identities = reader(() -> { reads.incrementAndGet(); return identity("alice"); });
++        var gate = gate(service(identities,(trusted,tenant) -> CompletableFuture.completedFuture(handle(new AtomicInteger()))));
++        var response = Flux.from(filter(gate).doFilter(HttpRequest.GET("/api/v1/main/executions"),ignored -> {
++            effects.incrementAndGet(); return Mono.just(HttpResponse.ok());
++        })).single().block(LIMIT);
++        assertThat(response.code()).isEqualTo(401); assertThat(reads).hasValue(0); assertThat(effects).hasValue(0);
++    }
++
++    @Test
++    void explicitUnavailableAndUnknownFailureKeep503And403() {
++        for (var failure : List.of(new AuthorizationUnavailableException(),new IllegalStateException("unknown"))) {
++            var effects = new AtomicInteger(); var begins = new AtomicInteger();
++            var identities = reader(() -> {
++                assertThat(AuthorizationInvocationContext.currentRequest()).isPresent(); throw failure;
++            });
++            var gate = gate(service(identities,(trusted,tenant) -> {
++                begins.incrementAndGet(); return CompletableFuture.completedFuture(handle(new AtomicInteger()));
++            }));
++            var response = Flux.from(filter(gate).doFilter(request(),ignored -> {
++                effects.incrementAndGet(); return Mono.just(HttpResponse.ok());
++            })).single().block(LIMIT);
++            assertThat(response.code()).isEqualTo(failure instanceof AuthorizationUnavailableException ? 503 : 403);
++            assertThat(begins).hasValue(0); assertThat(effects).hasValue(0);
++        }
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationIdentityUnavailablePostgresTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationIdentityUnavailablePostgresTest.java
 new file mode 100644
+index 0000000..0f1d780
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationIdentityUnavailablePostgresTest.java
 @@ -0,0 +1,79 @@
@@ -1752,451 +2043,162 @@ index 0000000..8e0cea0
 +        });
 +    }
 +}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java
 new file mode 100644
-index 0000000..9d584ed
+index 0000000..05ac52f
 --- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationCleanupSchedulingTest.java
-@@ -0,0 +1,114 @@
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableBoundaryTest.java
+@@ -0,0 +1,34 @@
 +package io.kestra.webserver.rbac;
 +
-+import io.micronaut.core.propagation.PropagatedContext;
-+import io.micronaut.core.propagation.PropagatedContextElement;
-+import io.kestra.core.repositories.AuthorizationInvocationContext;
-+import io.micronaut.http.HttpRequest;
-+import io.netty.channel.DefaultEventLoop;
-+import java.time.Duration;
-+import java.util.concurrent.CompletableFuture;
-+import java.util.concurrent.CountDownLatch;
-+import java.util.concurrent.TimeUnit;
-+import java.util.concurrent.atomic.AtomicInteger;
-+import java.util.concurrent.atomic.AtomicReference;
-+import org.junit.jupiter.api.Test;
-+import reactor.core.publisher.Mono;
-+
-+import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.*;
-+import static org.assertj.core.api.Assertions.*;
-+import static org.awaitility.Awaitility.await;
-+
-+/** A CompletionStage return type alone does not make a close factory non-blocking. */
-+class AuthorizationCleanupSchedulingTest {
-+    private record TransactionProbe(java.sql.Connection connection) implements PropagatedContextElement {}
-+
-+    private static PropagatedContext callerContext() {
-+        return PropagatedContext.empty().plus(new AuthorizationInvocationContext(HttpRequest.GET("/cleanup-probe"), false))
-+            .plus(new TransactionProbe(org.mockito.Mockito.mock(java.sql.Connection.class)));
-+    }
-+    private static AuthorizationEvaluationV1 blockingClose(CountDownLatch entered, CountDownLatch unlock,
-+        AtomicInteger closed, AtomicReference<Thread> thread, AtomicReference<PropagatedContext> context) {
-+        return new AuthorizationEvaluationV1() {
-+            public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
-+                return CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
-+            }
-+            public java.util.concurrent.CompletionStage<Void> close() {
-+                closed.incrementAndGet(); thread.set(Thread.currentThread()); context.set(PropagatedContext.getOrEmpty());
-+                entered.countDown();
-+                boolean interrupted = false;
-+                while (true) {
-+                    try { unlock.await(); break; } catch (InterruptedException ignored) { interrupted = true; }
-+                }
-+                if (interrupted) Thread.currentThread().interrupt();
-+                return CompletableFuture.completedFuture(null);
-+            }
-+        };
-+    }
-+
-+    @Test
-+    void cancelAndBlockingCloseMustNotBlockEventLoop() throws Exception {
-+        var loop = new DefaultEventLoop();
-+        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var acquired = new CountDownLatch(1);
-+        var heartbeat = new CountDownLatch(1); var returned = new CountDownLatch(1); var closed = new AtomicInteger();
-+        var thread = new AtomicReference<Thread>(); var context = new AtomicReference<PropagatedContext>();
-+        var handle = blockingClose(entered, unlock, closed, thread, context);
-+        var subscription = evaluations((principal, tenant) -> CompletableFuture.completedFuture(handle))
-+            .boundary(PRINCIPAL, "main", () -> { acquired.countDown(); return Mono.never(); }).subscribe();
-+        boolean heartBeats; boolean cancellationReturns;
-+        try {
-+            assertThat(acquired.await(3, TimeUnit.SECONDS)).isTrue();
-+            loop.execute(() -> {
-+                try (var scope = callerContext().propagate()) { subscription.dispose(); returned.countDown(); }
-+            });
-+            loop.execute(heartbeat::countDown);
-+            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
-+            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
-+            cancellationReturns = returned.getCount() == 0;
-+            System.out.printf("cancel-close barrier: heartbeat=%s cancelReturned=%s closes=%d%n", heartBeats, cancellationReturns, closed.get());
-+        } finally {
-+            unlock.countDown(); subscription.dispose();
-+            assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
-+            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
-+        }
-+        assertThat(heartBeats).as("blocking close factory must not block the cancelling event loop").isTrue();
-+        assertThat(cancellationReturns).isTrue(); assertThat(loop.inEventLoop(thread.get())).isFalse();
-+        assertThat(context.get().getAllElements()).isEmpty();
-+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed).hasValue(1));
-+    }
-+
-+    @Test
-+    void lateHandleBlockingCloseMustNotBlockCompletingEventLoop() throws Exception {
-+        var loop = new DefaultEventLoop();
-+        var entered = new CountDownLatch(1); var unlock = new CountDownLatch(1); var registered = new CountDownLatch(1);
-+        var heartbeat = new CountDownLatch(1); var returned = new CountDownLatch(1); var closed = new AtomicInteger();
-+        var thread = new AtomicReference<Thread>(); var context = new AtomicReference<PropagatedContext>();
-+        var pending = new CompletableFuture<AuthorizationEvaluationV1>() {
-+            @Override public CompletableFuture<AuthorizationEvaluationV1> whenComplete(
-+                java.util.function.BiConsumer<? super AuthorizationEvaluationV1, ? super Throwable> callback) {
-+                var result = super.whenComplete(callback); registered.countDown(); return result;
-+            }
-+        };
-+        var subscription = evaluations((principal, tenant) -> pending).boundary(PRINCIPAL, "main", Mono::never).subscribe();
-+        var handle = blockingClose(entered, unlock, closed, thread, context);
-+        boolean heartBeats; boolean completionReturns;
-+        try {
-+            assertThat(registered.await(3, TimeUnit.SECONDS)).isTrue(); subscription.dispose();
-+            loop.execute(() -> {
-+                try (var scope = callerContext().propagate()) { pending.complete(handle); returned.countDown(); }
-+            });
-+            loop.execute(heartbeat::countDown);
-+            assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
-+            heartBeats = heartbeat.await(100, TimeUnit.MILLISECONDS);
-+            completionReturns = returned.getCount() == 0;
-+            System.out.printf("late-close barrier: heartbeat=%s completeReturned=%s closes=%d%n", heartBeats, completionReturns, closed.get());
-+        } finally {
-+            unlock.countDown(); subscription.dispose();
-+            assertThat(returned.await(3, TimeUnit.SECONDS)).isTrue();
-+            loop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
-+        }
-+        assertThat(heartBeats).as("late close factory must not block the completion event loop").isTrue();
-+        assertThat(completionReturns).isTrue(); assertThat(loop.inEventLoop(thread.get())).isFalse();
-+        assertThat(context.get().getAllElements()).isEmpty(); assertThat(pending).isNotCancelled();
-+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(closed).hasValue(1));
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationHttpOriginBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationHttpOriginBoundaryTest.java
-new file mode 100644
-index 0000000..3b167df
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationHttpOriginBoundaryTest.java
-@@ -0,0 +1,243 @@
-+package io.kestra.webserver.rbac;
-+
-+import io.kestra.core.repositories.AuthorizationInvocationContext;
-+import io.kestra.core.repositories.AuthorizationEvaluationContext;
-+import io.kestra.core.repositories.AuthorizationQueryContext;
 +import io.kestra.webserver.oidc.TrustedIdentityV1;
 +import io.kestra.webserver.oidc.TrustedIdentityV2;
-+import io.micronaut.core.async.propagation.ReactorPropagation;
-+import io.micronaut.core.propagation.PropagatedContext;
-+import io.micronaut.core.propagation.PropagatedContextElement;
-+import io.micronaut.http.HttpRequest;
-+import io.micronaut.http.HttpResponse;
-+import io.micronaut.http.context.ServerRequestContext;
-+import io.micronaut.security.authentication.Authentication;
-+import io.micronaut.security.filters.SecurityFilter;
-+import java.time.Duration;
++import io.micronaut.context.BeanProvider;
 +import java.util.List;
-+import java.util.Set;
-+import java.util.concurrent.CompletableFuture;
-+import java.util.concurrent.CountDownLatch;
-+import java.util.concurrent.TimeUnit;
-+import java.util.concurrent.atomic.AtomicInteger;
-+import java.util.concurrent.atomic.AtomicReference;
 +import org.junit.jupiter.api.Test;
-+import reactor.core.publisher.Flux;
 +import reactor.core.publisher.Mono;
-+import reactor.core.scheduler.Schedulers;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
 +
-+import static io.kestra.webserver.rbac.AuthorizationEvaluationRestTest.request;
-+import static io.kestra.webserver.rbac.AuthorizationEvaluationRestTest.filter;
-+import static io.kestra.webserver.rbac.AuthorizationEvaluationTest.bean;
-+import static org.assertj.core.api.Assertions.*;
-+
-+/** Host-only mock identity/lock entry: no plugin, database, HTTP server or container. */
-+class AuthorizationHttpOriginBoundaryTest {
-+    private static final Duration LIMIT = Duration.ofSeconds(3);
-+    private record TransactionProbe(java.sql.Connection connection) implements PropagatedContextElement {}
-+
-+    private static TrustedIdentityV1.Identity identity(String subject) {
-+        return new TrustedIdentityV1.Identity(1, "https://issuer.example", subject, "ui", Set.of("ui"), "main",
-+            "group", Set.of("openid"), Set.of(), 1, 1, 1);
-+    }
-+    private static TrustedIdentityV2 reader(java.util.function.Supplier<TrustedIdentityV1.Identity> read) {
-+        return new TrustedIdentityV2() {
-+            public Identity current() { throw new AssertionError("Must use ordinary authorization entry"); }
-+            public Identity current(java.sql.Connection connection) { throw new AssertionError("No borrowed connection"); }
-+            public Identity currentForAuthorization() { return read.get(); }
-+        };
-+    }
-+    private static AuthorizationEvaluationV1 handle(AtomicInteger closes) {
-+        return new AuthorizationEvaluationV1() {
-+            public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
-+                return CompletableFuture.completedFuture(TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
-+            }
-+            public java.util.concurrent.CompletionStage<Void> close() {
-+                assertThat(PropagatedContext.getOrEmpty().getAllElements()).isEmpty();
-+                closes.incrementAndGet();
-+                return CompletableFuture.completedFuture(null);
-+            }
-+        };
-+    }
-+    private static AuthorizationEvaluations service(TrustedIdentityV1 identities, AuthorizationEvaluationProviderV2 provider) {
-+        return new AuthorizationEvaluations(true, new RbacConfiguration(true, false), true, bean(null), bean(provider), bean(identities), true);
-+    }
-+    private static TypedAuthorizationGate gate(AuthorizationEvaluations evaluations) {
-+        return new TypedAuthorizationGate(bean(null), evaluations);
-+    }
-+    // A real filter request must remain the origin even without FIRST-filter ambient context.
-+    @Test
-+    void actualHttpRequestWithoutAmbientOriginSurvivesAsyncInitialization() {
-+        var request = request();
-+        var authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow();
-+        var checkedIdentity = new AtomicInteger();
-+        var lockEntry = new AtomicInteger();
-+        var begins = new AtomicInteger();
-+        var closes = new AtomicInteger();
-+        var effects = new AtomicInteger();
-+        var initializedOn = new java.util.concurrent.atomic.AtomicReference<Thread>();
-+        var subscribedOn = new java.util.concurrent.atomic.AtomicReference<Thread>();
-+        var identities = new io.kestra.webserver.oidc.TrustedIdentityV2() {
-+            public Identity current() { throw new AssertionError("Must use ordinary authorization entry"); }
-+            public Identity current(java.sql.Connection connection) { throw new AssertionError("No borrowed connection"); }
-+            public Identity currentForAuthorization() {
-+                checkedIdentity.incrementAndGet();
-+                initializedOn.set(Thread.currentThread());
-+                // Same pre-lock lookup as OidcTrustedIdentity.currentForAuthorization().
-+                var actual = io.kestra.core.repositories.AuthorizationInvocationContext.currentRequest()
-+                    .orElseThrow(() -> new IllegalStateException("Missing HTTP origin before security lock"));
-+                assertThat(actual).isSameAs(request);
-+                assertThat(actual.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class)).contains(authentication);
-+                var origin = io.kestra.core.repositories.AuthorizationInvocationContext.current().orElseThrow();
-+                assertThat(origin.internal()).isFalse();
-+                assertThat(origin.request()).isSameAs(request);
-+                assertThat(io.kestra.core.repositories.AuthorizationEvaluationContext.current()).isEmpty();
-+                assertThat(io.micronaut.core.propagation.PropagatedContext.getOrEmpty().getAllElements()).containsExactly(origin);
-+                lockEntry.incrementAndGet(); // No JDBC: marks the production method's subsequent security-lock entry.
-+                return new Identity(1, "https://issuer.example", "alice", "ui", Set.of("ui"), "main",
-+                    "group", Set.of("openid"), Set.of(), 1, 1, 1);
-+            }
-+        };
-+        AuthorizationEvaluationProviderV2 provider = (identity, tenant) -> {
-+            begins.incrementAndGet();
-+            assertThat(identity.subject()).isEqualTo(authentication.getName());
-+            assertThat(tenant).isEqualTo("main");
-+            return java.util.concurrent.CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
-+                public java.util.concurrent.CompletionStage<TypedAuthorization.Decision> authorize(TypedAuthorization.Operation operation) {
-+                    return java.util.concurrent.CompletableFuture.completedFuture(
-+                        TypedAuthorization.Decision.allow(TypedAuthorization.QueryDomain.unrestricted()));
-+                }
-+                public java.util.concurrent.CompletionStage<Void> close() {
-+                    closes.incrementAndGet();
-+                    return java.util.concurrent.CompletableFuture.completedFuture(null);
-+                }
-+            });
-+        };
-+        var evaluations = new AuthorizationEvaluations(true, new RbacConfiguration(true, false), true,
-+            AuthorizationEvaluationTest.bean(null), AuthorizationEvaluationTest.bean(provider), AuthorizationEvaluationTest.bean(identities), true);
-+        var gate = new TypedAuthorizationGate(AuthorizationEvaluationTest.bean(null), evaluations);
-+        try (var scope = io.micronaut.core.propagation.PropagatedContext.empty().propagate()) {
-+            assertThat(io.kestra.core.repositories.AuthorizationInvocationContext.current()).isEmpty();
-+            assertThat(io.micronaut.http.context.ServerRequestContext.currentRequest()).isEmpty();
-+            var response = Mono.defer(() -> {
-+                subscribedOn.set(Thread.currentThread());
-+                assertThat(io.kestra.core.repositories.AuthorizationInvocationContext.current()).isEmpty();
-+                return reactor.core.publisher.Flux.from(filter(gate).doFilter(request, actual -> {
-+                    assertThat(actual).isSameAs(request);
-+                    effects.incrementAndGet();
-+                    return Mono.just(HttpResponse.ok());
-+                })).single();
-+            }).subscribeOn(Schedulers.single()).block(java.time.Duration.ofSeconds(3));
-+            assertThat(response.code()).as("actual HTTP origin must survive boundary initialization; checked=%s lock=%s", checkedIdentity, lockEntry).isEqualTo(200);
-+        }
-+        assertThat(initializedOn.get()).isNotSameAs(subscribedOn.get());
-+        assertThat(checkedIdentity).hasValue(1);
-+        assertThat(lockEntry).hasValue(1);
-+        assertThat(begins).hasValue(1);
-+        assertThat(effects).hasValue(1);
-+        assertThat(closes).hasValue(1);
-+    }
-+    @Test
-+    void concurrentRequestsOverrideStaleOriginsAndTrimTransactions() throws Exception {
-+        var left = request(); var right = request();
-+        right.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("bob", List.of("reader")));
-+        var entered = new CountDownLatch(2); var unlock = new CountDownLatch(1);
-+        var reads = new AtomicInteger(); var begins = new AtomicInteger();
-+        var closes = new AtomicInteger(); var effects = new AtomicInteger();
-+        var seen = java.util.concurrent.ConcurrentHashMap.<HttpRequest<?>>newKeySet();
-+        var expected = java.util.Map.<String,HttpRequest<?>>of("alice",left,"bob",right);
-+        var identities = reader(() -> {
-+            var actual = AuthorizationInvocationContext.currentRequest().orElseThrow();
-+            var auth = actual.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow();
-+            assertThat(actual).isSameAs(expected.get(auth.getName()));
-+            var origin = AuthorizationInvocationContext.current().orElseThrow();
-+            assertThat(origin.request()).isSameAs(actual); assertThat(origin.internal()).isFalse();
-+            assertThat(PropagatedContext.getOrEmpty().getAllElements()).containsExactly(origin);
-+            assertThat(AuthorizationEvaluationContext.current()).isEmpty();
-+            assertThat(PropagatedContext.getOrEmpty().find(TransactionProbe.class)).isEmpty();
-+            assertThat(PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class)).isEmpty();
-+            seen.add(actual); reads.incrementAndGet(); entered.countDown();
-+            boolean interrupted = false;
-+            while (true) {
-+                try { assertThat(unlock.await(3, TimeUnit.SECONDS)).isTrue(); break; }
-+                catch (InterruptedException ignored) { interrupted = true; }
-+            }
-+            if (interrupted) Thread.currentThread().interrupt();
-+            return identity(auth.getName());
-+        });
-+        var evaluations = service(identities,(trusted,tenant) -> {
-+            assertThat(AuthorizationInvocationContext.currentRequest()).contains(expected.get(trusted.subject()));
-+            assertThat(tenant).isEqualTo("main"); begins.incrementAndGet();
-+            return CompletableFuture.completedFuture(handle(closes));
-+        });
-+        var gate = gate(evaluations);
-+        var connection = (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
-+            new Class<?>[]{java.sql.Connection.class}, (proxy,method,args) -> { throw new AssertionError("Transaction must not propagate"); });
-+        var caller = PropagatedContext.empty().plus(new TransactionProbe(connection))
-+            .plus(new AuthorizationEvaluationContext(new Object())).plus(new AuthorizationQueryContext(new Object()));
-+        var staleHttp = caller.plus(new AuthorizationInvocationContext(HttpRequest.GET("/wrong-source"),false));
-+        var staleInternal = caller.plus(new AuthorizationInvocationContext(null,true));
-+        java.util.function.BiFunction<HttpRequest<?>,PropagatedContext,Mono<io.micronaut.http.MutableHttpResponse<?>>> run = (actual,ambient) ->
-+            Flux.from(filter(gate).doFilter(actual, continued -> {
-+                assertThat(continued).isSameAs(actual);
-+                assertThat(AuthorizationInvocationContext.currentRequest()).contains(actual);
-+                effects.incrementAndGet(); return Mono.just(HttpResponse.ok());
-+            })).single().contextWrite(context -> ReactorPropagation.addPropagatedContext(context,ambient));
-+        var result = Mono.zip(run.apply(left,staleHttp),run.apply(right,staleInternal)).toFuture();
-+        try { assertThat(entered.await(3, TimeUnit.SECONDS)).as("both independent HTTP identities must enter").isTrue(); }
-+        finally { unlock.countDown(); }
-+        var responses = result.get(3,TimeUnit.SECONDS);
-+        assertThat(responses.getT1().code()).isEqualTo(200); assertThat(responses.getT2().code()).isEqualTo(200);
-+        assertThat(seen).containsExactlyInAnyOrder(left,right);
-+        assertThat(reads).hasValue(2); assertThat(begins).hasValue(2);
-+        assertThat(effects).hasValue(2); assertThat(closes).hasValue(2);
++class AuthorizationUnavailableBoundaryTest {
++    @Test void applicationGroupBoundaryUsesNewDefaultCompatibleEntryAndPreservesExplicitUnavailable() {
++        var identities=mock(BeanProvider.class);var legacy=mock(BeanProvider.class);var modern=mock(BeanProvider.class);
++        var identity=mock(TrustedIdentityV2.class);
++        when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);when(modern.isUnique()).thenReturn(true);
++        when(identity.currentForAuthorization()).thenThrow(new AuthorizationUnavailableException());
++        var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,legacy,modern,identities,true);
++        var principal=new RbacAuthorizer.Principal("actor",List.of(),null,null,List.of());
++        assertThrows(AuthorizationUnavailableException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
++        verify(identity).currentForAuthorization();verify(identity,never()).current();
 +    }
 +
-+    @Test
-+    void missingOriginOutsideHttpFilterStillFailsClosed() {
-+        var lockEntry = new AtomicInteger(); var begins = new AtomicInteger(); var effects = new AtomicInteger();
-+        var identities = reader(() -> {
-+            var actual = AuthorizationInvocationContext.currentRequest().orElseThrow(() -> new IllegalStateException("Missing origin"));
-+            assertThat(actual).isNotNull(); lockEntry.incrementAndGet(); return identity("alice");
-+        });
-+        var evaluations = service(identities,(trusted,tenant) -> {
-+            begins.incrementAndGet(); return CompletableFuture.completedFuture(handle(new AtomicInteger()));
-+        });
-+        try(var scope = PropagatedContext.empty().propagate()) {
-+            assertThat(ServerRequestContext.currentRequest()).isEmpty();
-+            assertThatThrownBy(() -> evaluations.boundary(AuthorizationEvaluationTest.PRINCIPAL,"main",() -> {
-+                effects.incrementAndGet(); return Mono.just(true);
-+            }).blockLast(LIMIT)).isInstanceOf(IllegalStateException.class);
-+        }
-+        assertThat(lockEntry).hasValue(0); assertThat(begins).hasValue(0); assertThat(effects).hasValue(0);
-+    }
-+
-+    @Test
-+    void requestWithoutAuthenticationStillReturns401BeforeIdentityOrBusiness() {
-+        var reads = new AtomicInteger(); var effects = new AtomicInteger();
-+        var identities = reader(() -> { reads.incrementAndGet(); return identity("alice"); });
-+        var gate = gate(service(identities,(trusted,tenant) -> CompletableFuture.completedFuture(handle(new AtomicInteger()))));
-+        var response = Flux.from(filter(gate).doFilter(HttpRequest.GET("/api/v1/main/executions"),ignored -> {
-+            effects.incrementAndGet(); return Mono.just(HttpResponse.ok());
-+        })).single().block(LIMIT);
-+        assertThat(response.code()).isEqualTo(401); assertThat(reads).hasValue(0); assertThat(effects).hasValue(0);
-+    }
-+
-+    @Test
-+    void explicitUnavailableAndUnknownFailureKeep503And403() {
-+        for (var failure : List.of(new AuthorizationUnavailableException(),new IllegalStateException("unknown"))) {
-+            var effects = new AtomicInteger(); var begins = new AtomicInteger();
-+            var identities = reader(() -> {
-+                assertThat(AuthorizationInvocationContext.currentRequest()).isPresent(); throw failure;
-+            });
-+            var gate = gate(service(identities,(trusted,tenant) -> {
-+                begins.incrementAndGet(); return CompletableFuture.completedFuture(handle(new AtomicInteger()));
-+            }));
-+            var response = Flux.from(filter(gate).doFilter(request(),ignored -> {
-+                effects.incrementAndGet(); return Mono.just(HttpResponse.ok());
-+            })).single().block(LIMIT);
-+            assertThat(response.code()).isEqualTo(failure instanceof AuthorizationUnavailableException ? 503 : 403);
-+            assertThat(begins).hasValue(0); assertThat(effects).hasValue(0);
-+        }
++    @Test void missingOrDuplicateProvidersAndLegacyUnknownFailuresKeepExistingDenial() {
++        var identities=mock(BeanProvider.class);var legacy=mock(BeanProvider.class);var modern=mock(BeanProvider.class);
++        var identity=mock(TrustedIdentityV1.class);when(identities.isUnique()).thenReturn(true);when(identities.get()).thenReturn(identity);
++        var evaluations=new AuthorizationEvaluations(true,new RbacConfiguration(true,false),true,legacy,modern,identities,true);
++        var principal=new RbacAuthorizer.Principal("actor",List.of(),null,null,List.of());
++        assertThrows(IllegalStateException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast());
++        verifyNoInteractions(identity);
++        when(modern.isUnique()).thenReturn(true);when(identity.current()).thenThrow(new IllegalStateException("unknown"));
++        assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,()->evaluations.boundary(principal,"main",()->Mono.just(true)).blockLast()).getClass());
 +    }
 +}
-
-diff --git a/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java b/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
-index a024e78..2edf622 100644
---- a/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
-+++ b/webserver/src/main/java/io/kestra/webserver/services/SseConnectionMetrics.java
-@@ -26,11 +26,19 @@ import reactor.core.publisher.Flux;
- @Singleton
- public class SseConnectionMetrics {
-     private final MetricRegistry metricRegistry;
-+    private final io.kestra.webserver.rbac.SseAuthorization authorization;
-     private final Map<String, AtomicInteger> activeByType = new ConcurrentHashMap<>();
-
--    @Inject
-+    /** Compatibility for isolated metrics tests; production uses the required injected helper. */
-     public SseConnectionMetrics(MetricRegistry metricRegistry) {
-         this.metricRegistry = metricRegistry;
-+        this.authorization = null;
-+    }
-+
-+    @Inject
-+    public SseConnectionMetrics(MetricRegistry metricRegistry, io.kestra.webserver.rbac.SseAuthorization authorization) {
-+        this.metricRegistry = metricRegistry;
-+        this.authorization = java.util.Objects.requireNonNull(authorization);
-     }
-
-     /**
-@@ -47,7 +55,7 @@ public class SseConnectionMetrics {
-      */
-     public <T> Flux<Event<T>> track(Flux<Event<T>> flux, String type, Runnable onClose) {
-         AtomicInteger active = active(type);
--        return flux
-+        return (authorization == null ? flux : authorization.bind(flux))
-             .doOnSubscribe(subscription ->
-             {
-                 active.incrementAndGet();
-
-diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java
 new file mode 100644
-index 0000000..7b06505
+index 0000000..a9669e4
 --- /dev/null
-+++ b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
-@@ -0,0 +1,33 @@
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationUnavailableHttpTest.java
+@@ -0,0 +1,110 @@
 +package io.kestra.webserver.rbac;
 +
-+import io.kestra.core.repositories.AuthorizationInvocationContext;
-+import io.micronaut.core.async.propagation.ReactorPropagation;
-+import io.micronaut.core.propagation.PropagatedContext;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.repositories.FlowRepositoryInterface;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
 +import jakarta.inject.Singleton;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
 +import java.util.List;
-+import reactor.core.publisher.Flux;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.junit.jupiter.api.Assertions.*;
 +
-+/** Fresh authorization at the stream source, inside framework-captured response context. */
-+@Singleton
-+public final class SseAuthorization {
-+    private final TypedAuthorizationGate gate;
-+    public SseAuthorization(TypedAuthorizationGate gate) { this.gate = gate; }
++@KestraTest(environments="h2")
++@Property(name="kestra.server-type",value="WEBSERVER")
++@Property(name="kestra.rbac.enabled",value="true")
++@Property(name="kestra.rbac.typed.enabled",value="true")
++@Property(name="kestra.rbac.evaluation.enabled",value="true")
++@Property(name="micronaut.security.enabled",value="true")
++@Property(name="micronaut.security.filter.enabled",value="true")
++@Property(name="micronaut.security.intercept-url-map[0].pattern",value="/**")
++@Property(name="micronaut.security.intercept-url-map[0].access[0]",value="isAnonymous()")
++@Property(name="mcp.http.security.fixture",value="true")
++@Property(name="authorization.unavailable.probe",value="true")
++class AuthorizationUnavailableHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject FlowRepositoryInterface flows;
 +
-+    public <T> Flux<T> bind(Flux<T> source) {
-+        if (!gate.evaluationEnabled()) return source;
-+        var owner = AuthorizationEvaluations.current();
-+        var request = AuthorizationInvocationContext.currentRequest().orElse(null);
-+        if (owner == null || request == null || AuthorizationInvocationContext.isInternal() || owner.restPlan.isEmpty())
-+            return Flux.error(AuthorizationEvaluations.denied());
-+        // Capture immutable requirements and HTTP origin, never the old owner, connection or transaction.
-+        var principal = owner.principal;
-+        String tenant = owner.tenant;
-+        var plan = List.copyOf(owner.restPlan);
-+        var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
-+        return gate.boundary(principal, tenant, () -> Flux.fromIterable(plan)
-+            .concatMap(operation -> gate.authorize(principal, operation))
-+            .all(TypedAuthorization.Decision::allowed)
-+            .flatMapMany(allowed -> allowed ? source : Flux.error(AuthorizationEvaluations.denied())))
-+            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context, origin));
++    @Test void explicitDependencyFailuresAre503AcrossSynchronousAndAsynchronousStages()throws Exception {
++        for(String mode:List.of("identity-sql","begin-sync","begin-async","authorize-sync","authorize-async","wrapped-async")) {
++            var response=send(mode,"/api/v1/main/flows","POST");
++            assertEquals(503,response.statusCode(),mode);
++            assertTrue(response.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
++            var problem=io.kestra.core.serializers.JacksonMapper.ofJson().readTree(response.body());
++            assertEquals(503,problem.path("status").intValue());
++            assertFalse(response.body().contains("secret-probe"));assertFalse(response.body().contains("AuthorizationUnavailableException"));
++            assertTrue(flows.findByIdWithoutAcl("main","dependency.probe","never-created",Optional.empty()).isEmpty());
++        }
++    }
++
++    @Test void unknownErrorsDecisionsAndUnknownRoutesRetain403()throws Exception {
++        for(String mode:List.of("unknown-begin","unknown-authorize","deny","unknown-wrapper")) {
++            assertEquals(403,send(mode,"/api/v1/main/flows","POST").statusCode(),mode);
++            assertTrue(flows.findByIdWithoutAcl("main","dependency.probe","never-created",Optional.empty()).isEmpty());
++        }
++        assertEquals(403,send("allow","/not-a-route","GET").statusCode());
++        assertEquals(401,send("anonymous","/api/v1/configs","GET").statusCode());
++    }
++
++    HttpResponse<String> send(String mode,String path,String method)throws Exception {
++        var builder=HttpRequest.newBuilder(server.getURI().resolve(path)).header("X-Unavailable-Probe",mode);
++        if(method.equals("POST"))builder.header("Content-Type","application/x-yaml").POST(HttpRequest.BodyPublishers.ofString("namespace: dependency.probe\nid: never-created\ntasks: []"));
++        else builder.GET();
++        return HttpClient.newHttpClient().send(builder.build(),HttpResponse.BodyHandlers.ofString());
++    }
++
++    @Singleton
++    @Requires(property="authorization.unavailable.probe",value="true")
++    static class Identity implements AuthenticationFetcher<io.micronaut.http.HttpRequest<?>> {
++        public org.reactivestreams.Publisher<Authentication> fetchAuthentication(io.micronaut.http.HttpRequest<?> request) {
++            String mode=request.getHeaders().get("X-Unavailable-Probe");
++            return mode==null||mode.equals("anonymous")?Mono.empty():Mono.just(Authentication.build(mode,List.of()));
++        }
++    }
++
++    @Singleton
++    @Requires(property="authorization.unavailable.probe",value="true")
++    static class Policy implements AuthorizationEvaluationProviderV1 {
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal,String tenant) {
++            String mode=principal.subject();
++            if(mode.equals("identity-sql"))return identitySqlFailure();
++            if(mode.equals("begin-sync"))throw new AuthorizationUnavailableException();
++            if(mode.equals("begin-async"))return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
++            if(mode.equals("unknown-begin"))throw new IllegalStateException("secret-probe");
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                public CompletionStage<Decision> authorize(Operation operation) {
++                    if(mode.equals("authorize-sync"))throw new AuthorizationUnavailableException();
++                    if(mode.equals("authorize-async"))return CompletableFuture.failedFuture(new AuthorizationUnavailableException());
++                    if(mode.equals("wrapped-async"))return CompletableFuture.failedFuture(new java.util.concurrent.CompletionException(new AuthorizationUnavailableException()));
++                    if(mode.equals("unknown-authorize"))throw new IllegalStateException("secret-probe");
++                    if(mode.equals("unknown-wrapper"))return CompletableFuture.failedFuture(new IllegalStateException("secret-probe",new AuthorizationUnavailableException()));
++                    return CompletableFuture.completedFuture(mode.equals("allow")?Decision.allow(QueryDomain.unrestricted()):Decision.deny("denied"));
++                }
++                public CompletionStage<Void> close(){return CompletableFuture.completedFuture(null);}
++            });
++        }
++
++        CompletionStage<AuthorizationEvaluationV1> identitySqlFailure() {
++            var source=org.mockito.Mockito.mock(javax.sql.DataSource.class);
++            try {org.mockito.Mockito.when(source.getConnection()).thenThrow(new java.sql.SQLException("secret-probe SQL"));}
++            catch(java.sql.SQLException failure){throw new AssertionError(failure);}
++            var projections=org.mockito.Mockito.mock(io.micronaut.context.BeanProvider.class);
++            org.mockito.Mockito.when(projections.isUnique()).thenReturn(true);
++            var configuration=new io.kestra.webserver.oidc.OidcConfiguration();configuration.setIssuer("https://issuer.example");
++            var identity=new io.kestra.webserver.oidc.services.OidcTrustedIdentity(projections,
++                org.mockito.Mockito.mock(io.kestra.webserver.oidc.OidcProtocolStateV1.class),configuration,source);
++            identity.currentForAuthorization();throw new AssertionError("Unavailable identity must not open an evaluation");
++        }
 +    }
 +}
-
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
 new file mode 100644
 index 0000000..f1a7560

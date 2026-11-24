@@ -1,7 +1,7 @@
 # 需求: REQ-0300 登录后规范tenant路径、零授权退出入口、usage与MCP工具列表按实际资源域授权
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；用户报告空白dashboard、全局usage泄露、受限MCP页面拒绝和零授权账号无法退出
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；用户报告空白dashboard、全局usage泄露、受限MCP页面拒绝和零授权账号无法退出
 # 触达上游文件: 7 个（UI认证与拒绝页面、统计查询入口、typed资源适配和独立探针）
 # 移除条件: 上游OSS提供等价规范登录路径、独立拒绝退出入口和usage/MCP工具查询授权
 # 演进：REQ-0368 通用入口激活按原需求归属；未引入业务逻辑。
@@ -29,10 +29,10 @@ index 0000000..67160a9
 +    }
 +</script>
 diff --git a/ui/src/main.ts b/ui/src/main.ts
-index 3764c6a..41037cd 100644
+index 7d69d87..a13ffac 100644
 --- a/ui/src/main.ts
 +++ b/ui/src/main.ts
-@@ -46,6 +46,10 @@ const handleAuthError = (to: {fullPath: string}, error: unknown) => {
+@@ -47,6 +47,10 @@ const handleAuthError = (to: {fullPath: string}, error: unknown) => {
          const fromPath = to.fullPath !== "/ui/login" ? to.fullPath : undefined
          return {name: "login", query: fromPath ? {from: fromPath} : {}}
      } 
@@ -43,10 +43,10 @@ index 3764c6a..41037cd 100644
      console.error("Error during authentication check:", error)
      return
  }
-@@ -97,6 +101,15 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
+@@ -98,6 +102,15 @@ async function beforeResolve(router: Router, to: any, from: any): Promise<unknow
          return // Prevent navigation if the path and query are the same
      }
- 
+
 +    if (to.name === "access-denied") {
 +        const response = await fetch("/api/v1/configs/login")
 +        if (response.ok) Authentication.configureOidc((await response.json()).oidcAuthEnabled === true)
@@ -60,27 +60,27 @@ index 3764c6a..41037cd 100644
          const miscStore = useMiscStore()
          async function loadRouteConfigs() {
 diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
-index e243b34..6bd429e 100644
+index 6d929a6..7b43436 100644
 --- a/ui/src/routes/routes.ts
 +++ b/ui/src/routes/routes.ts
 @@ -11,6 +11,7 @@ import {NAMESPACE_PARENT_ROUTE, createNamespaceTabRoutes} from "../utils/namespa
  export type KestraRouteRecord = RouteRecordRaw & {ossOnly?: boolean}
- 
+
  const routes: KestraRouteRecord[] = [
 +    {name: "access-denied", path: "/access-denied", component: () => import("../components/errors/AccessDenied.vue"), meta: {anonymous: true, layout: FullScreenLayout}},
      //Initial
      {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
- 
+
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-index 438f276..9516ceb 100644
+index 0ed75fb..f8069c4 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/MiscController.java
-@@ -214,7 +214,7 @@ public class MiscController {
-     @Operation(tags = { "Misc" }, summary = "Retrieve instance usage information")
-     public ApiUsage getUsages() {
+@@ -222,7 +222,7 @@ public class MiscController {
+     public ApiUsage getUsages(
+         @Parameter(description = "The rolling window, in days, the execution figures cover") @QueryValue(defaultValue = "1") @Min(1) @Max(MAX_USAGE_DAYS) int days) {
          ZonedDateTime now = ZonedDateTime.now();
--        FeatureUsageReport.UsageEvent event = featureUsageReport.report(now.toInstant(), Reportable.TimeInterval.of(now.minus(Duration.ofDays(1)), now));
-+        FeatureUsageReport.UsageEvent event = featureUsageReport.report(now.toInstant(), Reportable.TimeInterval.of(now.minus(Duration.ofDays(1)), now), "main");
+-        FeatureUsageReport.UsageEvent event = featureUsageReport.report(now.toInstant(), Reportable.TimeInterval.of(now.minus(Duration.ofDays(days)), now));
++        FeatureUsageReport.UsageEvent event = featureUsageReport.report(now.toInstant(), Reportable.TimeInterval.of(now.minus(Duration.ofDays(days)), now), "main");
          return ApiUsage.builder()
              .flows(event.getFlows())
              .executions(event.getExecutions())
@@ -112,7 +112,7 @@ index f5a35ea..85ebe09 100644
 @@ -72,6 +72,22 @@ class OssRestOperationAdapterTest {
              "[]", Map.of()))).isEmpty();
      }
- 
+
 +    @Test
 +    void usageRequiresBothResourceDomainsAndToolListingUsesFlowDomain() {
 +        var usage = adapter.resolve(request("MiscController", "getUsages", "GET", Map.of("tenant", "main"), "", Map.of()));

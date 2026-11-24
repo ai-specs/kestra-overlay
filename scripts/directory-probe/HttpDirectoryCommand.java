@@ -4,9 +4,9 @@ import org.postgresql.ds.PGSimpleDataSource;
 public class HttpDirectoryCommand {
     public static void main(String[] arguments) throws Exception {
         var source = new PGSimpleDataSource();
-        source.setURL(arguments[0]);
-        source.setUser("kestra");
-        source.setPassword("local-test-only");
+        source.setURL(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_URL", arguments[0]));
+        source.setUser(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_USER", "kestra"));
+        source.setPassword(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_PASSWORD", "local-test-only"));
         var directory = new OidcUserDirectory(source);
         if ("temporary".equals(arguments[1])) {
             var temporary = directory.createTemporary("browser-" + java.util.UUID.randomUUID(), null, null);

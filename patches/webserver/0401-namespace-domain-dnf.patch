@@ -1,7 +1,7 @@
 # 需求: REQ-0401 namespace相关DNF补集代数与JDBC日志执行激活
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；维护者2026-11-18接收的宿主公开契约修复，不含插件业务模型
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；维护者2026-11-18接收的宿主公开契约修复，不含插件业务模型
 # 触达上游文件: 19 个
 # 移除条件: 上游提供等价相关DNF补集代数与查询执行机制
 diff --git a/core/src/main/java/io/kestra/core/models/NamespaceDomain.java b/core/src/main/java/io/kestra/core/models/NamespaceDomain.java
@@ -167,7 +167,7 @@ index cb86321..32ff9aa 100644
      /**
       * A no-op collaborator granting global access with no auditing. Used as the safe default for log
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
-index 450a7a7..2e7cebb 100644
+index b31a6a8..efca047 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 @@ -600,6 +600,8 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
@@ -180,7 +180,7 @@ index 450a7a7..2e7cebb 100644
          Condition allowed = switch (scope.kind()) {
              case GLOBAL -> DSL.trueCondition();
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
-index 9abd08c..5b47465 100644
+index ff93e8a..7454f2b 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 @@ -113,7 +113,7 @@ public abstract class AbstractJdbcRepository {
@@ -260,7 +260,7 @@ index 4801eaa..aef6e3a 100644
  ,
              TypedAuthorization.Action.
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
-index 4e94c9d..d3dc23d 100644
+index b6c00cb..4ef3a25 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
 @@ -118,9 +118,7 @@ public final class AiToolAuthorization {

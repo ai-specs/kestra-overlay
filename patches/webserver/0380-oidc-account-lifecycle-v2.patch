@@ -1,7 +1,7 @@
 # 需求: REQ-0380 标准账号删除与同连接可信操作者生命周期参与
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；完整本地门通过；仅对应提交CI及正式镜像推广成功后可消费
-# 来源: 新写；公开UserDirectoryV1与协议安全锁；R24主控设计维护者可复核
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；公开UserDirectoryV1与协议安全锁；R24主控设计维护者可复核
 # 触达上游文件: 16 个（公开SPI、同连接适配、迁移与独立PG探针）
 # 移除条件: 上游提供等价标准身份生命周期和借用连接公开机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleParticipantV1.java b/webserver/src/main/java/io/kestra/webserver/oidc/IdentityLifecycleParticipantV1.java
@@ -59,6 +59,7 @@ index 581f62f..fc8dd2b 100644
      @Override public Optional<Account> account(Connection connection,String issuer,String subject)throws SQLException {
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV2.java b/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV2.java
 new file mode 100644
+index 0000000..ea0f44d
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/TrustedIdentityV2.java
 @@ -0,0 +1,8 @@
@@ -107,6 +108,7 @@ index 0000000..209dda2
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLifecycleParticipants.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLifecycleParticipants.java
 new file mode 100644
+index 0000000..c330549
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcLifecycleParticipants.java
 @@ -0,0 +1,47 @@
@@ -184,9 +186,10 @@ index 0000000..7604bdf
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
+index 62e3e3e..3d9ce96 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,7 @@ import io.kestra.webserver.oidc.ApplicationGroupScopeIssuance;
  import io.kestra.webserver.oidc.OidcConfiguration;
  import io.kestra.webserver.oidc.OidcProtocolStateV1;
  import io.kestra.webserver.oidc.TrustedIdentityV1;
@@ -194,7 +197,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
  import io.micronaut.context.BeanProvider;
  import io.micronaut.context.annotation.Requires;
  import io.micronaut.data.connection.jdbc.advice.DelegatingDataSource;
-@@ -23,7 +24,7 @@
+@@ -23,7 +24,7 @@ import javax.sql.DataSource;
 
  @Singleton
  @Requires(property="kestra.rbac.application-groups.enabled",value="true")
@@ -203,12 +206,10 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
      public static final String CLAIM="kestra_application_group_v1";
      private final BeanProvider<ApplicationGroupProtocolProjectionV1> projections;
      private final OidcProtocolStateV1 protocol;
-@@ -41,6 +42,20 @@
-         var authentication=request.getAttribute("io.kestra.mcp.authentication",Authentication.class)
-             .or(()->request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class)).orElseThrow(OidcTrustedIdentity::denied);
+@@ -43,6 +44,20 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
          return validate(authentication);
-+    }
-+
+     }
+
 +    @Override public Identity current(Connection connection) {
 +        try {
 +            var request=AuthorizationInvocationContext.currentRequest().orElseThrow(()->identityFailure(true));
@@ -221,10 +222,12 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
 +        } catch(SQLException|RuntimeException failure) {
 +            throw infrastructureFailure(true);
 +        }
-     }
-
++    }
++
      public Identity validate(Authentication authentication) {
-@@ -78,6 +93,20 @@
+         try{return validateCurrent(authentication);}
+         catch(RuntimeException failure){throw denied();}
+@@ -78,6 +93,20 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
      }
 
      private Identity validateCurrent(Authentication authentication) {
@@ -245,7 +248,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
          if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")) || !projections.isUnique())throw denied();
          Object raw=authentication.getAttributes().get(CLAIM);
          if(!(raw instanceof Map<?,?> claim))throw denied();
-@@ -89,10 +118,6 @@
+@@ -89,10 +118,6 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
          var audiences=strings(authentication.getAttributes().get("aud"),true);
          var scopes=strings(claim.get("application_group_scopes"),false);
          var protocols=strings(claim.get("protocol_scopes"),false);
@@ -256,7 +259,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
                  var account=protocol.account(connection,target.issuer(),target.subject()).orElseThrow(OidcTrustedIdentity::denied);
                  if(!account.issuer().equals(target.issuer()) || !account.subject().equals(target.subject()) || !account.active()
                      || account.authenticationVersion()!=authenticationVersion)throw denied();
-@@ -116,12 +141,7 @@
+@@ -116,12 +141,7 @@ public final class OidcTrustedIdentity implements TrustedIdentityV1 {
                      || projection.scopes().stream().anyMatch(scope->vocabulary.contains(scope.key())))throw denied();
                  var identity=new Identity(1,target.issuer(),target.subject(),target.clientId(),audiences,target.tenant(),
                      projection.applicationGroupId(),protocols,scopes,authenticationVersion,epoch,projection.revision());
@@ -271,7 +274,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrust
 
      private static String text(Object value) {
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
-index cc5ea8397b7cf35edd62a492c3b4cbfef6df02a6..50b704baa00cc97c30ffe50a37c46fb673580a4e 100644
+index cc5ea83..50b704b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcUserDirectory.java
 @@ -8,6 +8,8 @@ import java.util.ArrayList;
@@ -379,6 +382,83 @@ index 0000000..1d9af0a
 +    subject TEXT PRIMARY KEY,
 +    retired_at TIMESTAMPTZ NOT NULL DEFAULT now()
 +);
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/AuthorizationIdentityClassificationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/AuthorizationIdentityClassificationTest.java
+new file mode 100644
+index 0000000..57a0e14
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/AuthorizationIdentityClassificationTest.java
+@@ -0,0 +1,71 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.rbac.AuthorizationUnavailableException;
++import java.sql.SQLException;
++import java.util.Optional;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++
++class AuthorizationIdentityClassificationTest {
++    @Test void oldV2ImplementationDelegatesDefaultOnlyToOrdinaryCurrent() {
++        var calls=new AtomicInteger();
++        TrustedIdentityV2 old=new TrustedIdentityV2() {
++            public Identity current(){calls.incrementAndGet();throw new IllegalStateException("legacy failure");}
++            public Identity current(java.sql.Connection connection){throw new AssertionError("Default must not borrow or end a transaction");}
++        };
++        var failure=assertThrows(IllegalStateException.class,old::currentForAuthorization);
++        assertEquals(IllegalStateException.class,failure.getClass());assertEquals(1,calls.get());
++    }
++
++    @Test void connectionSqlAndProjectionFailuresUseOnlyFixedSafeUnavailable()throws Exception {
++        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
++        when(fixture.source.getConnection()).thenThrow(new SQLException("password=private SQL"));
++        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
++        doReturn(fixture.connection).when(fixture.source).getConnection();
++        doThrow(new SQLException("private lock query")).when(fixture.protocol).lockSecurityState(fixture.connection);
++        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
++        doNothing().when(fixture.protocol).lockSecurityState(fixture.connection);
++        when(fixture.projection.current(eq(fixture.connection),any())).thenThrow(new IllegalStateException("private projection failure"));
++        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
++        when(fixture.projection.current(eq(fixture.connection),any())).thenReturn(null);
++        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
++    }
++
++    @Test void actorInvalidityAndMissingProjectionComponentKeepOrdinaryDenial()throws Exception {
++        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
++        when(fixture.source.getConnection()).thenReturn(fixture.connection);
++        when(fixture.protocol.account(fixture.connection,TrustedIdentityFailureClassificationTest.ISSUER,"actor")).thenReturn(Optional.empty());
++        fixture.request(()->{
++            assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,service::currentForAuthorization).getClass());
++            return null;
++        });
++        when(fixture.projections.isUnique()).thenReturn(false);
++        fixture.request(()->{assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,service::currentForAuthorization).getClass());return null;});
++    }
++
++    @Test void authorizationOwnsItsTransactionWhileOrdinaryAndBorrowedContractsRemainDistinct()throws Exception {
++        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
++        when(fixture.source.getConnection()).thenReturn(fixture.connection);
++        fixture.request(()->{assertEquals("actor",service.currentForAuthorization().subject());return null;});
++        verify(fixture.source).getConnection();verify(fixture.connection).commit();verify(fixture.connection).close();
++        clearInvocations(fixture.source,fixture.connection);
++        when(fixture.protocol.account(fixture.connection,TrustedIdentityFailureClassificationTest.ISSUER,"actor")).thenReturn(Optional.empty());
++        fixture.request(()->{assertEquals(IdentityLifecycleGuardV1.Failure.FORBIDDEN,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->service.current(fixture.connection)).failure());return null;});
++        verifyNoInteractions(fixture.source);verify(fixture.connection,never()).commit();verify(fixture.connection,never()).rollback();verify(fixture.connection,never()).close();
++        assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,()->service.validate(fixture.authentication())).getClass());
++    }
++
++    @Test void unknownNonDependencyRuntimeIsNotReclassifiedAsUnavailable()throws Exception {
++        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
++        when(fixture.source.getConnection()).thenReturn(fixture.connection);
++        doThrow(new IllegalStateException("unknown lock programming failure")).when(fixture.protocol).lockSecurityState(fixture.connection);
++        fixture.request(()->{assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,service::currentForAuthorization).getClass());return null;});
++    }
++
++    void assertSafe(AuthorizationUnavailableException failure) {
++        assertEquals("Authorization dependency is unavailable",failure.getMessage());assertNull(failure.getCause());
++    }
++}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountDeletionPostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcAccountDeletionPostgresTest.java
 new file mode 100644
 index 0000000..17c5aa9
@@ -483,8 +563,33 @@ index 0000000..17c5aa9
 +        }
 +    }
 +}
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
+index 3262778..a83f59e 100644
+--- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
+@@ -25,9 +25,18 @@ public abstract class OidcPostgresTestBase {
+      * class, which would hand later classes an empty database while the migration flag is
+      * already set — the exact failure this base exists to prevent.
+      */
+-    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18");
++    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18")
++        .withLabel("owner", System.getProperty("kestra.test.resource.owner",
++            System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_OWNER", "kestra-overlay-" + java.util.UUID.randomUUID())))
++        .withLabel("run", System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_RUN", "oidc-local-tests"));
+
+     static {
++        String volume = System.getenv("KESTRA_TEST_PG_VOLUME");
++        if (volume != null && !volume.isBlank()) {
++            POSTGRES.withCreateContainerCmdModifier(command -> command.getHostConfig().withBinds(
++                new com.github.dockerjava.api.model.Bind(volume,
++                    new com.github.dockerjava.api.model.Volume("/var/lib/postgresql"))));
++        }
+         POSTGRES.start();
+     }
+
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityBorrowedConnectionTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityBorrowedConnectionTest.java
 new file mode 100644
+index 0000000..11c81db
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityBorrowedConnectionTest.java
 @@ -0,0 +1,48 @@
@@ -536,30 +641,9 @@ new file mode 100644
 +        verify(connection,never()).commit();verify(connection,never()).rollback();verify(connection,never()).close();
 +    }
 +}
-diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
-index 3262778ed4442625d42e6168599ca1002991045b..71ed6b5f5fe373fbed09ff5c601c05621e94bb7d 100644
---- a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
-+++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
-@@ -26,7 +26,16 @@ public abstract class OidcPostgresTestBase {
-      * already set — the exact failure this base exists to prevent.
-      */
--    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18");
-+    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:18")
-+        .withLabel("owner", System.getProperty("kestra.test.resource.owner",
-+            System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_OWNER", "kestra-overlay-" + java.util.UUID.randomUUID())))
-+        .withLabel("run", System.getenv().getOrDefault("KESTRA_TEST_RESOURCE_RUN", "oidc-local-tests"));
-
-     static {
-+        String volume = System.getenv("KESTRA_TEST_PG_VOLUME");
-+        if (volume != null && !volume.isBlank()) {
-+            POSTGRES.withCreateContainerCmdModifier(command -> command.getHostConfig().withBinds(
-+                new com.github.dockerjava.api.model.Bind(volume,
-+                    new com.github.dockerjava.api.model.Volume("/var/lib/postgresql"))));
-+        }
-         POSTGRES.start();
-     }
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityFailureClassificationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityFailureClassificationTest.java
 new file mode 100644
+index 0000000..613c9c7
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityFailureClassificationTest.java
 @@ -0,0 +1,153 @@
@@ -718,6 +802,7 @@ new file mode 100644
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityLockRecheckPostgresTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityLockRecheckPostgresTest.java
 new file mode 100644
+index 0000000..00ae085
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/TrustedIdentityLockRecheckPostgresTest.java
 @@ -0,0 +1,105 @@
@@ -824,81 +909,5 @@ new file mode 100644
 +                borrowed.rollback();
 +            }
 +        }
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/AuthorizationIdentityClassificationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/AuthorizationIdentityClassificationTest.java
-new file mode 100644
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/oidc/AuthorizationIdentityClassificationTest.java
-@@ -0,0 +1,71 @@
-+package io.kestra.webserver.oidc;
-+
-+import io.kestra.webserver.rbac.AuthorizationUnavailableException;
-+import java.sql.SQLException;
-+import java.util.Optional;
-+import java.util.concurrent.atomic.AtomicInteger;
-+import org.junit.jupiter.api.Test;
-+import static org.junit.jupiter.api.Assertions.*;
-+import static org.mockito.ArgumentMatchers.*;
-+import static org.mockito.Mockito.*;
-+
-+class AuthorizationIdentityClassificationTest {
-+    @Test void oldV2ImplementationDelegatesDefaultOnlyToOrdinaryCurrent() {
-+        var calls=new AtomicInteger();
-+        TrustedIdentityV2 old=new TrustedIdentityV2() {
-+            public Identity current(){calls.incrementAndGet();throw new IllegalStateException("legacy failure");}
-+            public Identity current(java.sql.Connection connection){throw new AssertionError("Default must not borrow or end a transaction");}
-+        };
-+        var failure=assertThrows(IllegalStateException.class,old::currentForAuthorization);
-+        assertEquals(IllegalStateException.class,failure.getClass());assertEquals(1,calls.get());
-+    }
-+
-+    @Test void connectionSqlAndProjectionFailuresUseOnlyFixedSafeUnavailable()throws Exception {
-+        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
-+        when(fixture.source.getConnection()).thenThrow(new SQLException("password=private SQL"));
-+        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
-+        doReturn(fixture.connection).when(fixture.source).getConnection();
-+        doThrow(new SQLException("private lock query")).when(fixture.protocol).lockSecurityState(fixture.connection);
-+        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
-+        doNothing().when(fixture.protocol).lockSecurityState(fixture.connection);
-+        when(fixture.projection.current(eq(fixture.connection),any())).thenThrow(new IllegalStateException("private projection failure"));
-+        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
-+        when(fixture.projection.current(eq(fixture.connection),any())).thenReturn(null);
-+        fixture.request(()->{assertSafe(assertThrows(AuthorizationUnavailableException.class,service::currentForAuthorization));return null;});
-+    }
-+
-+    @Test void actorInvalidityAndMissingProjectionComponentKeepOrdinaryDenial()throws Exception {
-+        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
-+        when(fixture.source.getConnection()).thenReturn(fixture.connection);
-+        when(fixture.protocol.account(fixture.connection,TrustedIdentityFailureClassificationTest.ISSUER,"actor")).thenReturn(Optional.empty());
-+        fixture.request(()->{
-+            assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,service::currentForAuthorization).getClass());
-+            return null;
-+        });
-+        when(fixture.projections.isUnique()).thenReturn(false);
-+        fixture.request(()->{assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,service::currentForAuthorization).getClass());return null;});
-+    }
-+
-+    @Test void authorizationOwnsItsTransactionWhileOrdinaryAndBorrowedContractsRemainDistinct()throws Exception {
-+        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
-+        when(fixture.source.getConnection()).thenReturn(fixture.connection);
-+        fixture.request(()->{assertEquals("actor",service.currentForAuthorization().subject());return null;});
-+        verify(fixture.source).getConnection();verify(fixture.connection).commit();verify(fixture.connection).close();
-+        clearInvocations(fixture.source,fixture.connection);
-+        when(fixture.protocol.account(fixture.connection,TrustedIdentityFailureClassificationTest.ISSUER,"actor")).thenReturn(Optional.empty());
-+        fixture.request(()->{assertEquals(IdentityLifecycleGuardV1.Failure.FORBIDDEN,assertThrows(IdentityLifecycleGuardV1.Rejected.class,()->service.current(fixture.connection)).failure());return null;});
-+        verifyNoInteractions(fixture.source);verify(fixture.connection,never()).commit();verify(fixture.connection,never()).rollback();verify(fixture.connection,never()).close();
-+        assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,()->service.validate(fixture.authentication())).getClass());
-+    }
-+
-+    @Test void unknownNonDependencyRuntimeIsNotReclassifiedAsUnavailable()throws Exception {
-+        var fixture=new TrustedIdentityFailureClassificationTest();var service=fixture.service();
-+        when(fixture.source.getConnection()).thenReturn(fixture.connection);
-+        doThrow(new IllegalStateException("unknown lock programming failure")).when(fixture.protocol).lockSecurityState(fixture.connection);
-+        fixture.request(()->{assertEquals(IllegalStateException.class,assertThrows(IllegalStateException.class,service::currentForAuthorization).getClass());return null;});
-+    }
-+
-+    void assertSafe(AuthorizationUnavailableException failure) {
-+        assertEquals("Authorization dependency is unavailable",failure.getMessage());assertNull(failure.getCause());
 +    }
 +}

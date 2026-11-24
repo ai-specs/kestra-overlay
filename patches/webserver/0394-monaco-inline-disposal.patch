@@ -1,14 +1,14 @@
 # 需求: REQ-0394 锁定Monaco公开inline provider释放接口兼容
 # 消费扩展仓: ai-specs/kestra-plugin-rbac及宿主原生flow编辑器
 # 状态: core；主控入口C接收；候选未发布
-# 来源: 新写；CI43023388148四次实际page-error，0.56.0公开provider接口与旧回调不匹配
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；CI43023388148四次实际page-error，0.56.0公开provider接口与旧回调不匹配
 # 触达上游文件: 2 个
 # 移除条件: 上游YAML inline provider实现锁定Monaco公开释放接口并具备生命周期回归
 diff --git a/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts b/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts
-index ea0cfb5..ce57139 100644
+index ae0ad8c..46735dc 100644
 --- a/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts
 +++ b/ui/src/composables/monaco/languages/yamlLanguageConfigurator.ts
-@@ -580,6 +580,7 @@ export class YamlLanguageConfigurator extends AbstractLanguageConfigurator {
+@@ -582,6 +582,7 @@ export class YamlLanguageConfigurator extends AbstractLanguageConfigurator {
                                  ),
                                  command: {
                                      id: "moveCursor",
@@ -16,12 +16,9 @@ index ea0cfb5..ce57139 100644
                                      arguments: [
                                          {
                                              lineNumber: position.lineNumber,
-@@ -596,9 +597,9 @@ export class YamlLanguageConfigurator extends AbstractLanguageConfigurator {
-                 },
-                 handlePartialAccept() {
-                 },
--                freeInlineCompletions() {
-+                disposeInlineCompletions() {
+@@ -601,7 +602,7 @@ export class YamlLanguageConfigurator extends AbstractLanguageConfigurator {
+                 // Monaco 0.55+ only calls disposeInlineCompletions (https://github.com/kestra-io/kestra/issues/22751).
+                 disposeInlineCompletions() {
                  },
 -            } as any),
 +            }),

@@ -2,7 +2,7 @@
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者授权）
 # 状态: core
 # 版本接线: REQ-0383在consent同连接事务中、标准身份行锁前调用资源目标校验；新公开DTO归0383
-# 来源: 新写；RFC6749/7591 + OWASP CSRF + PostgreSQL事务；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；RFC6749/7591 + OWASP CSRF + PostgreSQL事务；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
 # 触达上游文件: 9 个（详见diff）
 # 移除条件: 上游OSS提供等价能力或本需求弃用
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcOwnedClientController.java
@@ -679,7 +679,7 @@ index 0000000..b8c4364
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcSecondUserFixtureTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSecondUserFixtureTest.java
 new file mode 100644
-index 0000000..a64a338
+index 0000000..8f8c531
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcSecondUserFixtureTest.java
 @@ -0,0 +1,20 @@
@@ -697,8 +697,8 @@ index 0000000..a64a338
 +        assumeTrue(url != null, "Controlled image acceptance fixture only");
 +        final var source = new org.postgresql.ds.PGSimpleDataSource();
 +        source.setURL(url);
-+        source.setUser("kestra");
-+        source.setPassword("local-ci-only");
++        source.setUser(System.getenv().getOrDefault("OIDC_FIXTURE_DB_USER", "kestra"));
++        source.setPassword(System.getenv().getOrDefault("OIDC_FIXTURE_DB_PASSWORD", "local-ci-only"));
 +        new OidcUserService(source, new ObjectMapper()).create(new OidcUserService.CreateUserRequest(
 +            "second-user", "Second user", "second@example.test", "SecondPass123!", java.util.List.of("user")));
 +    }

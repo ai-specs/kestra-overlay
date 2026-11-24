@@ -4,8 +4,30 @@
 # 来源：新写；复用Micronaut 4 StaticResourceResolver及宿主已打包root/favicon.ico，不读取扩展业务
 # 触达上游文件（6）：公共静态资源判定、三个过滤器、真实HTTP与失败关闭测试
 # 移除条件：上游OSS提供等价精确静态资源公开判定及全链认证回归
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+index 0170480..5420af5 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+@@ -18,6 +18,8 @@ import io.micronaut.security.filters.SecurityFilter;
+ @Filter("/**")
+ @Requires(property = "kestra.oidc.enabled", value = "true")
+ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
++    @jakarta.inject.Inject
++    private io.kestra.webserver.rbac.PublicFavicon publicFavicon;
+     private final OidcConfiguration configuration;
+     private final OidcIdentityLifecycle lifecycle
+ ;
+@@ -29,6 +31,7 @@ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
+     }
+     @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
+     @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++        if(publicFavicon!=null && publicFavicon.matches(request))return chain.proceed(request);
+         String path = request.getPath();
+         if (path.startsWith("/oauth/") || path.startsWith("/.well-known/") || path.startsWith("/ui/assets/")
+             || path.equals("/api/v1/configs/login") || java.util.Set.of("/oidc/login", "/oidc/logout", "/oidc/setup",
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/PublicFavicon.java b/webserver/src/main/java/io/kestra/webserver/rbac/PublicFavicon.java
 new file mode 100644
+index 0000000..6290792
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/PublicFavicon.java
 @@ -0,0 +1,32 @@
@@ -42,9 +64,10 @@ new file mode 100644
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+index 5ab134c..6b7f44d 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
-@@ -22,6 +22,8 @@
+@@ -22,6 +22,8 @@ import reactor.core.publisher.Mono;
  @Filter("/**")
  @io.micronaut.context.annotation.Requires(property = "kestra.rbac.typed.enabled", value = "false", defaultValue = "false")
  public class RestRbacFilter implements HttpServerFilter {
@@ -53,7 +76,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.jav
      private final RbacConfiguration configuration;
      private final BeanProvider<RestAuthorizationResolver> resolvers;
      private final RbacGate gate;
-@@ -32,7 +34,7 @@
+@@ -32,7 +34,7 @@ public class RestRbacFilter implements HttpServerFilter {
      }
      @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
      @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
@@ -63,9 +86,10 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.jav
          if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
          return Mono.defer(() -> {
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+index 00a0bd3..f8b32f6 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
-@@ -22,6 +22,8 @@
+@@ -22,6 +22,8 @@ import reactor.core.publisher.Mono;
  @Filter("/**")
  @Requires(property = "kestra.rbac.typed.enabled", value = "true")
  public final class TypedRestRbacFilter implements HttpServerFilter {
@@ -74,7 +98,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilte
      private final RbacConfiguration configuration;
      private final OssRestOperationAdapter adapter;
      private final TypedAuthorizationGate gate;
-@@ -42,7 +44,7 @@
+@@ -42,7 +44,7 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
 
      @Override
      public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
@@ -83,28 +107,9 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilte
          Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
          if (authentication == null) return Mono.just(error(request, HttpStatus.UNAUTHORIZED));
          var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
-diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
---- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
-+++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
-@@ -18,6 +18,8 @@
- @Filter("/**")
- @Requires(property = "kestra.oidc.enabled", value = "true")
- public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
-+    @jakarta.inject.Inject
-+    private io.kestra.webserver.rbac.PublicFavicon publicFavicon;
-     private final OidcConfiguration configuration;
-     private final OidcIdentityLifecycle lifecycle
- ;
-@@ -29,6 +31,7 @@
-     }
-     @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
-     @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
-+        if(publicFavicon!=null && publicFavicon.matches(request))return chain.proceed(request);
-         String path = request.getPath();
-         if (path.startsWith("/oauth/") || path.startsWith("/.well-known/") || path.startsWith("/ui/assets/")
-             || path.equals("/api/v1/configs/login") || java.util.Set.of("/oidc/login", "/oidc/logout", "/oidc/setup",
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconHttpTest.java
 new file mode 100644
+index 0000000..63b9de5
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconHttpTest.java
 @@ -0,0 +1,53 @@
@@ -163,6 +168,7 @@ new file mode 100644
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconTest.java
 new file mode 100644
+index 0000000..d0b5d1a
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/PublicFaviconTest.java
 @@ -0,0 +1,89 @@

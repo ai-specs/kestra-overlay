@@ -1,7 +1,7 @@
 # 需求: REQ-0220 修正 MCP 管理编辑页的内置 OIDC 语义并避免 PWA 横幅遮挡管理操作
 # 消费扩展仓: kestra-oidc-provider / MCP 管理 UI
 # 状态: core
-# 来源: 手工适配；沿用上游 MCP 编辑与 PWA 组件，剥离外部 OIDC provider 列表对内置 IdP 的错误依赖
+# 来源: v2.0.11上下文适配（保留上游行为）； 手工适配；沿用上游 MCP 编辑与 PWA 组件，剥离外部 OIDC provider 列表对内置 IdP 的错误依赖
 # 触达上游文件: 3 个（MCP 编辑页、应用壳、英文翻译）
 # 移除条件: 上游 MCP UI 原生支持内置 OIDC provider 语义且不再显示外部 provider 空态
 # 演进：REQ-0368 通用入口激活按原需求归属；未引入业务逻辑。
@@ -17,14 +17,14 @@ index 63a4a25..5a8fc13 100644
 -    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous" />
 +    <PwaInstallPrompt v-if="loaded && route?.name && !route.meta?.anonymous && !isAdminRoute && !extensionFallback" />
  </template>
- 
+
  <script lang="ts" setup>
 @@ -57,6 +57,7 @@
          : null
- 
+
      const loaded = ref(false)
 +    const isAdminRoute = computed(() => route.path.includes("/admin/"))
- 
+
      const apiStore = useApiStore()
      const layoutStore = useLayoutStore()
 diff --git a/ui/src/components/admin/mcp/tabs/McpEdit.vue b/ui/src/components/admin/mcp/tabs/McpEdit.vue
@@ -33,7 +33,7 @@ index 6c6141b..6cc99ef 100644
 +++ b/ui/src/components/admin/mcp/tabs/McpEdit.vue
 @@ -79,7 +79,7 @@
              </KsFormItem>
- 
+
              <KsFormItem
 -                v-if="isOAuth"
 +                v-if="isOAuth && !usesBuiltInOidc"
@@ -43,7 +43,7 @@ index 6c6141b..6cc99ef 100644
 @@ -99,6 +99,15 @@
                  </KsSelect>
              </KsFormItem>
- 
+
 +            <KsAlert
 +                v-if="isOAuth && usesBuiltInOidc"
 +                type="info"
@@ -61,7 +61,7 @@ index 6c6141b..6cc99ef 100644
      const isPrivate = computed(() => form.value.serverType === "PRIVATE")
      const isOAuth = computed(() => isPrivate.value && form.value.authType === "OAUTH")
 +    const usesBuiltInOidc = computed(() => isOAuth.value)
- 
+
      const privateServer = computed({
          get: () => form.value.serverType === "PRIVATE",
 @@ -248,16 +258,10 @@
@@ -73,14 +73,14 @@ index 6c6141b..6cc99ef 100644
 -        }
          return false
      }
- 
+
      const authHint = (opt: AuthOption): string => {
 -        if (opt.value === "OAUTH" && noOauthProviders.value) {
 -            return t("mcp.no_oauth_providers")
 -        }
          return t(opt.hintKey)
      }
- 
+
 @@ -289,7 +293,7 @@
              instructions: form.value.instructions || undefined,
              serverType: form.value.serverType,
@@ -91,10 +91,10 @@ index 6c6141b..6cc99ef 100644
              disabled: form.value.disabled,
          }
 diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
-index f4a164d..6c20588 100644
+index fb45e5b..cdbc2c7 100644
 --- a/ui/src/translations/en.json
 +++ b/ui/src/translations/en.json
-@@ -2304,7 +2304,8 @@
+@@ -2336,7 +2336,8 @@
        "scopes_supported": "Supported scopes",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes advertised in this server's Protected Resource Metadata document. Spec-compliant MCP clients constrain their authorize request to this list. Leave empty to omit the field and let clients fall back to the IdP's advertised scopes.",

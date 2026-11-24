@@ -1,7 +1,7 @@
 # 需求: REQ-0384，独立管理页面通用ShadowRoot弹层、规范导航及精确公开SDK能力/消费契约。
 # 消费扩展仓: ai-specs/kestra-plugin-rbac；独立探针不消费真实扩展源码或产物。
 # 状态: core；能力契约overlayCompatibility V1 supported；源码不是发布声明；新元数据输入完整949及CI/推广仍须验证。
-# 来源: 新写；公开npm机制调查与真实949机制证据；补齐内置README/元数据一致性，本轮按4151完整46补丁父输入演进原生高级筛选桌面锚定；chip编辑保留原生定位。
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；公开npm机制调查与真实949机制证据；补齐内置README/元数据一致性，本轮按4151完整46补丁父输入演进原生高级筛选桌面锚定；chip编辑保留原生定位。
 # 触达上游文件: UI扩展协议、runtime、ExtensionPage、SDK及一致性测试、内置SDK README/类型/元数据/适配/矩阵，共13文件。
 # 移除条件: 上游OSS提供等价独立扩展ShadowRoot弹层、焦点生命周期、默认popper隔离和可拒绝异步导航公开SDK。
 # 来源增量提交: 7cb9999、618a57a、86a0461、6969acf、04dc980、2f2984a；仅独占开发树提交，未发布。
@@ -12,7 +12,7 @@ index 28025b9..0f94961 100644
 --- a/ui/src/components/extensions/ExtensionPage.vue
 +++ b/ui/src/components/extensions/ExtensionPage.vue
 @@ -7,12 +7,13 @@
- 
+
  <script setup lang="ts">
      import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
 -    import {useRoute, useRouter} from "vue-router";
@@ -52,7 +52,7 @@ index 28025b9..0f94961 100644
 +            request: createExtensionRequest(signal, hostExtensionPath(`/api/v1/${encodeURIComponent(tenant)}`), fetch, recoverUnauthorized),
          });
      }
- 
+
 @@ -79,5 +84,6 @@
          observer.observe(document.documentElement, {attributes: true, attributeFilter: ["class"]});
          void load();
@@ -222,12 +222,12 @@ index 5b9f469..872f001 100644
 +import {parseQuery, stringifyQuery} from "vue-router";
 +import type {LocationQuery, Router} from "vue-router";
  import {getCsrfToken} from "../utils/csrf";
- 
+
  export function hostExtensionPath(path: string): string {
 @@ -13,7 +15,38 @@ export function extensionPath(path: string): string {
      return path;
  }
- 
+
 -export function createExtensionRequest(signal: AbortSignal, apiBase: string, fetcher: typeof fetch = fetch) {
 +export function extensionLocation(value: string) {
 +    const separator = value.indexOf("?");
@@ -274,16 +274,16 @@ index 5b9f469..872f001 100644
 +        return response;
      };
  }
- 
+
 @@ -41,6 +76,8 @@ export class ExtensionLifecycle {
      private serial: Promise<void> = Promise.resolve();
      private disposed = false;
      private latest?: UiExtensionContextV1;
 +    private navigating = false;
 +    private ready = false;
- 
+
      constructor(private container: HTMLElement, private onError: (error: unknown) => void) {}
- 
+
 @@ -59,11 +96,34 @@ export class ExtensionLifecycle {
              if (this.disposed) return;
              this.mounted = mounted;
@@ -293,7 +293,7 @@ index 5b9f469..872f001 100644
              if (!this.disposed) {this.onError(error); void this.dispose();}
          }
      }
- 
+
 +    async beforeNavigate(target: UiExtensionNavigationV1): Promise<boolean> {
 +        if (this.disposed || !this.ready || this.navigating) return false;
 +        if (!this.mounted?.beforeNavigate) return true;

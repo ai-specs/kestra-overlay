@@ -1,7 +1,7 @@
 # 需求: REQ-0403 生产OIDC浏览器书签返回与同源目标校验
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；复用Micronaut Security 4.15.2 PriorToLoginPersistence与IdTokenLoginHandler；不接插件模型
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；复用Micronaut Security 4.15.2 PriorToLoginPersistence与IdTokenLoginHandler；不接插件模型
 # 触达上游文件: 5 个
 # 移除条件: 上游提供等价OIDC原URI保存、同源消费与退出清理机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java

@@ -1,14 +1,14 @@
 # 需求: REQ-0404b 原生Flow详情有限能力与局部拒绝
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；已接收、独占候选，未发布
-# 来源: 新写；固定BASE原生Flow详情实际生产Overview403及既有0404a有限机制
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；固定BASE原生Flow详情实际生产Overview403及既有0404a有限机制
 # 触达上游文件: ui/scripts/translations/fingerprints.json, ui/src/components/dashboard/Dashboard.vue, ui/src/components/dashboard/sections/Sections.vue, ui/src/components/flows/FlowCapabilityState.vue, ui/src/components/flows/FlowRuntimeTab.vue, ui/src/components/flows/FlowTriggers.vue, ui/src/components/flows/Overview.vue, ui/src/components/flows/defaultFlowChartHashes.json, ui/src/components/flows/flowTabs.ts, ui/src/components/flows/useFlowDetailCapabilities.spec.ts, ui/src/components/flows/useFlowDetailCapabilities.ts, ui/src/stores/dashboard.ts, ui/src/translations/de.json, ui/src/translations/en.json, ui/src/translations/es.json, ui/src/translations/fr.json, ui/src/translations/hi.json, ui/src/translations/it.json, ui/src/translations/ja.json, ui/src/translations/ko.json, ui/src/translations/pl.json, ui/src/translations/pt.json, ui/src/translations/pt_BR.json, ui/src/translations/ru.json, ui/src/translations/zh_CN.json, ui/tests/flow-detail-capabilities/browser.mjs, ui/tests/flow-detail-capabilities/cases.mjs, ui/tests/flow-detail-capabilities/check-report.mjs, ui/tests/flow-detail-capabilities/check-report.test.mjs, ui/tests/flow-detail-capabilities/diagnostics.mjs, ui/tests/flow-detail-capabilities/diagnostics.test.mjs, ui/tests/flow-detail-capabilities/index.html, ui/tests/flow-detail-capabilities/main.ts, ui/tests/flow-detail-capabilities/playwright.mjs, ui/tests/flow-detail-capabilities/run-browser.mjs, ui/tests/flow-detail-capabilities/serve.mjs, ui/tests/flow-detail-capabilities/transport.ts, ui/tests/unit/stores/dashboardGeneration.spec.ts, webserver/src/main/java/io/kestra/webserver/controllers/api/FlowExecutionCapabilitiesController.java, webserver/src/main/java/io/kestra/webserver/rbac/FlowExecutionCapabilities.java, webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java, webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesHttpTest.java, webserver/src/test/java/io/kestra/webserver/rbac/FlowExecutionCapabilitiesTest.java
 # 移除条件: 上游提供等价原生Flow详情有限typed能力预检与按实际数据源局部拒绝机制
 diff --git a/ui/scripts/translations/fingerprints.json b/ui/scripts/translations/fingerprints.json
-index 3ceb699..0ff7388 100644
+index bf75f8b..11195c2 100644
 --- a/ui/scripts/translations/fingerprints.json
 +++ b/ui/scripts/translations/fingerprints.json
-@@ -809,6 +809,7 @@
+@@ -822,6 +822,7 @@
    "flowConcurrency|loadError": "4909848400a0",
    "flowConcurrency|staleLimit|message": "eeda8b5d88b7",
    "flowConcurrency|staleLimit|title": "d0c8c283de55",
@@ -251,7 +251,7 @@ index 0000000..e602ed7
 +    const tabState = computed(() => projection.modeA.value ? "available" : props.tab === "concurrency" ? "unsupported" : projection.state(capabilities[props.tab]!))
 +</script>
 diff --git a/ui/src/components/flows/FlowTriggers.vue b/ui/src/components/flows/FlowTriggers.vue
-index 386cd91..4e20f38 100644
+index 41134d3..741990e 100644
 --- a/ui/src/components/flows/FlowTriggers.vue
 +++ b/ui/src/components/flows/FlowTriggers.vue
 @@ -49,7 +49,8 @@
@@ -264,7 +264,7 @@ index 386cd91..4e20f38 100644
                  </template>
              </KsTableColumn>
              <KsTableColumn
-@@ -353,6 +354,9 @@
+@@ -376,6 +377,9 @@
      import Vars from "../executions/Vars.vue"
      import BackfillBanner from "./BackfillBanner.vue"
      import Empty from "../layout/empty/Empty.vue"
@@ -311,7 +311,7 @@ index cda02ad..a64620f 100644
                  .findExecutions({"filters[namespace][EQUALS]": flow.value.namespace, "filters[flowId][EQUALS]": flow.value.id})
 diff --git a/ui/src/components/flows/defaultFlowChartHashes.json b/ui/src/components/flows/defaultFlowChartHashes.json
 new file mode 100644
-index 0000000..7f7e8f0
+index 0000000..dcc3e5d
 --- /dev/null
 +++ b/ui/src/components/flows/defaultFlowChartHashes.json
 @@ -0,0 +1,12 @@
@@ -323,12 +323,12 @@ index 0000000..7f7e8f0
 +  "description": "690c8de3ce88b367aa102b9ccdef4f70485ca706e50f0f96507c04f2f489087e",
 +  "total_executions_pie": "76c5ad9c8e07644cfe332f2e14591de68a66295be412053226345002cc6bc850",
 +  "total_executions_timeseries": "a7159d222e69e6706b0d34ed6e67bd65da40bfc6376c232c45c7d1c89455dc03",
-+  "recent_executions": "72e807df4c669a226f3e583aefcba17e7856d2015b8737ef36f82622254d0d99",
-+  "next_executions": "fba094b417fe5c5a854b8a37465f60f66894a48270fc1e8cfb6db2f320b3ae4b",
++  "recent_executions": "defaddcdd7a85febd4c7b0b0454c9f057ea5ddd69828b3b4c3f788edbdd6df71",
++  "next_executions": "4d68a32358eb2c490950e68ea1dac86515d0c7d4621e10d5fb2908ff100e0378",
 +  "logs_timeseries": "f3218967e4dfcea9bf90a120a0eadcc0eb8e56b3ad73c24f67b72f31c0f293de"
 +}
 diff --git a/ui/src/components/flows/flowTabs.ts b/ui/src/components/flows/flowTabs.ts
-index 83816f1..d668911 100644
+index f64148a..f717d96 100644
 --- a/ui/src/components/flows/flowTabs.ts
 +++ b/ui/src/components/flows/flowTabs.ts
 @@ -58,8 +58,8 @@ export const FLOW_TAB_ROUTES: RouteRecordRaw[] = [
@@ -339,7 +339,7 @@ index 83816f1..d668911 100644
 -        props: {embed: true},
 +        component: () => import("./FlowRuntimeTab.vue"),
 +        props: {tab: "executions", embed: true},
-         meta: {tab: "executions", title: "executions"},
+         meta: {tab: "executions", title: "executions", docId: "executions"},
      },
      {
 @@ -84,20 +84,22 @@ export const FLOW_TAB_ROUTES: RouteRecordRaw[] = [
@@ -349,7 +349,7 @@ index 83816f1..d668911 100644
 -        component: () => import("./FlowTriggers.vue"),
 +        component: () => import("./FlowRuntimeTab.vue"),
 +        props: {tab: "triggers"},
-         meta: {tab: "triggers", title: "triggers"},
+         meta: {tab: "triggers", title: "triggers", docId: "triggers"},
      },
      {
          name: `${FLOW_PARENT_ROUTE}/logs`,
@@ -376,7 +376,7 @@ index 83816f1..d668911 100644
 -        component: () => import("./FlowConcurrency.vue"),
 +        component: () => import("./FlowRuntimeTab.vue"),
 +        props: {tab: "concurrency"},
-         meta: {tab: "concurrency", title: "concurrency"},
+         meta: {tab: "concurrency", title: "concurrency", docId: "concurrency-limits"},
      },
      {
 diff --git a/ui/src/components/flows/useFlowDetailCapabilities.spec.ts b/ui/src/components/flows/useFlowDetailCapabilities.spec.ts
@@ -622,10 +622,10 @@ index 8a310a5..70b1749 100644
          sourceCode.value = data.sourceCode ?? ""
          sourceCodeOrigin.value = sourceCode.value
 diff --git a/ui/src/translations/de.json b/ui/src/translations/de.json
-index e52d18f..5a9b323 100644
+index 55ad1fa..f2bc19a 100644
 --- a/ui/src/translations/de.json
 +++ b/ui/src/translations/de.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Installiere Kestra als App für schnelleren Zugriff und eine Vollbild-Ansicht.",
        "install": "Installieren",
        "dismiss": "Nicht jetzt"
@@ -636,7 +636,7 @@ index e52d18f..5a9b323 100644
    }
  }
 diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
-index 1b56efe..9762103 100644
+index 4d51a62..9b930d0 100644
 --- a/ui/src/translations/en.json
 +++ b/ui/src/translations/en.json
 @@ -6,6 +6,9 @@
@@ -650,10 +650,10 @@ index 1b56efe..9762103 100644
      "recipe": {
        "create_flow": "Create flow",
 diff --git a/ui/src/translations/es.json b/ui/src/translations/es.json
-index cc2f80b..eed7149 100644
+index 554d08e..0ef05d2 100644
 --- a/ui/src/translations/es.json
 +++ b/ui/src/translations/es.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Instala Kestra como una aplicación para un acceso más rápido y una experiencia a pantalla completa.",
        "install": "Instalar",
        "dismiss": "Ahora no"
@@ -664,10 +664,10 @@ index cc2f80b..eed7149 100644
    }
  }
 diff --git a/ui/src/translations/fr.json b/ui/src/translations/fr.json
-index d169024..457732e 100644
+index 4e71591..ba164f7 100644
 --- a/ui/src/translations/fr.json
 +++ b/ui/src/translations/fr.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Installez Kestra comme application pour un accès plus rapide et une expérience plein écran.",
        "install": "Installer",
        "dismiss": "Pas maintenant"
@@ -678,10 +678,10 @@ index d169024..457732e 100644
    }
  }
 diff --git a/ui/src/translations/hi.json b/ui/src/translations/hi.json
-index 31dd181..23982be 100644
+index b8fd32f..c747fa0 100644
 --- a/ui/src/translations/hi.json
 +++ b/ui/src/translations/hi.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "तेज़ पहुंच और पूर्ण-स्क्रीन अनुभव के लिए Kestra को ऐप के रूप में इंस्टॉल करें।",
        "install": "इंस्टॉल करें",
        "dismiss": "अभी नहीं"
@@ -692,10 +692,10 @@ index 31dd181..23982be 100644
    }
  }
 diff --git a/ui/src/translations/it.json b/ui/src/translations/it.json
-index e31ebb6..9ee6046 100644
+index 4ea19e1..12d588c 100644
 --- a/ui/src/translations/it.json
 +++ b/ui/src/translations/it.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Installa Kestra come app per un accesso più rapido e un'esperienza a schermo intero.",
        "install": "Installa",
        "dismiss": "Non ora"
@@ -706,10 +706,10 @@ index e31ebb6..9ee6046 100644
    }
  }
 diff --git a/ui/src/translations/ja.json b/ui/src/translations/ja.json
-index 1145fe9..7209146 100644
+index 735ba49..b036e25 100644
 --- a/ui/src/translations/ja.json
 +++ b/ui/src/translations/ja.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "より高速なアクセスとフルスクリーン体験のために、Kestra をアプリとしてインストールします。",
        "install": "インストール",
        "dismiss": "後で"
@@ -720,10 +720,10 @@ index 1145fe9..7209146 100644
    }
  }
 diff --git a/ui/src/translations/ko.json b/ui/src/translations/ko.json
-index cbd7f15..618ac4a 100644
+index c51292d..2062b3e 100644
 --- a/ui/src/translations/ko.json
 +++ b/ui/src/translations/ko.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "더 빠른 접근과 전체 화면 경험을 위해 Kestra를 앱으로 설치하세요.",
        "install": "설치",
        "dismiss": "나중에"
@@ -734,10 +734,10 @@ index cbd7f15..618ac4a 100644
    }
  }
 diff --git a/ui/src/translations/pl.json b/ui/src/translations/pl.json
-index 346f4f8..0abb1b7 100644
+index e18f65e..f99366f 100644
 --- a/ui/src/translations/pl.json
 +++ b/ui/src/translations/pl.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Zainstaluj Kestrę jako aplikację, aby mieć szybszy dostęp i pełnoekranowy widok.",
        "install": "Zainstaluj",
        "dismiss": "Nie teraz"
@@ -748,10 +748,10 @@ index 346f4f8..0abb1b7 100644
    }
  }
 diff --git a/ui/src/translations/pt.json b/ui/src/translations/pt.json
-index e0ba61f..bfd3fe4 100644
+index 06acc07..a00987e 100644
 --- a/ui/src/translations/pt.json
 +++ b/ui/src/translations/pt.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Instale o Kestra como uma aplicação para um acesso mais rápido e uma experiência em ecrã inteiro.",
        "install": "Instalar",
        "dismiss": "Agora não"
@@ -762,10 +762,10 @@ index e0ba61f..bfd3fe4 100644
    }
  }
 diff --git a/ui/src/translations/pt_BR.json b/ui/src/translations/pt_BR.json
-index 8c84c2d..894d594 100644
+index c53e09e..18275fc 100644
 --- a/ui/src/translations/pt_BR.json
 +++ b/ui/src/translations/pt_BR.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Instale o Kestra como um aplicativo para acesso mais rápido e uma experiência em tela cheia.",
        "install": "Instalar",
        "dismiss": "Agora não"
@@ -776,10 +776,10 @@ index 8c84c2d..894d594 100644
    }
  }
 diff --git a/ui/src/translations/ru.json b/ui/src/translations/ru.json
-index 98d2fe6..5a7946d 100644
+index 1bc1497..a254839 100644
 --- a/ui/src/translations/ru.json
 +++ b/ui/src/translations/ru.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "Установите Kestra как приложение для более быстрого доступа и полноэкранного режима.",
        "install": "Установить",
        "dismiss": "Не сейчас"
@@ -790,10 +790,10 @@ index 98d2fe6..5a7946d 100644
    }
  }
 diff --git a/ui/src/translations/zh_CN.json b/ui/src/translations/zh_CN.json
-index 0585f66..03a7ddd 100644
+index d47128b..f2fd2bd 100644
 --- a/ui/src/translations/zh_CN.json
 +++ b/ui/src/translations/zh_CN.json
-@@ -2640,6 +2640,9 @@
+@@ -2672,6 +2672,9 @@
        "install_description": "将 Kestra 安装为应用,以获得更快的访问速度和全屏体验。",
        "install": "安装",
        "dismiss": "暂不"

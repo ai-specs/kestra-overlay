@@ -16,9 +16,9 @@ index 8dfc57d..75c6999 100644
  public class OidcDiscoveryController {
 +    @io.micronaut.context.annotation.Value("${kestra.oidc.registration.enabled:false}")
 +    private boolean registrationEnabled;
- 
+
      private final OidcConfiguration configuration;
- 
+
 @@ -54,6 +56,9 @@ public class OidcDiscoveryController {
              URI.create(issuer + "/oidc/jwks")
          );

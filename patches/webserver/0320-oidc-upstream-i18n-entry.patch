@@ -1,11 +1,11 @@
 # 需求: REQ-0320 独立OIDC登录页复用上游vue-i18n与语言目录
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；用户要求定制页面沿用上游国际化机制，复用现有翻译键
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；用户要求定制页面沿用上游国际化机制，复用现有翻译键
 # 触达上游文件: 4 个（构建脚本、独立Vite配置、翻译入口、静态资源缓存）
 # 移除条件: 上游OSS提供同等独立认证页面国际化入口
 diff --git a/ui/package.json b/ui/package.json
-index 87dad2c..16b0153 100644
+index 90850aa..610ce44 100644
 --- a/ui/package.json
 +++ b/ui/package.json
 @@ -16,7 +16,7 @@
@@ -90,13 +90,13 @@ index b54181e..d861b4a 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/UiController.java
 @@ -97,7 +97,9 @@ public class UiController {
- 
+
      private HttpResponse<?> respond(HttpRequest<?> request, String normalized, URL url) {
          MediaType mediaType = mediaTypeFor(normalized);
 -        String cacheControl = normalized.startsWith(HASHED_ASSETS_PREFIX) ? HASHED_ASSETS_CACHE_CONTROL : DEFAULT_CACHE_CONTROL;
 +        // The standalone authentication entry has a stable public URL; its imported chunks are hashed.
 +        String cacheControl = normalized.equals("assets/oidc-login-i18n.js") ? "no-cache"
 +            : normalized.startsWith(HASHED_ASSETS_PREFIX) ? HASHED_ASSETS_CACHE_CONTROL : DEFAULT_CACHE_CONTROL;
- 
+
          // One connection per request: the metadata and, when the body is needed, the stream both come
          // from it. Opening a second one to read the entity tag doubled the per-request cost.

@@ -112,9 +112,9 @@ async function main() {
         console.log('BROWSER OIDC LOGIN, REFRESH, NAVIGATION AND LOGOUT ALL GREEN');
         const {runPasswordChangeBrowserCases} = await import('./password-change-browser-cases.mjs');
         const {execFileSync} = require('node:child_process');
-        const temporary = () => JSON.parse(execFileSync('docker', ['exec', process.env.BB_BROWSER_SERVER, 'java',
+        const temporary = () => JSON.parse(execFileSync('docker', ['exec', ...(process.env.BB_PROBE_ENV_FILE ? ['--env-file', process.env.BB_PROBE_ENV_FILE] : []), process.env.BB_BROWSER_SERVER, 'java',
             '-cp', '/app/kestra:/tmp/directory-command.jar', 'HttpDirectoryCommand',
-            `jdbc:postgresql://${process.env.BB_BROWSER_POSTGRES}:5432/kestra`, 'temporary'], {encoding: 'utf8'}));
+            `jdbc:postgresql://${process.env.BB_BROWSER_POSTGRES}:5432/${process.env.BB_DB || 'kestra'}`, 'temporary'], {encoding: 'utf8'}));
         const first = temporary();
         const second = temporary();
         const passwordReport = `.work/password-change-${process.env.BB_BROWSER_SETUP === '1' ? 'setup' : 'env'}.json`;

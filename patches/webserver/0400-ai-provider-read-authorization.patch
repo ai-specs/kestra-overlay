@@ -22,45 +22,6 @@ index e976f96..b40b32a 100644
          String tenant = request.variable("tenant");
          if (tenant == null && Set.of("io.kestra.webserver.controllers.api.MiscController",
              "io.kestra.webserver.controllers.api.PluginController").contains(route.controller())) tenant = "main";
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java
-new file mode 100644
-index 0000000..7f65147
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java
-@@ -0,0 +1,33 @@
-+package io.kestra.webserver.rbac;
-+
-+import java.util.List;
-+import java.util.Map;
-+import io.kestra.core.repositories.ExecutionRepositoryInterface;
-+import org.junit.jupiter.api.Test;
-+import static io.kestra.webserver.rbac.TypedAuthorization.*;
-+import static org.assertj.core.api.Assertions.*;
-+import static org.mockito.Mockito.*;
-+
-+class AiProvidersOperationTest {
-+    private final OssRestOperationAdapter adapter = new OssRestOperationAdapter(mock(ExecutionRepositoryInterface.class));
-+    @Test
-+    void mapsOnlyTheExactNativeProviderRouteToTenantAiRead() {
-+        var operations = adapter.resolve(request("GET", "/api/v1/main/ai/providers", "getProviders", Map.of()));
-+        assertThat(operations).containsExactly(new Operation(CONTRACT_VERSION, Source.REST, Resource.AI, Action.READ,
-+            "main", null, null, QueryDomain.unrestricted(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
-+    }
-+    @Test
-+    void rejectsOtherMethodsPathsHandlersAndTenantsEvenWithMainVariable() {
-+        for (String method : List.of("POST", "PUT", "DELETE", "HEAD", "OPTIONS", "get"))
-+            assertThat(adapter.resolve(request(method, "/api/v1/main/ai/providers", "getProviders", Map.of("tenant", "main")))).isEmpty();
-+        for (String path : List.of("/api/v1/other/ai/providers", "/api/v1/main/ai/providers/", "/api/v1/main/ai/generate/flow", "/api/v1/main/ai/%70roviders", "/api/v1/main/ai//providers"))
-+            assertThat(adapter.resolve(request("GET", path, "getProviders", Map.of("tenant", "main")))).isEmpty();
-+        for (String handler : List.of("generateFlow", "unknown"))
-+            assertThat(adapter.resolve(request("GET", "/api/v1/main/ai/providers", handler, Map.of("tenant", "main")))).isEmpty();
-+        assertThat(adapter.resolve(request("GET", "/api/v1/main/ai/providers", "getProviders", Map.of("tenant", "other")))).isEmpty();
-+    }
-+    private OssRestOperationAdapter.Request request(String method, String path, String handler, Map<String,Object> variables) {
-+        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, path, Map.of(), null,
-+            new byte[0], "io.kestra.webserver.controllers.api.AiController", handler, List.of()), variables);
-+    }
-+}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersHttpTest.java
 new file mode 100644
 index 0000000..bae1a4d
@@ -264,5 +225,44 @@ index 0000000..258adc9
 +                public CompletionStage<Void> close() { return CompletableFuture.completedFuture(null); }
 +            });
 +        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java
+new file mode 100644
+index 0000000..7f65147
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiProvidersOperationTest.java
+@@ -0,0 +1,33 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Map;
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import org.junit.jupiter.api.Test;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiProvidersOperationTest {
++    private final OssRestOperationAdapter adapter = new OssRestOperationAdapter(mock(ExecutionRepositoryInterface.class));
++    @Test
++    void mapsOnlyTheExactNativeProviderRouteToTenantAiRead() {
++        var operations = adapter.resolve(request("GET", "/api/v1/main/ai/providers", "getProviders", Map.of()));
++        assertThat(operations).containsExactly(new Operation(CONTRACT_VERSION, Source.REST, Resource.AI, Action.READ,
++            "main", null, null, QueryDomain.unrestricted(), Coverage.SINGLE, Aggregate.NONE, SideEffect.READ_ONLY));
++    }
++    @Test
++    void rejectsOtherMethodsPathsHandlersAndTenantsEvenWithMainVariable() {
++        for (String method : List.of("POST", "PUT", "DELETE", "HEAD", "OPTIONS", "get"))
++            assertThat(adapter.resolve(request(method, "/api/v1/main/ai/providers", "getProviders", Map.of("tenant", "main")))).isEmpty();
++        for (String path : List.of("/api/v1/other/ai/providers", "/api/v1/main/ai/providers/", "/api/v1/main/ai/generate/flow", "/api/v1/main/ai/%70roviders", "/api/v1/main/ai//providers"))
++            assertThat(adapter.resolve(request("GET", path, "getProviders", Map.of("tenant", "main")))).isEmpty();
++        for (String handler : List.of("generateFlow", "unknown"))
++            assertThat(adapter.resolve(request("GET", "/api/v1/main/ai/providers", handler, Map.of("tenant", "main")))).isEmpty();
++        assertThat(adapter.resolve(request("GET", "/api/v1/main/ai/providers", "getProviders", Map.of("tenant", "other")))).isEmpty();
++    }
++    private OssRestOperationAdapter.Request request(String method, String path, String handler, Map<String,Object> variables) {
++        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method, path, Map.of(), null,
++            new byte[0], "io.kestra.webserver.controllers.api.AiController", handler, List.of()), variables);
 +    }
 +}

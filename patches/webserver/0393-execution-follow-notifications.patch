@@ -1,11 +1,24 @@
 # 需求: REQ-0393 执行follow真实状态分类与所属通知恢复卸载和有界关闭
 # 消费扩展仓: ai-specs/kestra-plugin-rbac及宿主执行页面
 # 状态: core；主控授权候选，定向门验证中，未发布
-# 来源: 新写；基于正式BASE生产SSE故障及定向生命周期红例，不引入插件业务模型
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；基于正式BASE生产SSE故障及定向生命周期红例，不引入插件业务模型
 # 触达上游文件: 4 个
 # 移除条件: 上游提供等价执行follow准确错误语义与所属通知生命周期
+diff --git a/ui/src/components/ErrorToast.vue b/ui/src/components/ErrorToast.vue
+index 0512896..c355ebc 100644
+--- a/ui/src/components/ErrorToast.vue
++++ b/ui/src/components/ErrorToast.vue
+@@ -98,7 +98,7 @@
+             }),
+             position: "bottom-right",
+             type: props.message.variant || "error",
+-            duration: 0,
++            duration: props.message.duration ?? 0,
+             dangerouslyUseHTMLString: true,
+             customClass: isLargeNotification.value ? "error-notification kel-notification__large" : "error-notification",
+         })
 diff --git a/ui/src/stores/executions.ts b/ui/src/stores/executions.ts
-index 78d3505..7ad18b3 100644
+index eb8a4e7..1a8bd4a 100644
 --- a/ui/src/stores/executions.ts
 +++ b/ui/src/stores/executions.ts
 @@ -1,5 +1,5 @@
@@ -15,7 +28,7 @@ index 78d3505..7ad18b3 100644
  import {apiUrl} from "override/utils/route"
  import * as Utils from "../utils/utils"
  import {useCoreStore} from "./core"
-@@ -412,7 +412,18 @@ export const useExecutionsStore = defineStore("executions", () => {
+@@ -417,7 +417,18 @@ export const useExecutionsStore = defineStore("executions", () => {
      // Closing it aborts the underlying stream (see subscribeToExecution).
      const executionSubscription = ref<{ close: () => void } | undefined>(undefined)
 
@@ -34,7 +47,7 @@ index 78d3505..7ad18b3 100644
          executionSubscription.value?.close()
          executionSubscription.value = undefined
      }
-@@ -458,7 +469,7 @@ export const useExecutionsStore = defineStore("executions", () => {
+@@ -465,7 +476,7 @@ export const useExecutionsStore = defineStore("executions", () => {
          executionId: string,
          handlers: {
              onExecution: (execution: Execution) => void;
@@ -43,7 +56,7 @@ index 78d3505..7ad18b3 100644
              onEnd?: () => void;
          },
      ): { close: () => void } {
-@@ -468,11 +479,12 @@ export const useExecutionsStore = defineStore("executions", () => {
+@@ -475,11 +486,12 @@ export const useExecutionsStore = defineStore("executions", () => {
          // The server closes the stream with an "end" event on normal completion; a
          // termination without it means the connection dropped or the execution was not found.
          let receivedEnd = false
@@ -57,7 +70,7 @@ index 78d3505..7ad18b3 100644
              handlers.onEnd?.()
          }
 
-@@ -486,6 +498,11 @@ export const useExecutionsStore = defineStore("executions", () => {
+@@ -493,6 +505,11 @@ export const useExecutionsStore = defineStore("executions", () => {
              {executionId},
              {
                  signal: controller.signal,
@@ -69,7 +82,7 @@ index 78d3505..7ad18b3 100644
                  // Do not auto-reconnect on a dropped connection: each reconnect opened a
                  // fresh server-side SSE connection whose Netty direct buffers were not
                  // promptly reclaimed, leaking off-heap memory over time (kestra-io/kestra#16982).
-@@ -520,25 +537,33 @@ export const useExecutionsStore = defineStore("executions", () => {
+@@ -527,25 +544,33 @@ export const useExecutionsStore = defineStore("executions", () => {
          closeSSE()
 
          executionSubscription.value = subscribeToExecution(options.id, {
@@ -119,19 +132,6 @@ index 78d3505..7ad18b3 100644
              },
          })
      }
-diff --git a/ui/src/components/ErrorToast.vue b/ui/src/components/ErrorToast.vue
-index 0512896..c355ebc 100644
---- a/ui/src/components/ErrorToast.vue
-+++ b/ui/src/components/ErrorToast.vue
-@@ -98,7 +98,7 @@
-             }),
-             position: "bottom-right",
-             type: props.message.variant || "error",
--            duration: 0,
-+            duration: props.message.duration ?? 0,
-             dangerouslyUseHTMLString: true,
-             customClass: isLargeNotification.value ? "error-notification kel-notification__large" : "error-notification",
-         })
 diff --git a/ui/src/utils/problem.ts b/ui/src/utils/problem.ts
 index b5de9d3..f0174cd 100644
 --- a/ui/src/utils/problem.ts
@@ -146,11 +146,11 @@ index b5de9d3..f0174cd 100644
      /** Pre-localized title. Wins over anything derived from `problem`. */
      title?: string
 diff --git a/ui/tests/unit/stores/executionsFollow.spec.ts b/ui/tests/unit/stores/executionsFollow.spec.ts
-index 1c0fa49..9113089 100644
+index dbe8cec..759863c 100644
 --- a/ui/tests/unit/stores/executionsFollow.spec.ts
 +++ b/ui/tests/unit/stores/executionsFollow.spec.ts
-@@ -122,3 +122,52 @@ describe("executions store follow stream", () => {
-         expect(onEnd).not.toHaveBeenCalled()
+@@ -234,3 +234,52 @@ describe("executions store follow stream", () => {
+         expect(store.flow).toMatchObject(flow)
      })
  })
 +

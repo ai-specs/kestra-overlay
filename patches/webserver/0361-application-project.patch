@@ -1,11 +1,12 @@
 # 需求: REQ-0361 应用组 scope 选择器
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；选择器定向测试通过，完整CI未通过，未发布
-# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0；宿主独立验证树；不承载应用资源策略
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0；宿主独立验证树；不承载应用资源策略
 # 触达上游文件: 最小公共契约、宿主激活点与独立测试
 # 移除条件: 上游提供等价公开应用组 scope 选择机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuance.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuance.java
 new file mode 100644
+index 0000000..f4fa60d
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuance.java
 @@ -0,0 +1,66 @@
@@ -77,6 +78,7 @@ new file mode 100644
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuanceTest.java
 new file mode 100644
+index 0000000..2bd8ec8
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/ApplicationGroupScopeIssuanceTest.java
 @@ -0,0 +1,117 @@

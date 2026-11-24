@@ -5,9 +5,10 @@
 # 触达上游文件：webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java；webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java；webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
 # 移除条件：上游为流式响应提供等价的授权快照到期失败关闭机制。
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
+index 7b06505..e582464 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.java
-@@ -4,12 +4,15 @@
+@@ -4,12 +4,15 @@ import io.kestra.core.repositories.AuthorizationInvocationContext;
  import io.micronaut.core.async.propagation.ReactorPropagation;
  import io.micronaut.core.propagation.PropagatedContext;
  import jakarta.inject.Singleton;
@@ -23,7 +24,7 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.j
      private final TypedAuthorizationGate gate;
      public SseAuthorization(TypedAuthorizationGate gate) { this.gate = gate; }
 
-@@ -24,10 +27,23 @@
+@@ -24,10 +27,23 @@ public final class SseAuthorization {
          String tenant = owner.tenant;
          var plan = List.copyOf(owner.restPlan);
          var origin = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
@@ -51,10 +52,31 @@ diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/SseAuthorization.j
 +            .flatMapMany(allowed -> allowed ? Flux.empty() : Flux.error(AuthorizationEvaluations.denied()));
 +    }
  }
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+index 196530e..ef2e403 100644
+--- a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
+@@ -49,6 +49,7 @@ class AuthorizationEvaluationTest {
+         final AtomicInteger begins = new AtomicInteger();
+         final AtomicInteger closes = new AtomicInteger();
+         final AtomicInteger calls = new AtomicInteger();
++        final java.util.concurrent.atomic.AtomicBoolean expired = new java.util.concurrent.atomic.AtomicBoolean();
+         Runnable afterDecision = () -> {};
+
+         public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
+@@ -58,6 +59,7 @@ class AuthorizationEvaluationTest {
+                 public CompletionStage<Decision> authorize(Operation operation) {
+                     calls.incrementAndGet();
+                     afterDecision.run();
++                    if (expired.get()) return CompletableFuture.completedFuture(Decision.deny("snapshot expired"));
+                     var domain = new QueryDomain(List.copyOf(snapshot), List.of(), List.of(), true, false);
+                     return CompletableFuture.completedFuture(operation.namespace() == null || snapshot.contains(operation.namespace())
+                         ? Decision.allow(domain) : Decision.deny("snapshot denied"));
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
+index f1a7560..ce3ac02 100644
 --- a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowContextTest.java
-@@ -55,6 +55,26 @@
+@@ -55,6 +55,26 @@ class ExecutionFollowContextTest {
      @Test void deferredFollowBodyRechecksRevokedGrantBeforeReading() throws Exception {
          deferredBody(true);
      }
@@ -81,22 +103,3 @@ diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExecutionFollowCon
      @Test void deferredBodyCancellationClosesItsOwnEvaluation() throws Exception {
          var policy=new AuthorizationEvaluationTest.Policy();var gate=AuthorizationEvaluationTest.gate(policy);
          var adapter=mock(OssRestOperationAdapter.class);
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
---- a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationTest.java
-@@ -49,6 +49,7 @@
-         final AtomicInteger begins = new AtomicInteger();
-         final AtomicInteger closes = new AtomicInteger();
-         final AtomicInteger calls = new AtomicInteger();
-+        final java.util.concurrent.atomic.AtomicBoolean expired = new java.util.concurrent.atomic.AtomicBoolean();
-         Runnable afterDecision = () -> {};
-
-         public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal, String tenant) {
-@@ -58,6 +59,7 @@
-                 public CompletionStage<Decision> authorize(Operation operation) {
-                     calls.incrementAndGet();
-                     afterDecision.run();
-+                    if (expired.get()) return CompletableFuture.completedFuture(Decision.deny("snapshot expired"));
-                     var domain = new QueryDomain(List.copyOf(snapshot), List.of(), List.of(), true, false);
-                     return CompletableFuture.completedFuture(operation.namespace() == null || snapshot.contains(operation.namespace())
-                         ? Decision.allow(domain) : Decision.deny("snapshot denied"));

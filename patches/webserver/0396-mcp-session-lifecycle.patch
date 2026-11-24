@@ -1,16 +1,49 @@
 # 需求: REQ-0396 MCP监听保活与受管理会话关闭
 # 消费扩展仓: ai-specs/kestra-plugin-rbac及正式MCP客户端
 # 状态: core；主控入口C接收；候选未发布
-# 来源: 新写；锁定SDK1.1.3原实现删除/保活/旧GET注销分别实际红例
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；锁定SDK1.1.3原实现删除/保活/旧GET注销分别实际红例
 # 触达上游文件: 4 个
 # 移除条件: 上游提供等价监听保活隔离、受管理异步关闭及流实例条件注销
+diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
+index ac21e88..0fbd1a0 100644
+--- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
++++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
+@@ -56,7 +56,7 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+         this.mcpErrorResponseMapper = mcpErrorResponseMapper;
+         this.mcpSessionService = mcpSessionService;
+         this.keepAliveScheduler = KeepAliveScheduler
+-            .builder(() -> (isClosing.get()) ? Flux.empty() : Flux.fromIterable(this.mcpSessionService.listMcpStreamableServerSession()))
++            .builder(() -> (isClosing.get()) ? Flux.empty() : Flux.fromIterable(this.mcpSessionService.listListeningMcpStreamableServerSession()))
+             .initialDelay(KEEP_ALIVE_INTERVAL)
+             .interval(KEEP_ALIVE_INTERVAL)
+             .build();
+@@ -173,12 +173,16 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+         Flux<Event<?>> serverSentEvent = Flux.<Event<?>> create(sink ->
+         {
+             FluxStreamableMcpSessionTransport sessionTransport = new FluxStreamableMcpSessionTransport(sink);
+-            McpStreamableServerSession.McpStreamableServerSessionStream listeningStream = resolvedSession
+-                .listeningStream(sessionTransport);
++            McpStreamableServerSession.McpStreamableServerSessionStream listeningStream = mcpSessionService
++                .registerSseSession(transportContext, resolvedSession, sessionTransport);
++            if (listeningStream == null) {
++                sink.error(new IllegalStateException("MCP session is no longer local"));
++                return;
++            }
+             sink.onDispose(() ->
+             {
+                 listeningStream.close();
+-                mcpSessionService.deregisterSseSession(transportContext);
++                mcpSessionService.deregisterSseSession(transportContext, listeningStream);
+             });
+         }).contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
+
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-index d0e6849..8b1a8ac 100644
+index dca9060..dc24cfc 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-@@ -18,6 +18,12 @@ import io.kestra.core.queues.QueueSubscriber;
- import io.kestra.core.server.ServerInstance;
+@@ -20,6 +20,12 @@ import io.kestra.core.server.ServerInstance;
 
+ import io.micronaut.core.annotation.Nullable;
  import io.modelcontextprotocol.spec.McpStreamableServerSession;
 +import reactor.core.Disposable;
 +import reactor.core.Disposables;
@@ -21,10 +54,10 @@ index d0e6849..8b1a8ac 100644
  import jakarta.annotation.PostConstruct;
  import jakarta.annotation.PreDestroy;
  import jakarta.inject.Inject;
-@@ -30,6 +36,10 @@ public class McpSessionService {
+@@ -39,6 +45,10 @@ public class McpSessionService {
      private final McpSessionRepositoryInterface sessionRepository;
      private final BroadcastQueueInterface<McpSessionEvent> mcpSessionQueue;
-     private final Map<KestraMcpTransportContext, McpStreamableServerSession> streamableSessions = new ConcurrentHashMap<>();
+     private final Map<KestraMcpTransportContext, LocalSession> streamableSessions = new ConcurrentHashMap<>();
 +    private record ListeningSession(McpStreamableServerSession session,
 +        McpStreamableServerSession.McpStreamableServerSessionStream stream) {}
 +    private final Map<KestraMcpTransportContext, ListeningSession> listeningSessions = new ConcurrentHashMap<>();
@@ -32,7 +65,7 @@ index d0e6849..8b1a8ac 100644
      private QueueSubscriber<McpSessionEvent> sessionSubscriber;
 
      static final Duration SESSION_PURGE_AGE = Duration.ofHours(48);
-@@ -74,13 +84,64 @@ public class McpSessionService {
+@@ -83,13 +93,64 @@ public class McpSessionService {
          if (sessionSubscriber != null) {
              sessionSubscriber.close();
          }
@@ -42,7 +75,7 @@ index d0e6849..8b1a8ac 100644
 +    private void closeDeletedSession(KestraMcpTransportContext context, McpStreamableServerSession session) {
 +        var listener = new java.util.concurrent.atomic.AtomicReference<ListeningSession>();
 +        listeningSessions.compute(context, (key, current) -> {
-+            streamableSessions.remove(key, session);
++            streamableSessions.computeIfPresent(key, (ignored, local) -> local.session() == session ? null : local);
 +            if (current != null && current.session() == session) {
 +                listener.set(current);
 +                return null;
@@ -85,7 +118,7 @@ index d0e6849..8b1a8ac 100644
      }
 
      public Collection<McpStreamableServerSession> listMcpStreamableServerSession() {
-         return streamableSessions.values();
+         return streamableSessions.values().stream().map(LocalSession::session).toList();
      }
 
 +    public Collection<McpStreamableServerSession> listListeningMcpStreamableServerSession() {
@@ -97,7 +130,7 @@ index d0e6849..8b1a8ac 100644
          streamableSessions.clear();
      }
 
-@@ -121,7 +182,7 @@ public class McpSessionService {
+@@ -134,7 +195,7 @@ public class McpSessionService {
       * supplied session locally, and broadcasts the change so the previous owning node can
       * release its in-memory state.
       * <p>
@@ -106,7 +139,7 @@ index d0e6849..8b1a8ac 100644
       *
       * @param context the transport context identifying the session
       * @param session the local session that will serve the SSE stream
-@@ -143,8 +204,31 @@ public class McpSessionService {
+@@ -156,8 +217,32 @@ public class McpSessionService {
       *
       * @param context the transport context identifying the session
       */
@@ -118,7 +151,8 @@ index d0e6849..8b1a8ac 100644
 +        boolean sessionValid = sessionExists(context);
 +        var registered = new java.util.concurrent.atomic.AtomicReference<McpStreamableServerSession.McpStreamableServerSessionStream>();
 +        listeningSessions.compute(context, (key, previous) -> {
-+            if (streamableSessions.get(key) != session || !sessionValid) {
++            var local = streamableSessions.get(key);
++            if (local == null || local.session() != session || !isOwner(local.ownerId(), context) || !sessionValid) {
 +                return previous;
 +            }
 +            var stream = session.listeningStream(transport);
@@ -134,51 +168,60 @@ index d0e6849..8b1a8ac 100644
 +            if (current.stream() != stream) {
 +                return current;
 +            }
-+            streamableSessions.remove(key, current.session());
++            streamableSessions.computeIfPresent(key, (ignored, local) -> local.session() == current.session() ? null : local);
 +            return null;
 +        });
      }
 
      /**
-diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-index bdf3d4c..1262415 100644
---- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-+++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-@@ -55,7 +55,7 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
-         this.mcpErrorResponseMapper = mcpErrorResponseMapper;
-         this.mcpSessionService = mcpSessionService;
-         this.keepAliveScheduler = KeepAliveScheduler
--            .builder(() -> (isClosing.get()) ? Flux.empty() : Flux.fromIterable(this.mcpSessionService.listMcpStreamableServerSession()))
-+            .builder(() -> (isClosing.get()) ? Flux.empty() : Flux.fromIterable(this.mcpSessionService.listListeningMcpStreamableServerSession()))
-             .initialDelay(KEEP_ALIVE_INTERVAL)
-             .interval(KEEP_ALIVE_INTERVAL)
-             .build();
-@@ -172,12 +172,16 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
-         Flux<Event<?>> serverSentEvent = Flux.<Event<?>> create(sink ->
-         {
-             FluxStreamableMcpSessionTransport sessionTransport = new FluxStreamableMcpSessionTransport(sink);
--            McpStreamableServerSession.McpStreamableServerSessionStream listeningStream = resolvedSession
--                .listeningStream(sessionTransport);
-+            McpStreamableServerSession.McpStreamableServerSessionStream listeningStream = mcpSessionService
-+                .registerSseSession(transportContext, resolvedSession, sessionTransport);
-+            if (listeningStream == null) {
-+                sink.error(new IllegalStateException("MCP session is no longer local"));
-+                return;
-+            }
-             sink.onDispose(() ->
-             {
-                 listeningStream.close();
--                mcpSessionService.deregisterSseSession(transportContext);
-+                mcpSessionService.deregisterSseSession(transportContext, listeningStream);
-             });
-         }).contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
+diff --git a/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java b/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
+index c6e84a9..c0693c6 100644
+--- a/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
++++ b/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
+@@ -247,25 +247,20 @@ class KestraFluxStreamableServerTransportProviderTest {
 
+     @Test
+     void shouldHandleToolCallByEphemeralSessionWhenSseConnectionIsOnSeparateInstance() {
+-        // Given — session exists on another server
+         KestraMcpTransportContext context = buildTransportContext();
+-        mcpSessionRepository.save(
+-            new McpSession(
+-                context.getTenantId(), context.getServerId(),
+-                context.getSessionId(), "other-server-instance-id", null, false
+-            )
+-        );
+-
+-        KestraFluxStreamableServerTransportProvider provider = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(), mcpSessionService);
+-        provider.setSessionFactory(buildSessionFactory());
+-
+-        // When — a tools/list request arrives for that cross-server session
+-        HttpRequest<String> request = HttpRequest.POST("/mcp", toJson(TOOLS_LIST_REQUEST))
+-            .accept(MediaType.TEXT_EVENT_STREAM_TYPE, MediaType.APPLICATION_JSON_TYPE)
+-            .header(HttpHeaders.MCP_SESSION_ID, context.getSessionId());
+-        HttpResponse<?> response = provider.handleRequest(request, context).block();
++        // The shared assertion executes real tools/call with an echo handler, checks its
++        // parameters and response payload, and proves the session remains owned remotely.
++        HttpResponse<?> response = McpSessionLifecycleTest.crossNodeToolCallWithPayload(
++            mcpSessionService, mcpSessionRepository, context);
++        assertThat(response).isNotNull();
++        assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
++    }
+
+-        // Then — an ephemeral session handles the request locally; 200 not 503
++    @Test
++    void shouldListVisibleToolsForRemoteSessionWithoutCreatingEphemeralSession() {
++        KestraMcpTransportContext context = buildTransportContext();
++        HttpResponse<?> response = McpSessionLifecycleTest.crossNodeVisibleToolsWithoutEphemeralSession(
++            mcpSessionService, mcpSessionRepository, context, TOOLS_LIST_REQUEST);
+         assertThat(response).isNotNull();
+         assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
+     }
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpSessionLifecycleTest.java b/webserver/src/test/java/io/kestra/mcp/McpSessionLifecycleTest.java
 new file mode 100644
-index 0000000..4a829a5
+index 0000000..1969a73
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpSessionLifecycleTest.java
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,562 @@
 +package io.kestra.mcp;
 +
 +import ch.qos.logback.classic.Logger;
@@ -218,9 +261,10 @@ index 0000000..4a829a5
 +        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, handler);
 +    }
 +    static final class QueueAndRepository {
-+        record RepositoryKey(String tenant, String session) {}
-+        static RepositoryKey key(String tenant, String session) {return new RepositoryKey(tenant,session);}
-+        // Match the published JDBC key (tenant, sessionId); find additionally checks serverId.
++        record RepositoryKey(String tenant, String server, String session) {}
++        static RepositoryKey key(String tenant, String session) {return key(tenant,"default",session);}
++        static RepositoryKey key(String tenant, String server, String session) {return new RepositoryKey(tenant,server,session);}
++        // Match the v2.0.11 persisted tenant/server/session key.
 +        final Map<RepositoryKey, McpSession> records = new ConcurrentHashMap<>();
 +        final AtomicReference<Consumer<Either<McpSessionEvent, DeserializationException>>> receiver = new AtomicReference<>();
 +        final AtomicInteger deliveredDeletes = new AtomicInteger();
@@ -240,10 +284,10 @@ index 0000000..4a829a5
 +        final McpSessionRepositoryInterface repository = fake(McpSessionRepositoryInterface.class, (p,m,a) -> {
 +            return switch (m.getName()) {
 +                case "purgeOlderThan" -> 0;
-+                case "find" -> Optional.ofNullable(records.get(key((String)a[0],(String)a[2])))
++                case "find" -> Optional.ofNullable(records.get(key((String)a[0],(String)a[1],(String)a[2])))
 +                    .filter(record -> Objects.equals(record.serverId(),a[1]));
-+                case "save" -> { McpSession value=(McpSession)a[0]; records.put(key(value.tenantId(),value.sessionId()),value); yield value; }
-+                case "delete" -> Optional.ofNullable(records.remove(key((String)a[0],(String)a[1])));
++                case "save" -> { McpSession value=(McpSession)a[0]; records.put(key(value.tenantId(),value.serverId(),value.sessionId()),value); yield value; }
++                case "delete" -> Optional.ofNullable(records.remove(key((String)a[0],(String)a[1],(String)a[2])));
 +                default -> throw new UnsupportedOperationException(m.toString());
 +            };
 +        });
@@ -317,10 +361,12 @@ index 0000000..4a829a5
 +        try {
 +            var response=provider.handleRequest(initialize(),identity(realSession.getId())).block(Duration.ofSeconds(2));
 +            require(response.code()==200 && environment.records.size()==1 && service.listMcpStreamableServerSession().size()==1,"real initialize must register persistent/local session");
++            var issuedSessionId = response.header("Mcp-Session-Id");
++            require(issuedSessionId != null && !issuedSessionId.equals(realSession.getId()), "initialize must issue a new server session id");
 +            // Complete and cancel a genuine POST SSE response, just as root's rpc reader does.
 +            var rpc = HttpRequest.POST("/api/v1/main/mcp/default", "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"probe/echo\",\"params\":{}}")
-+                .accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",realSession.getId());
-+            var post = provider.handleRequest(rpc,identity(realSession.getId())).block(Duration.ofSeconds(2));
++                .accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",issuedSessionId);
++            var post = provider.handleRequest(rpc,identity(issuedSessionId)).block(Duration.ofSeconds(2));
 +            require(post.code()==200,"real POST response precondition");
 +            var payloads = Flux.from((org.reactivestreams.Publisher<?>)post.body()).take(1).collectList().block(Duration.ofSeconds(2));
 +            require(payloads.size()==1 && environment.records.size()==1 && service.listMcpStreamableServerSession().size()==1,
@@ -625,7 +671,7 @@ index 0000000..4a829a5
 +            var outside=KestraMcpTransportContext.builder().tenantId("tenant-outside").serverId("default").sessionId(aSession.getId()).userId("alice").clientId("client").resource("resource").roles(List.of()).scopes(List.of()).build();
 +            require(!service.sessionExists(outside),"unknown tenant cannot find either session");
 +            var noOp=provider.handleRequest(HttpRequest.<String>DELETE("/api/v1/tenant-outside/mcp/default").accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",aSession.getId()),outside).block(Duration.ofSeconds(2));
-+            require(noOp.code()==200 && e.deliveredDeletes.get()==0 && e.records.size()==2 && !aEnded.get() && !bEnded.get(),"wrong-tenant DELETE is an existing no-op, not cross-tenant termination");
++            require(noOp.code()==404 && e.deliveredDeletes.get()==0 && e.records.size()==2 && !aEnded.get() && !bEnded.get(),"wrong-tenant DELETE must return absent without cross-tenant termination");
 +            var deleted=provider.handleRequest(HttpRequest.<String>DELETE("/api/v1/tenant-a/mcp/default").accept(MediaType.APPLICATION_JSON_TYPE,MediaType.TEXT_EVENT_STREAM_TYPE).header("Mcp-Session-Id",aSession.getId()),aContext).block(Duration.ofSeconds(2));
 +            bSession.sendNotification("probe/tenant-b-still-active",Map.of()).block(Duration.ofSeconds(2));
 +            require(deleted.code()==200 && e.deliveredDeletes.get()==1 && !service.sessionExists(aContext) && service.sessionExists(bContext)
@@ -650,11 +696,11 @@ index 0000000..4a829a5
 +                var getDenied=provider.handleRequest(get(real.getId()),wrong).block(Duration.ofSeconds(2));
 +                var deleteNoOp=provider.handleRequest(delete(real.getId()),wrong).block(Duration.ofSeconds(2));
 +                real.sendNotification("probe/owner-still-active",Map.of()).block(Duration.ofSeconds(2));expectedMessages++;
-+                require(getDenied.code()==404 && deleteNoOp.code()==200 && e.deliveredDeletes.get()==0 && e.records.size()==1
++                require(getDenied.code()==404 && deleteNoOp.code()==404 && e.deliveredDeletes.get()==0 && e.records.size()==1
 +                    && service.sessionExists(owner) && service.findMcpStreamableServerSession(owner).orElseThrow()==real
 +                    && !ended.get() && messages.get()==expectedMessages,"wrong identity must not remove storage, emit DELETED, or close actual owner listener");
 +            }
-+            System.out.println("OBSERVED identity isolation: subject/client/resource GET404 and DELETE200 no-op; live owner received all three notifications");
++            System.out.println("OBSERVED identity isolation: subject/client/resource GET404 and DELETE404 without side effects; live owner received all three notifications");
 +        } finally {if(stream!=null)stream.dispose();real.close();provider.closeGracefully().block(Duration.ofSeconds(2));service.stop();}
 +    }
 +
@@ -738,45 +784,3 @@ index 0000000..4a829a5
 +    }
 +
 +}
-diff --git a/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java b/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
-index 6b0d5b1..ee79805 100644
---- a/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
-+++ b/webserver/src/test/java/io/kestra/mcp/KestraFluxStreamableServerTransportProviderTest.java
-@@ -227,25 +227,20 @@ class KestraFluxStreamableServerTransportProviderTest {
-
-     @Test
-     void shouldHandleToolCallByEphemeralSessionWhenSseConnectionIsOnSeparateInstance() {
--        // Given — session exists on another server
-         KestraMcpTransportContext context = buildTransportContext();
--        mcpSessionRepository.save(
--            new McpSession(
--                context.getTenantId(), context.getServerId(),
--                context.getSessionId(), "other-server-instance-id", null, false
--            )
--        );
--
--        KestraFluxStreamableServerTransportProvider provider = new KestraFluxStreamableServerTransportProvider(new McpErrorResponseMapper(), mcpSessionService);
--        provider.setSessionFactory(buildSessionFactory());
--
--        // When — a tools/list request arrives for that cross-server session
--        HttpRequest<String> request = HttpRequest.POST("/mcp", toJson(TOOLS_LIST_REQUEST))
--            .accept(MediaType.TEXT_EVENT_STREAM_TYPE, MediaType.APPLICATION_JSON_TYPE)
--            .header(HttpHeaders.MCP_SESSION_ID, context.getSessionId());
--        HttpResponse<?> response = provider.handleRequest(request, context).block();
-+        // The shared assertion executes real tools/call with an echo handler, checks its
-+        // parameters and response payload, and proves the session remains owned remotely.
-+        HttpResponse<?> response = McpSessionLifecycleTest.crossNodeToolCallWithPayload(
-+            mcpSessionService, mcpSessionRepository, context);
-+        assertThat(response).isNotNull();
-+        assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
-+    }
-
--        // Then — an ephemeral session handles the request locally; 200 not 503
-+    @Test
-+    void shouldListVisibleToolsForRemoteSessionWithoutCreatingEphemeralSession() {
-+        KestraMcpTransportContext context = buildTransportContext();
-+        HttpResponse<?> response = McpSessionLifecycleTest.crossNodeVisibleToolsWithoutEphemeralSession(
-+            mcpSessionService, mcpSessionRepository, context, TOOLS_LIST_REQUEST);
-         assertThat(response).isNotNull();
-         assertThat(response.getStatus().getCode()).isEqualTo(HttpStatus.OK.getCode());
-     }

@@ -1,24 +1,24 @@
 # 需求: REQ-0230 REST/MCP统一typed授权SPI、REST失败关闭门与可信roles传递
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；R-EE-RBAC架构激活面 + Micronaut 4.10.26/security 4.15.2契约；不包含角色模型或路由权限策略
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；R-EE-RBAC架构激活面 + Micronaut 4.10.26/security 4.15.2契约；不包含角色模型或路由权限策略
 # 触达上游文件: 11 个（详见diff）
 # 移除条件: 上游OSS提供等价统一授权SPI、可信主体传递与失败关闭执行门
 # 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
-index 741ed00..96c6bd8 100644
+index 8cd5ca7..5f6ee6e 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
-@@ -159,6 +159,8 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
+@@ -160,6 +160,8 @@ import static io.kestra.core.utils.Rethrow.throwFunction;
  @Slf4j
  @Controller("/api/v1/{tenant}/executions")
  public class ExecutionController {
 +    @Inject private io.kestra.webserver.rbac.RbacExecutionGate rbacExecutionGate;
 +
      private static final Duration AVERAGE_DURATION_LOOKBACK = Duration.ofDays(30);
+     private static final Pattern NAMESPACE_FILE_REVISION = Pattern.compile("(.+)\\.v(\\d+)");
 
-     @Nullable
-@@ -1033,10 +1035,17 @@ public class ExecutionController {
+@@ -1052,10 +1054,17 @@ public class ExecutionController {
          // Same reason for the Micronaut propagated context: it carries the server request and its
          // authentication, which the CREATE event listeners need to attribute the execution to its author.
          final PropagatedContext propagatedContext = PropagatedContext.getOrEmpty();
@@ -39,7 +39,7 @@ index 741ed00..96c6bd8 100644
                  Check.Behavior behavior = Check.resolveBehavior(failed);
                  if (Check.Behavior.BLOCK_EXECUTION.equals(behavior)) {
                      return Mono.error(
-@@ -1095,7 +1104,7 @@ public class ExecutionController {
+@@ -1114,7 +1123,7 @@ public class ExecutionController {
                      // SSE subscribe
                      String subscriberId = UUID.randomUUID().toString();
                      // Use Flux to wait for completion using the streaming service
@@ -48,7 +48,7 @@ index 741ed00..96c6bd8 100644
                      {
                          streamingService.registerSubscriber(
                              executionId,
-@@ -1103,14 +1112,15 @@ public class ExecutionController {
+@@ -1122,20 +1131,13 @@ public class ExecutionController {
                              emitter,
                              flow
                          );
@@ -56,18 +56,24 @@ index 741ed00..96c6bd8 100644
 +                    }))
                          .last()
                          .map(Event::getData)
--                        .map(
--                            execution -> ExecutionResponse.fromExecution(
-+                        .flatMap(
-+                            execution -> rbacExecutionGate.readResult(authentication, tenantId, execution.getNamespace(), executionId,
-+                                () -> Mono.just(ExecutionResponse.fromExecution(
-                                 execution,
-                                 executionUrl
--                            )
-+                            )))
-                         )
+-                        .map(execution -> {
+-                            try {
+-                                return ExecutionResponse.fromExecution(
+-                                    execution,
+-                                    executionOutputService.getOutputs(execution),
+-                                    executionUrl
+-                                );
+-                            } catch (InternalException e) {
+-                                throw Exceptions.propagate(e);
+-                            }
+-                        })
++                        .flatMap(execution -> rbacExecutionGate.readResult(
++                            authentication, tenantId, execution.getNamespace(), executionId,
++                            () -> Mono.fromCallable(() -> ExecutionResponse.fromExecution(
++                                execution, executionOutputService.getOutputs(execution), executionUrl))))
                          .timeout(Duration.ofHours(1)) // avoid idle SSE sockets by setting a between-item timeout
                          .doFinally(signalType -> streamingService.unregisterSubscriber(executionId, subscriberId));
+                 });
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java b/webserver/src/main/java/io/kestra/webserver/rbac/McpAuthorizationResolver.java
 new file mode 100644
 index 0000000..dd45e13
@@ -294,7 +300,7 @@ index 0000000..70965f8
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5a1560b55eab73d1cc98d2ebbbc35af5467a8f4
+index 0000000..b5a1560
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 @@ -0,0 +1,105 @@
@@ -405,7 +411,7 @@ index 0000000000000000000000000000000000000000..b5a1560b55eab73d1cc98d2ebbbc35af
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..c579ea7dc0c23cdf6a5d1a12b612e9888a8d7d2b
+index 0000000..c579ea7
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacActivationTest.java
 @@ -0,0 +1,152 @@

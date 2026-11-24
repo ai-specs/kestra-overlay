@@ -59,16 +59,16 @@ class McpLifecycleGateTest(unittest.TestCase):
                 with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
                     GATE.check(directory, {SUITE: 17})
 
-    def test_original_transport_gate_keeps_all_seventeen_names(self):
+    def test_transport_gate_requires_original_and_six_upstream_security_cases(self):
         suite = "io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest"
-        self.assertEqual(GATE.REQUIRED[suite], 17)
+        self.assertEqual(GATE.REQUIRED[suite], 23)
         for bad in (False, True):
             with tempfile.TemporaryDirectory() as location, contextlib.redirect_stdout(io.StringIO()):
                 directory = Path(location)
                 names = sorted(GATE.MCP_TRANSPORT_REQUIRED)
                 if bad: names[0] = "wrong-case"
                 cases = "".join(f'<testcase name="{name}()"/>' for name in names)
-                (directory / f"TEST-{suite}.xml").write_text(f'<testsuite tests="17" skipped="0" errors="0" failures="0">{cases}</testsuite>')
+                (directory / f"TEST-{suite}.xml").write_text(f'<testsuite tests="23" skipped="0" errors="0" failures="0">{cases}</testsuite>')
                 if bad:
-                    with self.assertRaises(SystemExit): GATE.check(directory, {suite: 17})
-                else: GATE.check(directory, {suite: 17})
+                    with self.assertRaises(SystemExit): GATE.check(directory, {suite: 23})
+                else: GATE.check(directory, {suite: 23})

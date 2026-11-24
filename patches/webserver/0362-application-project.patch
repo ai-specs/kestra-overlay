@@ -1,7 +1,7 @@
 # 需求: REQ-0362 应用组只读可信身份与标准协议复查
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；只读接线定向探针通过；PostgreSQL与完整CI未通过，未发布
-# 来源: 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0；宿主独立验证树；不承载应用资源策略
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；RFC6749 §3.3/§4.1/§6、OIDC Core 1.0；宿主独立验证树；不承载应用资源策略
 # 触达上游文件: 最小公共契约、宿主激活点与独立测试
 # 移除条件: 上游提供等价公开应用组可信身份机制
 diff --git a/core/src/main/java/io/kestra/core/repositories/GlobalTenantResourceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/GlobalTenantResourceAccessControl.java
@@ -60,11 +60,11 @@ index 22b6a5e..1de5120 100644
 +            ? DSL.noCondition() : field("id", String.class).in(domain.ids());
 +    }
 +
- 
+
      public AbstractJdbcMcpServerRepository(io.kestra.jdbc.AbstractJdbcRepository<McpServer> jdbcRepository,
          ApplicationEventPublisher<CrudEvent<McpServer>> eventPublisher,
 @@ -66,7 +77,11 @@ public abstract class AbstractJdbcMcpServerRepository extends AbstractJdbcCrudRe
- 
+
      @Override
      public ArrayListTotal<McpServer> find(Pageable pageable, String tenantId) {
 -        return findPage(pageable, tenantId, DSL.noCondition());
@@ -74,10 +74,11 @@ index 22b6a5e..1de5120 100644
 +tenantId
 +));
      }
- 
+
      @Override
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 new file mode 100644
+index 0000000..62e3e3e
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 @@ -0,0 +1,147 @@
@@ -273,6 +274,7 @@ index 0000000..fddecfb
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationGroupIntegrationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationGroupIntegrationTest.java
 new file mode 100644
+index 0000000..647a452
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationGroupIntegrationTest.java
 @@ -0,0 +1,296 @@
@@ -574,6 +576,7 @@ new file mode 100644
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationGroupTokenIssuanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationGroupTokenIssuanceTest.java
 new file mode 100644
+index 0000000..150a2dc
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcApplicationGroupTokenIssuanceTest.java
 @@ -0,0 +1,103 @@
@@ -680,414 +683,133 @@ new file mode 100644
 +
 +    private static OidcUserService.OidcUser user() {return new OidcUserService.OidcUser("alice","Alice","alice@example.invalid",false,List.of());}
 +}
-diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPendingClientConsentTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPendingClientConsentTest.java
 new file mode 100644
+index 0000000..1a6847f
 --- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
-@@ -0,0 +1,186 @@
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPendingClientConsentTest.java
+@@ -0,0 +1,118 @@
 +package io.kestra.webserver.oidc;
 +
-+import io.kestra.core.repositories.AuthorizationInvocationContext;
-+import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
-+import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.nimbusds.oauth2.sdk.Scope;
++import io.kestra.webserver.mcp.McpResourceUrl;
++import io.kestra.webserver.oidc.controllers.OidcProviderController;
++import io.kestra.webserver.oidc.services.*;
 +import io.micronaut.context.BeanProvider;
-+import io.micronaut.core.propagation.PropagatedContext;
 +import io.micronaut.http.HttpRequest;
-+import io.micronaut.security.authentication.Authentication;
-+import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.http.HttpStatus;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
 +import java.sql.Connection;
-+import java.sql.SQLException;
++import java.sql.PreparedStatement;
 +import java.util.List;
 +import java.util.Map;
 +import java.util.Optional;
 +import java.util.Set;
++import java.util.concurrent.atomic.AtomicBoolean;
 +import javax.sql.DataSource;
 +import org.junit.jupiter.api.Test;
-+import static io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.*;
 +import static org.junit.jupiter.api.Assertions.*;
 +import static org.mockito.Mockito.*;
 +
-+class OidcTrustedIdentityTest {
-+    private static final String ISSUER="https://identity.example.invalid";
-+    private static final String RESOURCE=ISSUER+"/api/v1/main/mcp/default";
-+    private final ApplicationGroupProtocolProjectionV1 projection=mock(ApplicationGroupProtocolProjectionV1.class);
-+    private final OidcProtocolStateV1 protocol=mock(OidcProtocolStateV1.class);
-+    private final DataSource source=mock(DataSource.class);
-+    private final Connection connection=mock(Connection.class);
-+    private final BeanProvider<ApplicationGroupProtocolProjectionV1> providers=mock(BeanProvider.class);
++class OidcPendingClientConsentTest {
++    private static final String ISSUER="https://issuer.example";
++    private static final String CALLBACK="https://client.example/callback";
++    private final AtomicBoolean owned=new AtomicBoolean();
 +    private Set<String> supported=Set.of("read");
-+    private Set<String> granted=Set.of("read");
++    private final OidcProtocolStateV1 protocol=mock(OidcProtocolStateV1.class);
++    private final OidcOwnershipService ownership=mock(OidcOwnershipService.class);
++    private final OidcJwkService keys=mock(OidcJwkService.class);
++    private final OidcAuthorizationCodeService codes=mock(OidcAuthorizationCodeService.class);
++    private final Connection connection=mock(Connection.class);
++    private final PreparedStatement binding=mock(PreparedStatement.class);
++    private OidcTokenService tokens;
 +
-+    private Projection view(String group,String tenant,String issuer,String client,String subject,boolean active,boolean approved,long epoch) {
-+        return new Projection(group,tenant,issuer,client,subject,active,approved,19,epoch,Set.of("ui",RESOURCE),
-+            List.of(new Scope("read","Reader","Read access")),supported,granted);
-+    }
-+
-+    private OidcTrustedIdentity service()throws Exception {
-+        when(providers.isUnique()).thenReturn(true);when(providers.get()).thenReturn(projection);
-+        when(source.getConnection()).thenReturn(connection);
-+        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,3)));
-+        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid","profile"),true)));
-+        when(projection.current(eq(connection),any())).thenAnswer(call->new Result(1,true,Optional.of(view("applicationGroup","main",ISSUER,"ui","alice",true,true,7))));
-+        var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
-+        return new OidcTrustedIdentity(providers,protocol,configuration,source);
++    private static Map<String,List<String>> parameters() {
++        return Map.of("client_id",List.of("client"),"response_type",List.of("code"),"redirect_uri",List.of(CALLBACK),"scope",List.of("openid read"),
++            "code_challenge",List.of("a".repeat(43)),"code_challenge_method",List.of("S256"),"state",List.of("state"));
 +    }
 +
-+    private static Authentication identity(String audience,long epoch,Set<String> scopes) {
-+        var claim=Map.of("application_group_id","applicationGroup","client_id","ui","authorization_version",epoch,
-+            "application_group_scopes",scopes,"protocol_scopes",Set.of("openid"));
-+        return Authentication.build("alice",List.of("legacy-admin"),Map.of("iss",ISSUER,"aud",List.of(audience),
-+            OidcTrustedIdentity.CLAIM,claim,OidcIdentityLifecycle.CLAIM,3L,"resource",RESOURCE));
++    private static HttpRequest<?> authorizeRequest() {
++        return HttpRequest.GET("/oidc/authorize?client_id=client&response_type=code&redirect_uri="+URLEncoder.encode(CALLBACK,StandardCharsets.UTF_8)
++            +"&scope=openid+read&code_challenge="+"a".repeat(43)+"&code_challenge_method=S256&state=state");
 +    }
 +
-+    private static Authentication protocolSession(String audience,long version) {
-+        return Authentication.build("alice",List.of(),Map.of("iss",ISSUER,"aud",List.of(audience),OidcIdentityLifecycle.CLAIM,version));
-+    }
++    private static HttpRequest<?> consentRequest(){return HttpRequest.POST("/oidc/consent","").header("Origin",ISSUER);}
 +
-+    @Test void missingProjectionAllowsOnlyCurrentConfiguredLoginSessionWithoutGroupIdentity()throws Exception {
-+        var service=service();when(providers.isPresent()).thenReturn(false);
-+        service.validateSession(protocolSession("ui",3));
-+        assertThrows(IllegalStateException.class,()->service.validate(protocolSession("ui",3)));
-+        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession(RESOURCE,3)));
-+        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession("ui",2)));
-+        verifyNoInteractions(projection);
-+    }
++    private static Map<String,String> approval(){return Map.of("interaction","interaction","decision","approve","scope-openid","yes","scope-read","yes");}
 +
-+    @Test void unboundSessionCannotUpgradeWhenProjectionActivatesOrIsAmbiguous()throws Exception {
-+        var service=service();when(providers.isPresent()).thenReturn(true);
-+        when(projection.current(eq(connection),any())).thenReturn(new Result(1,false,Optional.empty()));
-+        service.validateSession(protocolSession("ui",3));
-+        when(projection.current(eq(connection),any())).thenReturn(new Result(1,true,Optional.of(view("applicationGroup","main",ISSUER,"ui","alice",true,true,7))));
-+        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession("ui",3)));
-+        when(providers.isUnique()).thenReturn(false);
-+        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession("ui",3)));
-+    }
-+
-+    @Test void boundSessionStillRequiresProjectionAndRevocationValidation()throws Exception {
-+        var service=service();when(providers.isPresent()).thenReturn(false);when(providers.isUnique()).thenReturn(false);
-+        assertThrows(IllegalStateException.class,()->service.validateSession(identity("ui",7,Set.of())));
-+        when(providers.isUnique()).thenReturn(true);
-+        service.validateSession(identity("ui",7,Set.of("read")));
-+        assertThrows(IllegalStateException.class,()->service.validateSession(identity("ui",6,Set.of("read"))));
-+    }
-+
-+    @Test void uiContextPreservesDistinctRevisionAndEpochWithinOneProtocolTransaction()throws Exception {
-+        var service=service();var request=HttpRequest.GET("/api/v1/main/flows/search");
-+        request.setAttribute(SecurityFilter.AUTHENTICATION,identity("ui",7,Set.of("read")));
-+        try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
-+            var identity=service.current();assertEquals(19,identity.directoryRevision());assertEquals(7,identity.authorizationVersion());
-+            assertEquals(Set.of("read"),identity.applicationGroupScopes());
-+        }
-+        var order=inOrder(connection,protocol,projection);
-+        order.verify(connection).setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);order.verify(connection).setAutoCommit(false);
-+        order.verify(protocol).lockSecurityState(connection);order.verify(protocol).account(connection,ISSUER,"alice");
-+        order.verify(protocol).client(connection,ISSUER,"ui");order.verify(projection).current(connection,new Request(ISSUER,"main","ui","alice","applicationGroup"));
-+        order.verify(connection).commit();order.verify(connection).close();verify(source).getConnection();
-+    }
-+
-+    @Test void mcpUsesCurrentResourceAuthenticationInsteadOfAmbientCookie()throws Exception {
-+        var service=service();var bearer=identity(RESOURCE,7,Set.of("read"));var request=HttpRequest.POST("/api/v1/main/mcp/default","");
-+        request.setAttribute("io.kestra.mcp.authentication",bearer);request.setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("foreign-cookie"));
-+        try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
-+            assertEquals("alice",service.current().subject());
-+            assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        }
-+    }
-+
-+    @Test void rejectsOldEpochUnknownScopeAndIncorrectUiAudience()throws Exception {
-+        var service=service();
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",6,Set.of("read"))));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read","unknown"))));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity(RESOURCE,7,Set.of("read"))));
-+        verify(connection,times(3)).rollback();verify(connection,never()).commit();
-+    }
-+
-+    @Test void missingContextNeverCreatesTrustedIdentityOrTouchesStorage()throws Exception {
-+        var service=service();assertThrows(IllegalStateException.class,service::current);verifyNoInteractions(connection);
-+        verify(source,never()).getConnection();
-+    }
-+
-+    @Test void revokedApplicationSupportOrUserGrantRejectsExistingIdentity()throws Exception {
-+        var service=service();assertEquals(Set.of("read"),service.validate(identity("ui",7,Set.of("read"))).applicationGroupScopes());
-+        supported=Set.of();assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        supported=Set.of("read");granted=Set.of();assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+    }
-+
-+    @Test void zeroScopeNeedsCurrentProjectionAndDoesNotRequirePermissionMetadata()throws Exception {
-+        var service=service();
-+        assertEquals(Set.of("read"),service.validate(identity("ui",7,Set.of("read"))).applicationGroupScopes());
-+        supported=Set.of();assertTrue(service.validate(identity("ui",7,Set.of())).applicationGroupScopes().isEmpty());
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        when(providers.isUnique()).thenReturn(false);
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
-+    }
-+
-+    @Test void standardAccountAndClientRevocationCannotBeHiddenByAnUnchangedGroupEpoch()throws Exception {
-+        var service=service();assertNotNull(service.validate(identity("ui",7,Set.of("read"))));
-+        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",false,false,3)));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,4)));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,3)));
-+        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",false,Set.of("openid"),true)));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+    }
-+
-+    @Test void wrongProjectionTargetsInactiveGroupsAndUnavailableProviderFailClosed()throws Exception {
-+        var service=service();
-+        for(var view:List.of(view("other","main",ISSUER,"ui","alice",true,true,7),
-+            view("applicationGroup","other",ISSUER,"ui","alice",true,true,7),view("applicationGroup","main",ISSUER+"/","ui","alice",true,true,7),
-+            view("applicationGroup","main",ISSUER,"other","alice",true,true,7),view("applicationGroup","main",ISSUER,"ui","other",true,true,7),
-+            view("applicationGroup","main",ISSUER,"ui","alice",false,true,7),view("applicationGroup","main",ISSUER,"ui","alice",true,false,7))) {
-+            when(projection.current(eq(connection),any())).thenReturn(new Result(1,true,Optional.of(view)));
-+            assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
-+        }
-+        when(projection.current(eq(connection),any())).thenReturn(new Result(1,false,Optional.empty()));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
-+        when(projection.current(eq(connection),any())).thenThrow(new SQLException("unavailable"));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
-+        verify(connection,never()).commit();
-+    }
-+
-+    @Test void protocolScopesRequireCurrentClientRegistrationAndUiSelectorIsNotIdentityScope()throws Exception {
-+        var service=service();
-+        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of(),true)));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid"),false)));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid",ApplicationGroupScopeIssuance.UI_SELECTOR),true)));
-+        var claim=Map.of("application_group_id","applicationGroup","client_id","ui","authorization_version",7L,
-+            "application_group_scopes",Set.of("read"),"protocol_scopes",Set.of(ApplicationGroupScopeIssuance.UI_SELECTOR));
-+        var identity=Authentication.build("alice",Map.of("iss",ISSUER,"aud",List.of("ui"),OidcTrustedIdentity.CLAIM,claim,OidcIdentityLifecycle.CLAIM,3L));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity));
-+    }
-+
-+    @Test void protocolStorageFailureDoesNotReusePreviouslyAllowedIdentity()throws Exception {
-+        var service=service();assertNotNull(service.validate(identity("ui",7,Set.of("read"))));
-+        when(projection.current(eq(connection),any())).thenThrow(new SQLException("unavailable"));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+        verify(connection).commit();verify(connection).rollback();verify(connection,times(2)).close();
-+        when(source.getConnection()).thenThrow(new SQLException("unavailable"));
-+        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationApplicationGroupTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationApplicationGroupTest.java
-new file mode 100644
-index 0000000..c9a53c5
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationApplicationGroupTest.java
-@@ -0,0 +1,33 @@
-+package io.kestra.webserver.rbac;
-+
-+import io.kestra.webserver.oidc.TrustedIdentityV1;
-+import io.micronaut.context.BeanProvider;
-+import java.util.List;
-+import org.junit.jupiter.api.Test;
-+import reactor.core.publisher.Mono;
-+import static org.assertj.core.api.Assertions.*;
-+import static org.mockito.Mockito.*;
-+
-+class AuthorizationEvaluationApplicationGroupTest {
-+    @Test
-+    void shouldRequireTypedEvaluationForProjectMode() {
-+        assertThatThrownBy(() -> new AuthorizationEvaluations(false, new RbacConfiguration(true, false),
-+            true, mock(BeanProvider.class), mock(BeanProvider.class), mock(BeanProvider.class), true))
-+            .isInstanceOf(IllegalArgumentException.class);
-+    }
-+
-+    @Test
-+    void shouldNeverFallBackToV1WhenProjectProviderIsMissing() {
-+        BeanProvider<AuthorizationEvaluationProviderV1> legacy = mock(BeanProvider.class);
-+        when(legacy.isUnique()).thenReturn(true);
-+        BeanProvider<AuthorizationEvaluationProviderV2> modern = mock(BeanProvider.class);
-+        BeanProvider<TrustedIdentityV1> identities = mock(BeanProvider.class);
-+        when(identities.isUnique()).thenReturn(true);
-+        var evaluations = new AuthorizationEvaluations(true, new RbacConfiguration(true, false),
-+            true, legacy, modern, identities, true);
-+        var principal = new RbacAuthorizer.Principal("alice", List.of(), null, null, List.of());
-+        assertThatThrownBy(() -> evaluations.boundary(principal, "main", () -> Mono.just(true)).blockLast())
-+            .isInstanceOf(IllegalStateException.class);
-+        verify(legacy, never()).get();
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java
-new file mode 100644
-index 0000000..b880529
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java
-@@ -0,0 +1,38 @@
-+package io.kestra.webserver.rbac;
-+
-+import io.kestra.core.repositories.ExecutionRepositoryInterface;
-+import io.kestra.webserver.ui.UiExtensionDescriptorV1;
-+import io.kestra.webserver.ui.UiExtensionRegistry;
-+import io.micronaut.context.BeanProvider;
-+import java.util.List;
-+import java.util.Map;
-+import org.junit.jupiter.api.Test;
-+import static org.assertj.core.api.Assertions.*;
-+import static org.mockito.Mockito.*;
-+import static io.kestra.webserver.rbac.TypedAuthorization.*;
-+
-+class ExtensionResourceAdapterTest {
-+    private OssRestOperationAdapter adapter() throws Exception {
-+        var registry = mock(UiExtensionRegistry.class);
-+        when(registry.descriptors()).thenReturn(List.of(new UiExtensionDescriptorV1(1, "probe", "ui-extensions/probe", "page.js", List.of(), Map.of(), Map.of("en", "Probe"), null)));
-+        var adapter = new OssRestOperationAdapter(mock(ExecutionRepositoryInterface.class));
-+        var field = OssRestOperationAdapter.class.getDeclaredField("extensionRegistries"); field.setAccessible(true);
-+        field.set(adapter, new BeanProvider<UiExtensionRegistry>() { public UiExtensionRegistry get() { return registry; } public boolean isUnique() { return true; } });
-+        return adapter;
-+    }
-+    private OssRestOperationAdapter.Request request(String method, String path, String controller, String handler, Map<String,Object> variables) {
-+        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method,path,Map.of(),null,new byte[0],controller,handler,List.of()),variables);
-+    }
-+    @Test void resolvesRegisteredAssetsAndApiByActualMethod() throws Exception {
-+        var adapter = adapter();
-+        var asset = adapter.resolve(request("GET", "/ui-extensions/main/probe/page.js", "io.kestra.webserver.controllers.api.UiExtensionController", "asset", Map.of("tenant", "main", "id", "probe"))).getFirst();
-+        assertThat(asset.resource()).isEqualTo(Resource.EXTENSION); assertThat(asset.action()).isEqualTo(Action.READ); assertThat(asset.resourceId()).isEqualTo("probe");
-+        var write = adapter.resolve(request("PUT", "/api/v1/main/extensions/probe/applicationGroups/p", "external.ExampleController", "save", Map.of("tenant", "main", "id", "p"))).getFirst();
-+        assertThat(write.resource()).isEqualTo(Resource.EXTENSION); assertThat(write.resourceId()).isEqualTo("probe"); assertThat(write.action()).isEqualTo(Action.UPDATE); assertThat(write.sideEffect()).isEqualTo(SideEffect.STORAGE_WRITE);
-+    }
-+    @Test void rejectsUnknownAndPrefixCollisionWithoutUsingChildObjectId() throws Exception {
-+        var adapter = adapter();
-+        assertThat(adapter.resolve(request("GET", "/api/v1/main/extensions/unknown/applicationGroups/p", "external.ExampleController", "read", Map.of("tenant", "main", "id", "probe")))).isEmpty();
-+        assertThat(adapter.resolve(request("GET", "/ui-extensions/main/unknown/page.js", "io.kestra.webserver.controllers.api.UiExtensionController", "asset", Map.of("tenant", "main", "id", "unknown")))).isEmpty();
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java
-new file mode 100644
-index 0000000..46d8177
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java
-@@ -0,0 +1,47 @@
-+package io.kestra.webserver.rbac;
-+
-+import java.util.List;
-+import org.junit.jupiter.api.Test;
-+import static org.assertj.core.api.Assertions.*;
-+import static io.kestra.webserver.rbac.TypedAuthorization.*;
-+
-+class QueryDomainFailClosedTest {
-+    private QueryDomain scoped(String namespace, String id) {
-+        return new QueryDomain(List.of(namespace),List.of(),List.of(),true,true,DomainKind.RESTRICTED,
-+            List.of(new QueryDomain.ResourceDomain(List.of(namespace),List.of(),List.of(),List.of(id))));
-+    }
-+    @Test void incompatibleResourceScopesIntersectToExplicitDeny() {
-+        var left = scoped("a","one");
-+        var right = new QueryDomain(List.of(),List.of(),List.of(),true,true,DomainKind.GLOBAL,
-+            List.of(new QueryDomain.ResourceDomain(List.of(),List.of(),List.of(),List.of("two"),QueryDomain.ResourceScope.TENANT,QueryDomain.IdScope.RESTRICTED_IDS)));
-+        assertThat(left.resourceAllowed("a","other")).isFalse();
-+        assertThat(right.resourceAllowed("a","other")).isFalse();
-+        var intersection = left.intersect(right);
-+        assertThat(intersection.resourceAllowed("a","other")).isFalse();
-+        assertThat(intersection.resourceAllowed("a","one")).isFalse();
-+        assertThat(intersection.kind()).isEqualTo(DomainKind.RESTRICTED);
-+        assertThat(intersection.exactNamespaces()).isEmpty();
-+    }
-+    @Test void disjointIdsAndNamespacesNeverBecomeLegacyNamespaceGrants() {
-+        for (var other : List.of(scoped("a","two"),scoped("b","one"))) {
-+            var empty = scoped("a","one").intersect(other);
-+            assertThat(empty.resourceAllowed("a","one")).isFalse();
-+            assertThat(empty.contains("a")).isFalse();
-+            assertThat(empty.resourceDomains()).isEmpty();
-+        }
-+    }
-+    @Test void rejectsContradictoryTenantOuterDomainAndAllIdsSelectors() {
-+        var tenant = new QueryDomain.ResourceDomain(List.of(),List.of(),List.of(),List.of("one"),QueryDomain.ResourceScope.TENANT,QueryDomain.IdScope.RESTRICTED_IDS);
-+        assertThatThrownBy(() -> new QueryDomain(List.of("a"),List.of(),List.of(),true,true,DomainKind.RESTRICTED,List.of(tenant))).isInstanceOf(IllegalArgumentException.class);
-+        assertThatThrownBy(() -> new QueryDomain.ResourceDomain(List.of("a"),List.of(),List.of(),List.of("one"),QueryDomain.ResourceScope.NAMESPACE,QueryDomain.IdScope.ALL_IDS)).isInstanceOf(IllegalArgumentException.class);
-+    }
-+    @Test void emptyRestrictedTermDeniesAndValidIntersectionKeepsAssociation() {
-+        var empty = new QueryDomain(List.of("a"),List.of(),List.of(),true,true,DomainKind.RESTRICTED,
-+            List.of(new QueryDomain.ResourceDomain(List.of("a"),List.of(),List.of(),List.of())));
-+        assertThat(empty.resourceAllowed("a","one")).isFalse();
-+        assertThat(empty.contains("a")).isFalse();
-+        var both = scoped("a","one").intersect(scoped("a","one"));
-+        assertThat(both.resourceAllowed("a","one")).isTrue();
-+        assertThat(both.resourceAllowed("a","two")).isFalse();
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
-new file mode 100644
-index 0000000..7c3a436
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
-@@ -0,0 +1,73 @@
-+package io.kestra.webserver.rbac;
-+
-+import io.kestra.core.models.AccessScope;
-+import io.kestra.core.models.QueryFilter;
-+import io.kestra.core.repositories.NamespaceAccessControl;
-+import io.kestra.jdbc.repository.AbstractJdbcRepository;
-+import java.sql.DriverManager;
-+import java.util.List;
-+import org.jooq.Condition;
-+import org.jooq.SQLDialect;
-+import org.jooq.impl.DSL;
-+import org.junit.jupiter.api.Test;
-+import static org.assertj.core.api.Assertions.*;
-+import static org.mockito.Mockito.*;
-+import static io.kestra.webserver.rbac.TypedAuthorization.*;
-+
-+class TypedResourceDomainBoundaryTest {
-+    private QueryDomain domain(boolean restricted) {
-+        return new QueryDomain(List.of("a"), List.of(), List.of(), true, true, DomainKind.RESTRICTED,
-+            List.of(new QueryDomain.ResourceDomain(List.of("a"), List.of(), List.of(), restricted ? List.of("one") : List.of(),
-+                QueryDomain.ResourceScope.NAMESPACE, restricted ? QueryDomain.IdScope.RESTRICTED_IDS : QueryDomain.IdScope.ALL_IDS)));
-+    }
-+    private TypedNamespaceAccessControl control(QueryDomain domain) throws Exception {
-+        var result = mock(TypedNamespaceAccessControl.class, CALLS_REAL_METHODS);
-+        doReturn(domain).when(result).domain(any());
-+        var field = TypedNamespaceAccessControl.class.getDeclaredField("gate"); field.setAccessible(true); field.set(result, mock(TypedAuthorizationGate.class));
-+        return result;
-+    }
-+    private Condition jdbc(TypedNamespaceAccessControl control, QueryFilter.Resource resource) throws Exception {
-+        AbstractJdbcRepository repository = new AbstractJdbcRepository() {
-+            protected NamespaceAccessControl namespaceAccessControl() { return control; }
++    private OidcProviderController controller()throws Exception {
++        var source=mock(DataSource.class);when(source.getConnection()).thenReturn(connection);
++        when(connection.prepareStatement("UPDATE oidc_authorization_code SET code=? WHERE code=? AND client_id=? AND subject=? AND NOT used")).thenReturn(binding);
++        when(binding.executeUpdate()).thenReturn(1);
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,0)));
++        when(protocol.client(connection,ISSUER,"client")).thenAnswer(call->Optional.of(new OidcProtocolStateV1.Client(ISSUER,"client",owned.get(),Set.of("openid"),false)));
++        when(protocol.pendingClient(connection,ISSUER,"client")).thenReturn(Optional.of(new OidcProtocolStateV1.PendingClient(ISSUER,"client",Set.of("openid"))));
++        ApplicationGroupProtocolProjectionV1 projection=(database,request)->new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(
++            new ApplicationGroupProtocolProjectionV1.Projection("group","main",ISSUER,"client","alice",true,true,1,1,Set.of("client"),
++                List.of(new ApplicationGroupProtocolProjectionV1.Scope("read","Reader","Read records")),supported,Set.of("read"))));
++        BeanProvider<ApplicationGroupProtocolProjectionV1> provider=new BeanProvider<>() {
++            public ApplicationGroupProtocolProjectionV1 get(){return projection;}
++            public boolean isPresent(){return true;}
++            public boolean isUnique(){return true;}
 +        };
-+        var method = AbstractJdbcRepository.class.getDeclaredMethod("aclCondition", QueryFilter.Resource.class); method.setAccessible(true);
-+        return (Condition) method.invoke(repository, resource);
++        var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
++        tokens=new OidcTokenService(source,new ObjectMapper(),configuration,keys,provider,null,protocol);
++        var mode=OidcTokenService.class.getDeclaredField("applicationGroups");mode.setAccessible(true);mode.set(tokens,true);
++        var clients=mock(OidcClientService.class);
++        var registered=new OidcClientService.OidcClient("client","",List.of(CALLBACK),List.of("authorization_code","refresh_token"),List.of("openid"),true);
++        when(clients.find("client")).thenReturn(Optional.of(registered));when(clients.isRedirectUriRegistered(registered,CALLBACK)).thenReturn(true);when(clients.isPublic(registered)).thenReturn(true);
++        var sessions=mock(OidcSessionService.class);when(sessions.sessionIdFrom(any())).thenReturn(Optional.of("session"));when(sessions.subject("session")).thenReturn(Optional.of("alice"));
++        when(sessions.authenticationVersion("session")).thenReturn(0L);
++        when(ownership.state("client")).thenReturn(new OidcOwnershipService.ClientState("pending",null,java.time.Instant.now().plusSeconds(300),"Application",true));
++        when(ownership.begin(eq("client"),eq("alice"),eq("session"),any())).thenReturn("interaction");
++        when(ownership.completeForSession(eq(0L),eq("interaction"),eq("alice"),eq("session"),eq(true),any())).thenAnswer(call->{
++            owned.set(true);return new OidcOwnershipService.ConsentResult(parameters(),"raw-code");
++        });
++        return new OidcProviderController(configuration,clients,codes,mock(McpResourceUrl.class),tokens,new OidcConsentPolicy(),keys,mock(OidcUserService.class),sessions,ownership);
 +    }
-+    @Test void nonFlowAllIdsQueriesRemainUsableAndNamespaceFiltered() throws Exception {
-+        try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
-+            var db = DSL.using(connection, SQLDialect.H2);
-+            db.execute("create table candidates(namespace varchar(255), id varchar(255))");
-+            db.execute("insert into candidates values ('a','one'),('a','two'),('b','one')");
-+            for (var resource : List.of(QueryFilter.Resource.NAMESPACE, QueryFilter.Resource.LOG, QueryFilter.Resource.TRIGGER,
-+                QueryFilter.Resource.KV_METADATA, QueryFilter.Resource.NAMESPACE_FILE_METADATA)) {
-+                var condition = jdbc(control(domain(false)), resource);
-+                assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(condition))).as(resource.name()).isEqualTo(2);
-+                assertThat(db.select(DSL.field("namespace", String.class)).from("candidates").where(condition).limit(1).fetch(0, String.class)).containsExactly("a");
-+                assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(jdbc(control(domain(true)), resource)))).as(resource.name()+" restricted").isZero();
-+            }
-+        }
++
++    @Test void registeredPendingApplicationCanReachOwnerConsentWithoutCreatingCredentials()throws Exception {
++        var controller=controller();var response=controller.authorize(authorizeRequest());
++        assertEquals(HttpStatus.OK,response.getStatus());String html=response.getBody().orElseThrow().toString();
++        assertTrue(html.contains("scope-read"));assertTrue(html.contains("Reader"));
++        verify(ownership).begin(eq("client"),eq("alice"),eq("session"),any());verifyNoInteractions(codes,keys);verify(binding,never()).executeUpdate();
 +    }
-+    @Test void namespaceOnlyAndLogConsumersNeverDropRestrictedIds() throws Exception {
-+        var restricted = control(domain(true));
-+        assertThat(restricted.namespaceAllowed(QueryFilter.Resource.FLOW, "a")).isFalse();
-+        assertThat(restricted.namespaceScope(QueryFilter.Resource.FLOW).kind()).isEqualTo(AccessScope.Kind.DENY_ALL);
-+        assertThat(new TypedLogAccessControl(restricted).namespaceScope().kind()).isEqualTo(AccessScope.Kind.DENY_ALL);
-+        assertThat(restricted.resourceReadAllowed(QueryFilter.Resource.LOG, "main", "a", "one")).isFalse();
-+        assertThat(restricted.resourceReadAllowed(QueryFilter.Resource.FLOW, "main", "a", "one")).isTrue();
-+        assertThat(restricted.resourceReadAllowed(QueryFilter.Resource.FLOW, "main", "a", "two")).isFalse();
-+        var all = control(domain(false));
-+        assertThat(all.namespaceAllowed(QueryFilter.Resource.FLOW, "a")).isTrue();
-+        assertThat(all.namespaceAllowed(QueryFilter.Resource.FLOW, "b")).isFalse();
-+        assertThat(new TypedLogAccessControl(all).namespaceScope().namespaceAllowed("a")).isTrue();
-+        assertThat(new TypedLogAccessControl(all).namespaceScope().namespaceAllowed("b")).isFalse();
++
++    @Test void pendingApplicationStillCannotBindOrMintBeforeOwnerConfirmation()throws Exception {
++        controller();
++        assertThrows(OidcException.class,()->tokens.bindApplicationGroupCode("raw-code","client","alice",List.of("openid","read")));
++        assertThrows(OidcException.class,()->tokens.issueAuthorizationTokens("client",new OidcUserService.OidcUser("alice","Alice","alice@example.invalid",false,List.of()),
++            new Scope("openid","read"),null,null,"application-group-v1.group.1.code"));
++        verify(binding,never()).executeUpdate();verifyNoInteractions(keys);
 +    }
-+    @Test void exactResourcePredicatesPreserveNamespaceIdAssociation() throws Exception {
-+        var terms = List.of(new QueryDomain.ResourceDomain(List.of("a"), List.of(), List.of(), List.of("one")),
-+            new QueryDomain.ResourceDomain(List.of("b"), List.of(), List.of(), List.of("two")));
-+        var control = control(new QueryDomain(List.of("a","b"),List.of(),List.of(),true,true,DomainKind.RESTRICTED,terms));
-+        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","a","one")).isTrue();
-+        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","b","two")).isTrue();
-+        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","a","two")).isFalse();
-+        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","b","one")).isFalse();
++
++    @Test void ownerConfirmationIsFollowedByASeparateCurrentStateCheckAndBoundCode()throws Exception {
++        var controller=controller();assertEquals(HttpStatus.OK,controller.authorize(authorizeRequest()).getStatus());
++        var response=controller.consent(consentRequest(),approval());assertEquals(HttpStatus.SEE_OTHER,response.getStatus());
++        String location=response.getHeaders().get("Location");assertNotNull(location);assertTrue(location.startsWith(CALLBACK));
++        assertTrue(location.contains("code=application-group-v1.group.1.raw-code"));assertTrue(location.contains("state=state"));
++        verify(binding).setString(1,"application-group-v1.group.1.raw-code");verify(binding).executeUpdate();verifyNoInteractions(keys);
++    }
++
++    @Test void expiredPendingRegistrationCannotReachConsentOrCredentialBinding()throws Exception {
++        var controller=controller();when(protocol.pendingClient(connection,ISSUER,"client")).thenReturn(Optional.empty());
++        var response=controller.authorize(authorizeRequest());assertTrue(response.getHeaders().get("Location").contains("error=invalid_scope"));
++        verify(ownership,never()).begin(anyString(),anyString(),anyString(),any());verify(binding,never()).executeUpdate();verifyNoInteractions(keys);
++    }
++
++    @Test void supportRevokedAfterPreviewReturnsAnOAuthErrorWithoutBindingACredential()throws Exception {
++        var controller=controller();assertEquals(HttpStatus.OK,controller.authorize(authorizeRequest()).getStatus());supported=Set.of();
++        var response=controller.consent(consentRequest(),approval());String location=response.getHeaders().get("Location");
++        assertNotNull(location);assertTrue(location.startsWith(CALLBACK));assertTrue(location.contains("error=invalid_scope"));
++        assertFalse(location.contains("code="));verify(binding,never()).executeUpdate();verifyNoInteractions(keys);
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcProtocolProjectionAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProtocolProjectionAuthorizationTest.java
 new file mode 100644
+index 0000000..372318e
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcProtocolProjectionAuthorizationTest.java
 @@ -0,0 +1,199 @@
@@ -1290,126 +1012,410 @@ new file mode 100644
 +        verifyNoInteractions(keys);
 +    }
 +}
-diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPendingClientConsentTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPendingClientConsentTest.java
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
 new file mode 100644
+index 0000000..5028294
 --- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPendingClientConsentTest.java
-@@ -0,0 +1,118 @@
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcTrustedIdentityTest.java
+@@ -0,0 +1,186 @@
 +package io.kestra.webserver.oidc;
 +
-+import com.fasterxml.jackson.databind.ObjectMapper;
-+import com.nimbusds.oauth2.sdk.Scope;
-+import io.kestra.webserver.mcp.McpResourceUrl;
-+import io.kestra.webserver.oidc.controllers.OidcProviderController;
-+import io.kestra.webserver.oidc.services.*;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
 +import io.micronaut.context.BeanProvider;
++import io.micronaut.core.propagation.PropagatedContext;
 +import io.micronaut.http.HttpRequest;
-+import io.micronaut.http.HttpStatus;
-+import java.net.URLEncoder;
-+import java.nio.charset.StandardCharsets;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
 +import java.sql.Connection;
-+import java.sql.PreparedStatement;
++import java.sql.SQLException;
 +import java.util.List;
 +import java.util.Map;
 +import java.util.Optional;
 +import java.util.Set;
-+import java.util.concurrent.atomic.AtomicBoolean;
 +import javax.sql.DataSource;
 +import org.junit.jupiter.api.Test;
++import static io.kestra.webserver.oidc.ApplicationGroupProtocolProjectionV1.*;
 +import static org.junit.jupiter.api.Assertions.*;
 +import static org.mockito.Mockito.*;
 +
-+class OidcPendingClientConsentTest {
-+    private static final String ISSUER="https://issuer.example";
-+    private static final String CALLBACK="https://client.example/callback";
-+    private final AtomicBoolean owned=new AtomicBoolean();
-+    private Set<String> supported=Set.of("read");
++class OidcTrustedIdentityTest {
++    private static final String ISSUER="https://identity.example.invalid";
++    private static final String RESOURCE=ISSUER+"/api/v1/main/mcp/default";
++    private final ApplicationGroupProtocolProjectionV1 projection=mock(ApplicationGroupProtocolProjectionV1.class);
 +    private final OidcProtocolStateV1 protocol=mock(OidcProtocolStateV1.class);
-+    private final OidcOwnershipService ownership=mock(OidcOwnershipService.class);
-+    private final OidcJwkService keys=mock(OidcJwkService.class);
-+    private final OidcAuthorizationCodeService codes=mock(OidcAuthorizationCodeService.class);
++    private final DataSource source=mock(DataSource.class);
 +    private final Connection connection=mock(Connection.class);
-+    private final PreparedStatement binding=mock(PreparedStatement.class);
-+    private OidcTokenService tokens;
++    private final BeanProvider<ApplicationGroupProtocolProjectionV1> providers=mock(BeanProvider.class);
++    private Set<String> supported=Set.of("read");
++    private Set<String> granted=Set.of("read");
 +
-+    private static Map<String,List<String>> parameters() {
-+        return Map.of("client_id",List.of("client"),"response_type",List.of("code"),"redirect_uri",List.of(CALLBACK),"scope",List.of("openid read"),
-+            "code_challenge",List.of("a".repeat(43)),"code_challenge_method",List.of("S256"),"state",List.of("state"));
++    private Projection view(String group,String tenant,String issuer,String client,String subject,boolean active,boolean approved,long epoch) {
++        return new Projection(group,tenant,issuer,client,subject,active,approved,19,epoch,Set.of("ui",RESOURCE),
++            List.of(new Scope("read","Reader","Read access")),supported,granted);
 +    }
 +
-+    private static HttpRequest<?> authorizeRequest() {
-+        return HttpRequest.GET("/oidc/authorize?client_id=client&response_type=code&redirect_uri="+URLEncoder.encode(CALLBACK,StandardCharsets.UTF_8)
-+            +"&scope=openid+read&code_challenge="+"a".repeat(43)+"&code_challenge_method=S256&state=state");
-+    }
-+
-+    private static HttpRequest<?> consentRequest(){return HttpRequest.POST("/oidc/consent","").header("Origin",ISSUER);}
-+
-+    private static Map<String,String> approval(){return Map.of("interaction","interaction","decision","approve","scope-openid","yes","scope-read","yes");}
-+
-+    private OidcProviderController controller()throws Exception {
-+        var source=mock(DataSource.class);when(source.getConnection()).thenReturn(connection);
-+        when(connection.prepareStatement("UPDATE oidc_authorization_code SET code=? WHERE code=? AND client_id=? AND subject=? AND NOT used")).thenReturn(binding);
-+        when(binding.executeUpdate()).thenReturn(1);
-+        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,0)));
-+        when(protocol.client(connection,ISSUER,"client")).thenAnswer(call->Optional.of(new OidcProtocolStateV1.Client(ISSUER,"client",owned.get(),Set.of("openid"),false)));
-+        when(protocol.pendingClient(connection,ISSUER,"client")).thenReturn(Optional.of(new OidcProtocolStateV1.PendingClient(ISSUER,"client",Set.of("openid"))));
-+        ApplicationGroupProtocolProjectionV1 projection=(database,request)->new ApplicationGroupProtocolProjectionV1.Result(1,true,Optional.of(
-+            new ApplicationGroupProtocolProjectionV1.Projection("group","main",ISSUER,"client","alice",true,true,1,1,Set.of("client"),
-+                List.of(new ApplicationGroupProtocolProjectionV1.Scope("read","Reader","Read records")),supported,Set.of("read"))));
-+        BeanProvider<ApplicationGroupProtocolProjectionV1> provider=new BeanProvider<>() {
-+            public ApplicationGroupProtocolProjectionV1 get(){return projection;}
-+            public boolean isPresent(){return true;}
-+            public boolean isUnique(){return true;}
-+        };
++    private OidcTrustedIdentity service()throws Exception {
++        when(providers.isUnique()).thenReturn(true);when(providers.get()).thenReturn(projection);
++        when(source.getConnection()).thenReturn(connection);
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,3)));
++        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid","profile"),true)));
++        when(projection.current(eq(connection),any())).thenAnswer(call->new Result(1,true,Optional.of(view("applicationGroup","main",ISSUER,"ui","alice",true,true,7))));
 +        var configuration=new OidcConfiguration();configuration.setIssuer(ISSUER);
-+        tokens=new OidcTokenService(source,new ObjectMapper(),configuration,keys,provider,null,protocol);
-+        var mode=OidcTokenService.class.getDeclaredField("applicationGroups");mode.setAccessible(true);mode.set(tokens,true);
-+        var clients=mock(OidcClientService.class);
-+        var registered=new OidcClientService.OidcClient("client","",List.of(CALLBACK),List.of("authorization_code","refresh_token"),List.of("openid"),true);
-+        when(clients.find("client")).thenReturn(Optional.of(registered));when(clients.isRedirectUriRegistered(registered,CALLBACK)).thenReturn(true);when(clients.isPublic(registered)).thenReturn(true);
-+        var sessions=mock(OidcSessionService.class);when(sessions.sessionIdFrom(any())).thenReturn(Optional.of("session"));when(sessions.subject("session")).thenReturn(Optional.of("alice"));
-+        when(sessions.authenticationVersion("session")).thenReturn(0L);
-+        when(ownership.state("client")).thenReturn(new OidcOwnershipService.ClientState("pending",null,java.time.Instant.now().plusSeconds(300),"Application",true));
-+        when(ownership.begin(eq("client"),eq("alice"),eq("session"),any())).thenReturn("interaction");
-+        when(ownership.completeForSession(eq(0L),eq("interaction"),eq("alice"),eq("session"),eq(true),any())).thenAnswer(call->{
-+            owned.set(true);return new OidcOwnershipService.ConsentResult(parameters(),"raw-code");
-+        });
-+        return new OidcProviderController(configuration,clients,codes,mock(McpResourceUrl.class),tokens,new OidcConsentPolicy(),keys,mock(OidcUserService.class),sessions,ownership);
++        return new OidcTrustedIdentity(providers,protocol,configuration,source);
 +    }
 +
-+    @Test void registeredPendingApplicationCanReachOwnerConsentWithoutCreatingCredentials()throws Exception {
-+        var controller=controller();var response=controller.authorize(authorizeRequest());
-+        assertEquals(HttpStatus.OK,response.getStatus());String html=response.getBody().orElseThrow().toString();
-+        assertTrue(html.contains("scope-read"));assertTrue(html.contains("Reader"));
-+        verify(ownership).begin(eq("client"),eq("alice"),eq("session"),any());verifyNoInteractions(codes,keys);verify(binding,never()).executeUpdate();
++    private static Authentication identity(String audience,long epoch,Set<String> scopes) {
++        var claim=Map.of("application_group_id","applicationGroup","client_id","ui","authorization_version",epoch,
++            "application_group_scopes",scopes,"protocol_scopes",Set.of("openid"));
++        return Authentication.build("alice",List.of("legacy-admin"),Map.of("iss",ISSUER,"aud",List.of(audience),
++            OidcTrustedIdentity.CLAIM,claim,OidcIdentityLifecycle.CLAIM,3L,"resource",RESOURCE));
 +    }
 +
-+    @Test void pendingApplicationStillCannotBindOrMintBeforeOwnerConfirmation()throws Exception {
-+        controller();
-+        assertThrows(OidcException.class,()->tokens.bindApplicationGroupCode("raw-code","client","alice",List.of("openid","read")));
-+        assertThrows(OidcException.class,()->tokens.issueAuthorizationTokens("client",new OidcUserService.OidcUser("alice","Alice","alice@example.invalid",false,List.of()),
-+            new Scope("openid","read"),null,null,"application-group-v1.group.1.code"));
-+        verify(binding,never()).executeUpdate();verifyNoInteractions(keys);
++    private static Authentication protocolSession(String audience,long version) {
++        return Authentication.build("alice",List.of(),Map.of("iss",ISSUER,"aud",List.of(audience),OidcIdentityLifecycle.CLAIM,version));
 +    }
 +
-+    @Test void ownerConfirmationIsFollowedByASeparateCurrentStateCheckAndBoundCode()throws Exception {
-+        var controller=controller();assertEquals(HttpStatus.OK,controller.authorize(authorizeRequest()).getStatus());
-+        var response=controller.consent(consentRequest(),approval());assertEquals(HttpStatus.SEE_OTHER,response.getStatus());
-+        String location=response.getHeaders().get("Location");assertNotNull(location);assertTrue(location.startsWith(CALLBACK));
-+        assertTrue(location.contains("code=application-group-v1.group.1.raw-code"));assertTrue(location.contains("state=state"));
-+        verify(binding).setString(1,"application-group-v1.group.1.raw-code");verify(binding).executeUpdate();verifyNoInteractions(keys);
++    @Test void missingProjectionAllowsOnlyCurrentConfiguredLoginSessionWithoutGroupIdentity()throws Exception {
++        var service=service();when(providers.isPresent()).thenReturn(false);
++        service.validateSession(protocolSession("ui",3));
++        assertThrows(IllegalStateException.class,()->service.validate(protocolSession("ui",3)));
++        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession(RESOURCE,3)));
++        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession("ui",2)));
++        verifyNoInteractions(projection);
 +    }
 +
-+    @Test void expiredPendingRegistrationCannotReachConsentOrCredentialBinding()throws Exception {
-+        var controller=controller();when(protocol.pendingClient(connection,ISSUER,"client")).thenReturn(Optional.empty());
-+        var response=controller.authorize(authorizeRequest());assertTrue(response.getHeaders().get("Location").contains("error=invalid_scope"));
-+        verify(ownership,never()).begin(anyString(),anyString(),anyString(),any());verify(binding,never()).executeUpdate();verifyNoInteractions(keys);
++    @Test void unboundSessionCannotUpgradeWhenProjectionActivatesOrIsAmbiguous()throws Exception {
++        var service=service();when(providers.isPresent()).thenReturn(true);
++        when(projection.current(eq(connection),any())).thenReturn(new Result(1,false,Optional.empty()));
++        service.validateSession(protocolSession("ui",3));
++        when(projection.current(eq(connection),any())).thenReturn(new Result(1,true,Optional.of(view("applicationGroup","main",ISSUER,"ui","alice",true,true,7))));
++        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession("ui",3)));
++        when(providers.isUnique()).thenReturn(false);
++        assertThrows(IllegalStateException.class,()->service.validateSession(protocolSession("ui",3)));
 +    }
 +
-+    @Test void supportRevokedAfterPreviewReturnsAnOAuthErrorWithoutBindingACredential()throws Exception {
-+        var controller=controller();assertEquals(HttpStatus.OK,controller.authorize(authorizeRequest()).getStatus());supported=Set.of();
-+        var response=controller.consent(consentRequest(),approval());String location=response.getHeaders().get("Location");
-+        assertNotNull(location);assertTrue(location.startsWith(CALLBACK));assertTrue(location.contains("error=invalid_scope"));
-+        assertFalse(location.contains("code="));verify(binding,never()).executeUpdate();verifyNoInteractions(keys);
++    @Test void boundSessionStillRequiresProjectionAndRevocationValidation()throws Exception {
++        var service=service();when(providers.isPresent()).thenReturn(false);when(providers.isUnique()).thenReturn(false);
++        assertThrows(IllegalStateException.class,()->service.validateSession(identity("ui",7,Set.of())));
++        when(providers.isUnique()).thenReturn(true);
++        service.validateSession(identity("ui",7,Set.of("read")));
++        assertThrows(IllegalStateException.class,()->service.validateSession(identity("ui",6,Set.of("read"))));
++    }
++
++    @Test void uiContextPreservesDistinctRevisionAndEpochWithinOneProtocolTransaction()throws Exception {
++        var service=service();var request=HttpRequest.GET("/api/v1/main/flows/search");
++        request.setAttribute(SecurityFilter.AUTHENTICATION,identity("ui",7,Set.of("read")));
++        try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
++            var identity=service.current();assertEquals(19,identity.directoryRevision());assertEquals(7,identity.authorizationVersion());
++            assertEquals(Set.of("read"),identity.applicationGroupScopes());
++        }
++        var order=inOrder(connection,protocol,projection);
++        order.verify(connection).setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);order.verify(connection).setAutoCommit(false);
++        order.verify(protocol).lockSecurityState(connection);order.verify(protocol).account(connection,ISSUER,"alice");
++        order.verify(protocol).client(connection,ISSUER,"ui");order.verify(projection).current(connection,new Request(ISSUER,"main","ui","alice","applicationGroup"));
++        order.verify(connection).commit();order.verify(connection).close();verify(source).getConnection();
++    }
++
++    @Test void mcpUsesCurrentResourceAuthenticationInsteadOfAmbientCookie()throws Exception {
++        var service=service();var bearer=identity(RESOURCE,7,Set.of("read"));var request=HttpRequest.POST("/api/v1/main/mcp/default","");
++        request.setAttribute("io.kestra.mcp.authentication",bearer);request.setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("foreign-cookie"));
++        try(var scope=PropagatedContext.getOrEmpty().plus(new AuthorizationInvocationContext(request,false)).propagate()) {
++            assertEquals("alice",service.current().subject());
++            assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        }
++    }
++
++    @Test void rejectsOldEpochUnknownScopeAndIncorrectUiAudience()throws Exception {
++        var service=service();
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",6,Set.of("read"))));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read","unknown"))));
++        assertThrows(IllegalStateException.class,()->service.validate(identity(RESOURCE,7,Set.of("read"))));
++        verify(connection,times(3)).rollback();verify(connection,never()).commit();
++    }
++
++    @Test void missingContextNeverCreatesTrustedIdentityOrTouchesStorage()throws Exception {
++        var service=service();assertThrows(IllegalStateException.class,service::current);verifyNoInteractions(connection);
++        verify(source,never()).getConnection();
++    }
++
++    @Test void revokedApplicationSupportOrUserGrantRejectsExistingIdentity()throws Exception {
++        var service=service();assertEquals(Set.of("read"),service.validate(identity("ui",7,Set.of("read"))).applicationGroupScopes());
++        supported=Set.of();assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        supported=Set.of("read");granted=Set.of();assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++    }
++
++    @Test void zeroScopeNeedsCurrentProjectionAndDoesNotRequirePermissionMetadata()throws Exception {
++        var service=service();
++        assertEquals(Set.of("read"),service.validate(identity("ui",7,Set.of("read"))).applicationGroupScopes());
++        supported=Set.of();assertTrue(service.validate(identity("ui",7,Set.of())).applicationGroupScopes().isEmpty());
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        when(providers.isUnique()).thenReturn(false);
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
++    }
++
++    @Test void standardAccountAndClientRevocationCannotBeHiddenByAnUnchangedGroupEpoch()throws Exception {
++        var service=service();assertNotNull(service.validate(identity("ui",7,Set.of("read"))));
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",false,false,3)));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,4)));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        when(protocol.account(connection,ISSUER,"alice")).thenReturn(Optional.of(new OidcProtocolStateV1.Account(ISSUER,"alice",true,true,3)));
++        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",false,Set.of("openid"),true)));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++    }
++
++    @Test void wrongProjectionTargetsInactiveGroupsAndUnavailableProviderFailClosed()throws Exception {
++        var service=service();
++        for(var view:List.of(view("other","main",ISSUER,"ui","alice",true,true,7),
++            view("applicationGroup","other",ISSUER,"ui","alice",true,true,7),view("applicationGroup","main",ISSUER+"/","ui","alice",true,true,7),
++            view("applicationGroup","main",ISSUER,"other","alice",true,true,7),view("applicationGroup","main",ISSUER,"ui","other",true,true,7),
++            view("applicationGroup","main",ISSUER,"ui","alice",false,true,7),view("applicationGroup","main",ISSUER,"ui","alice",true,false,7))) {
++            when(projection.current(eq(connection),any())).thenReturn(new Result(1,true,Optional.of(view)));
++            assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
++        }
++        when(projection.current(eq(connection),any())).thenReturn(new Result(1,false,Optional.empty()));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
++        when(projection.current(eq(connection),any())).thenThrow(new SQLException("unavailable"));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of())));
++        verify(connection,never()).commit();
++    }
++
++    @Test void protocolScopesRequireCurrentClientRegistrationAndUiSelectorIsNotIdentityScope()throws Exception {
++        var service=service();
++        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of(),true)));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid"),false)));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        when(protocol.client(connection,ISSUER,"ui")).thenReturn(Optional.of(new OidcProtocolStateV1.Client(ISSUER,"ui",true,Set.of("openid",ApplicationGroupScopeIssuance.UI_SELECTOR),true)));
++        var claim=Map.of("application_group_id","applicationGroup","client_id","ui","authorization_version",7L,
++            "application_group_scopes",Set.of("read"),"protocol_scopes",Set.of(ApplicationGroupScopeIssuance.UI_SELECTOR));
++        var identity=Authentication.build("alice",Map.of("iss",ISSUER,"aud",List.of("ui"),OidcTrustedIdentity.CLAIM,claim,OidcIdentityLifecycle.CLAIM,3L));
++        assertThrows(IllegalStateException.class,()->service.validate(identity));
++    }
++
++    @Test void protocolStorageFailureDoesNotReusePreviouslyAllowedIdentity()throws Exception {
++        var service=service();assertNotNull(service.validate(identity("ui",7,Set.of("read"))));
++        when(projection.current(eq(connection),any())).thenThrow(new SQLException("unavailable"));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++        verify(connection).commit();verify(connection).rollback();verify(connection,times(2)).close();
++        when(source.getConnection()).thenThrow(new SQLException("unavailable"));
++        assertThrows(IllegalStateException.class,()->service.validate(identity("ui",7,Set.of("read"))));
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationApplicationGroupTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationApplicationGroupTest.java
+new file mode 100644
+index 0000000..2780625
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AuthorizationEvaluationApplicationGroupTest.java
+@@ -0,0 +1,33 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.webserver.oidc.TrustedIdentityV1;
++import io.micronaut.context.BeanProvider;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AuthorizationEvaluationApplicationGroupTest {
++    @Test
++    void shouldRequireTypedEvaluationForProjectMode() {
++        assertThatThrownBy(() -> new AuthorizationEvaluations(false, new RbacConfiguration(true, false),
++            true, mock(BeanProvider.class), mock(BeanProvider.class), mock(BeanProvider.class), true))
++            .isInstanceOf(IllegalArgumentException.class);
++    }
++
++    @Test
++    void shouldNeverFallBackToV1WhenProjectProviderIsMissing() {
++        BeanProvider<AuthorizationEvaluationProviderV1> legacy = mock(BeanProvider.class);
++        when(legacy.isUnique()).thenReturn(true);
++        BeanProvider<AuthorizationEvaluationProviderV2> modern = mock(BeanProvider.class);
++        BeanProvider<TrustedIdentityV1> identities = mock(BeanProvider.class);
++        when(identities.isUnique()).thenReturn(true);
++        var evaluations = new AuthorizationEvaluations(true, new RbacConfiguration(true, false),
++            true, legacy, modern, identities, true);
++        var principal = new RbacAuthorizer.Principal("alice", List.of(), null, null, List.of());
++        assertThatThrownBy(() -> evaluations.boundary(principal, "main", () -> Mono.just(true)).blockLast())
++            .isInstanceOf(IllegalStateException.class);
++        verify(legacy, never()).get();
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java
+new file mode 100644
+index 0000000..e5d8c3b
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/ExtensionResourceAdapterTest.java
+@@ -0,0 +1,38 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.repositories.ExecutionRepositoryInterface;
++import io.kestra.webserver.ui.UiExtensionDescriptorV1;
++import io.kestra.webserver.ui.UiExtensionRegistry;
++import io.micronaut.context.BeanProvider;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++class ExtensionResourceAdapterTest {
++    private OssRestOperationAdapter adapter() throws Exception {
++        var registry = mock(UiExtensionRegistry.class);
++        when(registry.descriptors()).thenReturn(List.of(new UiExtensionDescriptorV1(1, "probe", "ui-extensions/probe", "page.js", List.of(), Map.of(), Map.of("en", "Probe"), null)));
++        var adapter = new OssRestOperationAdapter(mock(ExecutionRepositoryInterface.class));
++        var field = OssRestOperationAdapter.class.getDeclaredField("extensionRegistries"); field.setAccessible(true);
++        field.set(adapter, new BeanProvider<UiExtensionRegistry>() { public UiExtensionRegistry get() { return registry; } public boolean isUnique() { return true; } });
++        return adapter;
++    }
++    private OssRestOperationAdapter.Request request(String method, String path, String controller, String handler, Map<String,Object> variables) {
++        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request(method,path,Map.of(),null,new byte[0],controller,handler,List.of()),variables);
++    }
++    @Test void resolvesRegisteredAssetsAndApiByActualMethod() throws Exception {
++        var adapter = adapter();
++        var asset = adapter.resolve(request("GET", "/ui-extensions/main/probe/page.js", "io.kestra.webserver.controllers.api.UiExtensionController", "asset", Map.of("tenant", "main", "id", "probe"))).getFirst();
++        assertThat(asset.resource()).isEqualTo(Resource.EXTENSION); assertThat(asset.action()).isEqualTo(Action.READ); assertThat(asset.resourceId()).isEqualTo("probe");
++        var write = adapter.resolve(request("PUT", "/api/v1/main/extensions/probe/applicationGroups/p", "external.ExampleController", "save", Map.of("tenant", "main", "id", "p"))).getFirst();
++        assertThat(write.resource()).isEqualTo(Resource.EXTENSION); assertThat(write.resourceId()).isEqualTo("probe"); assertThat(write.action()).isEqualTo(Action.UPDATE); assertThat(write.sideEffect()).isEqualTo(SideEffect.STORAGE_WRITE);
++    }
++    @Test void rejectsUnknownAndPrefixCollisionWithoutUsingChildObjectId() throws Exception {
++        var adapter = adapter();
++        assertThat(adapter.resolve(request("GET", "/api/v1/main/extensions/unknown/applicationGroups/p", "external.ExampleController", "read", Map.of("tenant", "main", "id", "probe")))).isEmpty();
++        assertThat(adapter.resolve(request("GET", "/ui-extensions/main/unknown/page.js", "io.kestra.webserver.controllers.api.UiExtensionController", "asset", Map.of("tenant", "main", "id", "unknown")))).isEmpty();
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java
+new file mode 100644
+index 0000000..46d8177
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/QueryDomainFailClosedTest.java
+@@ -0,0 +1,47 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++class QueryDomainFailClosedTest {
++    private QueryDomain scoped(String namespace, String id) {
++        return new QueryDomain(List.of(namespace),List.of(),List.of(),true,true,DomainKind.RESTRICTED,
++            List.of(new QueryDomain.ResourceDomain(List.of(namespace),List.of(),List.of(),List.of(id))));
++    }
++    @Test void incompatibleResourceScopesIntersectToExplicitDeny() {
++        var left = scoped("a","one");
++        var right = new QueryDomain(List.of(),List.of(),List.of(),true,true,DomainKind.GLOBAL,
++            List.of(new QueryDomain.ResourceDomain(List.of(),List.of(),List.of(),List.of("two"),QueryDomain.ResourceScope.TENANT,QueryDomain.IdScope.RESTRICTED_IDS)));
++        assertThat(left.resourceAllowed("a","other")).isFalse();
++        assertThat(right.resourceAllowed("a","other")).isFalse();
++        var intersection = left.intersect(right);
++        assertThat(intersection.resourceAllowed("a","other")).isFalse();
++        assertThat(intersection.resourceAllowed("a","one")).isFalse();
++        assertThat(intersection.kind()).isEqualTo(DomainKind.RESTRICTED);
++        assertThat(intersection.exactNamespaces()).isEmpty();
++    }
++    @Test void disjointIdsAndNamespacesNeverBecomeLegacyNamespaceGrants() {
++        for (var other : List.of(scoped("a","two"),scoped("b","one"))) {
++            var empty = scoped("a","one").intersect(other);
++            assertThat(empty.resourceAllowed("a","one")).isFalse();
++            assertThat(empty.contains("a")).isFalse();
++            assertThat(empty.resourceDomains()).isEmpty();
++        }
++    }
++    @Test void rejectsContradictoryTenantOuterDomainAndAllIdsSelectors() {
++        var tenant = new QueryDomain.ResourceDomain(List.of(),List.of(),List.of(),List.of("one"),QueryDomain.ResourceScope.TENANT,QueryDomain.IdScope.RESTRICTED_IDS);
++        assertThatThrownBy(() -> new QueryDomain(List.of("a"),List.of(),List.of(),true,true,DomainKind.RESTRICTED,List.of(tenant))).isInstanceOf(IllegalArgumentException.class);
++        assertThatThrownBy(() -> new QueryDomain.ResourceDomain(List.of("a"),List.of(),List.of(),List.of("one"),QueryDomain.ResourceScope.NAMESPACE,QueryDomain.IdScope.ALL_IDS)).isInstanceOf(IllegalArgumentException.class);
++    }
++    @Test void emptyRestrictedTermDeniesAndValidIntersectionKeepsAssociation() {
++        var empty = new QueryDomain(List.of("a"),List.of(),List.of(),true,true,DomainKind.RESTRICTED,
++            List.of(new QueryDomain.ResourceDomain(List.of("a"),List.of(),List.of(),List.of())));
++        assertThat(empty.resourceAllowed("a","one")).isFalse();
++        assertThat(empty.contains("a")).isFalse();
++        var both = scoped("a","one").intersect(scoped("a","one"));
++        assertThat(both.resourceAllowed("a","one")).isTrue();
++        assertThat(both.resourceAllowed("a","two")).isFalse();
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
+new file mode 100644
+index 0000000..7c3a436
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedResourceDomainBoundaryTest.java
+@@ -0,0 +1,73 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.models.AccessScope;
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.repositories.NamespaceAccessControl;
++import io.kestra.jdbc.repository.AbstractJdbcRepository;
++import java.sql.DriverManager;
++import java.util.List;
++import org.jooq.Condition;
++import org.jooq.SQLDialect;
++import org.jooq.impl.DSL;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++
++class TypedResourceDomainBoundaryTest {
++    private QueryDomain domain(boolean restricted) {
++        return new QueryDomain(List.of("a"), List.of(), List.of(), true, true, DomainKind.RESTRICTED,
++            List.of(new QueryDomain.ResourceDomain(List.of("a"), List.of(), List.of(), restricted ? List.of("one") : List.of(),
++                QueryDomain.ResourceScope.NAMESPACE, restricted ? QueryDomain.IdScope.RESTRICTED_IDS : QueryDomain.IdScope.ALL_IDS)));
++    }
++    private TypedNamespaceAccessControl control(QueryDomain domain) throws Exception {
++        var result = mock(TypedNamespaceAccessControl.class, CALLS_REAL_METHODS);
++        doReturn(domain).when(result).domain(any());
++        var field = TypedNamespaceAccessControl.class.getDeclaredField("gate"); field.setAccessible(true); field.set(result, mock(TypedAuthorizationGate.class));
++        return result;
++    }
++    private Condition jdbc(TypedNamespaceAccessControl control, QueryFilter.Resource resource) throws Exception {
++        AbstractJdbcRepository repository = new AbstractJdbcRepository() {
++            protected NamespaceAccessControl namespaceAccessControl() { return control; }
++        };
++        var method = AbstractJdbcRepository.class.getDeclaredMethod("aclCondition", QueryFilter.Resource.class); method.setAccessible(true);
++        return (Condition) method.invoke(repository, resource);
++    }
++    @Test void nonFlowAllIdsQueriesRemainUsableAndNamespaceFiltered() throws Exception {
++        try (var connection = DriverManager.getConnection("jdbc:h2:mem:;DATABASE_TO_LOWER=TRUE")) {
++            var db = DSL.using(connection, SQLDialect.H2);
++            db.execute("create table candidates(namespace varchar(255), id varchar(255))");
++            db.execute("insert into candidates values ('a','one'),('a','two'),('b','one')");
++            for (var resource : List.of(QueryFilter.Resource.NAMESPACE, QueryFilter.Resource.LOG, QueryFilter.Resource.TRIGGER,
++                QueryFilter.Resource.KV_METADATA, QueryFilter.Resource.NAMESPACE_FILE_METADATA)) {
++                var condition = jdbc(control(domain(false)), resource);
++                assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(condition))).as(resource.name()).isEqualTo(2);
++                assertThat(db.select(DSL.field("namespace", String.class)).from("candidates").where(condition).limit(1).fetch(0, String.class)).containsExactly("a");
++                assertThat(db.fetchCount(db.selectFrom(DSL.table("candidates")).where(jdbc(control(domain(true)), resource)))).as(resource.name()+" restricted").isZero();
++            }
++        }
++    }
++    @Test void namespaceOnlyAndLogConsumersNeverDropRestrictedIds() throws Exception {
++        var restricted = control(domain(true));
++        assertThat(restricted.namespaceAllowed(QueryFilter.Resource.FLOW, "a")).isFalse();
++        assertThat(restricted.namespaceScope(QueryFilter.Resource.FLOW).kind()).isEqualTo(AccessScope.Kind.DENY_ALL);
++        assertThat(new TypedLogAccessControl(restricted).namespaceScope().kind()).isEqualTo(AccessScope.Kind.DENY_ALL);
++        assertThat(restricted.resourceReadAllowed(QueryFilter.Resource.LOG, "main", "a", "one")).isFalse();
++        assertThat(restricted.resourceReadAllowed(QueryFilter.Resource.FLOW, "main", "a", "one")).isTrue();
++        assertThat(restricted.resourceReadAllowed(QueryFilter.Resource.FLOW, "main", "a", "two")).isFalse();
++        var all = control(domain(false));
++        assertThat(all.namespaceAllowed(QueryFilter.Resource.FLOW, "a")).isTrue();
++        assertThat(all.namespaceAllowed(QueryFilter.Resource.FLOW, "b")).isFalse();
++        assertThat(new TypedLogAccessControl(all).namespaceScope().namespaceAllowed("a")).isTrue();
++        assertThat(new TypedLogAccessControl(all).namespaceScope().namespaceAllowed("b")).isFalse();
++    }
++    @Test void exactResourcePredicatesPreserveNamespaceIdAssociation() throws Exception {
++        var terms = List.of(new QueryDomain.ResourceDomain(List.of("a"), List.of(), List.of(), List.of("one")),
++            new QueryDomain.ResourceDomain(List.of("b"), List.of(), List.of(), List.of("two")));
++        var control = control(new QueryDomain(List.of("a","b"),List.of(),List.of(),true,true,DomainKind.RESTRICTED,terms));
++        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","a","one")).isTrue();
++        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","b","two")).isTrue();
++        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","a","two")).isFalse();
++        assertThat(control.resourceReadAllowed(QueryFilter.Resource.FLOW,"main","b","one")).isFalse();
 +    }
 +}

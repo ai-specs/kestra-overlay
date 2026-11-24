@@ -1,7 +1,7 @@
 # 需求: REQ-0402 未知操作和SYSTEM失败关闭，移除行政兜底
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；维护者2026-11-18接收的宿主公开契约修复，不含插件业务模型
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；维护者2026-11-18接收的宿主公开契约修复，不含插件业务模型
 # 触达上游文件: 4 个
 # 移除条件: 上游提供等价未解析操作失败关闭机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java

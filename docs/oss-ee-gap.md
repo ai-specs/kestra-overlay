@@ -1,3 +1,10 @@
+## 2026-11-24 升级状态与历史记录说明
+
+v2.0.5 的正式宿主基线为 `434955d`，CI `45104521508` 已成功并发布；下方各日期
+记录中的未发布状态是当时记录。当前源码升级到 v2.0.11，仍为未发布候选。
+公开契约所有权不变；升级不得把扩展业务或其内部 API 移入宿主。升级裁决与可复用
+流程见 [上游升级规则](upstream-upgrade-agent.md)，最终发布状态以对应提交 CI 为准。
+
 2026-11-23 R-EE-RBAC / REQ-0407（已授权实施，候选未发布）：
 正式组合 CI45092941429 的 MCP 后台刷新与队列 fatal，结合真实 Micronaut/H2 同连接
 传播红复现，接收后台 refreshTools 发布与订阅空上下文隔离。无新权限、业务模型或公开
@@ -182,7 +189,7 @@ REQ-0370 接收只读协议投影、事务内标准账号/client/安装状态查
 > 每个补足决策（patch / 扩展仓 / reserved / 不补足）以此表为准。
 > BASE 升级后必须复扫（命令集在 §5）。
 >
-> 证据分级：`[src]` = BASE（v2.0.5 @ 172dd0f37）源码；`[docs]` = kestra.io 文档；
+> 证据分级：`[src]` = 调查时固定的 BASE 源码（旧 v2.0.5/172dd0f3；本次 v2.0.11/dde805a2 复扫）；`[docs]` = kestra.io 文档；
 > `[dsh]` = dsh 项目实证；`[live]` = 本地 vanilla 实例实测。
 >
 > **当前范围（2026-10-07 收窄裁定）**：两项——
@@ -224,11 +231,18 @@ REQ-0370 接收只读协议投影、事务内标准账号/client/安装状态查
 > `bash scripts/blackbox-ui-oidc.sh <image>`；后者验收 UI 拦截→框架 OAuth2 客户端→
 > 内置用户名密码→PKCE 授权码→真实 token 交换→认证 UI/API。保留原协议黑盒门。
 
+2026-11-24 在两个固定 commit 上以 §5 的符号规则复扫：EditionProvider 36、
+io.kestra.ee 引用4、missingClasses 1、enterprise/EE feature 52、覆写说明14，
+数量两端一致。数量相同只说明本次检索未新增分类，不证明行为兼容。S1–S9 的机制
+继续存在，唯一 reserved 的 R-OIDC-SERVER 已激活事实不变，没有据此接收新业务域。
+本次按符号重核公开 classpath、迁移 bean、可选组件与授权来源；MCP 与执行异步变化
+另按升级裁决处理。旧 vanilla IAM HTTP 结论仅为历史证据，不冒称本次重跑。
+
 ## 1. EE 的交付机制 = overlay 可用的架构缝隙（穷尽列举）
 
 此表是机制事实（缝隙分类学），与域无关。两个活跃事项踩在 S6/S8 上。
 
-| # | 缝隙 | v2.0.5 证据 `[src]` | 当前使用 |
+| # | 缝隙 | 源码证据 `[src]`（旧行号仅定位，升级须按符号核对） | 当前使用 |
 |---|---|---|---|
 | S1 | `@Requires(missingClasses="io.kestra.ee.…")`：EE jar 在 classpath ⇒ 其 bean 顶替 OSS bean。全仓唯一注解实例。 | `webserver/rooting/TenantAliasingRooter.java:19` | 无（分类学留档） |
 | S2 | OSS 桩 bean + EE `@Replaces`（源码显式文档化的「桩—替换」对） | `core/tenant/TenantService.java:9`；`core/runners/DisabledReusableInputsExpander.java:11`；`webserver/services/ai/agent/DefaultSystemPromptResolver.java:11`；`core/services/ConcurrencyLimitResolver.java:17`；`core/services/MaintenanceService.java:89`；`core/services/NamespaceService.java:22` | 无活跃使用。R-EE-RBAC 的 Authorizer bean 即此形态 |

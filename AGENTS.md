@@ -331,18 +331,28 @@ git add <需求A的文件> && git commit -m "REQ <id>"
 
 ## 6. 上游版本升级流程
 
-1. `git clone --depth 1 --branch vX.Y.Z …` 取新树；确认 tag 指向 commit sha。
-2. 逐 patch 三分支判定（按编号顺序在新树上 `git apply --check`）：
-   - **clean-apply** → 保留；再编译级复核（CI）；
-   - **上游已吸收/文件消失** → 删除 patch，manifest 记 `absorbed@vX.Y.Z`，commit 说明证据；
-   - **冲突** → 按该 patch 头部 `来源` 字段重推导（fork 定制回到 §5.2 求法），**收窄优先**，
-     禁止趁机扩面。
-3. 复扫 `docs/oss-ee-gap.md`：重跑 §5 复现命令更新 §1/§2；逐行复审 §3 与 **逐条检查
-   §4 reserved 触发条件**（如 R-CLASSPATH-MERGE 实施状态、R-EE-RBAC 前置是否变化）。
-4. 更新 `patches/BASE` 两行（tag + sha）。
-5. 本地 `check-patches.sh --apply-check`（新树）→ commit → push → **CI 必须全绿**（升级属
-   「大改后跟踪一次」例外，允许用 `gh run list -R ai-specs/kestra-overlay` 确认）。
-6. 镜像主 tag 自动 = 新 release（build.sh 规则），扩展仓按新镜像版本跟进（不在本仓职责内）。
+升级入口为 `docs/upstream-upgrade-agent.md`，按以下顺序执行，不以补丁可应用代替兼容。
+
+1. 在独占目录取得旧 BASE 与目标 tag 的 Git 对象。核对 annotated tag 对象与 peeled
+   commit，固定完整 SHA；不得 reset 其他人的工作树或复用未核对输入的旧验证树。
+2. 运行 `scripts/assess-upstream-upgrade.py`，保存完整 Git 差异、输入 hash、交叠与
+   首个失败/后继 blocked。不得用托管平台截断的文件清单作为完整影响范围。
+3. 对全部 patch 建立裁决台账，逐需求读上游与定制实现，判定保留、部分吸收、删除或
+   最小适配。clean apply 仍须审查 API、依赖、异步上下文、数据库迁移和行为变化。
+   已吸收能力优先删除重复实现，保留必要回归；不得把 blocked 当成独立冲突。
+4. 在新 BASE 独占开发树逐需求提交、生成 diff，不手写 hunk。复扫差异表 §5 的
+   命令、机制和每条 reserved 移除/激活条件；同步 BASE、manifest、公开说明。
+5. 干净树完整顺序重放，核对所有触达文件与开发树字节一致，再运行完整 local-ci、
+   自有镜像与浏览器门。上游新增安全测试加入精确报告门；不能削减已有断言。
+6. 检查新安装与已有安装升级。新增迁移必须检查执行条件、离线/禁用行为和副作用；
+   回退必须恢复一致的数据库、安装凭据、存储、配置和产物，不能只替换旧镜像。
+   宿主验证自身机制；真实模式 A/B 和业务扩展生产升级由部署仓负责。
+7. 本地相关门通过后提交推送，跟踪最终提交的全部 CI、下载报告并核对正式镜像
+   digest/provenance。宿主正式发布后，消费方才更新正式输入，按第 10 节交付。
+
+基础镜像是否更新须单独裁决。记录固定 digest 的 JRE、OS、UID/GID 与双架构，
+核对目标 Dockerfile 和运行要求；不得自动跟随 latest。缺少真实报告或未裁决项时
+必须标明未验证，不得把评估报告的退出码 0 当作升级或发布通过。
 
 ## 7. 技术表达与证据要求
 

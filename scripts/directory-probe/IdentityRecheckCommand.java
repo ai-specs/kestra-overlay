@@ -27,7 +27,7 @@ public class IdentityRecheckCommand {
         if(!passed)throw new IllegalStateException("Identity recheck probe assertion failed");
     }
     public static void main(String[] arguments)throws Exception {
-        var source=new PGSimpleDataSource();source.setURL(arguments[0]);source.setUser("kestra");source.setPassword("local-test-only");
+        var source=new PGSimpleDataSource();source.setURL(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_URL", arguments[0]));source.setUser(System.getenv().getOrDefault("IDENTITY_RECHECK_DB_USER","kestra"));source.setPassword(System.getenv().getOrDefault("IDENTITY_RECHECK_DB_PASSWORD","local-test-only"));
         var configuration=new OidcConfiguration();configuration.setIssuer(arguments[1]);
         var protocol=new OidcProtocolState(arguments[1],"kestra-ui",new OidcInstallationReceipt(java.nio.file.Path.of("/tmp/unused-identity-probe-receipt")),new ObjectMapper());
         boolean complete=false;

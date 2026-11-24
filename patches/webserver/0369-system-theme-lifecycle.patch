@@ -10,7 +10,7 @@ index 964c8f3..703d720 100644
 +++ b/ui/src/composables/useThemeCycle.ts
 @@ -12,6 +12,10 @@ import type {useMiscStore} from "override/stores/misc"
  const THEMES: SelectedTheme[] = ["dark-2", "dark", "light"]
- 
+
  export function useThemeCycle(miscStore: ReturnType<typeof useMiscStore>) {
 +    let media: MediaQueryList | undefined
 +    function systemThemeChanged() {
@@ -22,7 +22,7 @@ index 964c8f3..703d720 100644
 @@ -20,6 +24,13 @@ export function useThemeCycle(miscStore: ReturnType<typeof useMiscStore>) {
          }
      }
- 
+
 -    onMounted(() => window.addEventListener("keydown", cycleTheme))
 -    onUnmounted(() => window.removeEventListener("keydown", cycleTheme))
 +    onMounted(() => {

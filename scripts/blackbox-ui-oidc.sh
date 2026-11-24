@@ -11,6 +11,7 @@ PG_DATA="$PG-data"
 SERVER="kestra-ui-bb-$$"
 STORAGE="kestra-ui-storage-$$"
 SETUP_MODE="${BB_SETUP_MODE:-form}"
+source "$(dirname "${BASH_SOURCE[0]}")/image-test-postgres.sh"
 TEMP_DIR=$(mktemp -d)
 PASSWORD_RBAC_REPORT="$(dirname "$0")/../.work/password-rbac-$SETUP_MODE.json"
 mkdir -p "$(dirname "$PASSWORD_RBAC_REPORT")"
@@ -25,12 +26,22 @@ DEPENDENCY503_REPORT="$(dirname "$0")/../.work/dependency503-$SETUP_MODE.json"
 printf '{"completed":false,"checks":[],"phase":"image-startup","mode":"%s"}\n' "$SETUP_MODE" > "$DEPENDENCY503_REPORT"
 
 cleanup() {
+  local cleanup_status=$?
+
+  if [ "${BB_PG_ACTIVE:-0}" = 1 ]; then
+    image_pg_resources_cleanup "$RESOURCE_OWNER" "$NET" || cleanup_status=1
+  else
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  fi
   rm -rf "$TEMP_DIR"
+  image_pg_cleanup || cleanup_status=1
+  return "$cleanup_status"
 }
 trap cleanup EXIT
+image_pg_init local-test-only
+image_pg_prepare_probe_env "$TEMP_DIR/directory-probe.env"
 
 assert_status() {
   if [ "$2" != "$3" ]; then
@@ -59,6 +70,7 @@ prepare_directory_probe() {
 
 docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
 docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$STORAGE" >/dev/null
+if [ "$BB_PG_ACTIVE" = 0 ]; then
 if docker volume inspect "$PG_DATA" >/dev/null 2>&1; then echo 'FAIL: test database volume already exists'; exit 1; fi
 docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$PG_DATA" >/dev/null
 docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" \
@@ -68,13 +80,15 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 
+
+fi
 cat > "$TEMP_DIR/config.yml" <<YAML
 datasources:
   postgres:
-    url: jdbc:postgresql://$PG:5432/kestra
+    url: jdbc:postgresql://$PG:5432/$BB_DB
     driverClassName: org.postgresql.Driver
-    username: kestra
-    password: local-test-only
+    username: $BB_DB_USER
+    password: $BB_DB_PASSWORD
 kestra:
   anonymous-usage-report:
     enabled: false
@@ -157,7 +171,7 @@ EXTENSION_MOUNT=()
 if [ -n "${BB_UI_EXTENSION_JAR:-}" ]; then
   EXTENSION_MOUNT=(-v "$BB_UI_EXTENSION_JAR:/app/libs/kestra-rbac-authorizer.jar:ro")
 fi
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$SERVER" --network "$BB_APP_NETWORK" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} \
   -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")" "$IMAGE" server standalone >/dev/null
 READY=0
@@ -317,7 +331,7 @@ assert_status "restart keeps setup closed" 404 "$(curl -s -o /dev/null -w '%{htt
 HASH_AFTER=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT credential FROM oidc_user_auth_method WHERE user_id='tester' AND type='PASSWORD'")
 assert_status "restart does not overwrite password" "$HASH_BEFORE" "$HASH_AFTER"
 docker rm -f "$SERVER" >/dev/null
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$SERVER" --network "$NET" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} -v "$STORAGE:/app/storage" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$SERVER" --network "$BB_APP_NETWORK" -p "$PORT:8080" ${EXTENSION_MOUNT[@]+"${EXTENSION_MOUNT[@]}"} -v "$STORAGE:/app/storage" \
   "${BOOTSTRAP_ENV[@]}" -e KESTRA_OIDC_BOOTSTRAP_USERNAME=attacker -e 'KESTRA_OIDC_BOOTSTRAP_PASSWORD=InjectedPass123!' \
   -e KESTRA_CONFIGURATION="$(cat "$TEMP_DIR/config.yml")
 kestra.rbac.application-groups.enabled: true
@@ -334,8 +348,8 @@ ATTACKER_COUNT=$(docker exec "$PG" psql -U kestra -d kestra -Atc "SELECT count(*
 assert_status "bootstrap cannot add another initial account" 0 "$ATTACKER_COUNT"
 node "$(dirname "$0")/protocol-session-probe.mjs" "$BASE"
 prepare_directory_probe
-docker exec "$SERVER" java -cp /app/kestra:/tmp/directory-command.jar IdentityRecheckCommand \
-  "jdbc:postgresql://$PG:5432/kestra" "$BASE" > "$IDENTITY_RECHECK_REPORT"
+docker exec --env-file "$BB_PROBE_ENV_FILE" "$SERVER" java -cp /app/kestra:/tmp/directory-command.jar IdentityRecheckCommand \
+  "jdbc:postgresql://$PG:5432/$BB_DB" "$BASE" > "$IDENTITY_RECHECK_REPORT"
 python3 - "$IDENTITY_RECHECK_REPORT" <<'PYIDENTITY'
 import json,sys
 report=json.load(open(sys.argv[1]))
@@ -373,7 +387,8 @@ docker exec "$SERVER" sh -c 'printf "kestra-oidc-installation-v1\n00000000-0000-
 assert_status "replaced receipt fails closed" 500 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/oidc/setup")"
 echo 'UI OIDC BLACKBOX ALL GREEN'
 if [ -n "${BB_DEPENDENCY_PROBE_JAR:-}" ]; then
-  docker rm -f "$SERVER" "$PG" >/dev/null
+  docker rm -f "$SERVER" >/dev/null
+  if [ "$BB_PG_ACTIVE" = 0 ]; then docker rm -f "$PG" >/dev/null; fi
   BB_RESOURCE_OWNER="$RESOURCE_OWNER" BB_DEPENDENCY_PORT="$PORT" bash "$(dirname "$0")/blackbox-dependency503.sh" \
     "$IMAGE" "$BB_DEPENDENCY_PROBE_JAR" "$DEPENDENCY503_REPORT" 503
 fi

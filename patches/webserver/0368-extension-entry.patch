@@ -662,7 +662,7 @@ index 0cec2e1..ae94d07 100644
  import type {UiExtensionDescriptorV1} from "./protocol";
 -import {hostExtensionPath} from "./runtime";
 +import {visibleExtensions} from "./access";
- 
+
  export function useUiExtensions() {
      const route = useRoute();
 @@ -13,18 +13,8 @@ export function useUiExtensions() {
@@ -687,12 +687,12 @@ index 0cec2e1..ae94d07 100644
      }, {immediate: true});
      onScopeDispose(() => controller?.abort());
 diff --git a/ui/src/override/stores/misc.ts b/ui/src/override/stores/misc.ts
-index e960664..8e00a06 100644
+index 2c8ea11..3e60c8e 100644
 --- a/ui/src/override/stores/misc.ts
 +++ b/ui/src/override/stores/misc.ts
 @@ -44,8 +44,8 @@ export const useMiscStore = defineStore("misc", () => {
      const axios = useClient()
- 
+
  
 -    async function loadConfigs() {
 -        const response = await axios.get(`${apiUrlWithoutTenants()}/configs`)

@@ -36,7 +36,7 @@ index f4c2d7c..5ce6a0e 100644
 +++ b/ui/src/components/admin/McpServerCard.vue
 @@ -96,8 +96,8 @@
      const {t} = useI18n({useScope: "global"})
- 
+
      const AUTH_LABELS: Record<McpServerAuthType, string> = {
 -        BASIC: "mcp.basic_auth",
 -        API_TOKEN: "mcp.api_token",
@@ -44,7 +44,7 @@ index f4c2d7c..5ce6a0e 100644
 +        API_TOKEN: "mcp.oauth",
          OAUTH: "mcp.oauth",
      }
- 
+
 @@ -214,4 +214,4 @@
      .delete-icon {
          color: var(--ks-icon-muted);
@@ -58,7 +58,7 @@ index 51f6a89..3d398b2 100644
 +++ b/ui/src/components/admin/mcp/tabs/McpConnect.vue
 @@ -151,7 +151,7 @@
      })
- 
+
      const authType = computed<McpServerAuthType>(
 -        () => mcpStore.server?.authType ?? "BASIC",
 +        () => "OAUTH",
@@ -102,14 +102,14 @@ index 788e442..6c6141b 100644
 +++ b/ui/src/components/admin/mcp/tabs/McpEdit.vue
 @@ -179,9 +179,7 @@
      const DEFAULT_OAUTH_SCOPES = ["openid", "profile", "email"]
- 
+
      const AUTH_OPTIONS = [
 -        {value: "BASIC", labelKey: "mcp.basic_auth", hintKey: "mcp.username_password", ee: false},
 -        {value: "API_TOKEN", labelKey: "mcp.api_token", hintKey: "mcp.bearer_token", ee: true},
 -        {value: "OAUTH", labelKey: "mcp.oauth", hintKey: "mcp.oauth_hint", ee: true},
 +        {value: "OAUTH", labelKey: "mcp.oauth", hintKey: "mcp.oauth_hint", ee: false},
      ] as const
- 
+
      type AuthOption = (typeof AUTH_OPTIONS)[number]
 @@ -193,7 +191,7 @@
          description: "",
@@ -134,7 +134,7 @@ index 03dd170..ef2a77b 100644
 @@ -140,23 +140,13 @@ public class McpServerController {
      protected void validateMcp(ApiMcpServer mcpServer) {
          McpServer.AuthType authType = mcpServer.authType();
- 
+
 -        if (
 -            editionProvider.get() == EditionProvider.Edition.OSS
 -                && (authType == McpServer.AuthType.API_TOKEN || authType == McpServer.AuthType.OAUTH)
@@ -142,10 +142,10 @@ index 03dd170..ef2a77b 100644
 -            throw new HttpStatusException(HttpStatus.FORBIDDEN, "Auth type '" + authType + "' requires Enterprise Edition");
 -        }
 +        if (authType != McpServer.AuthType.OAUTH) throw new HttpStatusException(HttpStatus.BAD_REQUEST, "MCP requires OAuth2 authentication");
- 
+
          boolean hasOauthProvider = mcpServer.oauthProvider() != null && !mcpServer.oauthProvider().isBlank();
          boolean hasScopes = !ListUtils.isEmpty(mcpServer.oauthScopesSupported());
- 
+
          if (authType == McpServer.AuthType.OAUTH) {
 -            if (!hasOauthProvider) {
 -                throw new HttpStatusException(HttpStatus.BAD_REQUEST, "oauthProvider is required when authType is OAUTH");
@@ -164,7 +164,7 @@ index 9a9ae38..0763849 100644
 @@ -33,20 +33,6 @@ public class McpServerAuthenticationFilter implements HttpServerFilter {
      /** Request attribute set when this filter has already made the auth decision. */
      public static final String MCP_AUTH_HANDLED = "io.kestra.mcp.auth.handled";
- 
+
 -    private final McpServerCache mcpServerCache;
 -    private final BasicAuthService basicAuthService;
 -    private final TenantService tenantService;
@@ -195,7 +195,7 @@ index 9a9ae38..0763849 100644
 -            );
 +        return Flux.just(HttpResponse.<Object> unauthorized().body(java.util.Map.of("error", "oauth2_required")));
      }
- 
+
 -    private Publisher<MutableHttpResponse<?>> authenticate(
 -        HttpRequest<?> request,
 -        ServerFilterChain chain,

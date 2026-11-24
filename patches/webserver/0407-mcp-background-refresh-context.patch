@@ -1,11 +1,11 @@
 # 需求: REQ-0407 MCP后台工具刷新隔离调用方连接与授权上下文
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；定向H2验证，完整CI与发布未执行
-# 来源: CI45092941429正式e27864c失败与真实Micronaut/H2同Connection红复现；独占Git增量生成
+# 来源: v2.0.11上下文适配（保留上游行为）； CI45092941429正式e27864c失败与真实Micronaut/H2同Connection红复现；独占Git增量生成
 # 触达上游文件: 2 个（宿主刷新方法与独立H2回归测试）
 # 移除条件: 上游提供等价MCP后台刷新发布与订阅的空上下文隔离
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-index 3afc739f28dcaf5e1c8434eed498cbe1b4b77b2d..19d8f02e98ac7e32ec368e176a734904ba4afbda 100644
+index 3afc739..19d8f02 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 @@ -110,9 +110,15 @@ public class McpServerHandlerTransport {
@@ -29,7 +29,7 @@ index 3afc739f28dcaf5e1c8434eed498cbe1b4b77b2d..19d8f02e98ac7e32ec368e176a734904
      public Mono<Void> evictAndNotify(String tenantId, String serverId) {
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpBackgroundRefreshContextTest.java b/webserver/src/test/java/io/kestra/mcp/McpBackgroundRefreshContextTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..5a3de09d36d56dd1c33e902424410edcd1baee9b
+index 0000000..5a3de09
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpBackgroundRefreshContextTest.java
 @@ -0,0 +1,239 @@

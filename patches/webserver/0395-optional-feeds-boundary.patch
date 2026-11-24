@@ -1,7 +1,7 @@
 # 需求: REQ-0395 可选原生feeds调用错误边界
 # 消费扩展仓: ai-specs/kestra-plugin-rbac及宿主原生页面
 # 状态: core；主控入口C接收；候选未发布
-# 来源: 新写；两轮生产feeds失败及App未处理Promise证据
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；两轮生产feeds失败及App未处理Promise证据
 # 触达上游文件: 2 个
 # 移除条件: 上游App具备等价可选feeds失败边界与成功拒绝回归
 diff --git a/ui/src/App.vue b/ui/src/App.vue

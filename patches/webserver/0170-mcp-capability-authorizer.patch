@@ -1,15 +1,15 @@
 # 需求: 统一RbacAuthorizer/依赖计划执行SPI衔接、roles/session/cache隔离升级； REQ-0170 复合 scope 执行门与 MCP Authorizer/session 隔离
 # 消费扩展仓: ai-specs/kestra-plugin-rbac； R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
-# 来源: 新写；MCP SDK 1.1.3 + 维护者能力契约；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
-# 触达上游文件: 15 个（详见diff）
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；MCP SDK 1.1.3 + 维护者能力契约；不移植客户业务/RBAC角色模型；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 触达上游文件: 18 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 # 演进理由: REQ-0330 沿用原需求授权激活点；避免后续补丁重复改写同一来源行。
 # 诊断维护: 最终fallback前调用0365独立安全诊断helper；保持原响应和权限；以真实需求提交重新生成
 # 输入: BASE 172dd0f3760fb1255d3b22bd1fd07ce31b173fa3；overlay d63518ca39b4093dbbbd0c8dca3b84aba6a4c5bc原0170加最小诊断钩子
 # 异步修复: 输入overlay 8279e82e2ad9b4bbaaca2d181f2eab8e19930cf2；来源commit 7618b5b399201b21d2278c7d0f061eb2f5c71675；仅传播HTTP来源，未发布
 diff --git a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
-index f1f7f730c5fa5f5b647f760ac4e2031ba2041f97..4e74ab21e566f08c33b5da06cfda036b69c393cb 100644
+index 8d1e9d7..971a45c 100644
 --- a/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
 +++ b/core/src/main/java/io/kestra/core/mcp/models/McpSession.java
 @@ -14,7 +14,19 @@ public record McpSession(
@@ -31,9 +31,9 @@ index f1f7f730c5fa5f5b647f760ac4e2031ba2041f97..4e74ab21e566f08c33b5da06cfda036b
 +        this(tenantId, serverId, sessionId, sseNode, userId, deleted, clientId, resource, java.util.List.of());
 +    }
 
-     /** {@inheritDoc} */
-     @Override
-@@ -31,6 +43,6 @@ public record McpSession(
+     /**
+      * {@inheritDoc}
+@@ -35,6 +47,6 @@ public record McpSession(
      }
 
      public McpSession toDeleted() {
@@ -42,10 +42,10 @@ index f1f7f730c5fa5f5b647f760ac4e2031ba2041f97..4e74ab21e566f08c33b5da06cfda036b
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-index 1e70462a460e604f3978d20554f9a60735769052..bdf3d4cf9ba1eedb3b2d59da241bdf0c44c5f75b 100644
+index e3be52b..ac21e88 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
 +++ b/webserver/src/main/java/io/kestra/mcp/KestraFluxStreamableServerTransportProvider.java
-@@ -35,6 +35,12 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+@@ -36,6 +36,12 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
 
      private McpStreamableServerSession.Factory sessionFactory;
 
@@ -58,7 +58,7 @@ index 1e70462a460e604f3978d20554f9a60735769052..bdf3d4cf9ba1eedb3b2d59da241bdf0c
      private final McpSessionService mcpSessionService;
 
      private final AtomicBoolean isClosing = new AtomicBoolean(false);
-@@ -257,6 +263,9 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+@@ -263,6 +269,9 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
              if (message instanceof McpSchema.JSONRPCNotification) {
                  return Mono.just(HttpResponse.accepted());
              }
@@ -68,7 +68,7 @@ index 1e70462a460e604f3978d20554f9a60735769052..bdf3d4cf9ba1eedb3b2d59da241bdf0c
              // Tool handlers are identical on every node — create a lightweight ephemeral session
              // to process the request and stream the result back in this POST response body.
              if (message instanceof McpSchema.JSONRPCRequest jsonrpcRequest) {
-@@ -290,6 +299,10 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+@@ -296,6 +305,10 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
              );
          }
 
@@ -79,7 +79,7 @@ index 1e70462a460e604f3978d20554f9a60735769052..bdf3d4cf9ba1eedb3b2d59da241bdf0c
          Mono<HttpResponse<?>> response = switch (message) {
              case McpSchema.JSONRPCResponse jsonrpcResponse ->
                  session.get().accept(jsonrpcResponse).then(Mono.just(HttpResponse.accepted()));
-@@ -310,6 +323,19 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
+@@ -316,6 +329,19 @@ public class KestraFluxStreamableServerTransportProvider implements McpStreamabl
              .onErrorResume(Throwable.class, e -> mcpErrorResponseMapper.exceptionResponse(e, message));
      }
 
@@ -100,7 +100,7 @@ index 1e70462a460e604f3978d20554f9a60735769052..bdf3d4cf9ba1eedb3b2d59da241bdf0c
          return Flux.create(sink ->
          {
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java b/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java
-index 35edc9bc8ef154c86d58e0c2a2b8524b5226d435..c434363845fa76788f49853575f913435da825c7 100644
+index 35edc9b..c434363 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpErrorResponseMapper.java
 @@ -15,6 +15,11 @@ import static io.modelcontextprotocol.spec.McpSchema.JSONRPC_VERSION;
@@ -116,7 +116,7 @@ index 35edc9bc8ef154c86d58e0c2a2b8524b5226d435..c434363845fa76788f49853575f91343
          return exceptionResponse(error, msg);
      }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
-index c8d3137c4959c266143a3679d1180213f6fabe07..3afc739f28dcaf5e1c8434eed498cbe1b4b77b2d 100644
+index c8d3137..3afc739 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpServerHandlerTransport.java
 @@ -39,6 +39,7 @@ public class McpServerHandlerTransport {
@@ -186,10 +186,10 @@ index c8d3137c4959c266143a3679d1180213f6fabe07..3afc739f28dcaf5e1c8434eed498cbe1
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-index 1e6fd7d..d0e6849 100644
+index d0bf17c..dca9060 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpSessionService.java
-@@ -58,13 +58,13 @@ public class McpSessionService {
+@@ -67,13 +67,13 @@ public class McpSessionService {
              boolean isNewOwner = McpSessionEventType.OWNERSHIP_CHANGED == event.type()
                  && ServerInstance.INSTANCE_ID.equals(session.sseNode());
              if (!isNewOwner && (event.type() == McpSessionEventType.DELETED || event.type() == McpSessionEventType.OWNERSHIP_CHANGED)) {
@@ -199,27 +199,18 @@ index 1e6fd7d..d0e6849 100644
 -                    .sessionId(session.sessionId())
 -                    .build();
 -                Optional.ofNullable(streamableSessions.remove(context))
--                    .ifPresent(McpStreamableServerSession::delete);
+-                    .ifPresent(local -> local.session().delete());
 +                streamableSessions.forEach((context, localSession) -> {
 +                    if (java.util.Objects.equals(context.getTenantId(), session.tenantId())
 +                        && java.util.Objects.equals(context.getServerId(), session.serverId())
 +                        && java.util.Objects.equals(context.getSessionId(), session.sessionId())) {
-+                        closeDeletedSession(context, localSession);
++                        closeDeletedSession(context, localSession.session());
 +                    }
 +                });
              }
          });
      }
-@@ -90,7 +90,7 @@ public class McpSessionService {
-     public boolean sessionExists(KestraMcpTransportContext context) {
-         return sessionRepository.find(
-             context.getTenantId(), context.getServerId(), context.getSessionId()
--        ).isPresent();
-+        ).filter(session -> sameIdentity(session, context)).isPresent();
-     }
-
-     Optional<McpStreamableServerSession> findMcpStreamableServerSession(KestraMcpTransportContext context) {
-@@ -107,7 +107,7 @@ public class McpSessionService {
+@@ -119,7 +119,7 @@ public class McpSessionService {
          }
          McpSession session = new McpSession(
              context.getTenantId(), context.getServerId(),
@@ -227,8 +218,8 @@ index 1e6fd7d..d0e6849 100644
 +            context.getSessionId(), ServerInstance.INSTANCE_ID, context.getUserId(), false, context.getClientId(), context.getResource(), context.getRoles()
          );
          sessionRepository.save(session);
-         streamableSessions.put(context, mcpStreamableServerSession);
-@@ -129,7 +129,7 @@ public class McpSessionService {
+         streamableSessions.put(context, new LocalSession(mcpStreamableServerSession, context.getUserId()));
+@@ -142,7 +142,7 @@ public class McpSessionService {
      public void takeSseOwnership(KestraMcpTransportContext context, McpStreamableServerSession session) {
          McpSession updated = new McpSession(
              context.getTenantId(), context.getServerId(),
@@ -236,18 +227,19 @@ index 1e6fd7d..d0e6849 100644
 +            context.getSessionId(), ServerInstance.INSTANCE_ID, context.getUserId(), false, context.getClientId(), context.getResource(), context.getRoles()
          );
          sessionRepository.save(updated);
-         streamableSessions.put(context, session);
-@@ -155,6 +155,7 @@ public class McpSessionService {
-      */
-     public void close(KestraMcpTransportContext context) {
-         sessionRepository.find(context.getTenantId(), context.getServerId(), context.getSessionId())
-+            .filter(session -> sameIdentity(session, context))
-             .ifPresent(session ->
-             {
-                 sessionRepository.delete(context.getTenantId(), context.getSessionId());
-@@ -169,4 +170,11 @@ public class McpSessionService {
-             log.error("Failed to emit MCP session event {} for session {}: {}", event.type(), event.session().sessionId(), e.getMessage(), e);
-         }
+         streamableSessions.put(context, new LocalSession(session, context.getUserId()));
+@@ -179,7 +179,7 @@ public class McpSessionService {
+
+     private Optional<McpSession> findOwnedSession(KestraMcpTransportContext context) {
+         return sessionRepository.find(context.getTenantId(), context.getServerId(), context.getSessionId())
+-            .filter(session -> isOwner(session.userId(), context));
++            .filter(session -> sameIdentity(session, context));
+     }
+
+     /**
+@@ -200,4 +200,11 @@ public class McpSessionService {
+
+     private record LocalSession(McpStreamableServerSession session, @Nullable String ownerId) {
      }
 +
 +    private boolean sameIdentity(final McpSession session, final KestraMcpTransportContext context) {
@@ -258,7 +250,7 @@ index 1e6fd7d..d0e6849 100644
 +    }
  }
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolService.java b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
-index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..457a248425347e5c3b04ef7601ae2edbc1ed2aa7 100644
+index 8c1d54b..457a248 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolService.java
 @@ -57,6 +57,7 @@ public class McpToolService {
@@ -479,7 +471,7 @@ index 8c1d54bbe0fa6d038606d789f55488f41205c8e7..457a248425347e5c3b04ef7601ae2edb
 
      /**
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
-index d82b6cd7da28990844f420dae5c48309ccce21cd..91a9d449ffa7cbde94ecbe0cc6943c26489897ec 100644
+index d82b6cd..91a9d44 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/McpToolController.java
 @@ -88,6 +88,8 @@ public class McpToolController {
@@ -494,7 +486,7 @@ index d82b6cd7da28990844f420dae5c48309ccce21cd..91a9d449ffa7cbde94ecbe0cc6943c26
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..747372321c5d42fd41a33f95f15b6a80dd92ee2e
+index 0000000..7473723
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpAuthorizer.java
 @@ -0,0 +1,11 @@
@@ -511,7 +503,7 @@ index 0000000000000000000000000000000000000000..747372321c5d42fd41a33f95f15b6a80
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f6d041622f9ead05b669e039c4bc3be25e7fa23
+index 0000000..6f6d041
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/mcp/McpCapabilityGate.java
 @@ -0,0 +1,136 @@
@@ -652,7 +644,7 @@ index 0000000000000000000000000000000000000000..6f6d041622f9ead05b669e039c4bc3be
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
-index 62fdba7e18c1fcd7733873c9120a9ca2e922b44e..f059c5b3c87c2f3516543b0e2cf5a9dc4da1330d 100644
+index 62fdba7..f059c5b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/OidcConfiguration.java
 @@ -25,6 +25,16 @@ public class OidcConfiguration {
@@ -674,7 +666,7 @@ index 62fdba7e18c1fcd7733873c9120a9ca2e922b44e..f059c5b3c87c2f3516543b0e2cf5a9dc
      private List<UserSeed> users = List.of();
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..a60acd14a827881d74f522d646d2a2b1d3073969
+index 0000000..a60acd1
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/McpOidcConsentPolicy.java
 @@ -0,0 +1,34 @@
@@ -713,7 +705,7 @@ index 0000000000000000000000000000000000000000..a60acd14a827881d74f522d646d2a2b1
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
-index d7b44992227587faa4c81de542f8132679f5f4c1..2c2d63203cb37a787080c70ee4830baa47a89c1d 100644
+index d7b4499..2c2d632 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcRegistrationService.java
 @@ -70,7 +70,7 @@ public class OidcRegistrationService {
@@ -727,7 +719,7 @@ index d7b44992227587faa4c81de542f8132679f5f4c1..2c2d63203cb37a787080c70ee4830baa
          if (request.containsKey("client_name")
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb4835fd8c508a496ccc523f79333012ccf63e55
+index 0000000..fb4835f
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpDynamicToolListTest.java
 @@ -0,0 +1,148 @@
@@ -881,7 +873,7 @@ index 0000000000000000000000000000000000000000..fb4835fd8c508a496ccc523f79333012
 +}
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3caed8de40ef1c43aabefb9f9d04d89a01ea659
+index 0000000..b3caed8
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpExecutionGateTest.java
 @@ -0,0 +1,57 @@
@@ -944,7 +936,7 @@ index 0000000000000000000000000000000000000000..b3caed8de40ef1c43aabefb9f9d04d89
 +}
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java b/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..6defcc0dc57397603705c6f571c08fe2b91d88e5
+index 0000000..e8628e2
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpSessionIdentityTest.java
 @@ -0,0 +1,39 @@
@@ -983,13 +975,13 @@ index 0000000000000000000000000000000000000000..6defcc0dc57397603705c6f571c08fe2
 +            assertFalse(service.sessionExists(context));
 +            service.close(context);
 +        }
-+        verify(repository, never()).delete(any(), any());
++        verify(repository, never()).delete(any(), any(), any());
 +        verifyNoInteractions(queue);
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..4bc0fc07ec1917b63f777f12bf1fe713e5b1c393
+index 0000000..4bc0fc0
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpCapabilityGateTest.java
 @@ -0,0 +1,77 @@
@@ -1072,7 +1064,7 @@ index 0000000000000000000000000000000000000000..4bc0fc07ec1917b63f777f12bf1fe713
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpConsentExposureTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpConsentExposureTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..476b8e0890966fd00ef26bf295dc428ff3edce74
+index 0000000..476b8e0
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpConsentExposureTest.java
 @@ -0,0 +1,17 @@
@@ -1094,7 +1086,7 @@ index 0000000000000000000000000000000000000000..476b8e0890966fd00ef26bf295dc428f
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
-index 0fa89f55caa3a80e0a351e851c74933b97cea4a4..37b39a49f3d9d56362a3462ad75c2234c02bc111 100644
+index 0fa89f5..37b39a4 100644
 --- a/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/McpSdkInstanceTest.java
 @@ -32,7 +32,21 @@ class McpSdkInstanceTest {

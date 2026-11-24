@@ -1,11 +1,11 @@
 # 需求: REQ-0240 Exact namespace scope与合成候选分页前过滤
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；入口B用户生产目标，R-EE-RBAC公共查询契约；不包含角色或后台身份策略
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；入口B用户生产目标，R-EE-RBAC公共查询契约；不包含角色或后台身份策略
 # 触达上游文件: 7 个（详见diff）
 # 移除条件: 上游OSS提供等价Exact scope表达、统一查询翻译与Namespace候选过滤
 diff --git a/core/src/main/java/io/kestra/core/models/AccessScope.java b/core/src/main/java/io/kestra/core/models/AccessScope.java
-index 732d078e9112913259d06d99bbc603f6c8bac247..fb01c2a07566596a0d1567fb792774be180a7b80 100644
+index 732d078..fb01c2a 100644
 --- a/core/src/main/java/io/kestra/core/models/AccessScope.java
 +++ b/core/src/main/java/io/kestra/core/models/AccessScope.java
 @@ -2,23 +2,29 @@ package io.kestra.core.models;
@@ -118,7 +118,7 @@ index 732d078e9112913259d06d99bbc603f6c8bac247..fb01c2a07566596a0d1567fb792774be
 +    }
  }
 diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-index fb6b70e2d8b8434073c459fa4e95fbe6057b901f..f1d9fc873d1305227f25a726fafde2ed649dd1e1 100644
+index fb6b70e..f1d9fc8 100644
 --- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 +++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 @@ -22,4 +22,21 @@ public interface NamespaceAccessControl {
@@ -144,12 +144,12 @@ index fb6b70e2d8b8434073c459fa4e95fbe6057b901f..f1d9fc873d1305227f25a726fafde2ed
 +    }
  }
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
-index bd49dd2871dc221e1433ab349e2a2a9844edbc70..5ee14ab542692d89137699d66bebcf5c3eef009d 100644
+index bea59ad..e588159 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 @@ -609,6 +609,9 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
-                     ors.add(field("namespace").eq(namespace));
-                     ors.add(field("namespace").startsWith(namespace + "."));
+                     ors.add(CaseSensitiveMatch.eq(field("namespace", String.class), namespace));
+                     ors.add(CaseSensitiveMatch.startsWith(field("namespace", String.class), namespace + "."));
                  }
 +                for (String namespace : scope.exactNamespaces()) {
 +                    ors.add(field("namespace").eq(namespace));
@@ -158,12 +158,12 @@ index bd49dd2871dc221e1433ab349e2a2a9844edbc70..5ee14ab542692d89137699d66bebcf5c
              }
          };
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
-index 2b42eea786eac455b49f9d5d0100f21161efc742..03cfa0397e4ee5364c8ccfd10a428110c5724625 100644
+index 93ffd62..89bc874 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 @@ -125,6 +125,9 @@ public abstract class AbstractJdbcRepository {
-                     ors.add(column.eq(namespace));
-                     ors.add(column.startsWith(namespace + "."));
+                     ors.add(CaseSensitiveMatch.eq(column, namespace));
+                     ors.add(CaseSensitiveMatch.startsWith(column, namespace + "."));
                  }
 +                for (String namespace : scope.exactNamespaces()) {
 +                    ors.add(column.eq(namespace));
@@ -179,7 +179,7 @@ index 2b42eea786eac455b49f9d5d0100f21161efc742..03cfa0397e4ee5364c8ccfd10a428110
 \ No newline at end of file
 +}
 diff --git a/webserver/src/main/java/io/kestra/mcp/McpToolScope.java b/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
-index 14ebad2a2a3a9376fab619e4c60b6f382c115464..e4bf7e278f66bd962717470f48ae748d7e2133d3 100644
+index 14ebad2..e4bf7e2 100644
 --- a/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
 +++ b/webserver/src/main/java/io/kestra/mcp/McpToolScope.java
 @@ -14,12 +14,7 @@ public final class McpToolScope {
@@ -207,7 +207,7 @@ index 14ebad2a2a3a9376fab619e4c60b6f382c115464..e4bf7e278f66bd962717470f48ae748d
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
-index 2ca4e4a071871b7a50962e9d48a39a951eb2e0a7..b4a147cd646614446f61583c725f23f2d97c14ab 100644
+index 2ca4e4a..b4a147c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceController.java
 @@ -13,6 +13,7 @@ import io.kestra.core.models.namespaces.NamespaceInterface;
@@ -253,7 +253,7 @@ index 2ca4e4a071871b7a50962e9d48a39a951eb2e0a7..b4a147cd646614446f61583c725f23f2
          return PagedResults.of((ArrayListTotal<N>) namespaceSearchable.filter(allNamespaces, page, size, sort, filters));
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f52cf63baa579ab38fc863aa8e6a4930f029bfc
+index 0000000..5f52cf6
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/NamespaceScopeContractTest.java
 @@ -0,0 +1,157 @@

@@ -14,13 +14,13 @@ index 8bfdbca..4ced57f 100644
      private RunContextFactory runContextFactory;
 +    @Inject
 +    private io.kestra.core.repositories.NamespaceAccessControl namespaceAccessControl;
- 
+
      public FlowGraph flowGraph(FlowWithSource flow, List<String> expandedSubflows) throws IllegalVariableEvaluationException, FlowProcessingException {
          return this.flowGraph(flow, expandedSubflows, null);
 @@ -97,6 +99,10 @@ public class GraphService {
              subflowGraphTask = subflowGraphTask.withRenderedSubflowId(runContext);
              ExecutableTask.SubflowId subflowId = subflowGraphTask.executableTask().subflowId();
- 
+
 +            if (!namespaceAccessControl.namespaceAllowed(io.kestra.core.models.QueryFilter.Resource.FLOW, subflowId.namespace())) {
 +                throw new io.kestra.core.exceptions.ForbiddenException("Expanded subflow is outside the authorized namespace scope");
 +            }

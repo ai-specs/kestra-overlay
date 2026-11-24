@@ -58,7 +58,9 @@ public final class ProfileDirectoryCommand {
 
     public static void main(String[] arguments) throws Exception {
         var source = new PGSimpleDataSource();
-        source.setURL(arguments[0]); source.setUser("kestra"); source.setPassword("local-test-only");
+        source.setURL(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_URL", arguments[0]));
+        source.setUser(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_USER", "kestra"));
+        source.setPassword(System.getenv().getOrDefault("DIRECTORY_PROBE_DB_PASSWORD", "local-test-only"));
         UserDirectoryV2 directory = new OidcUserDirectory(source);
         if (arguments[1].equals("create")) {
             var user = directory.create("profile-" + UUID.randomUUID(), "Initial", "initial@example.invalid", "ProfileProbeInitial123!");

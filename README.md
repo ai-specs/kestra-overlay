@@ -1,3 +1,12 @@
+## 2026-11-24 上游 v2.0.11 升级候选（未发布）
+
+当前源码 BASE 已移至 v2.0.11 / `dde805a27d7c636732f181dc1eab906330e6f7c9`。
+这是候选输入，不是正式镜像声明。升级前正式基线为 `434955d`，成功 CI `45104521508`；
+其所含 0407、typed V2、首装与 UI 机制已经发布。下方带日期的旧“候选未发布”段落
+仅记录各能力当时状态，不得据此否认该正式基线，也不得证明本次升级已交付。
+本次升级流程、影响评估脚本及 AI 任务模板见 [上游升级规则](docs/upstream-upgrade-agent.md)。
+宿主正式发布、扩展正式编译与部署组合验收必须按顺序分别取得证据。
+
 2026-11-23 REQ-0407 候选（未发布）：MCP 后台工具刷新显式隔离队列连接、事务和请求
 授权上下文。真实 Micronaut/H2 红复现确认原实现跨 boundedElastic 复用调用方 Connection；
 候选保持原工具调用身份、权限、错误与关闭路径，不修改队列 fatal/retry，不增加自动重启。
@@ -1056,3 +1065,26 @@ LOG/TRIGGER受限ID查询尚无消费者适配，保持失败关闭，不丢限�
 宽度）具名计划全过、零失败/跳过/未运行，完整诊断、readiness/runId/sourceHash、输入
 摘要与源码快照可独立核对；失败也上传。测试transport明确不代表生产身份或数据库验收。
 本候选仍须完整本地门、正式CI和镜像发布，再由部署仓消费正式产物验证生产流程。
+
+## 上游版本升级与本地镜像验收
+
+固定源码与产物、逐补丁裁决、AI 升级任务模板和发布门见
+[上游升级规则](docs/upstream-upgrade-agent.md)。评估脚本只生成调查输入，不代表兼容。
+本次 v2.0.11 候选已通过完整本地门及候选镜像门，正式 CI/推广仍须完成。
+
+本地已有 PostgreSQL 时，四个镜像门支持显式隔离模式，避免停止用户服务或另起数据库：
+
+```bash
+export BB_EXISTING_PG_CONTAINER='<running-postgres-container>'
+export BB_EXISTING_PG_NETWORK='<existing-docker-network>'
+export BB_EXISTING_PG_PORT='<explicit-host-forward-port>'
+export BB_EXISTING_PG_ADMIN='<local-admin-role>'
+export BB_RESOURCE_OWNER='<unique-test-owner>'
+bash scripts/blackbox-oidc.sh '<fixed-image>'
+```
+
+四项输入必须完整；不传时 CI 保留原独立测试 PostgreSQL 路径。显式模式只在既有实例
+创建随机独立数据库和受限角色，应用使用该身份，结束后只清理本次成功创建的资源。
+主机端口必须由部署方提供可用转发，脚本不修改原容器网络或启动 PG 内转发进程。
+不输出测试密码；本地凭据只存放临时私有环境文件。此模式不能把模拟测试或本地候选
+提升为正式发布证据。MCP/UI 门使用相同变量，并保留所有原业务、安全与副作用断言。

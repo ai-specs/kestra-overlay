@@ -1,11 +1,12 @@
 # 需求: REQ-0366 MCP异步可信HTTP授权来源传播探针
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core；本地定向测试通过，未发布
-# 来源: 宿主独立V2 provider与OidcTrustedIdentity；固定BASE上真实需求提交
+# 来源: v2.0.11上下文适配（保留上游行为）； 宿主独立V2 provider与OidcTrustedIdentity；固定BASE上真实需求提交
 # 触达上游文件: 1 个（仅新增独立测试）
 # 移除条件: 上游提供等价MCP异步授权来源与撤权探针
 diff --git a/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java b/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java
 new file mode 100644
+index 0000000..58e86e5
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/mcp/McpAsyncIdentityContextTest.java
 @@ -0,0 +1,191 @@

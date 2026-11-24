@@ -2,13 +2,13 @@
 # 消费扩展仓：ai-specs/kestra-plugin-rbac及零背景部署用户
 # 状态：core；直接翻译经维护者明确授权；中文英文需真实页面验证，其他语言仅键/非空/插值一致性，不声明Gemini生成。
 # 来源：维护者2026-11-03最新裁决；实际编写132条首装译文及修正既有MCP缺译；fingerprint由真实英文源计算。
-# 触达上游文件：12种非英文translations JSON及英文源fingerprints，共13文件。
+# 触达上游文件：13种非英文translations JSON及英文源fingerprints，共13文件。
 # 移除条件：上游提供等价首次安装本地化与MCP内置OIDC文案。
 diff --git a/ui/scripts/translations/fingerprints.json b/ui/scripts/translations/fingerprints.json
-index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27b1966185 100644
+index 41bfbf9..bf75f8b 100644
 --- a/ui/scripts/translations/fingerprints.json
 +++ b/ui/scripts/translations/fingerprints.json
-@@ -921,6 +921,7 @@
+@@ -936,6 +936,7 @@
    "mcp|auth_type": "66880d2d8216",
    "mcp|basic_auth": "f0a792cf36e6",
    "mcp|bearer_token": "5c48c5679b6f",
@@ -16,7 +16,7 @@ index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27
    "mcp|client_setup": "4ba2b51d207d",
    "mcp|connect_tab|auth_api_token_hint": "d3746cb933be",
    "mcp|connect_tab|auth_basic_hint": "0ffeecfd762f",
-@@ -944,7 +945,7 @@
+@@ -959,7 +960,7 @@
    "mcp|instructions": "934652dce41d",
    "mcp|main_tenant": "0d6e4079e367",
    "mcp|managed_by_kestra": "2fdceed73c8e",
@@ -25,7 +25,7 @@ index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27
    "mcp|no_servers": "55437a872cd0",
    "mcp|oauth": "27f8943c6eba",
    "mcp|oauth_hint": "bc54a91c3914",
-@@ -1156,6 +1157,17 @@
+@@ -1171,6 +1172,17 @@
    "no_results|triggers": "a9140b65585f",
    "no_tasks_running": "8a589a1720ad",
    "of": "28391d3bc64e",
@@ -43,7 +43,7 @@ index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27
    "ok": "565339bc4d33",
    "onboarding|tour|actions|back": "76900f1bfd16",
    "onboarding|tour|actions|dismiss": "33832e6712de",
-@@ -1937,6 +1949,7 @@
+@@ -1958,6 +1970,7 @@
    "triggers_tabs_manage": "5a23444828db",
    "true": "3cbc87c7681f",
    "type": "baaddf70fb5d",
@@ -51,7 +51,7 @@ index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27
    "unable to generate graph": "7f735a273899",
    "undefined": "f02dfb7da82a",
    "unlock": "4ac709aa58bc",
-@@ -1997,4 +2010,4 @@
+@@ -2021,4 +2034,4 @@
    "workerId": "283c035a5126",
    "wrong labels": "f62b1e53b73f",
    "yes": "85a39ab345d6"
@@ -59,10 +59,10 @@ index e70b6f0af45b0c96edbd31fce9b53eddd2bd2c52..3ceb699bff6637f9cea568539a1e8a27
 \ No newline at end of file
 +}
 diff --git a/ui/src/translations/de.json b/ui/src/translations/de.json
-index a10ff7afa7290793d43f8d03bc4a24bb732a1d33..e52d18f7b714321bbd38c7ea1243dbe864a414a0 100644
+index 0e370ae..55ad1fa 100644
 --- a/ui/src/translations/de.json
 +++ b/ui/src/translations/de.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Fehlgeschlagen"
        }
      },
@@ -82,7 +82,7 @@ index a10ff7afa7290793d43f8d03bc4a24bb732a1d33..e52d18f7b714321bbd38c7ea1243dbe8
      "setup": {
        "login": "Anmelden",
        "login_title": "Bei Kestra anmelden",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Unterstützte Scopes",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes, die im Protected-Resource-Metadata-Dokument dieses Servers angekündigt werden. Spezifikationskonforme MCP-Clients beschränken ihre Autorisierungsanfrage auf diese Liste. Leer lassen, um das Feld auszulassen und die vom IdP angekündigten Scopes zu verwenden.",
@@ -93,10 +93,10 @@ index a10ff7afa7290793d43f8d03bc4a24bb732a1d33..e52d18f7b714321bbd38c7ea1243dbe8
        "no_servers": "Keine MCP-Server gefunden. Erstelle deinen ersten Server, um MCP-Tool-Trigger für externe AI-Agenten bereitzustellen.",
        "server_id": "Server-ID",
 diff --git a/ui/src/translations/es.json b/ui/src/translations/es.json
-index e7af8bfaf38b95df06d156d57b6956cf3e0380e5..cc2f80b22d421d1e0f2062d944e5ade7362feaf8 100644
+index 4c051b6..554d08e 100644
 --- a/ui/src/translations/es.json
 +++ b/ui/src/translations/es.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Fallido"
        }
      },
@@ -116,7 +116,7 @@ index e7af8bfaf38b95df06d156d57b6956cf3e0380e5..cc2f80b22d421d1e0f2062d944e5ade7
      "setup": {
        "login": "Iniciar sesión",
        "login_title": "Iniciar sesión en Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Scopes admitidos",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes anunciados en el documento Protected Resource Metadata de este servidor. Los clientes MCP que cumplen con la especificación limitan su solicitud de autorización a esta lista. Déjelo vacío para omitir el campo y dejar que los clientes utilicen los scopes anunciados por el IdP.",
@@ -127,10 +127,10 @@ index e7af8bfaf38b95df06d156d57b6956cf3e0380e5..cc2f80b22d421d1e0f2062d944e5ade7
        "no_servers": "No se encontraron servidores MCP. Cree su primer servidor para exponer los triggers de la herramienta MCP a agentes de IA externos.",
        "server_id": "ID del servidor",
 diff --git a/ui/src/translations/fr.json b/ui/src/translations/fr.json
-index 1b229eb6932b4fe7a7f3e351b72ca911eff7e34d..d1690243b6968deb46981aa32d1508f6597e9b45 100644
+index e2adc78..4e71591 100644
 --- a/ui/src/translations/fr.json
 +++ b/ui/src/translations/fr.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Échoué"
        }
      },
@@ -150,7 +150,7 @@ index 1b229eb6932b4fe7a7f3e351b72ca911eff7e34d..d1690243b6968deb46981aa32d1508f6
      "setup": {
        "login": "Connexion",
        "login_title": "Connectez-vous à Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Scopes pris en charge",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes annoncés dans le document Protected Resource Metadata de ce serveur. Les clients MCP conformes à la spécification limitent leur requête d'autorisation à cette liste. Laissez vide pour omettre le champ et laisser les clients utiliser les scopes annoncés par l'IdP.",
@@ -161,10 +161,10 @@ index 1b229eb6932b4fe7a7f3e351b72ca911eff7e34d..d1690243b6968deb46981aa32d1508f6
        "no_servers": "Aucun serveur MCP trouvé. Créez votre premier serveur pour exposer les triggers MCP Tool aux agents IA externes.",
        "server_id": "ID du serveur",
 diff --git a/ui/src/translations/hi.json b/ui/src/translations/hi.json
-index 2acbb45e8ef2398c9796a3b57fa6db9bedc37319..31dd181fa5a682966fec7541af51983de91ef007 100644
+index a45a98b..b8fd32f 100644
 --- a/ui/src/translations/hi.json
 +++ b/ui/src/translations/hi.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "विफल"
        }
      },
@@ -184,7 +184,7 @@ index 2acbb45e8ef2398c9796a3b57fa6db9bedc37319..31dd181fa5a682966fec7541af51983d
      "setup": {
        "login": "लॉगिन",
        "login_title": "Kestra में साइन इन करें",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "समर्थित scopes",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "इस सर्वर के Protected Resource Metadata दस्तावेज़ में विज्ञापित scopes। स्पेक-अनुपालक MCP क्लाइंट अपनी प्राधिकरण अनुरोध को इस सूची तक सीमित करते हैं। फ़ील्ड को छोड़ने और क्लाइंट को IdP के विज्ञापित scopes पर वापस जाने देने के लिए खाली छोड़ें।",
@@ -195,10 +195,10 @@ index 2acbb45e8ef2398c9796a3b57fa6db9bedc37319..31dd181fa5a682966fec7541af51983d
        "no_servers": "कोई MCP सर्वर नहीं मिला। बाहरी AI एजेंट्स के लिए MCP Tool triggers को एक्सपोज़ करने के लिए अपना पहला सर्वर बनाएं।",
        "server_id": "सर्वर ID",
 diff --git a/ui/src/translations/it.json b/ui/src/translations/it.json
-index 35cf020cab3be471c260bc26c9666a18b8cfb765..e31ebb63402b479bf8ff2c462d836d8cd4e9fd8f 100644
+index 31d220f..4ea19e1 100644
 --- a/ui/src/translations/it.json
 +++ b/ui/src/translations/it.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Fallito"
        }
      },
@@ -218,7 +218,7 @@ index 35cf020cab3be471c260bc26c9666a18b8cfb765..e31ebb63402b479bf8ff2c462d836d8c
      "setup": {
        "login": "Accedi",
        "login_title": "Accedi a Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Scope supportati",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scope pubblicizzati nel documento Protected Resource Metadata di questo server. I client MCP conformi alle specifiche limitano la richiesta di autorizzazione a questo elenco. Lasciare vuoto per omettere il campo e consentire ai client di utilizzare gli scope pubblicizzati dall'IdP.",
@@ -229,10 +229,10 @@ index 35cf020cab3be471c260bc26c9666a18b8cfb765..e31ebb63402b479bf8ff2c462d836d8c
        "no_servers": "Nessun server MCP trovato. Crea il tuo primo server per esporre i trigger dello strumento MCP agli agenti AI esterni.",
        "server_id": "ID server",
 diff --git a/ui/src/translations/ja.json b/ui/src/translations/ja.json
-index e4c02a37b0888d1b8b9b9024a158a3ad872afca5..1145fe998533f18a2a0ad47d9f3177e7b73814dd 100644
+index 8a41a6e..735ba49 100644
 --- a/ui/src/translations/ja.json
 +++ b/ui/src/translations/ja.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "失敗"
        }
      },
@@ -252,7 +252,7 @@ index e4c02a37b0888d1b8b9b9024a158a3ad872afca5..1145fe998533f18a2a0ad47d9f3177e7
      "setup": {
        "login": "ログイン",
        "login_title": "Kestraにサインイン",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "サポートされているscope",
        "scopes_supported_placeholder": "openid、profile、email",
        "scopes_supported_hint": "このサーバーのProtected Resource Metadataドキュメントに記載されたscope。仕様準拠のMCPクライアントは認可リクエストをこのリストに制限します。フィールドを省略してクライアントがIdPの公開scopeにフォールバックできるよう空のままにしてください。",
@@ -263,10 +263,10 @@ index e4c02a37b0888d1b8b9b9024a158a3ad872afca5..1145fe998533f18a2a0ad47d9f3177e7
        "no_servers": "MCPサーバーが見つかりません。最初のサーバーを作成して、MCP Tool triggerを外部AIエージェントに公開してください。",
        "server_id": "サーバー ID",
 diff --git a/ui/src/translations/ko.json b/ui/src/translations/ko.json
-index 05f854a44012723f62c4823735aa3f6668c3be1f..cbd7f15067a1a6cb906a922887ca15de2f141a60 100644
+index d7b42cf..c51292d 100644
 --- a/ui/src/translations/ko.json
 +++ b/ui/src/translations/ko.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "실패"
        }
      },
@@ -286,7 +286,7 @@ index 05f854a44012723f62c4823735aa3f6668c3be1f..cbd7f15067a1a6cb906a922887ca15de
      "setup": {
        "login": "로그인",
        "login_title": "Kestra에 로그인",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "지원되는 scope",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "이 서버의 Protected Resource Metadata 문서에 공개된 scope. 사양을 준수하는 MCP 클라이언트는 이 목록으로 인증 요청을 제한합니다. 필드를 생략하고 클라이언트가 IdP의 공개 scope로 대체할 수 있도록 비워 두세요.",
@@ -297,10 +297,10 @@ index 05f854a44012723f62c4823735aa3f6668c3be1f..cbd7f15067a1a6cb906a922887ca15de
        "no_servers": "MCP 서버를 찾을 수 없습니다. 외부 AI 에이전트에 MCP Tool trigger를 노출하기 위해 첫 번째 서버를 생성하세요.",
        "server_id": "서버 ID",
 diff --git a/ui/src/translations/pl.json b/ui/src/translations/pl.json
-index 41c9923fa4bde75df456c42d0cb7ed240c6fe78b..346f4f89b66ce73f20c9ec26616d870ce068501c 100644
+index 319a874..e18f65e 100644
 --- a/ui/src/translations/pl.json
 +++ b/ui/src/translations/pl.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Nieudane"
        }
      },
@@ -320,7 +320,7 @@ index 41c9923fa4bde75df456c42d0cb7ed240c6fe78b..346f4f89b66ce73f20c9ec26616d870c
      "setup": {
        "login": "Zaloguj się",
        "login_title": "Zaloguj się do Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Obsługiwane scope'y",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scope'y ogłaszane w dokumencie Protected Resource Metadata tego serwera. Klienty MCP zgodne ze specyfikacją ograniczają swoje żądanie autoryzacji do tej listy. Pozostaw puste, aby pominąć to pole i pozwolić klientom skorzystać ze scope'ów ogłaszanych przez IdP.",
@@ -331,10 +331,10 @@ index 41c9923fa4bde75df456c42d0cb7ed240c6fe78b..346f4f89b66ce73f20c9ec26616d870c
        "no_servers": "Nie znaleziono serwerów MCP. Utwórz swój pierwszy serwer, aby udostępnić Triggery MCP Tool zewnętrznym agentom AI.",
        "server_id": "ID serwera",
 diff --git a/ui/src/translations/pt.json b/ui/src/translations/pt.json
-index ffd94279df144c776262e2abd800e3fdb45d5d7d..e0ba61f03be063142668b32a4f2c5e787df86c5d 100644
+index c59e2d6..06acc07 100644
 --- a/ui/src/translations/pt.json
 +++ b/ui/src/translations/pt.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Falhou"
        }
      },
@@ -354,7 +354,7 @@ index ffd94279df144c776262e2abd800e3fdb45d5d7d..e0ba61f03be063142668b32a4f2c5e78
      "setup": {
        "login": "Login",
        "login_title": "Entrar no Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Scopes suportados",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes anunciados no documento Protected Resource Metadata deste servidor. Clientes MCP conformes com a especificação restringem o pedido de autorização a esta lista. Deixe vazio para omitir o campo e deixar os clientes recorrerem aos scopes anunciados pelo IdP.",
@@ -365,10 +365,10 @@ index ffd94279df144c776262e2abd800e3fdb45d5d7d..e0ba61f03be063142668b32a4f2c5e78
        "no_servers": "Nenhum servidor MCP encontrado. Crie seu primeiro servidor para expor triggers da ferramenta MCP a agentes de IA externos.",
        "server_id": "ID do servidor",
 diff --git a/ui/src/translations/pt_BR.json b/ui/src/translations/pt_BR.json
-index 52271c23b9e7d1e8f3b8d7eee81d2db3c8d77c3c..8c84c2d0b4be47d76572b15cc85f14b8a2b7272a 100644
+index e3cb171..c53e09e 100644
 --- a/ui/src/translations/pt_BR.json
 +++ b/ui/src/translations/pt_BR.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Falhou"
        }
      },
@@ -388,7 +388,7 @@ index 52271c23b9e7d1e8f3b8d7eee81d2db3c8d77c3c..8c84c2d0b4be47d76572b15cc85f14b8
      "setup": {
        "login": "Login",
        "login_title": "Entrar no Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Scopes suportados",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes divulgados no documento Protected Resource Metadata deste servidor. Clientes MCP em conformidade com a especificação restringem sua solicitação de autorização a esta lista. Deixe vazio para omitir o campo e deixar os clientes recorrerem aos scopes divulgados pelo IdP.",
@@ -399,10 +399,10 @@ index 52271c23b9e7d1e8f3b8d7eee81d2db3c8d77c3c..8c84c2d0b4be47d76572b15cc85f14b8
        "no_servers": "Nenhum servidor MCP encontrado. Crie seu primeiro servidor para expor triggers da ferramenta MCP a agentes de IA externos.",
        "server_id": "ID do servidor",
 diff --git a/ui/src/translations/ru.json b/ui/src/translations/ru.json
-index bdc97daa3973442d6bafadabd0a06d20a9719b67..98d2fe6b5b8bcc08375972c4712f596bbea66cbd 100644
+index 1e8c15d..1bc1497 100644
 --- a/ui/src/translations/ru.json
 +++ b/ui/src/translations/ru.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "Ошибка"
        }
      },
@@ -422,7 +422,7 @@ index bdc97daa3973442d6bafadabd0a06d20a9719b67..98d2fe6b5b8bcc08375972c4712f596b
      "setup": {
        "login": "Войти",
        "login_title": "Войти в Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "Поддерживаемые scopes",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "Scopes, объявленные в документе Protected Resource Metadata этого сервера. MCP-клиенты, соответствующие спецификации, ограничивают запрос авторизации этим списком. Оставьте пустым, чтобы пропустить поле и позволить клиентам использовать scopes, объявленные IdP.",
@@ -433,10 +433,10 @@ index bdc97daa3973442d6bafadabd0a06d20a9719b67..98d2fe6b5b8bcc08375972c4712f596b
        "no_servers": "Серверы MCP не найдены. Создайте первый сервер, чтобы предоставить триггеры MCP Tool внешним AI-агентам.",
        "server_id": "ID сервера",
 diff --git a/ui/src/translations/zh_CN.json b/ui/src/translations/zh_CN.json
-index a3e62bd65c7a9ff2ced16062fe9e4fac6d727234..0585f669341bbd73665a7d8a66d63b491e81cc0e 100644
+index e5451db..d47128b 100644
 --- a/ui/src/translations/zh_CN.json
 +++ b/ui/src/translations/zh_CN.json
-@@ -1972,6 +1972,19 @@
+@@ -1999,6 +1999,19 @@
          "failed": "失败"
        }
      },
@@ -456,7 +456,7 @@ index a3e62bd65c7a9ff2ced16062fe9e4fac6d727234..0585f669341bbd73665a7d8a66d63b49
      "setup": {
        "login": "登录",
        "login_title": "登录 Kestra",
-@@ -2305,7 +2318,8 @@
+@@ -2337,7 +2350,8 @@
        "scopes_supported": "支持的 scope",
        "scopes_supported_placeholder": "openid, profile, email",
        "scopes_supported_hint": "此服务器 Protected Resource Metadata 文档中公告的 scope。符合规范的 MCP 客户端将其授权请求限制为此列表。留空以省略该字段，让客户端回退到 IdP 公告的 scope。",

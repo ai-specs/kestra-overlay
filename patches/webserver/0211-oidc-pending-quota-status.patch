@@ -82,4 +82,3 @@ index 0000000..562f2b2
 +        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, controller(broken).register(metadata).getStatus());
 +    }
 +}
-

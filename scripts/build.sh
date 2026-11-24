@@ -68,10 +68,14 @@ python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/tes
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --console=plain)
+(cd "$WORK" && ./gradlew :jdbc:test --tests io.kestra.jdbc.migration.V2_0_11PluginAutoInstallMigrationTest --console=plain)
+python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/jdbc/build/test-results/test" --upstream-migration-only
+(cd "$WORK" && ./gradlew :jdbc-h2:test --tests io.kestra.repository.h2.H2McpSessionRepositoryTest --console=plain)
+python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/jdbc-h2/build/test-results/test" --mcp-repository-only
 
 echo "== build upstream UI assets =="
 (cd "$WORK/ui" && npm ci && npm run translations:check && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/components/flows/useFlowListIdentity.spec.ts src/components/flows/useFlowExecutionCapabilities.spec.ts src/components/flows/useFlowDetailCapabilities.spec.ts tests/unit/stores/dashboardGeneration.spec.ts src/utils/authentication.spec.ts src/utils/authentication-recovery.spec.ts src/oidc-setup-wait.spec.ts src/extensions tests/unit/stores/executionsFollow.spec.ts --reporter=default --reporter=json --outputFile=build/reports/ui-extension-tests.json)
+(cd "$WORK/ui" && npm run test:unit -- src/components/flows/useFlowListIdentity.spec.ts src/components/flows/useFlowExecutionCapabilities.spec.ts src/components/flows/useFlowDetailCapabilities.spec.ts tests/unit/stores/dashboardGeneration.spec.ts src/utils/authentication.spec.ts src/utils/authentication-recovery.spec.ts src/oidc-setup-wait.spec.ts src/extensions tests/unit/stores/executionsFollow.spec.ts --reporter=default --reporter=json --outputFile.json=build/reports/ui-extension-tests.json)
 python3 "$PWD/scripts/check-ui-extension-tests.py" "$WORK/ui/build/reports/ui-extension-tests.json"
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 

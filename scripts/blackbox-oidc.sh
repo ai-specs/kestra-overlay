@@ -21,6 +21,7 @@ K1="kestra-bb-a-$$"
 K2="kestra-bb-b-$$"
 PORT="${BB_PORT:-18080}"
 BASE="http://localhost:${PORT}"
+source "$(dirname "${BASH_SOURCE[0]}")/image-test-postgres.sh"
 T=$(mktemp -d)
 USER="admin@local.test"
 PASS="Admin1234!"
@@ -38,21 +39,30 @@ assert_contains() { # desc needle haystack-file
 }
 
 cleanup() {
+  local cleanup_status=$?
+
   rm -rf "$T"
+  if [ "${BB_PG_ACTIVE:-0}" = 1 ]; then
+    image_pg_resources_cleanup "$RESOURCE_OWNER" "$NET" || cleanup_status=1
+  else
   while read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done < <(docker ps -aq --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r network; do docker network rm "$network" >/dev/null 2>&1 || true; done < <(docker network ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
   while read -r volume; do docker volume rm "$volume" >/dev/null 2>&1 || true; done < <(docker volume ls -q --filter "label=owner=$RESOURCE_OWNER" --filter "label=run=$NET")
+  fi
+  image_pg_cleanup || cleanup_status=1
+  return "$cleanup_status"
 }
 trap cleanup EXIT
+image_pg_init k3str4
 
 conf() { # [oidc-enabled]
   cat <<YAML
 datasources:
   postgres:
-    url: jdbc:postgresql://$PG:5432/kestra
+    url: jdbc:postgresql://$PG:5432/$BB_DB
     driverClassName: org.postgresql.Driver
-    username: kestra
-    password: k3str4
+    username: $BB_DB_USER
+    password: $BB_DB_PASSWORD
 kestra:
   server:
     basic-auth:
@@ -130,13 +140,16 @@ wait_ready() { # container-name
 
 echo "== Phase A: 默认关（vanilla 等价 + UI 保留）=="
 docker network create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$NET" >/dev/null
+if [ "$BB_PG_ACTIVE" = 0 ]; then
 if docker volume inspect "$PG_DATA" >/dev/null 2>&1; then echo 'FAIL: test database volume already exists'; exit 1; fi
 docker volume create --label "owner=$RESOURCE_OWNER" --label "run=$NET" "$PG_DATA" >/dev/null
 docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$PG" --network "$NET" \
   -v "$PG_DATA:/var/lib/postgresql" -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=k3str4 postgres:18 >/dev/null
 for i in $(seq 1 30); do docker exec "$PG" pg_isready -U kestra >/dev/null 2>&1 && break; sleep 2; done
+fi
 
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$K1" --network "$NET" -p "$PORT:8080" \
+
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$K1" --network "$BB_APP_NETWORK" -p "$PORT:8080" \
   -e KESTRA_CONFIGURATION="$(conf)" "$IMAGE" server standalone >/dev/null
 wait_ready "$K1"
 
@@ -150,7 +163,7 @@ assert_contains "UI HTML 包含应用挂载点" 'id="app"' "$T/ui.html"
 docker rm -f "$K1" >/dev/null
 
 echo "== Phase B: kestra.oidc.enabled=true 全链 =="
-docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$K2" --network "$NET" -p "$PORT:8080" \
+docker run -d --label "owner=$RESOURCE_OWNER" --label "run=$NET" --name "$K2" --network "$BB_APP_NETWORK" -p "$PORT:8080" \
   -e KESTRA_OIDC_BOOTSTRAP_USERNAME="$OIDC_USER" -e KESTRA_OIDC_BOOTSTRAP_PASSWORD="$OIDC_PASS" \
   -e KESTRA_OIDC_BOOTSTRAP_EMAIL=tester@local.test -e KESTRA_OIDC_BOOTSTRAP_NAME=Tester \
   -e KESTRA_OIDC_SETUP_ALLOWED=false \

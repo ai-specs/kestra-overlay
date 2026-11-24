@@ -156,6 +156,10 @@ jobs:
             .work/verify/webserver/build/reports/tests/test/
             .work/verify/core/build/test-results/test/*.xml
             .work/verify/core/build/reports/tests/test/
+            .work/verify/jdbc/build/test-results/test/*.xml
+            .work/verify/jdbc/build/reports/tests/test/
+            .work/verify/jdbc-h2/build/test-results/test/*.xml
+            .work/verify/jdbc-h2/build/reports/tests/test/
           include-hidden-files: true
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4

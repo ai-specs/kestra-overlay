@@ -13,6 +13,7 @@ VOLUME="$RUN-pg-data"
 STORAGE="$RUN-storage"
 PORT="${BB_DEPENDENCY_PORT:-18489}"
 BASE="http://localhost:$PORT"
+source "$(dirname "${BASH_SOURCE[0]}")/image-test-postgres.sh"
 # Inventory commands must succeed; a failed inspection never grants cleanup ownership.
 networks="$(docker network ls --format '{{.Name}}')"
 containers="$(docker ps -a --format '{{.Names}}')"
@@ -48,34 +49,38 @@ cleanup() {
  result=$?
  trap - EXIT
  set +e
- for item in "${created_containers[@]}"; do
+ for item in ${created_containers[@]+"${created_containers[@]}"}; do
   if owned_container "$item"; then docker rm -f "$item" >/dev/null || result=1; else result=1; fi
  done
- for item in "${created_networks[@]}"; do
+ for item in ${created_networks[@]+"${created_networks[@]}"}; do
   if owned network "$item"; then docker network rm "$item" >/dev/null || result=1; else result=1; fi
  done
- for item in "${created_volumes[@]}"; do
+ for item in ${created_volumes[@]+"${created_volumes[@]}"}; do
   if owned volume "$item"; then docker volume rm "$item" >/dev/null || result=1; else result=1; fi
  done
+ image_pg_cleanup || result=1
  exit "$result"
 }
 # Only resources successfully created below can enter the cleanup lists.
 trap cleanup EXIT
+image_pg_init local-test-only
 mkdir -p "$(dirname "$REPORT")"
 printf '{"completed":false,"checks":[],"phase":"startup"}\n' > "$REPORT"
 docker network create --label "owner=$OWNER" --label "run=$RUN" "$RUN" >/dev/null
 created_networks+=("$RUN")
 owned network "$RUN"
-docker volume create --label "owner=$OWNER" --label "run=$RUN" "$VOLUME" >/dev/null
-created_volumes+=("$VOLUME")
-owned volume "$VOLUME"
 docker volume create --label "owner=$OWNER" --label "run=$RUN" "$STORAGE" >/dev/null
 created_volumes+=("$STORAGE")
 owned volume "$STORAGE"
+if [ "$BB_PG_ACTIVE" = 0 ]; then
+docker volume create --label "owner=$OWNER" --label "run=$RUN" "$VOLUME" >/dev/null
+created_volumes+=("$VOLUME")
+owned volume "$VOLUME"
 docker run -d --name "$PG" --label "owner=$OWNER" --label "run=$RUN" --network "$RUN" \
  --mount "type=volume,source=$VOLUME,target=/var/lib/postgresql" -e POSTGRES_DB=kestra -e POSTGRES_USER=kestra -e POSTGRES_PASSWORD=local-test-only postgres:18 >/dev/null
 created_containers+=("$PG")
 owned_container "$PG"
+fi
 PG_READY=0
 for attempt in $(seq 1 60); do
  if docker exec "$PG" pg_isready -h 127.0.0.1 -U kestra -d kestra >/dev/null 2>&1 \
@@ -93,10 +98,10 @@ docker exec "$PG" psql -U kestra -d kestra -v ON_ERROR_STOP=1 -c 'CREATE TABLE h
 CONFIG="$(cat <<YAML
 datasources:
   postgres:
-    url: jdbc:postgresql://$PG:5432/kestra
+    url: jdbc:postgresql://$PG:5432/$BB_DB
     driverClassName: org.postgresql.Driver
-    username: kestra
-    password: local-test-only
+    username: $BB_DB_USER
+    password: $BB_DB_PASSWORD
 kestra:
   repository:
     type: postgres
@@ -163,7 +168,7 @@ micronaut:
             jwks-uri: http://localhost:8080/oidc/jwks
 YAML
 )"
-docker run -d --name "$APP" --label "owner=$OWNER" --label "run=$RUN" --network "$RUN" -p "$PORT:8080" \
+docker run -d --name "$APP" --label "owner=$OWNER" --label "run=$RUN" --network "$BB_APP_NETWORK" -p "$PORT:8080" \
  --mount "type=volume,source=$STORAGE,target=/app/storage" -v "$PROBE:/app/libs/kestra-rbac-authorizer.jar:ro" \
  -e KESTRA_CONFIGURATION="$CONFIG" -e KESTRA_OIDC_UI_CLIENT_SECRET=local-ui-secret \
  -e KESTRA_OIDC_BOOTSTRAP_USERNAME=tester -e KESTRA_OIDC_BOOTSTRAP_PASSWORD=Passw0rd! \

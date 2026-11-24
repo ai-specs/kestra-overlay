@@ -2,8 +2,8 @@
 # 消费扩展仓: R-OIDC-SERVER 内置协议层（维护者直接授权）
 # 状态: core
 # 版本接线: REQ-0383保留V1语义，按版本调用独立V2投影；新公开DTO与回归归0383
-# 来源: 可信roles从已验证claims贯穿Authentication/context/factory； 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
-# 触达上游文件: 25 个（详见diff）
+# 来源: v2.0.11上下文适配（保留上游行为）； 可信roles从已验证claims贯穿Authentication/context/factory； 新写；RFC8707/9728/6750 + MCP SDK 1.1.3；不移植客户业务/RBAC角色模型；手工适配生产审计refresh事务修复至需求中间态，剥离后续0170/0190改动；本轮需求边界重建（中间态提交法，稳定钩子与独立测试）
+# 触达上游文件: 24 个（详见diff）
 # 移除条件: 上游 OSS 提供等价能力或 R-OIDC-SERVER 弃用
 diff --git a/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java b/webserver/src/main/java/io/kestra/mcp/DefaultMcpToolAccessControl.java
 index 9903d69..d936d67 100644
@@ -19,13 +19,13 @@ index 9903d69..d936d67 100644
      }
 
 diff --git a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
-index e93c3ee..a044504 100644
+index b17484c..d64bac1 100644
 --- a/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
 +++ b/webserver/src/main/java/io/kestra/mcp/KestraMcpTransportContext.java
-@@ -11,11 +11,15 @@ import lombok.EqualsAndHashCode;
+@@ -13,11 +13,15 @@ import lombok.EqualsAndHashCode;
   */
  @Data
- @Builder
+ @Builder(toBuilder = true)
 -@EqualsAndHashCode(exclude = "userId")
 +@EqualsAndHashCode
  public class KestraMcpTransportContext implements McpTransportContext {
@@ -39,7 +39,7 @@ index e93c3ee..a044504 100644
      private String sessionId;
 
      @Override
-@@ -25,6 +29,10 @@ public class KestraMcpTransportContext implements McpTransportContext {
+@@ -27,6 +31,10 @@ public class KestraMcpTransportContext implements McpTransportContext {
              case "serverId" -> serverId;
              case "sessionId" -> sessionId;
              case "userId" -> userId;

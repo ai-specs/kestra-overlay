@@ -498,7 +498,7 @@ index 0000000..6ea064a
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
 new file mode 100644
-index 0000000..4e94c9d
+index 0000000..b6c00cb
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/AiToolAuthorization.java
 @@ -0,0 +1,244 @@
@@ -567,13 +567,13 @@ index 0000000..4e94c9d
 +        }
 +        if (arguments == null || !arguments.isObject()) throw AiAuthorization.denied();
 +        List<Operation> plan = plan(entry.name(), arguments, context.tenant());
-+        if (entry.name().equals("author-flow")) {
++        if (entry.name().equals("author_flow")) {
 +            authorization.checked(caller, plan, () -> Boolean.TRUE);
 +            Result authored = action.get();
 +            return authorization.checked(caller, plan, () -> authored);
 +        }
 +        Result result = authorization.checked(caller, plan, () -> scoped(caller, plan, () -> {
-+            if (entry.name().equals("restart-execution")) checkRestartDependencies(caller, arguments);
++            if (entry.name().equals("restart_execution")) checkRestartDependencies(caller, arguments);
 +            return action.get();
 +        }));
 +        List<Operation> returned = resultPlan(entry.name(), context.tenant(), plan, result);
@@ -645,28 +645,28 @@ index 0000000..4e94c9d
 +    private List<Operation> resultPlan(String name, String tenant, List<Operation> plan, Object result) {
 +        Object value = result instanceof ToolExecutionResult executed ? executed.result() : result;
 +        var operations = new ArrayList<>(plan);
-+        if (name.equals("list-flows")) {
++        if (name.equals("list_flows")) {
 +            if (!(value instanceof ListFlowsTool.Result flows) || flows.flows() == null) throw AiAuthorization.denied();
 +            for (var flow : flows.flows())
 +                operations.add(single(Resource.FLOW, Action.READ, tenant, flow.namespace(), flow.id(), SideEffect.READ_ONLY));
-+        } else if (name.equals("list-executions")) {
++        } else if (name.equals("list_executions")) {
 +            if (!(value instanceof ListExecutionsTool.Result executions) || executions.executions() == null)
 +                throw AiAuthorization.denied();
 +            for (var execution : executions.executions())
 +                operations.add(single(Resource.EXECUTION, Action.READ, tenant, execution.namespace(), execution.id(), SideEffect.READ_ONLY));
-+        } else if (name.equals("read-flow")) {
++        } else if (name.equals("read_flow")) {
 +            if (!(value instanceof ReadFlowTool.Result flow)) throw AiAuthorization.denied();
 +            sameResource(plan.getFirst(), flow.namespace(), flow.id());
 +            operations.add(single(Resource.FLOW, Action.READ, tenant, flow.namespace(), flow.id(), SideEffect.READ_ONLY));
-+        } else if (name.equals("read-execution")) {
++        } else if (name.equals("read_execution")) {
 +            if (!(value instanceof ReadExecutionTool.Result execution)) throw AiAuthorization.denied();
 +            sameResource(plan.getFirst(), execution.namespace(), execution.id());
 +            operations.add(single(Resource.EXECUTION, Action.READ, tenant, execution.namespace(), execution.id(), SideEffect.READ_ONLY));
-+        } else if (name.equals("read-execution-logs")) {
++        } else if (name.equals("read_execution_logs")) {
 +            if (!(value instanceof ReadExecutionLogsTool.Result logs)
 +                || !Objects.equals(plan.getFirst().resourceId(), logs.executionId())) throw AiAuthorization.denied();
 +            operations.add(single(Resource.LOG, Action.READ, tenant, plan.getFirst().namespace(), logs.executionId(), SideEffect.READ_ONLY));
-+        } else if (name.equals("restart-execution")) {
++        } else if (name.equals("restart_execution")) {
 +            if (!(value instanceof RestartExecutionTool.Result restart)
 +                || !Objects.equals(plan.getFirst().resourceId(), restart.executionId())) throw AiAuthorization.denied();
 +        }
@@ -680,14 +680,14 @@ index 0000000..4e94c9d
 +
 +    private List<Operation> plan(String name, JsonNode arguments, String tenant) {
 +        return switch (name) {
-+            case "list-flows" -> List.of(query(Resource.FLOW, tenant, arguments));
-+            case "list-executions" -> List.of(query(Resource.EXECUTION, tenant, arguments));
-+            case "read-flow" -> List.of(single(Resource.FLOW, Action.READ, tenant,
++            case "list_flows" -> List.of(query(Resource.FLOW, tenant, arguments));
++            case "list_executions" -> List.of(query(Resource.EXECUTION, tenant, arguments));
++            case "read_flow" -> List.of(single(Resource.FLOW, Action.READ, tenant,
 +                text(arguments, "namespace"), text(arguments, "flowId"), SideEffect.READ_ONLY));
-+            case "read-execution", "read-execution-logs", "restart-execution" -> executionPlan(name, arguments, tenant);
-+            case "search-plugins", "get-plugin-schema" -> List.of(single(Resource.METADATA, Action.READ,
++            case "read_execution", "read_execution_logs", "restart_execution" -> executionPlan(name, arguments, tenant);
++            case "search_plugins", "get_plugin_schema" -> List.of(single(Resource.METADATA, Action.READ,
 +                tenant, null, null, SideEffect.READ_ONLY));
-+            case "validate-flow", "author-flow" -> List.of(single(Resource.METADATA, Action.READ, tenant, null, null, SideEffect.READ_ONLY));
++            case "validate_flow", "author_flow" -> List.of(single(Resource.METADATA, Action.READ, tenant, null, null, SideEffect.READ_ONLY));
 +            default -> throw AiAuthorization.denied();
 +        };
 +    }
@@ -699,12 +699,12 @@ index 0000000..4e94c9d
 +        if (!tenant.equals(actualTenant)
 +            || !id.equals(execution.getId()) || execution.getNamespace() == null) throw AiAuthorization.denied();
 +        String namespace = execution.getNamespace();
-+        if (name.equals("read-execution-logs")) {
++        if (name.equals("read_execution_logs")) {
 +            return List.of(single(Resource.LOG, Action.READ, tenant, namespace, id, SideEffect.READ_ONLY));
 +        }
 +        var operations = new ArrayList<Operation>();
 +        operations.add(single(Resource.EXECUTION, Action.READ, tenant, namespace, id, SideEffect.READ_ONLY));
-+        if (name.equals("restart-execution")) {
++        if (name.equals("restart_execution")) {
 +            String flowId = execution.getFlowId();
 +            if (flowId == null || flowId.isBlank()) throw AiAuthorization.denied();
 +            operations.add(single(Resource.EXECUTION, Action.UPDATE, tenant, namespace, id, SideEffect.QUEUE_WRITE));
@@ -856,7 +856,7 @@ index a1a78e5..a6797f5 100644
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java
-index edd6b13..51caf1a 100644
+index d711fe7..5432265 100644
 --- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java
 +++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/AuthorFlowTool.java
 @@ -1,9 +1,22 @@
@@ -1079,7 +1079,7 @@ index edd6b13..51caf1a 100644
      private String validate(final String tenant, final String yaml) {
          List<ValidateConstraintViolation> violations = flowService.validate(tenant, List.of(new FlowSource(null, yaml)));
 diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
-index 10b0228..42b2a28 100644
+index 982586a..4b8426c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
 +++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
 @@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
@@ -1112,42 +1112,53 @@ index 10b0228..42b2a28 100644
   * {@code @Tool}/{@code @P} annotations, {@link #toolMethod} resolves the annotated method up the class
   * hierarchy — the spec comes from the annotated method while execution dispatches virtually to the
   * override.
-@@ -60,9 +63,11 @@ public class ToolCatalog {
-     private final DocsMcpToolProvider docsMcpToolProvider;
+@@ -61,20 +64,38 @@ public class ToolCatalog {
      private final AgentToolPermissionEvaluator permissionEvaluator;
+     private final AgentToolCallScope callScope;
 
 +    private final AiToolAuthorization toolAuthorization;
 +
      private volatile Map<String, ToolEntry> registry;
 
--    @Inject
-+    /** Manual construction supports catalog inspection; dispatch requires the explicit authorization adapter. */
-     public ToolCatalog(
-         final List<AiPlatformTool> platformTools,
-         final List<AiAuthoringTool> authoringTools,
-@@ -72,6 +77,21 @@ public class ToolCatalog {
-         this.authoringTools = authoringTools;
-         this.docsMcpToolProvider = docsMcpToolProvider;
-         this.permissionEvaluator = permissionEvaluator;
-+        this.toolAuthorization = null;
-+    }
-+
-+    @Inject
-+    public ToolCatalog(
-+        final List<AiPlatformTool> platformTools,
-+        final List<AiAuthoringTool> authoringTools,
-+        final DocsMcpToolProvider docsMcpToolProvider,
-+        final AgentToolPermissionEvaluator permissionEvaluator,
-+        final AiToolAuthorization toolAuthorization) {
++    /** Manual construction supports inspection only; dispatch requires authorization. */
++    public ToolCatalog(List<AiPlatformTool> platformTools, List<AiAuthoringTool> authoringTools,
++        DocsMcpToolProvider docsMcpToolProvider, AgentToolPermissionEvaluator permissionEvaluator) {
 +        this.platformTools = platformTools;
 +        this.authoringTools = authoringTools;
 +        this.docsMcpToolProvider = docsMcpToolProvider;
 +        this.permissionEvaluator = permissionEvaluator;
++        this.callScope = new DefaultAgentToolCallScope();
++        this.toolAuthorization = null;
++    }
++
++    public ToolCatalog(List<AiPlatformTool> platformTools, List<AiAuthoringTool> authoringTools,
++        DocsMcpToolProvider docsMcpToolProvider, AgentToolPermissionEvaluator permissionEvaluator,
++        AiToolAuthorization toolAuthorization) {
++        this(platformTools, authoringTools, docsMcpToolProvider, permissionEvaluator,
++            toolAuthorization, new DefaultAgentToolCallScope());
++    }
++
+     @Inject
+-    public ToolCatalog(
+-        final List<AiPlatformTool> platformTools,
+-        final List<AiAuthoringTool> authoringTools,
+-        final DocsMcpToolProvider docsMcpToolProvider,
+-        final AgentToolPermissionEvaluator permissionEvaluator,
+-        final AgentToolCallScope callScope) {
++    public ToolCatalog(List<AiPlatformTool> platformTools, List<AiAuthoringTool> authoringTools,
++        DocsMcpToolProvider docsMcpToolProvider, AgentToolPermissionEvaluator permissionEvaluator,
++        AiToolAuthorization toolAuthorization, AgentToolCallScope callScope) {
+         this.platformTools = platformTools;
+         this.authoringTools = authoringTools;
+         this.docsMcpToolProvider = docsMcpToolProvider;
+         this.permissionEvaluator = permissionEvaluator;
+-        this.callScope = callScope;
 +        this.toolAuthorization = Objects.requireNonNull(toolAuthorization, "AI tool authorization adapter is required");
++        this.callScope = Objects.requireNonNull(callScope, "AI tool call scope is required");
      }
 
      public record ToolEntry(
-@@ -82,7 +102,7 @@ public class ToolCatalog {
+@@ -85,7 +106,7 @@ public class ToolCatalog {
          @Nullable AgentToolFamily family,
          AgentWritePolicy writePolicy,
          @Nullable AiTool tool) {
@@ -1156,7 +1167,7 @@ index 10b0228..42b2a28 100644
          public boolean isPermissionEvaluated() {
              return tool != null;
          }
-@@ -111,7 +131,7 @@ public class ToolCatalog {
+@@ -114,7 +135,7 @@ public class ToolCatalog {
                  register(built, tool, AgentToolCall.Kind.AUTHORING, null, AgentWritePolicy.AUTO);
              }
 
@@ -1165,15 +1176,19 @@ index 10b0228..42b2a28 100644
              docsMcpToolProvider.tools().forEach(
                  (spec, executor) -> built.put(
                      spec.name(), new ToolEntry(
-@@ -186,7 +206,10 @@ public class ToolCatalog {
+@@ -189,10 +210,11 @@ public class ToolCatalog {
 
          // Carry the caller context to the @Tool method as a langchain4j managed argument — the executor
          // injects it by type into the tool's AgentCallContext.Context parameter — not a thread-local.
--        ToolExecutionResult executed = entry.executor().executeWithContext(stripEmptyOptionalArgs(entry, request), AgentCallContext.into(context));
+-        ToolExecutionResult executed = callScope.call(
+-            context,
+-            () -> entry.executor().executeWithContext(stripEmptyOptionalArgs(entry, request), AgentCallContext.into(context))
+-        );
 +        ToolExecutionRequest effectiveRequest = stripEmptyOptionalArgs(entry, request);
 +        if (toolAuthorization == null) throw AiAuthorization.denied();
 +        ToolExecutionResult executed = toolAuthorization.checked(entry, effectiveRequest, context,
-+            () -> entry.executor().executeWithContext(effectiveRequest, AgentCallContext.into(context)));
++            () -> callScope.call(context,
++                () -> entry.executor().executeWithContext(effectiveRequest, AgentCallContext.into(context))));
          // A tool's single output is its return value; if that value is publishable, the caller (the
          // orchestrator) persists and streams the artefact — the tool never reaches back through a side channel.
          ArtefactDraft artefact = executed.result() instanceof PublishableToolResult publishable ? publishable.artefact() : null;
@@ -1912,7 +1927,7 @@ index 0000000..a3e83a9
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationHttpTest.java
 new file mode 100644
-index 0000000..ccb9575
+index 0000000..2825b3f
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorizationHttpTest.java
 @@ -0,0 +1,326 @@
@@ -2047,7 +2062,7 @@ index 0000000..ccb9575
 +        }
 +        String thread = create("alice");
 +        model.responses.add(AiMessage.from("", List.of(ToolExecutionRequest.builder()
-+            .id("list-1").name("list-flows").arguments("{}").build())));
++            .id("list-1").name("list_flows").arguments("{}").build())));
 +        model.responses.add(AiMessage.from("Only the permitted flows are listed."));
 +        HttpResponse<String> response = send("POST", BASE + "/" + thread + "/chat", "alice", chat());
 +        assertThat(response.statusCode()).isEqualTo(200);
@@ -2105,7 +2120,7 @@ index 0000000..ccb9575
 +            assertThat(policy.toolOperations.get()).isZero();
 +            assertThat(messages.load("main", thread)).noneMatch(message -> message.type() == AgentMessageType.TOOL_CALL);
 +            model.pending.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from("", List.of(
-+                ToolExecutionRequest.builder().id("late-list").name("list-flows").arguments("{}").build()))).build());
++                ToolExecutionRequest.builder().id("late-list").name("list_flows").arguments("{}").build()))).build());
 +            assertThat(policy.toolOperations.get()).isZero();
 +            assertThat(model.calls.get()).isEqualTo(1);
 +            awaitBalanced();
@@ -2428,7 +2443,7 @@ index 0000000..f0bf8b5
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java
 new file mode 100644
-index 0000000..fed6d82
+index 0000000..3800584
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java
 @@ -0,0 +1,396 @@
@@ -2520,7 +2535,7 @@ index 0000000..fed6d82
 +
 +    @Test
 +    void shouldAuthorizeMetadataInFreshBoundariesBeforeAndAfterAction() {
-+        assertThat(call("search-plugins", "{}", this::action)).isEqualTo("result");
++        assertThat(call("search_plugins", "{}", this::action)).isEqualTo("result");
 +        assertThat(boundaries.get()).isEqualTo(2);
 +        assertThat(actions.get()).isEqualTo(1);
 +        assertThat(seen).allMatch(operation -> operation.resource() == Resource.METADATA && operation.action() == Action.READ);
@@ -2529,7 +2544,7 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldNotRunActionWhenPolicyDenies() {
 +        policy = operation -> Decision.deny("revoked");
-+        assertThatThrownBy(() -> call("get-plugin-schema", "{}", this::action)).hasMessageContaining("AI authorization denied");
++        assertThatThrownBy(() -> call("get_plugin_schema", "{}", this::action)).hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +    }
 +
@@ -2544,7 +2559,7 @@ index 0000000..fed6d82
 +
 +    @Test
 +    void shouldBindSafeValidationScopeForDraftAndValidationTools() {
-+        for (String name : List.of("validate-flow")) {
++        for (String name : List.of("validate_flow")) {
 +            assertThat(call(name, "{}", () -> {
 +                assertThat(PropagatedContext.getOrEmpty().find(io.kestra.core.repositories.AuthorizationValidationContext.class)).isPresent();
 +                return "validated";
@@ -2572,13 +2587,13 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldKeepNamespaceAndIdCorrelatedForSingleFlow() {
 +        policy = operation -> Decision.allow(idScope("team.a", "flow-a"));
-+        assertThat(call("read-flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-a\"}", () -> {
++        assertThat(call("read_flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-a\"}", () -> {
 +            actions.incrementAndGet();
 +            return new ReadFlowTool.Result("team.a", "flow-a", 1, "source");
 +        }).source()).isEqualTo("source");
-+        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-b\"}", this::action))
++        assertThatThrownBy(() -> call("read_flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-b\"}", this::action))
 +            .hasMessageContaining("AI authorization denied");
-+        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"team.b\",\"flowId\":\"flow-a\"}", this::action))
++        assertThatThrownBy(() -> call("read_flow", "{\"namespace\":\"team.b\",\"flowId\":\"flow-a\"}", this::action))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isEqualTo(1);
 +    }
@@ -2586,13 +2601,13 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldBindDecisionDomainBeforeRepositoryActionAndCheckReturnedRows() {
 +        policy = operation -> Decision.allow(idScope("team.a", "flow-a"));
-+        var result = call("list-flows", "{\"NAMESPACE\":{\"operator\":\"EQUALS\",\"value\":\"team.a\"}}", () -> {
++        var result = call("list_flows", "{\"NAMESPACE\":{\"operator\":\"EQUALS\",\"value\":\"team.a\"}}", () -> {
 +            var reference = PropagatedContext.getOrEmpty().find(AuthorizationQueryContext.class).orElseThrow();
 +            var domain = (TypedDashboardGate.DatasourceDomain) reference.reference();
 +            assertThat(domain.domain().resourceAllowed("team.a", "flow-a")).isTrue();
 +            assertThat(domain.domain().resourceAllowed("team.a", "flow-b")).isFalse();
 +            assertThat(domain.domain().resourceAllowed("team.b", "flow-a")).isFalse();
-+            return new ListFlowsTool.Result(List.of(new ListFlowsTool.FlowSummary("team.a", "flow-a", "allowed")));
++            return new ListFlowsTool.Result(List.of(new ListFlowsTool.FlowSummary("team.a", "flow-a", "allowed")), 1);
 +        });
 +        assertThat(result.flows()).hasSize(1);
 +        assertThat(seen).anyMatch(operation -> operation.coverage() == Coverage.COMPLETE_QUERY && operation.queryDomain().paginated());
@@ -2601,7 +2616,7 @@ index 0000000..fed6d82
 +
 +    @Test
 +    void shouldRejectResultWhenPermissionRevokedAfterAction() {
-+        assertThatThrownBy(() -> call("search-plugins", "{}", () -> {
++        assertThatThrownBy(() -> call("search_plugins", "{}", () -> {
 +            policy = operation -> Decision.deny("revoked");
 +            return action();
 +        })).hasMessageContaining("AI authorization denied");
@@ -2612,7 +2627,7 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldResolveActualExecutionOwnerAndRequireAllRestartWrites() {
 +        owner("main", "team.actual", "exec");
-+        assertThat(call("restart-execution", "{\"executionId\":\"exec\",\"namespace\":\"spoofed\",\"revision\":2}", this::restartAction).executionId())
++        assertThat(call("restart_execution", "{\"executionId\":\"exec\",\"namespace\":\"spoofed\",\"revision\":2}", this::restartAction).executionId())
 +            .isEqualTo("exec");
 +        assertThat(seen).allMatch(operation -> "team.actual".equals(operation.namespace()));
 +        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.EXECUTION && operation.action() == Action.UPDATE
@@ -2626,7 +2641,7 @@ index 0000000..fed6d82
 +    void shouldNeverRunRestartWhenUpdateDeniedDespiteReadPermission() {
 +        owner("main", "team.a", "exec");
 +        policy = operation -> operation.action() == Action.UPDATE ? Decision.deny("read only") : Decision.allow(operation.queryDomain());
-+        assertThatThrownBy(() -> call("restart-execution", "{\"executionId\":\"exec\"}", this::action))
++        assertThatThrownBy(() -> call("restart_execution", "{\"executionId\":\"exec\"}", this::action))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +    }
@@ -2634,7 +2649,7 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldDenyExecutionOwnerOutsideCallerTenant() {
 +        owner("other", "team.a", "exec");
-+        assertThatThrownBy(() -> call("read-execution", "{\"executionId\":\"exec\"}", this::action))
++        assertThatThrownBy(() -> call("read_execution", "{\"executionId\":\"exec\"}", this::action))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +    }
@@ -2642,7 +2657,7 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldUseLogReadOfActualExecutionWithoutGrantingExecutionUpdate() {
 +        owner(null, "team.a", "exec");
-+        call("read-execution-logs", "{\"executionId\":\"exec\"}", () -> new ReadExecutionLogsTool.Result("exec", List.of()));
++        call("read_execution_logs", "{\"executionId\":\"exec\"}", () -> new ReadExecutionLogsTool.Result("exec", List.of()));
 +        assertThat(seen).allMatch(operation -> operation.resource() == Resource.LOG && operation.action() == Action.READ
 +            && "exec".equals(operation.resourceId()) && "team.a".equals(operation.namespace()));
 +    }
@@ -2651,9 +2666,9 @@ index 0000000..fed6d82
 +    void shouldRequireExecutionCreateOnlyForExplicitRestartRevision() {
 +        owner("main", "team.a", "exec");
 +        policy = operation -> operation.action() == Action.CREATE ? Decision.deny("no create") : Decision.allow(operation.queryDomain());
-+        call("restart-execution", "{\"executionId\":\"exec\"}", this::restartAction);
++        call("restart_execution", "{\"executionId\":\"exec\"}", this::restartAction);
 +        assertThat(seen).noneMatch(operation -> operation.action() == Action.CREATE);
-+        assertThatThrownBy(() -> call("restart-execution", "{\"executionId\":\"exec\",\"revision\":2}", this::action))
++        assertThatThrownBy(() -> call("restart_execution", "{\"executionId\":\"exec\",\"revision\":2}", this::action))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isEqualTo(1);
 +    }
@@ -2663,8 +2678,8 @@ index 0000000..fed6d82
 +        owner("main", "team.a", "exec");
 +        var adapter = adapter(true);
 +        doReturn(Optional.empty()).when(adapter.flowMetaStore).findByExecutionForRuntime(any());
-+        assertThatThrownBy(() -> adapter.checked(entry("restart-execution", false),
-+            request("restart-execution", "{\"executionId\":\"exec\"}"), context, this::restartAction))
++        assertThatThrownBy(() -> adapter.checked(entry("restart_execution", false),
++            request("restart_execution", "{\"executionId\":\"exec\"}"), context, this::restartAction))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +        verifyNoInteractions(adapter.executionGate);
@@ -2678,8 +2693,8 @@ index 0000000..fed6d82
 +            io.kestra.core.runners.ProcessedFlow.of(io.kestra.core.models.flows.FlowWithSource.of(
 +                io.kestra.core.models.flows.Flow.builder().tenantId("main").namespace("team.a").id("flow")
 +                    .revision(3).tasks(List.of()).build(), "")))).when(adapter.flowMetaStore).findByIdForRuntime(any(), any(), any(), any());
-+        assertThatThrownBy(() -> adapter.checked(entry("restart-execution", false),
-+            request("restart-execution", "{\"executionId\":\"exec\",\"revision\":2}"), context, this::restartAction))
++        assertThatThrownBy(() -> adapter.checked(entry("restart_execution", false),
++            request("restart_execution", "{\"executionId\":\"exec\",\"revision\":2}"), context, this::restartAction))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +    }
@@ -2689,16 +2704,16 @@ index 0000000..fed6d82
 +        owner("main", "team.a", "exec");
 +        var adapter = adapter(true);
 +        when(adapter.executionGate.dependencies(any(), anyString(), any(), anyString())).thenReturn(Mono.just(false));
-+        assertThatThrownBy(() -> adapter.checked(entry("restart-execution", false),
-+            request("restart-execution", "{\"executionId\":\"exec\"}"), context, this::restartAction))
++        assertThatThrownBy(() -> adapter.checked(entry("restart_execution", false),
++            request("restart_execution", "{\"executionId\":\"exec\"}"), context, this::restartAction))
 +            .hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +    }
 +
 +    @Test
 +    void shouldPlanExecutionListsAsQueriesAndAuthorizeReturnedExecutionIds() {
-+        var result = call("list-executions", "{}", () -> new ListExecutionsTool.Result(List.of(
-+            new ListExecutionsTool.ExecutionSummary("exec", "team.a", "flow", "FAILED", "today", null))));
++        var result = call("list_executions", "{}", () -> new ListExecutionsTool.Result(List.of(
++            new ListExecutionsTool.ExecutionSummary("exec", "team.a", "flow", "FAILED", "today", null)), 1));
 +        assertThat(result.executions()).hasSize(1);
 +        assertThat(seen).anyMatch(operation -> operation.resource() == Resource.EXECUTION
 +            && operation.action() == Action.LIST && operation.coverage() == Coverage.COMPLETE_QUERY);
@@ -2709,23 +2724,23 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldNotReturnListRowsOutsideAuthorizedResourceIds() {
 +        policy = operation -> Decision.allow(idScope("team.a", "flow-a"));
-+        assertThatThrownBy(() -> call("list-flows", "{}", () -> new ListFlowsTool.Result(List.of(
-+            new ListFlowsTool.FlowSummary("team.a", "flow-b", "outside")))))
++        assertThatThrownBy(() -> call("list_flows", "{}", () -> new ListFlowsTool.Result(List.of(
++            new ListFlowsTool.FlowSummary("team.a", "flow-b", "outside")), 1)))
 +            .hasMessageContaining("AI authorization denied");
 +    }
 +
 +    @Test
 +    void shouldRejectInvalidNamespaceAndArgumentsBeforeAction() {
-+        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"bad namespace\",\"flowId\":\"flow\"}", this::action))
++        assertThatThrownBy(() -> call("read_flow", "{\"namespace\":\"bad namespace\",\"flowId\":\"flow\"}", this::action))
 +            .isInstanceOf(IllegalArgumentException.class);
-+        assertThatThrownBy(() -> call("read-flow", "[]", this::action)).hasMessageContaining("AI authorization denied");
++        assertThatThrownBy(() -> call("read_flow", "[]", this::action)).hasMessageContaining("AI authorization denied");
 +        assertThat(actions.get()).isZero();
 +    }
 +
 +    @Test
 +    void shouldReauthorizeActualReadExecutionResultInNewBoundary() {
 +        owner("main", "team.a", "exec");
-+        var result = call("read-execution", "{\"executionId\":\"exec\"}", () ->
++        var result = call("read_execution", "{\"executionId\":\"exec\"}", () ->
 +            new ReadExecutionTool.Result("exec", "team.a", "flow", "FAILED", "today", null, List.of()));
 +        assertThat(result.id()).isEqualTo("exec");
 +        assertThat(boundaries.get()).isEqualTo(2);
@@ -2736,10 +2751,10 @@ index 0000000..fed6d82
 +    @Test
 +    void shouldNeverReturnSingleReadWhoseActualNamespaceOrIdDiffersFromPlan() {
 +        owner("main", "team.a", "exec");
-+        assertThatThrownBy(() -> call("read-execution", "{\"executionId\":\"exec\"}", () ->
++        assertThatThrownBy(() -> call("read_execution", "{\"executionId\":\"exec\"}", () ->
 +            new ReadExecutionTool.Result("other", "team.b", "flow", "FAILED", "today", null, List.of())))
 +            .hasMessageContaining("AI authorization denied");
-+        assertThatThrownBy(() -> call("read-flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-a\"}", () ->
++        assertThatThrownBy(() -> call("read_flow", "{\"namespace\":\"team.a\",\"flowId\":\"flow-a\"}", () ->
 +            new ReadFlowTool.Result("team.b", "flow-a", 1, "outside")))
 +            .hasMessageContaining("AI authorization denied");
 +    }
@@ -3248,7 +3263,7 @@ index 0000000..fdea2be
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
-index 5907d7a..c2b7f91 100644
+index 5d644e4..e4d7fb1 100644
 --- a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
 @@ -5,6 +5,12 @@ import java.util.Map;
@@ -3268,8 +3283,8 @@ index 5907d7a..c2b7f91 100644
          // how a replacement subclass extends a base tool
          DocsMcpToolProvider docs = mock(DocsMcpToolProvider.class);
          when(docs.tools()).thenReturn(Map.of());
--        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL);
-+        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, disabledAuthorization());
+-        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, new DefaultAgentToolCallScope());
++        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, disabledAuthorization(), new DefaultAgentToolCallScope());
          ToolExecutionRequest request = ToolExecutionRequest.builder().id("c1").name("tenant-echo").arguments("{}").build();
 
          // When — the spec is derived from the inherited @Tool method, execution dispatches virtually
@@ -3277,9 +3292,9 @@ index 5907d7a..c2b7f91 100644
      private static ToolCatalog newCatalog(final AgentToolPermissionEvaluator evaluator) {
          DocsMcpToolProvider docs = mock(DocsMcpToolProvider.class);
          when(docs.tools()).thenReturn(Map.of());
--        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator);
+-        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator, new DefaultAgentToolCallScope());
 +        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator,
-+            disabledAuthorization());
++            disabledAuthorization(), new DefaultAgentToolCallScope());
 +    }
 +
 +    private static AiToolAuthorization disabledAuthorization() {

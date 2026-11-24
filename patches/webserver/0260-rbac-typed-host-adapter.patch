@@ -1,11 +1,11 @@
 # 需求: REQ-0260 宿主解析当前 OSS 操作并在查询及副作用前消费 typed policy
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
 # 状态: core
-# 来源: 新写；现有 REST resolver 迫使扩展复制上游路由，dashboard fetchData 绕过 namespace ACL
+# 来源: v2.0.11上下文适配（保留上游行为）； 新写；现有 REST resolver 迫使扩展复制上游路由，dashboard fetchData 绕过 namespace ACL
 # 触达上游文件: 23 个（宿主适配、查询 ACL、精确资源读取、dashboard 与自身探针）
 # 移除条件: 上游 OSS 提供等价宿主 typed operation 适配与查询授权执行入口
 diff --git a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
-index f1d9fc873d1305227f25a726fafde2ed649dd1e1..6a59e4a09b3972c97519b003b147835081c44830 100644
+index f1d9fc8..6a59e4a 100644
 --- a/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 +++ b/core/src/main/java/io/kestra/core/repositories/NamespaceAccessControl.java
 @@ -39,4 +39,56 @@ resourceDomains(resource).stream().noneMatch(term -> term.idScope() == ResourceD
@@ -66,7 +66,7 @@ index f1d9fc873d1305227f25a726fafde2ed649dd1e1..6a59e4a09b3972c97519b003b1478350
 +    }
  }
 diff --git a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
-index 4b7bfe444f34c5d02488114e2b56b14690aead3a..cb863211fde9ac7254767410704ff072f071b7e4 100644
+index 4b7bfe4..cb86321 100644
 --- a/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
 +++ b/core/src/main/java/io/kestra/core/repositories/log/LogDataStoreAccessControl.java
 @@ -30,6 +30,10 @@ public interface LogDataStoreAccessControl {
@@ -81,7 +81,7 @@ index 4b7bfe444f34c5d02488114e2b56b14690aead3a..cb863211fde9ac7254767410704ff072
       * Invoked before a {@code deleteByQuery(tenantId, executionId, taskId, taskRunId, minLevel, attempt)}.
       * Default no-op; EE publishes an audit event.
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java
-index b3d2ee64e41c4840a9cbd3506ed08fcc513247cf..a7b3699ce67990c1e3dc8a1e0e01e0e75b16fa08 100644
+index e94011a..594e521 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcExecutionRepository.java
 @@ -564,7 +564,7 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcCrudRe
@@ -94,10 +94,10 @@ index b3d2ee64e41c4840a9cbd3506ed08fcc513247cf..a7b3699ce67990c1e3dc8a1e0e01e0e7
                  List<? extends ColumnDescriptor<Executions.Fields>> columnsWithoutDateWithOutAggs = columnsWithoutDate.values().stream()
                      .filter(column -> column.getAgg() == null)
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java
-index eeb38133784c50759bf00cef0016e0ee157fc719..17e2422266f457d956b12ae8491d2fca57ef62ee 100644
+index 64c23bf..ad5f32c 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcFlowRepository.java
-@@ -143,7 +143,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+@@ -145,7 +145,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
                      integer -> context
                          .select(VALUE_FIELD, NAMESPACE_FIELD, TENANT_ID_FIELD)
                          .from(jdbcRepository.getTable())
@@ -106,7 +106,7 @@ index eeb38133784c50759bf00cef0016e0ee157fc719..17e2422266f457d956b12ae8491d2fca
                          .and(NAMESPACE_FIELD.eq(namespace))
                          .and(field("id", String.class).eq(id))
                          .and(
-@@ -153,7 +153,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+@@ -155,7 +155,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
                      () -> context
                          .select(VALUE_FIELD, NAMESPACE_FIELD, TENANT_ID_FIELD)
                          .from(fromLastRevision(true))
@@ -115,7 +115,7 @@ index eeb38133784c50759bf00cef0016e0ee157fc719..17e2422266f457d956b12ae8491d2fca
                          .and(NAMESPACE_FIELD.eq(namespace))
                          .and(field("id", String.class).eq(id))
                  );
-@@ -209,6 +209,11 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+@@ -211,6 +211,11 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
          return super.defaultFilter(tenantId, allowDeleted).and(aclCondition(Resource.FLOW));
      }
 
@@ -127,7 +127,7 @@ index eeb38133784c50759bf00cef0016e0ee157fc719..17e2422266f457d956b12ae8491d2fca
      // "executable" filtering stays independent of read-ACL and is scoped by the EXECUTION grant instead,
      // since users with execute-but-not-read permission are exactly who these two methods serve.
      protected Condition defaultExecutionFilter(String tenantId) {
-@@ -232,7 +237,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+@@ -234,7 +239,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
                              TENANT_ID_FIELD
                          )
                          .from(jdbcRepository.getTable())
@@ -136,7 +136,7 @@ index eeb38133784c50759bf00cef0016e0ee157fc719..17e2422266f457d956b12ae8491d2fca
                          .and(NAMESPACE_FIELD.eq(namespace))
                          .and(field("id", String.class).eq(id))
                          .and(REVISION_FIELD.eq(integer))
-@@ -246,7 +251,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
+@@ -248,7 +253,7 @@ public abstract class AbstractJdbcFlowRepository extends AbstractJdbcRepository
                                  TENANT_ID_FIELD
                              )
                              .from(fromLastRevision(true))
@@ -146,7 +146,7 @@ index eeb38133784c50759bf00cef0016e0ee157fc719..17e2422266f457d956b12ae8491d2fca
                              .and(field("id", String.class).eq(id))
                      );
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
-index 5ee14ab542692d89137699d66bebcf5c3eef009d..450a7a701678763dde1d1704ebf0af43e4d1d832 100644
+index e588159..b31a6a8 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcLogDataStore.java
 @@ -565,7 +565,8 @@ public abstract class AbstractJdbcLogDataStore extends AbstractJdbcCrudRepositor
@@ -178,7 +178,7 @@ index 5ee14ab542692d89137699d66bebcf5c3eef009d..450a7a701678763dde1d1704ebf0af43
 
      @Override
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
-index 03cfa03..9abd08c 100644
+index 89bc874..ff93e8a 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcRepository.java
 @@ -114,9 +114,11 @@ public abstract class AbstractJdbcRepository {
@@ -234,7 +234,7 @@ index 03cfa03..9abd08c 100644
 
      protected Condition buildTenantCondition(String tenantId) {
 diff --git a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java
-index b64e71c6071f6cd6e0322a0f2bb8cc70fe002976..b1bd77eebe0c71f295e62d278bdaa1d6ed6d8ea1 100644
+index 0c77fb2..97a2674 100644
 --- a/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java
 +++ b/jdbc/src/main/java/io/kestra/jdbc/repository/AbstractJdbcTriggerRepository.java
 @@ -233,7 +233,8 @@ public abstract class AbstractJdbcTriggerRepository extends AbstractJdbcCrudRepo
@@ -248,7 +248,7 @@ index b64e71c6071f6cd6e0322a0f2bb8cc70fe002976..b1bd77eebe0c71f295e62d278bdaa1d6
                  List<? extends ColumnDescriptor<Triggers.Fields>> columnsWithoutDateWithOutAggs = columnsWithoutDate.values().stream()
                      .filter(column -> column.getAgg() == null)
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
-index 6b5a77a00534866ceaef8af0ae498883dd7c210c..5d5262fc2fe02211a33afbd0cd817d291ed2e708 100644
+index 6b5a77a..5d5262f 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/DashboardController.java
 @@ -96,6 +96,9 @@ public class DashboardController {
@@ -270,10 +270,10 @@ index 6b5a77a00534866ceaef8af0ae498883dd7c210c..5d5262fc2fe02211a33afbd0cd817d29
                  if (optionalFlow.isPresent()) {
                      Flow flow = optionalFlow.get();
 diff --git a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java
-index 8981235cd7911bea1107ed3f1a3b57aa0b9b7474..3a53b9da3ec742d1fab5d26f6bd0d2817061cb4c 100644
+index e8b695b..edd5bd3 100644
 --- a/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java
 +++ b/webserver/src/main/java/io/kestra/webserver/controllers/api/NamespaceFileController.java
-@@ -171,7 +171,7 @@ public class NamespaceFileController {
+@@ -169,7 +169,7 @@ public class NamespaceFileController {
          Path dirPath = Path.of(Optional.ofNullable(encodedPath).map(URI::getPath).orElse("/"));
 
          if (dirPath.toString().equals("/") && !namespaceStorage.exists(dirPath)) {
@@ -283,7 +283,7 @@ index 8981235cd7911bea1107ed3f1a3b57aa0b9b7474..3a53b9da3ec742d1fab5d26f6bd0d281
              throw new FileNotFoundException("Directory not found: " + dirPath);
          }
 diff --git a/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java b/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java
-index c88846e1aebb5bbeabb917870e40bc396846ad1a..04c81ba855e5ec0180244763c4ea34b2a4ae87c0 100644
+index c88846e..04c81ba 100644
 --- a/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java
 +++ b/webserver/src/main/java/io/kestra/webserver/converters/QueryFilterFormatBinder.java
 @@ -45,7 +45,7 @@ public class QueryFilterFormatBinder implements AnnotatedRequestArgumentBinder<Q
@@ -297,7 +297,7 @@ index c88846e1aebb5bbeabb917870e40bc396846ad1a..04c81ba855e5ec0180244763c4ea34b2
              String key = entry.getKey();
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..2afcd6bd05124830d7a63c5d1aeb089439c055dc
+index 0000000..2afcd6b
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/OssRestOperationAdapter.java
 @@ -0,0 +1,297 @@
@@ -599,7 +599,7 @@ index 0000000000000000000000000000000000000000..2afcd6bd05124830d7a63c5d1aeb0894
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
-index 78087d1477d66c920ecc960187dca51acb3df36b..94880596c227cdf30c4a46c1c37d20deaa3d78e6 100644
+index 78087d1..9488059 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RbacGate.java
 @@ -8,7 +8,16 @@ import reactor.core.publisher.Mono;
@@ -651,7 +651,7 @@ index 78087d1477d66c920ecc960187dca51acb3df36b..94880596c227cdf30c4a46c1c37d20de
          return completeQuery && resource != null && resource.kind() != null && resource.scope() == RbacAuthorizer.Scope.TENANT
              && resource.tenant() != null && !resource.tenant().isBlank() && resource.namespace() == null && resource.id() == null
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
-index b5a1560b55eab73d1cc98d2ebbbc35af5467a8f4..5ab134c58b0067ad037f2897026a491a38ccf34f 100644
+index b5a1560..5ab134c 100644
 --- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
 @@ -20,6 +20,7 @@ import reactor.core.publisher.Mono;
@@ -673,7 +673,7 @@ index b5a1560b55eab73d1cc98d2ebbbc35af5467a8f4..5ab134c58b0067ad037f2897026a491a
          var route = RouteAttributes.getRouteMatch(request).orElse(null);
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c2f9bc0c6666cdeb8d8c122d27212ec47654188
+index 0000000..5c2f9bc
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedDashboardGate.java
 @@ -0,0 +1,100 @@
@@ -779,7 +779,7 @@ index 0000000000000000000000000000000000000000..5c2f9bc0c6666cdeb8d8c122d27212ec
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..aac1cd4a25208d61a6bbdd2153d1d64d676b3899
+index 0000000..aac1cd4
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedLogAccessControl.java
 @@ -0,0 +1,32 @@
@@ -817,7 +817,7 @@ index 0000000000000000000000000000000000000000..aac1cd4a25208d61a6bbdd2153d1d64d
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..c36a540201f67a7d8717de3518d50c48083aaaee
+index 0000000..c36a540
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
 @@ -0,0 +1,187 @@
@@ -1010,7 +1010,7 @@ index 0000000000000000000000000000000000000000..c36a540201f67a7d8717de3518d50c48
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..dca24ae5ac21e6a731268180a1765e245dbfe7cd
+index 0000000..dca24ae
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedQueryDomains.java
 @@ -0,0 +1,36 @@
@@ -1052,7 +1052,7 @@ index 0000000000000000000000000000000000000000..dca24ae5ac21e6a731268180a1765e24
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..06722d6e5213068b5b30305901ee07cdb32c2304
+index 0000000..06722d6
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
 @@ -0,0 +1,86 @@
@@ -1144,7 +1144,7 @@ index 0000000000000000000000000000000000000000..06722d6e5213068b5b30305901ee07cd
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5a35ea78b32ad493ded2692196fb60deac7427d
+index 0000000..f5a35ea
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/OssRestOperationAdapterTest.java
 @@ -0,0 +1,81 @@
@@ -1230,7 +1230,7 @@ index 0000000000000000000000000000000000000000..f5a35ea78b32ad493ded2692196fb60d
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
-index a283c12b2ba830713186eb4e811989cf579afc0a..573776d6980021092276ced804aaa32c3dc02518 100644
+index a283c12..573776d 100644
 --- a/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/RbacHttpProbeTest.java
 @@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
@@ -1243,7 +1243,7 @@ index a283c12b2ba830713186eb4e811989cf579afc0a..573776d6980021092276ced804aaa32c
      @Test void realNettyGatePreservesBodyAndClosesUnknownAndAnonymousWebhook() throws Exception {
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardGateTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardGateTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..889dc238e966d43ba91dab76079fae8ea7e7a62c
+index 0000000..889dc23
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedDashboardGateTest.java
 @@ -0,0 +1,49 @@
@@ -1298,7 +1298,7 @@ index 0000000000000000000000000000000000000000..889dc238e966d43ba91dab76079fae8e
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedQueryDomainsTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedQueryDomainsTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..855a530b26f1db0b56a66a519a57558804a79143
+index 0000000..855a530
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedQueryDomainsTest.java
 @@ -0,0 +1,28 @@
@@ -1332,7 +1332,7 @@ index 0000000000000000000000000000000000000000..855a530b26f1db0b56a66a519a575588
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea4a75d1a870f74e660f333407c782cffb523018
+index 0000000..ea4a75d
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/rbac/TypedRbacHttpProbeTest.java
 @@ -0,0 +1,82 @@

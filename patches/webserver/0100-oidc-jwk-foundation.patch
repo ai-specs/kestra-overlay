@@ -13,7 +13,7 @@
 #   OidcJwkService（新增）；测试 OidcJwkServiceTest/OidcPostgresTestBase。
 # 移除条件：上游提供原生 OIDC 授权服务器（预期不会）；或 R-OIDC-SERVER 弃用
 diff --git a/webserver/build.gradle b/webserver/build.gradle
-index 783392931d8df2c067b8ece107bae19da9a213a5..a524496e8e9de5c3c74abf039b3315db5570f054 100644
+index 7833929..a524496 100644
 --- a/webserver/build.gradle
 +++ b/webserver/build.gradle
 @@ -23,6 +23,13 @@ dependencies {
@@ -43,7 +43,7 @@ index 783392931d8df2c067b8ece107bae19da9a213a5..a524496e8e9de5c3c74abf039b3315db
 
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..a99fae51e9dd7b0673306a17c8f812eb31742953
+index 0000000..a99fae5
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/migration/V2_0_90OidcServerJwkMigration.java
 @@ -0,0 +1,52 @@
@@ -101,7 +101,7 @@ index 0000000000000000000000000000000000000000..a99fae51e9dd7b0673306a17c8f812eb
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..536fa0ba15960c34836fa2f84a26f76f4a15b8a2
+index 0000000..536fa0b
 --- /dev/null
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcJwkService.java
 @@ -0,0 +1,162 @@
@@ -269,7 +269,7 @@ index 0000000000000000000000000000000000000000..536fa0ba15960c34836fa2f84a26f76f
 +}
 diff --git a/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql b/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4d32e2ab4a7e710f20ce086794cb7ccb4727643
+index 0000000..e4d32e2
 --- /dev/null
 +++ b/webserver/src/main/resources/migrations/2.0.90-oidc-server-jwk-postgres.sql
 @@ -0,0 +1,17 @@
@@ -292,7 +292,7 @@ index 0000000000000000000000000000000000000000..e4d32e2ab4a7e710f20ce086794cb7cc
 +);
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..3477b651080561cbaf5d2c6c9a9f1c52b7a700ab
+index 0000000..3477b65
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcJwkServiceTest.java
 @@ -0,0 +1,107 @@
@@ -405,7 +405,7 @@ index 0000000000000000000000000000000000000000..3477b651080561cbaf5d2c6c9a9f1c52
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..3262778ed4442625d42e6168599ca1002991045b
+index 0000000..3262778
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/OidcPostgresTestBase.java
 @@ -0,0 +1,169 @@
