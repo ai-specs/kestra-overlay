@@ -203,7 +203,10 @@ fi
         self.existing()
         result = self.run_shell('''image_pg_init original
 trap image_pg_cleanup EXIT
-test "$(stat -f %Lp "$BB_PG_SECRET_DIR/pg.env" 2>/dev/null || stat -c %a "$BB_PG_SECRET_DIR/pg.env")" = 600
+python3 - "$BB_PG_SECRET_DIR/pg.env" <<'PERMISSIONS'
+import os, stat, sys
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600
+PERMISSIONS
 test "$BB_DB" = "$BB_DB_USER"
 test "$BB_DB_PASSWORD" != original
 docker exec "$PG" psql -U kestra -d kestra -Atc 'SELECT 1'
@@ -222,6 +225,17 @@ if docker rm -f own-app "$PG"; then exit 99; fi
         self.assertIn('-i', calls[1]['args'])
         self.assertFalse(any(e['args'][0] == 'rm' for e in state['events']))
         self.assertNotIn('PASSWORD=', json.dumps(state))
+
+    def test_credentials_permissions_ignore_gnu_stat_stdout(self):
+        # GNU stat -f prints filesystem data before failing on the BSD-only format.
+        fake_stat = self.directory / 'stat'
+        fake_stat.write_text("#!/bin/sh\nif [ \"$1\" = -f ]; then\n  printf 'File: pg.env\\nType: ext2/ext3\\n'\n  exit 1\nfi\nprintf '600\\n'\n")
+        fake_stat.chmod(0o700)
+        reproduction = subprocess.run(
+            ['bash', '-c', 'test "$(stat -f %Lp ignored 2>/dev/null || stat -c %a ignored)" = 600'],
+            env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(reproduction.returncode, 0)
+        self.test_credentials_sql_mapping_stdin_and_cleanup()
 
     def test_create_failures_only_drop_successful_creates(self):
         self.existing()
