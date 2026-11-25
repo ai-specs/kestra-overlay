@@ -1,11 +1,19 @@
-## 2026-11-24 上游 v2.0.11 升级候选（未发布）
+## 上游 v2.0.11 正式发布
 
-当前源码 BASE 已移至 v2.0.11 / `dde805a27d7c636732f181dc1eab906330e6f7c9`。
-这是候选输入，不是正式镜像声明。升级前正式基线为 `434955d`，成功 CI `45104521508`；
-其所含 0407、typed V2、首装与 UI 机制已经发布。下方带日期的旧“候选未发布”段落
-仅记录各能力当时状态，不得据此否认该正式基线，也不得证明本次升级已交付。
-本次升级流程、影响评估脚本及 AI 任务模板见 [上游升级规则](docs/upstream-upgrade-agent.md)。
-宿主正式发布、扩展正式编译与部署组合验收必须按顺序分别取得证据。
+当前 BASE 为 v2.0.11 / `dde805a27d7c636732f181dc1eab906330e6f7c9`。
+宿主提交 `1d50c01a29b11186c29c07105c3d9c24b3762a96` 的 CI `45407070627`
+已成功，镜像已推广：
+
+```text
+ghcr.io/ai-specs/kestra-overlay@sha256:05917c8f72777ab9f9fb01f106d33db344ff9d01435a3cd836b7c7a037c447e1
+```
+
+正式报告已下载核对；双架构 provenance 的 completeness=false 限制保留。
+本节为当前发布状态。下方带日期的候选段落只记录历史，不是当前部署指令。
+独立扩展仍须自行取得正式宿主输入并通过自身发布门；部署组合由部署仓验证。
+升级工具与交付前文档检查见 [上游升级规则](docs/upstream-upgrade-agent.md)。
+
+## 历史能力记录
 
 2026-11-23 REQ-0407 候选（未发布）：MCP 后台工具刷新显式隔离队列连接、事务和请求
 授权上下文。真实 Micronaut/H2 红复现确认原实现跨 boundedElastic 复用调用方 Connection；
@@ -118,7 +126,7 @@ beforeNavigate只有明确true允许离开，异常/abort失败关闭；安全�
 这是面向第三方独立扩展项目的 Kestra 增强镜像。
 本文说明如何部署镜像、接入 OIDC、接入 MCP，以及挂载扩展。
 
-当前镜像基于 **Kestra OSS v2.0.5**，提供后端引擎、API、Web UI、内置 OAuth2/OIDC
+当前镜像基于 **Kestra OSS v2.0.11**，提供后端引擎、API、Web UI、内置 OAuth2/OIDC
 及 OAuth2-only MCP。`no-plugins` 变体不预装插件或外部扩展 jar，由部署方控制插件集。
 
 | 你的使用场景 | 从哪里开始 |
@@ -142,7 +150,7 @@ UI 登录、刷新和退出都使用 OIDC。
 
 ```bash
 echo $GITHUB_TOKEN | docker login ghcr.io -u <github-username> --password-stdin
-docker pull ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+docker pull ghcr.io/ai-specs/kestra-overlay@sha256:05917c8f72777ab9f9fb01f106d33db344ff9d01435a3cd836b7c7a037c447e1
 ```
 
 `GITHUB_TOKEN` 需要 `read:packages` 权限（GitHub → Settings → Developer settings →
@@ -183,7 +191,7 @@ services:
       retries: 10
 
   kestra:
-    image: ghcr.io/ai-specs/kestra-overlay:v2.0.5-no-plugins
+    image: ghcr.io/ai-specs/kestra-overlay@sha256:05917c8f72777ab9f9fb01f106d33db344ff9d01435a3cd836b7c7a037c447e1
     command: server standalone
     depends_on:
       postgres:
