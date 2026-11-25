@@ -64,7 +64,9 @@ python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/tes
   --tests io.kestra.mcp.McpCallDiagnosticTest --tests io.kestra.mcp.McpAsyncIdentityContextTest --tests io.kestra.mcp.McpBackgroundRefreshContextTest --tests 'io.kestra.webserver.ui.*' \
   --tests io.kestra.webserver.controllers.api.AiAgentControllerTest --tests io.kestra.webserver.controllers.api.AiOutputLifecycleTest \
   --tests io.kestra.webserver.controllers.api.AiTurnSchedulingTest --tests io.kestra.webserver.services.ai.agent.AiModeLifecycleTest \
-  --tests io.kestra.webserver.services.ai.agent.tool.ToolCatalogTest --console=plain)
+  --tests io.kestra.webserver.services.ai.agent.tool.ToolCatalogTest \
+  --tests io.kestra.webserver.services.ai.agent.tool.ToolResultBudgetTest \
+  --tests io.kestra.webserver.services.ai.agent.internals.ToolResultLimitTest --console=plain)
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --console=plain)
@@ -74,8 +76,9 @@ python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/jdbc/build/test
 python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/jdbc-h2/build/test-results/test" --mcp-repository-only
 
 echo "== build upstream UI assets =="
+bash "$PWD/scripts/run-upgrade-security-tests.sh" "$WORK" "$WORK/upgrade-security-tests"
 (cd "$WORK/ui" && npm ci && npm run translations:check && npm run build)
-(cd "$WORK/ui" && npm run test:unit -- src/components/flows/useFlowListIdentity.spec.ts src/components/flows/useFlowExecutionCapabilities.spec.ts src/components/flows/useFlowDetailCapabilities.spec.ts tests/unit/stores/dashboardGeneration.spec.ts src/utils/authentication.spec.ts src/utils/authentication-recovery.spec.ts src/oidc-setup-wait.spec.ts src/extensions tests/unit/stores/executionsFollow.spec.ts --reporter=default --reporter=json --outputFile.json=build/reports/ui-extension-tests.json)
+(cd "$WORK/ui" && npm run test:unit -- src/components/flows/useFlowListIdentity.spec.ts src/components/flows/useFlowExecutionCapabilities.spec.ts src/components/flows/useFlowDetailCapabilities.spec.ts tests/unit/stores/dashboardGeneration.spec.ts src/utils/authentication.spec.ts src/utils/authentication-recovery.spec.ts src/oidc-setup-wait.spec.ts src/extensions tests/unit/stores/executionsFollow.spec.ts tests/unit/stores/playgroundReadyToStart.spec.ts tests/unit/stores/playgroundReuse.spec.ts --reporter=default --reporter=json --outputFile.json=build/reports/ui-extension-tests.json)
 python3 "$PWD/scripts/check-ui-extension-tests.py" "$WORK/ui/build/reports/ui-extension-tests.json"
 test -s "$WORK/webserver/src/main/resources/ui/index.html"
 

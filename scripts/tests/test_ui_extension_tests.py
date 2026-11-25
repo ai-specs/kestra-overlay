@@ -25,7 +25,10 @@ class UiExtensionReportTest(unittest.TestCase):
             GATE.check(self.report())
 
     def test_requires_exact_added_shadow_tests(self):
-        self.assertEqual(sum(GATE.REQUIRED.values()), 154)
+        self.assertEqual(sum(GATE.REQUIRED.values()), 160)
+        self.assertEqual(sum(size for filename, size in GATE.REQUIRED.items()
+                             if filename not in {"tests/unit/stores/playgroundReadyToStart.spec.ts",
+                                                 "tests/unit/stores/playgroundReuse.spec.ts"}), 154)
         self.assertEqual(GATE.REQUIRED["src/components/flows/useFlowListIdentity.spec.ts"], 9)
         self.assertEqual(GATE.REQUIRED["src/components/flows/useFlowExecutionCapabilities.spec.ts"], 4)
         self.assertEqual(GATE.REQUIRED["src/components/flows/useFlowDetailCapabilities.spec.ts"], 8)
@@ -45,6 +48,21 @@ class UiExtensionReportTest(unittest.TestCase):
             mutation(report["testResults"])
             with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
                 GATE.check(report)
+
+    def test_requires_complete_playground_regressions(self):
+        for filename, expected in (("tests/unit/stores/playgroundReadyToStart.spec.ts", 4),
+                                   ("tests/unit/stores/playgroundReuse.spec.ts", 2)):
+            self.assertEqual(GATE.REQUIRED[filename], expected)
+            for mutation in ("missing", "skipped"):
+                with self.subTest(filename=filename, mutation=mutation):
+                    report = self.report()
+                    suite = next(item for item in report["testResults"] if item["name"].endswith(filename))
+                    if mutation == "missing":
+                        report["testResults"].remove(suite)
+                    else:
+                        suite["assertionResults"][0]["status"] = "pending"
+                    with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                        GATE.check(report)
 
     def test_rejects_skipped_assertion_even_when_totals_claim_success(self):
         report = self.report()

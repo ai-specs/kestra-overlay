@@ -1,6 +1,22 @@
-## 上游 v2.0.11 正式发布
+## 上游 v2.0.13 升级与发布入口
 
-当前 BASE 为 v2.0.11 / `dde805a27d7c636732f181dc1eab906330e6f7c9`。
+当前源码 BASE 为 v2.0.13 / `61da533e0754fcdd6c69cc2ae598dc9e72a0ccfe`。
+源码升级不等于正式发布。只有对应最终提交的全部必需 CI、镜像推广及报告审计成功后，
+该提交的镜像才可作为独立扩展的正式编译输入。正式镜像 digest 从该次成功 workflow 的
+发布产物取得，由消费仓固定；本机候选 tag 不可替代正式产物。
+
+本次保留全部 63 个需求补丁。认证入口保留上游 tenant guard，扩展菜单与路由保留上游
+AI 开关，AI 工具派发同时执行既有授权与上游新增结果预算检查。宿主 UI 精确单元门为
+160 项：原 154 项及 Playground readyToStart/reuse 新增 6 项，不减少原断言。
+工具结果预算的新增拒绝回归进入后端精确门。Playground 的生产交互仍须在正式模式
+A/B 中实际验证，不以源码包含或单元通过宣布缺陷修复。
+
+部署顺序保持正式宿主→独立插件→部署组合；固定基础镜像仍由 `patches/IMAGE_BASE`
+单独约束。升级工具与交付前文档检查见 [上游升级规则](docs/upstream-upgrade-agent.md)。
+
+## 历史 v2.0.11 发布记录
+
+以下为 v2.0.11 / `dde805a27d7c636732f181dc1eab906330e6f7c9` 的历史发布证据。
 宿主提交 `1d50c01a29b11186c29c07105c3d9c24b3762a96` 的 CI `45407070627`
 已成功，镜像已推广：
 
@@ -9,7 +25,7 @@ ghcr.io/ai-specs/kestra-overlay@sha256:05917c8f72777ab9f9fb01f106d33db344ff9d014
 ```
 
 正式报告已下载核对；双架构 provenance 的 completeness=false 限制保留。
-本节为当前发布状态。下方带日期的候选段落只记录历史，不是当前部署指令。
+本节及下方带日期的候选段落只记录历史，不是 v2.0.13 的发布或部署指令。
 独立扩展仍须自行取得正式宿主输入并通过自身发布门；部署组合由部署仓验证。
 升级工具与交付前文档检查见 [上游升级规则](docs/upstream-upgrade-agent.md)。
 
@@ -129,7 +145,7 @@ beforeNavigate只有明确true允许离开，异常/abort失败关闭；安全�
 这是面向第三方独立扩展项目的 Kestra 增强镜像。
 本文说明如何部署镜像、接入 OIDC、接入 MCP，以及挂载扩展。
 
-当前镜像基于 **Kestra OSS v2.0.11**，提供后端引擎、API、Web UI、内置 OAuth2/OIDC
+本分支构建目标基于 **Kestra OSS v2.0.13**，提供后端引擎、API、Web UI、内置 OAuth2/OIDC
 及 OAuth2-only MCP。`no-plugins` 变体不预装插件或外部扩展 jar，由部署方控制插件集。
 
 | 你的使用场景 | 从哪里开始 |
@@ -153,12 +169,15 @@ UI 登录、刷新和退出都使用 OIDC。
 
 ```bash
 echo $GITHUB_TOKEN | docker login ghcr.io -u <github-username> --password-stdin
-docker pull ghcr.io/ai-specs/kestra-overlay@sha256:05917c8f72777ab9f9fb01f106d33db344ff9d01435a3cd836b7c7a037c447e1
+docker pull "${KESTRA_IMAGE:?Set the verified published overlay image digest}"
 ```
 
 `GITHUB_TOKEN` 需要 `read:packages` 权限（GitHub → Settings → Developer settings →
 Personal access tokens → Fine-grained / Classic 均可）。无凭据匿名拉取会被拒绝（403），
 这是预期行为。
+
+`KESTRA_IMAGE` 必须是最终提交成功发布产物中的完整镜像 digest，由部署方固定。
+不得从上方历史发布记录推断 v2.0.13 已发布，也不得使用本地候选作为正式插件输入。
 
 **访问模型**：本仓库与 GHCR 包同为私有且互相关联——能读到本 README 的 GitHub 账号
 （仓库协作者）即拥有镜像拉取权限，用自己的 PAT 登录即可，无需单独申请凭据。
@@ -194,7 +213,7 @@ services:
       retries: 10
 
   kestra:
-    image: ghcr.io/ai-specs/kestra-overlay@sha256:05917c8f72777ab9f9fb01f106d33db344ff9d01435a3cd836b7c7a037c447e1
+    image: "${KESTRA_IMAGE:?Set the verified published overlay image digest}"
     command: server standalone
     depends_on:
       postgres:
@@ -300,7 +319,7 @@ volumes:
 
 ### 首次安装：网页引导或环境变量
 
-**首个账号参与者候选（REQ-0390，2026-11-03，未发布）**：启用 RBAC 与应用组模式时，
+**首个账号事务参与者（REQ-0390）**：启用 RBAC 与应用组模式时，
 真正空安装要求唯一 `io.kestra.webserver.oidc.OidcInitialAccountParticipantV1`。
 宿主在标准账号写入前调用 `initialize(Connection, InitialAccount)`；上下文仅含
 issuer、installationId、configuredLoginClientId、subject。扩展用借用连接建立自己的
@@ -312,14 +331,14 @@ issuer、installationId、configuredLoginClientId、subject。扩展用借用连
 已经装载。补放后由部署方执行 `docker compose restart kestra`，页面退避等待服务恢复
 并重新取得 CSRF；正常带 jar 启动首装无需重启。页面不保存密码或自动重新提交。
 应用组模式自动为配置的 UI OAuth2 client 追加 selector，保留显式其他 scopes，不改变
-外部 client 或模式 A；下方手工 scopes 示例仍可使用，但本候选不再要求手工追加。
+外部 client 或模式 A；下方手工 scopes 示例仍可使用，不要求手工追加。
 
 锁顺序：协议安全锁 → 首装锁 → 扩展目录/策略锁 → 标准身份行锁；READ_COMMITTED。
 receipt 在所有数据库写入成功后、commit 前创建。创建前确认回滚的失败可以重新提交；
 部分文件、损坏或提交结果未知仍锁存，不自动删凭据。非英文文案已按维护者本轮例外
 直接编写，并通过完整翻译检查；中英共用浏览器21项实际文案与交互已通过。对应提交CI
-及正式发布仍未完成。本轮完整local-ci已封存，新候选镜像门正在验证；CI与正式发布
-完成前，候选不能作为插件正式编译输入。见能力文档同日接收节。
+及正式发布状态必须按所选版本核对；历史本地门不代表 v2.0.13 已发布。正式镜像
+推广前，本地候选不能作为插件正式编译输入。见能力文档同日接收节。
 
 首次引导使用双凭据：数据库安装身份与 `/app/storage/.oidc-installation`
 共同决定状态，删除单一标记不能重新开放；异常失败关闭。凭据卷须持久化。
@@ -672,7 +691,7 @@ subject 等于当前不可修改的登录名；没有改名或物理删除接口
 
 当已认证账号获准访问某扩展、但没有业务配置权限时，宿主使用独立扩展壳层提供语言、
 主题、获准扩展导航和退出。拒绝页面提供相同的获准扩展入口；返回普通宿主页面仍须
-通过其业务权限。此 REQ-0368 行为为当前未发布候选，正式使用须选择通过完整发布门的
+通过其业务权限。此 REQ-0368 行为的正式使用须选择通过完整发布门的
 对应镜像。配置获准的扩展继续使用完整宿主布局，不改变业务 API 权限。
 
 REQ-0340 的源码和本地测试已存在，正式使用必须选择包含该契约且通过全部发布门的
@@ -897,7 +916,7 @@ CLI 已从正式64c4498移除，不提供兼容转发。该版本的协议契约
 身份和 tenant，并返回 `AuthorizationEvaluationV1` 句柄。实际应用权限由扩展自己的策略
 决定，不能从 OAuth 协议 scope、角色名称、描述或权限元数据副本推断。
 
-候选开关必须合并到完整 OIDC 配置，不能替代数据库、issuer、凭据、回调和安全过滤配置：
+以下开关必须合并到完整 OIDC 配置，不能替代数据库、issuer、凭据、回调和安全过滤配置：
 
 ```yaml
 kestra:
@@ -1009,7 +1028,7 @@ UI GET 后，登录 callback 返回同源原路径并保留 query；无书签仍
 此机制不授予目标页面权限，返回后仍执行正常授权。
 
 
-### Flow 列表有限执行能力（REQ-0404a 候选，未发布）
+### Flow 列表有限执行能力（REQ-0404a）
 
 本机制只覆盖原生 Flow 列表的末次执行日期、状态和每行执行统计，不代表完整 Flow
 详情页及其 Overview、Logs、Metrics、Triggers、Concurrency 已支持细粒度显示。
@@ -1040,7 +1059,7 @@ AVAILABLE只表示可以尝试经过授权执行ID域过滤的该Flow查询，�
 故障都能区分成503。完整发布、宿主独立真实浏览器门及部署仓生产验收之前不得计为交付。
 
 
-### Flow 详情有限能力（REQ-0404b，已接收候选、未发布）
+### Flow 详情有限能力（REQ-0404b）
 
 只覆盖原生固定默认 Overview 及已分类运行 tab 的读取。模式 B 保留原生 10 卡，
 移除 execution search total 对整页的挂载前置；描述、执行统计、日志统计及触发器统计
@@ -1075,13 +1094,13 @@ LOG/TRIGGER受限ID查询尚无消费者适配，保持失败关闭，不丢限�
 宿主独立CI新增 `native-flow-detail-browser` artifact，要求37项（21行为、16主题/语言/
 宽度）具名计划全过、零失败/跳过/未运行，完整诊断、readiness/runId/sourceHash、输入
 摘要与源码快照可独立核对；失败也上传。测试transport明确不代表生产身份或数据库验收。
-本候选仍须完整本地门、正式CI和镜像发布，再由部署仓消费正式产物验证生产流程。
+所选版本必须通过完整本地门、正式 CI 和镜像发布，再由部署仓消费正式产物验证生产流程。
 
 ## 上游版本升级与本地镜像验收
 
 固定源码与产物、逐补丁裁决、AI 升级任务模板和发布门见
 [上游升级规则](docs/upstream-upgrade-agent.md)。评估脚本只生成调查输入，不代表兼容。
-本次 v2.0.11 候选已通过完整本地门及候选镜像门，正式 CI/推广仍须完成。
+本次 v2.0.13 必须独立通过完整本地门、候选镜像门及最终正式 CI/推广；历史结果不继承。
 
 本地已有 PostgreSQL 时，四个镜像门支持显式隔离模式，避免停止用户服务或另起数据库：
 

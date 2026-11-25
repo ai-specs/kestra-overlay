@@ -169,7 +169,13 @@ def assess(overlay, source, target, output, target_commit=None):
                "交付顺序：先正式 host 的 CI 与镜像 digest，再由 plugin 使用正式宿主独立构建发布，"
                "最后 root 部署仓固定组合验收。最终报告审计源码提交、对象/标签、补丁和产物哈希、"
                "镜像 digest、完整门结果、失败与跳过、备份恢复证据和剩余限制；不得用候选或历史门"
-               "代替对应最终输入的证据。\n")
+               "代替对应最终输入的证据。\n\n"
+               "停止前必须执行 docs/upstream-upgrade-agent.md 的交付前文档时效性门："
+               "核对 README、部署命令、manifest 和机制文档的版本及发布状态，历史候选明确标识。"
+               "先收敛文档再冻结发布提交；精确部署 gitlink 必须对应成功发布 CI，不能借用父提交。"
+               "已知缺陷以目标版本真实交互验证，不以指定提交包含关系或修复代码形态代替。"
+               "下次升级的旧正式部署基线由 root 主控固定为升级前已发布组合，不能继续沿用更早版本。"
+               "监控命令退出或网络 EOF 不代表 CI 失败，必须回读远端运行状态后再裁决。\n")
     (output / 'ai-summary.md').write_text(summary)
     return report
 

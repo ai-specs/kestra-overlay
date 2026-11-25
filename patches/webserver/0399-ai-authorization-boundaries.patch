@@ -24,10 +24,10 @@ index 0000000..ec47230
 +    }
 +}
 diff --git a/core/src/main/java/io/kestra/core/services/FlowService.java b/core/src/main/java/io/kestra/core/services/FlowService.java
-index 19e2a98..d37f55c 100644
+index 7e520d7..dd85d3e 100644
 --- a/core/src/main/java/io/kestra/core/services/FlowService.java
 +++ b/core/src/main/java/io/kestra/core/services/FlowService.java
-@@ -473,6 +473,7 @@ public class FlowService {
+@@ -476,6 +476,7 @@ public class FlowService {
 
                  Integer sentRevision = flow.getRevision();
                  if (sentRevision != null) {
@@ -35,7 +35,7 @@ index 19e2a98..d37f55c 100644
                      Integer lastRevision = Optional.ofNullable(flowRepository.lastRevision(tenantId, flow.getNamespace(), flow.getId())).orElse(0);
                      constraintsBuilder.outdated(!sentRevision.equals(lastRevision + 1));
                  }
-@@ -683,6 +684,7 @@ public class FlowService {
+@@ -686,6 +687,7 @@ public class FlowService {
                  // those fields are mandatory so the mandatory validation will apply
                  return;
              }
@@ -43,7 +43,7 @@ index 19e2a98..d37f55c 100644
              Optional<Flow> optional = findById(tenantId, subflow.getNamespace(), subflow.getFlowId());
 
              if (optional.isEmpty()) {
-@@ -728,6 +730,27 @@ public class FlowService {
+@@ -731,6 +733,27 @@ public class FlowService {
              return Optional.empty();
          }
 
@@ -1079,7 +1079,7 @@ index d711fe7..5432265 100644
      private String validate(final String tenant, final String yaml) {
          List<ValidateConstraintViolation> violations = flowService.validate(tenant, List.of(new FlowSource(null, yaml)));
 diff --git a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
-index 982586a..4b8426c 100644
+index e683d1f..bf5ad5f 100644
 --- a/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
 +++ b/webserver/src/main/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalog.java
 @@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
@@ -1112,9 +1112,9 @@ index 982586a..4b8426c 100644
   * {@code @Tool}/{@code @P} annotations, {@link #toolMethod} resolves the annotated method up the class
   * hierarchy — the spec comes from the annotated method while execution dispatches virtually to the
   * override.
-@@ -61,20 +64,38 @@ public class ToolCatalog {
-     private final AgentToolPermissionEvaluator permissionEvaluator;
+@@ -62,22 +65,47 @@ public class ToolCatalog {
      private final AgentToolCallScope callScope;
+     private final ToolResultBudget toolResultBudget;
 
 +    private final AiToolAuthorization toolAuthorization;
 +
@@ -1129,13 +1129,21 @@ index 982586a..4b8426c 100644
 +        this.permissionEvaluator = permissionEvaluator;
 +        this.callScope = new DefaultAgentToolCallScope();
 +        this.toolAuthorization = null;
++        this.toolResultBudget = new ToolResultBudget(100_000, null);
 +    }
 +
 +    public ToolCatalog(List<AiPlatformTool> platformTools, List<AiAuthoringTool> authoringTools,
 +        DocsMcpToolProvider docsMcpToolProvider, AgentToolPermissionEvaluator permissionEvaluator,
 +        AiToolAuthorization toolAuthorization) {
 +        this(platformTools, authoringTools, docsMcpToolProvider, permissionEvaluator,
-+            toolAuthorization, new DefaultAgentToolCallScope());
++            toolAuthorization, new DefaultAgentToolCallScope(), new ToolResultBudget(100_000, null));
++    }
++
++    public ToolCatalog(List<AiPlatformTool> platformTools, List<AiAuthoringTool> authoringTools,
++        DocsMcpToolProvider docsMcpToolProvider, AgentToolPermissionEvaluator permissionEvaluator,
++        AiToolAuthorization toolAuthorization, AgentToolCallScope callScope) {
++        this(platformTools, authoringTools, docsMcpToolProvider, permissionEvaluator,
++            toolAuthorization, callScope, new ToolResultBudget(100_000, null));
 +    }
 +
      @Inject
@@ -1144,21 +1152,24 @@ index 982586a..4b8426c 100644
 -        final List<AiAuthoringTool> authoringTools,
 -        final DocsMcpToolProvider docsMcpToolProvider,
 -        final AgentToolPermissionEvaluator permissionEvaluator,
--        final AgentToolCallScope callScope) {
+-        final AgentToolCallScope callScope,
+-        final ToolResultBudget toolResultBudget) {
 +    public ToolCatalog(List<AiPlatformTool> platformTools, List<AiAuthoringTool> authoringTools,
 +        DocsMcpToolProvider docsMcpToolProvider, AgentToolPermissionEvaluator permissionEvaluator,
-+        AiToolAuthorization toolAuthorization, AgentToolCallScope callScope) {
++        AiToolAuthorization toolAuthorization, AgentToolCallScope callScope, ToolResultBudget toolResultBudget) {
          this.platformTools = platformTools;
          this.authoringTools = authoringTools;
          this.docsMcpToolProvider = docsMcpToolProvider;
          this.permissionEvaluator = permissionEvaluator;
 -        this.callScope = callScope;
+-        this.toolResultBudget = toolResultBudget;
 +        this.toolAuthorization = Objects.requireNonNull(toolAuthorization, "AI tool authorization adapter is required");
 +        this.callScope = Objects.requireNonNull(callScope, "AI tool call scope is required");
++        this.toolResultBudget = Objects.requireNonNull(toolResultBudget, "AI tool result budget is required");
      }
 
      public record ToolEntry(
-@@ -85,7 +106,7 @@ public class ToolCatalog {
+@@ -88,7 +116,7 @@ public class ToolCatalog {
          @Nullable AgentToolFamily family,
          AgentWritePolicy writePolicy,
          @Nullable AiTool tool) {
@@ -1167,7 +1178,7 @@ index 982586a..4b8426c 100644
          public boolean isPermissionEvaluated() {
              return tool != null;
          }
-@@ -114,7 +135,7 @@ public class ToolCatalog {
+@@ -117,7 +145,7 @@ public class ToolCatalog {
                  register(built, tool, AgentToolCall.Kind.AUTHORING, null, AgentWritePolicy.AUTO);
              }
 
@@ -1176,7 +1187,7 @@ index 982586a..4b8426c 100644
              docsMcpToolProvider.tools().forEach(
                  (spec, executor) -> built.put(
                      spec.name(), new ToolEntry(
-@@ -189,10 +210,11 @@ public class ToolCatalog {
+@@ -192,10 +220,11 @@ public class ToolCatalog {
 
          // Carry the caller context to the @Tool method as a langchain4j managed argument — the executor
          // injects it by type into the tool's AgentCallContext.Context parameter — not a thread-local.
@@ -1476,244 +1487,6 @@ index 0000000..f49f54e
 +            cancel();
 +            assertThat(executor.awaitTermination(3, TimeUnit.SECONDS)).isTrue();
 +        }
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java
-new file mode 100644
-index 0000000..aa25d65
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java
-@@ -0,0 +1,232 @@
-+package io.kestra.webserver.controllers.api;
-+
-+import java.lang.reflect.Field;
-+import java.lang.reflect.Method;
-+import java.time.Duration;
-+import java.util.List;
-+import java.util.Optional;
-+import java.util.concurrent.AbstractExecutorService;
-+import java.util.concurrent.CountDownLatch;
-+import java.util.concurrent.LinkedBlockingQueue;
-+import java.util.concurrent.Semaphore;
-+import java.util.concurrent.TimeUnit;
-+import java.util.concurrent.atomic.AtomicBoolean;
-+import java.util.concurrent.atomic.AtomicReference;
-+import java.util.function.Consumer;
-+import java.util.function.Supplier;
-+
-+import io.kestra.core.ai.agent.models.AgentMode;
-+import io.kestra.core.ai.agent.models.AgentPrincipal;
-+import io.kestra.core.ai.agent.models.AgentThread;
-+import io.kestra.core.ai.agent.models.AgentThreadStatus;
-+import io.kestra.core.ai.agent.repositories.AiMessageRepositoryInterface;
-+import io.kestra.core.ai.agent.repositories.AiThreadRepositoryInterface;
-+import io.kestra.core.tenant.TenantService;
-+import io.kestra.core.utils.ExecutorsUtils;
-+import io.kestra.webserver.rbac.AiAuthorization;
-+import io.kestra.webserver.services.ai.AiServiceManager;
-+import io.kestra.webserver.services.ai.agent.AgentConfiguration;
-+import io.kestra.webserver.services.ai.agent.AgentOrchestrator;
-+import io.kestra.webserver.services.ai.agent.AgentPrincipalResolver;
-+import io.kestra.webserver.services.ai.agent.AiThreadManager;
-+import io.kestra.webserver.services.ai.agent.TurnEventSink;
-+import io.kestra.webserver.services.ai.agent.data.AgentEvents;
-+import io.micronaut.http.sse.Event;
-+import org.junit.jupiter.api.Test;
-+import reactor.core.Disposable;
-+import reactor.core.publisher.Flux;
-+
-+import static org.assertj.core.api.Assertions.*;
-+import static org.awaitility.Awaitility.await;
-+import static org.mockito.Mockito.*;
-+
-+class AiTurnSchedulingTest {
-+    @Test
-+    void shouldRestoreIdleAndReleasePermitWhenCancelledBeforeWorkerStarts() throws Exception {
-+        try (Harness harness = new Harness()) {
-+            AtomicBoolean ran = new AtomicBoolean();
-+            Disposable subscription = harness.stream(sink -> ran.set(true)).subscribe();
-+            assertThat(harness.permits.availablePermits()).isZero();
-+            subscription.dispose();
-+            assertThat(harness.permits.availablePermits()).isZero();
-+            harness.runQueued();
-+            harness.idleAndReleased();
-+            assertThat(ran).isFalse();
-+        }
-+    }
-+
-+    @Test
-+    void shouldRestoreIdleWhenAuthorizationWorkRejectsBeforeOrchestratorStarts() throws Exception {
-+        try (Harness harness = new Harness()) {
-+            AtomicBoolean ran = new AtomicBoolean();
-+            doThrow(AiAuthorization.denied()).when(harness.authorization).work(any(), any());
-+            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
-+            harness.stream(sink -> ran.set(true)).subscribe(event -> {}, errors::add);
-+            harness.runQueued();
-+            harness.idleAndReleased();
-+            assertThat(ran).isFalse();
-+            verify(harness.authorization).work(any(), any());
-+        }
-+    }
-+
-+    @Test
-+    void shouldRestoreIdleAndReleaseOnlyOnceWhenExecutorRejectsSubmission() throws Exception {
-+        try (Harness harness = new Harness()) {
-+            harness.executor.reject = true;
-+            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
-+            Disposable subscription = harness.stream(sink -> fail("Work must not run")).subscribe(event -> {}, errors::add);
-+            harness.idleAndReleased();
-+            assertThat(errors).hasSize(1);
-+            assertThat(errors.getFirst()).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
-+            subscription.dispose();
-+            assertThat(harness.permits.availablePermits()).isEqualTo(1);
-+            verify(harness.threads, times(1)).save(any());
-+        }
-+    }
-+
-+    @Test
-+    void shouldReleasePermitExactlyOnceWhenSubmissionAndIdleResetBothFail() throws Exception {
-+        try (Harness harness = new Harness()) {
-+            harness.executor.reject = true;
-+            doThrow(new IllegalStateException("Test storage unavailable")).when(harness.threads).save(any());
-+            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
-+            Disposable subscription = harness.stream(sink -> fail("Work must not run")).subscribe(event -> {}, errors::add);
-+            assertThat(errors).hasSize(1);
-+            assertThat(errors.getFirst()).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
-+            assertThat(errors.getFirst().getSuppressed()).hasSize(1);
-+            assertThat(errors.getFirst().getSuppressed()[0]).hasMessage("Test storage unavailable");
-+            assertThat(harness.current.get().status()).isEqualTo(AgentThreadStatus.RUNNING);
-+            assertThat(harness.permits.availablePermits()).isEqualTo(1);
-+            subscription.dispose();
-+            assertThat(harness.permits.availablePermits()).isEqualTo(1);
-+        }
-+    }
-+
-+    @Test
-+    void shouldHoldPermitUntilQueuedOutputActuallyTerminates() throws Exception {
-+        try (Harness harness = new Harness()) {
-+            CountDownLatch gateEntered = new CountDownLatch(1);
-+            CountDownLatch gateRelease = new CountDownLatch(1);
-+            doAnswer(invocation -> {
-+                gateEntered.countDown();
-+                if (!gateRelease.await(4, TimeUnit.SECONDS)) throw new AssertionError("Output gate not released");
-+                return ((Supplier<?>) invocation.getArgument(1)).get();
-+            }).when(harness.authorization).entry(any(), any());
-+            var events = new java.util.concurrent.CopyOnWriteArrayList<String>();
-+            AtomicBoolean complete = new AtomicBoolean();
-+            harness.stream(sink -> {
-+                harness.manager.resetToIdleIfExists("main", "running");
-+                sink.emit(AgentEvents.TOKEN, "first");
-+                sink.emit(AgentEvents.DONE, "idle");
-+                sink.complete();
-+            }).subscribe(event -> events.add(event.getName()), failure -> fail("Unexpected stream error", failure), () -> complete.set(true));
-+            Thread worker = harness.startQueued();
-+            try {
-+                assertThat(gateEntered.await(3, TimeUnit.SECONDS)).isTrue();
-+                assertThat(harness.current.get().status()).isEqualTo(AgentThreadStatus.IDLE);
-+                assertThat(harness.permits.availablePermits()).isZero();
-+                assertThat(complete).isFalse();
-+            } finally {
-+                gateRelease.countDown();
-+            }
-+            worker.join(Duration.ofSeconds(4));
-+            assertThat(worker.isAlive()).isFalse();
-+            harness.idleAndReleased();
-+            assertThat(events).containsExactly(AgentEvents.TOKEN, AgentEvents.DONE);
-+            assertThat(complete).isTrue();
-+        }
-+    }
-+
-+    private static final class Harness implements AutoCloseable {
-+        final ControlledExecutor executor = new ControlledExecutor();
-+        final AiThreadRepositoryInterface threads = mock(AiThreadRepositoryInterface.class);
-+        final AtomicReference<AgentThread> current = new AtomicReference<>(AgentThread.builder()
-+            .uid("running").tenant("main").mode(AgentMode.ASK).status(AgentThreadStatus.RUNNING).build());
-+        final AiThreadManager manager = new AiThreadManager(threads, mock(AiMessageRepositoryInterface.class));
-+        final AiAuthorization authorization = mock(AiAuthorization.class);
-+        final AiAgentController controller;
-+        final Semaphore permits;
-+        final Method stream;
-+
-+        Harness() throws Exception {
-+            when(threads.find("main", "running")).thenAnswer(invocation -> Optional.of(current.get()));
-+            when(threads.save(any())).thenAnswer(invocation -> {
-+                AgentThread thread = invocation.getArgument(0);
-+                current.set(thread);
-+                return thread;
-+            });
-+            when(authorization.enabled()).thenReturn(true);
-+            when(authorization.entry(any(), any())).thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get());
-+            doAnswer(invocation -> { ((Runnable) invocation.getArgument(1)).run(); return null; })
-+                .when(authorization).work(any(), any());
-+            ExecutorsUtils executors = mock(ExecutorsUtils.class);
-+            when(executors.cachedVirtualThreadPool(anyString())).thenReturn(executor);
-+            var configuration = new AgentConfiguration(Duration.ofSeconds(5), "http://localhost/unused", 25, 50, 1, 10, Duration.ofHours(1), 50);
-+            controller = new AiAgentController(new TenantService(), mock(AiServiceManager.class), threads,
-+                mock(AiMessageRepositoryInterface.class), manager, mock(AgentOrchestrator.class),
-+                mock(AgentPrincipalResolver.class), configuration, executors);
-+            Field auth = AiAgentController.class.getDeclaredField("authorization");
-+            auth.setAccessible(true);
-+            auth.set(controller, authorization);
-+            Field semaphore = AiAgentController.class.getDeclaredField("turnGate");
-+            semaphore.setAccessible(true);
-+            permits = (Semaphore) semaphore.get(controller);
-+            assertThat(permits.tryAcquire()).isTrue();
-+            stream = AiAgentController.class.getDeclaredMethod("stream", AgentPrincipal.class, AgentThread.class, Consumer.class);
-+            stream.setAccessible(true);
-+        }
-+
-+        @SuppressWarnings("unchecked")
-+        Flux<Event<Object>> stream(Consumer<TurnEventSink> work) throws Exception {
-+            return (Flux<Event<Object>>) stream.invoke(controller, null, current.get(), work);
-+        }
-+
-+        void runQueued() throws Exception {
-+            Thread worker = startQueued();
-+            worker.join(Duration.ofSeconds(5));
-+            assertThat(worker.isAlive()).isFalse();
-+        }
-+
-+        Thread startQueued() throws Exception {
-+            Runnable task = executor.pending.poll(3, TimeUnit.SECONDS);
-+            assertThat(task).isNotNull();
-+            return Thread.ofVirtual().start(task);
-+        }
-+
-+        void idleAndReleased() {
-+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
-+                assertThat(current.get().status()).isEqualTo(AgentThreadStatus.IDLE);
-+                assertThat(permits.availablePermits()).isEqualTo(1);
-+            });
-+        }
-+
-+        @Override
-+        public void close() { executor.shutdownNow(); }
-+    }
-+
-+    private static final class ControlledExecutor extends AbstractExecutorService {
-+        final LinkedBlockingQueue<Runnable> pending = new LinkedBlockingQueue<>();
-+        volatile boolean reject;
-+        volatile boolean shutdown;
-+        @Override
-+        public void execute(Runnable task) {
-+            if (reject || shutdown) throw new java.util.concurrent.RejectedExecutionException("Test submission rejected");
-+            pending.add(task);
-+        }
-+        @Override
-+        public void shutdown() { shutdown = true; }
-+        @Override
-+        public List<Runnable> shutdownNow() {
-+            shutdown = true;
-+            var remaining = new java.util.ArrayList<Runnable>();
-+            pending.drainTo(remaining);
-+            return remaining;
-+        }
-+        @Override
-+        public boolean isShutdown() { return shutdown; }
-+        @Override
-+        public boolean isTerminated() { return shutdown && pending.isEmpty(); }
-+        @Override
-+        public boolean awaitTermination(long timeout, TimeUnit unit) { return isTerminated(); }
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorFlowBoundaryTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiAuthorFlowBoundaryTest.java
@@ -2379,66 +2152,6 @@ index 0000000..f575332
 +        return new OssRestOperationAdapter.Request(new RestAuthorizationResolver.Request("POST",
 +            "/api/v1/" + tenant + "/ai/threads", Map.of(), "application/json", new byte[0],
 +            "io.kestra.webserver.controllers.api.AiAgentController", handler, List.of()), Map.of("tenant", tenant));
-+    }
-+}
-diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java
-new file mode 100644
-index 0000000..f0bf8b5
---- /dev/null
-+++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java
-@@ -0,0 +1,54 @@
-+package io.kestra.webserver.rbac;
-+
-+import io.kestra.core.ai.agent.models.*;
-+import io.kestra.core.ai.agent.repositories.*;
-+import io.kestra.core.tenant.TenantService;
-+import io.kestra.core.utils.ExecutorsUtils;
-+import io.kestra.webserver.controllers.api.AiAgentController;
-+import io.kestra.webserver.services.ai.AiServiceManager;
-+import io.kestra.webserver.services.ai.agent.*;
-+import io.kestra.webserver.services.ai.agent.data.*;
-+import io.micronaut.http.HttpRequest;
-+import io.micronaut.http.context.ServerRequestContext;
-+import io.micronaut.security.authentication.Authentication;
-+import io.micronaut.security.filters.SecurityFilter;
-+import java.time.Duration;
-+import java.util.Optional;
-+import org.junit.jupiter.api.Test;
-+import static org.assertj.core.api.Assertions.*;
-+import static org.mockito.Mockito.*;
-+
-+class AiThreadOwnershipTest {
-+    @Test void authenticatedCreatorMustOwnItsThread() {
-+        var threads=mock(AiThreadRepositoryInterface.class);
-+        when(threads.create(any())).thenAnswer(invocation->invocation.getArgument(0));
-+        var controller=controller(threads);
-+        try {
-+            var request=HttpRequest.GET("/api/v1/main/ai/threads").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
-+            ServerRequestContext.with(request,(java.util.function.Supplier<ApiThreadSummary>)()->controller.create(new ApiCreateThreadRequest(AgentMode.ASK,"owned")));
-+            var saved=org.mockito.ArgumentCaptor.forClass(AgentThread.class);
-+            verify(threads).create(saved.capture());
-+            assertThat(saved.getValue().userId()).isEqualTo("alice");
-+        } finally {controller.close();}
-+    }
-+    @Test void anotherAuthenticatedUserCannotReadAnOwnedThread() {
-+        var threads=mock(AiThreadRepositoryInterface.class);
-+        when(threads.find("main","owned")).thenReturn(Optional.of(AgentThread.builder().uid("owned").tenant("main").userId("alice").status(AgentThreadStatus.IDLE).mode(AgentMode.ASK).build()));
-+        var controller=controller(threads);
-+        try {
-+            var request=HttpRequest.GET("/api/v1/main/ai/threads/owned").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("bob"));
-+            assertThatThrownBy(()->ServerRequestContext.with(request,(java.util.function.Supplier<ApiThreadDetail>)()->controller.get("owned"))).isInstanceOf(io.kestra.core.exceptions.NotFoundException.class);
-+        } finally {controller.close();}
-+    }
-+    private ExecutorsUtils executors() {
-+        var executors=mock(ExecutorsUtils.class);
-+        when(executors.cachedVirtualThreadPool(anyString())).thenAnswer(ignored->java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
-+        return executors;
-+    }
-+    private AiAgentController controller(AiThreadRepositoryInterface threads) {
-+        var tenant=mock(TenantService.class);when(tenant.resolveTenant()).thenReturn("main");
-+        var services=mock(AiServiceManager.class);when(services.hasConfiguredProvider()).thenReturn(true);when(services.getAiService(any())).thenReturn(mock(io.kestra.webserver.services.ai.AiServiceInterface.class));
-+        var config=new AgentConfiguration(Duration.ofSeconds(10),"http://localhost/disabled",25,50,32,10,Duration.ofHours(1),50);
-+        return new AiAgentController(tenant,services,threads,mock(AiMessageRepositoryInterface.class),mock(AiThreadManager.class),mock(AgentOrchestrator.class),mock(AgentPrincipalResolver.class),config,executors());
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiToolAuthorizationTest.java
@@ -3263,13 +2976,13 @@ index 0000000..fdea2be
 +    }
 +}
 diff --git a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
-index 5d644e4..e4d7fb1 100644
+index fc863a9..d96155d 100644
 --- a/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
 +++ b/webserver/src/test/java/io/kestra/webserver/services/ai/agent/tool/ToolCatalogTest.java
-@@ -5,6 +5,12 @@ import java.util.Map;
-
+@@ -6,6 +6,12 @@ import java.util.Map;
  import org.junit.jupiter.api.Test;
 
+ import io.kestra.webserver.services.ai.AiProviderConfiguration;
 +import io.kestra.core.repositories.ExecutionRepositoryInterface;
 +import io.kestra.core.tenant.TenantService;
 +import io.kestra.webserver.rbac.AiAuthorization;
@@ -3277,24 +2990,33 @@ index 5d644e4..e4d7fb1 100644
 +import io.kestra.webserver.rbac.RbacConfiguration;
 +import io.kestra.webserver.rbac.TypedAuthorizationGate;
  import io.kestra.webserver.services.ai.agent.AgentCallContext;
+ import io.kestra.webserver.services.ai.agent.internals.ToolResultLimit;
 
- import dev.langchain4j.agent.tool.ToolExecutionRequest;
-@@ -73,7 +79,7 @@ class ToolCatalogTest {
+@@ -75,7 +81,7 @@ class ToolCatalogTest {
          // how a replacement subclass extends a base tool
          DocsMcpToolProvider docs = mock(DocsMcpToolProvider.class);
          when(docs.tools()).thenReturn(Map.of());
--        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, new DefaultAgentToolCallScope());
-+        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, disabledAuthorization(), new DefaultAgentToolCallScope());
+-        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, new DefaultAgentToolCallScope(), new ToolResultBudget(100_000, null));
++        ToolCatalog catalog = new ToolCatalog(List.of(new OverridingEchoTool()), List.of(), docs, ALLOW_ALL, disabledAuthorization(), new DefaultAgentToolCallScope(), new ToolResultBudget(100_000, null));
          ToolExecutionRequest request = ToolExecutionRequest.builder().id("c1").name("tenant-echo").arguments("{}").build();
 
          // When — the spec is derived from the inherited @Tool method, execution dispatches virtually
-@@ -123,7 +129,14 @@ class ToolCatalogTest {
+@@ -92,7 +98,7 @@ class ToolCatalogTest {
+         when(docs.tools()).thenReturn(Map.of());
+         AiProviderConfiguration small = new AiProviderConfiguration("small", "Small", "gemini", false, Map.of("maxToolResultChars", 1_000));
+         ToolResultBudget budget = new ToolResultBudget(ToolResultLimit.MAX_CHARS, List.of(small));
+-        ToolCatalog catalog = new ToolCatalog(List.of(new TestOversizedResultTool()), List.of(), docs, ALLOW_ALL, new DefaultAgentToolCallScope(), budget);
++        ToolCatalog catalog = new ToolCatalog(List.of(new TestOversizedResultTool()), List.of(), docs, ALLOW_ALL, disabledAuthorization(), new DefaultAgentToolCallScope(), budget);
+         ToolExecutionRequest request = ToolExecutionRequest.builder().id("c1").name("oversized-result").arguments("{}").build();
+
+         // When / Then — the result is refused, not cut down, so the model never reasons on partial data
+@@ -142,7 +148,14 @@ class ToolCatalogTest {
      private static ToolCatalog newCatalog(final AgentToolPermissionEvaluator evaluator) {
          DocsMcpToolProvider docs = mock(DocsMcpToolProvider.class);
          when(docs.tools()).thenReturn(Map.of());
--        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator, new DefaultAgentToolCallScope());
+-        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator, new DefaultAgentToolCallScope(), new ToolResultBudget(100_000, null));
 +        return new ToolCatalog(List.of(new TestMutateTool(), new TestTenantEchoTool()), List.of(new TestDraftTool()), docs, evaluator,
-+            disabledAuthorization(), new DefaultAgentToolCallScope());
++            disabledAuthorization(), new DefaultAgentToolCallScope(), new ToolResultBudget(100_000, null));
 +    }
 +
 +    private static AiToolAuthorization disabledAuthorization() {
@@ -3304,3 +3026,301 @@ index 5d644e4..e4d7fb1 100644
      }
 
      private static ToolExecutionRequest request(final String name) {
+diff --git a/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java
+new file mode 100644
+index 0000000..51452f2
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/controllers/api/AiTurnSchedulingTest.java
+@@ -0,0 +1,232 @@
++package io.kestra.webserver.controllers.api;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.time.Duration;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.AbstractExecutorService;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.Semaphore;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.function.Consumer;
++import java.util.function.Supplier;
++
++import io.kestra.core.ai.agent.models.AgentMode;
++import io.kestra.core.ai.agent.models.AgentPrincipal;
++import io.kestra.core.ai.agent.models.AgentThread;
++import io.kestra.core.ai.agent.models.AgentThreadStatus;
++import io.kestra.core.ai.agent.repositories.AiMessageRepositoryInterface;
++import io.kestra.core.ai.agent.repositories.AiThreadRepositoryInterface;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.utils.ExecutorsUtils;
++import io.kestra.webserver.rbac.AiAuthorization;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.agent.AgentConfiguration;
++import io.kestra.webserver.services.ai.agent.AgentOrchestrator;
++import io.kestra.webserver.services.ai.agent.AgentPrincipalResolver;
++import io.kestra.webserver.services.ai.agent.AiThreadManager;
++import io.kestra.webserver.services.ai.agent.TurnEventSink;
++import io.kestra.webserver.services.ai.agent.data.AgentEvents;
++import io.micronaut.http.sse.Event;
++import org.junit.jupiter.api.Test;
++import reactor.core.Disposable;
++import reactor.core.publisher.Flux;
++
++import static org.assertj.core.api.Assertions.*;
++import static org.awaitility.Awaitility.await;
++import static org.mockito.Mockito.*;
++
++class AiTurnSchedulingTest {
++    @Test
++    void shouldRestoreIdleAndReleasePermitWhenCancelledBeforeWorkerStarts() throws Exception {
++        try (Harness harness = new Harness()) {
++            AtomicBoolean ran = new AtomicBoolean();
++            Disposable subscription = harness.stream(sink -> ran.set(true)).subscribe();
++            assertThat(harness.permits.availablePermits()).isZero();
++            subscription.dispose();
++            assertThat(harness.permits.availablePermits()).isZero();
++            harness.runQueued();
++            harness.idleAndReleased();
++            assertThat(ran).isFalse();
++        }
++    }
++
++    @Test
++    void shouldRestoreIdleWhenAuthorizationWorkRejectsBeforeOrchestratorStarts() throws Exception {
++        try (Harness harness = new Harness()) {
++            AtomicBoolean ran = new AtomicBoolean();
++            doThrow(AiAuthorization.denied()).when(harness.authorization).work(any(), any());
++            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
++            harness.stream(sink -> ran.set(true)).subscribe(event -> {}, errors::add);
++            harness.runQueued();
++            harness.idleAndReleased();
++            assertThat(ran).isFalse();
++            verify(harness.authorization).work(any(), any());
++        }
++    }
++
++    @Test
++    void shouldRestoreIdleAndReleaseOnlyOnceWhenExecutorRejectsSubmission() throws Exception {
++        try (Harness harness = new Harness()) {
++            harness.executor.reject = true;
++            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
++            Disposable subscription = harness.stream(sink -> fail("Work must not run")).subscribe(event -> {}, errors::add);
++            harness.idleAndReleased();
++            assertThat(errors).hasSize(1);
++            assertThat(errors.getFirst()).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
++            subscription.dispose();
++            assertThat(harness.permits.availablePermits()).isEqualTo(1);
++            verify(harness.threads, times(1)).save(any());
++        }
++    }
++
++    @Test
++    void shouldReleasePermitExactlyOnceWhenSubmissionAndIdleResetBothFail() throws Exception {
++        try (Harness harness = new Harness()) {
++            harness.executor.reject = true;
++            doThrow(new IllegalStateException("Test storage unavailable")).when(harness.threads).save(any());
++            var errors = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
++            Disposable subscription = harness.stream(sink -> fail("Work must not run")).subscribe(event -> {}, errors::add);
++            assertThat(errors).hasSize(1);
++            assertThat(errors.getFirst()).isInstanceOf(java.util.concurrent.RejectedExecutionException.class);
++            assertThat(errors.getFirst().getSuppressed()).hasSize(1);
++            assertThat(errors.getFirst().getSuppressed()[0]).hasMessage("Test storage unavailable");
++            assertThat(harness.current.get().status()).isEqualTo(AgentThreadStatus.RUNNING);
++            assertThat(harness.permits.availablePermits()).isEqualTo(1);
++            subscription.dispose();
++            assertThat(harness.permits.availablePermits()).isEqualTo(1);
++        }
++    }
++
++    @Test
++    void shouldHoldPermitUntilQueuedOutputActuallyTerminates() throws Exception {
++        try (Harness harness = new Harness()) {
++            CountDownLatch gateEntered = new CountDownLatch(1);
++            CountDownLatch gateRelease = new CountDownLatch(1);
++            doAnswer(invocation -> {
++                gateEntered.countDown();
++                if (!gateRelease.await(4, TimeUnit.SECONDS)) throw new AssertionError("Output gate not released");
++                return ((Supplier<?>) invocation.getArgument(1)).get();
++            }).when(harness.authorization).entry(any(), any());
++            var events = new java.util.concurrent.CopyOnWriteArrayList<String>();
++            AtomicBoolean complete = new AtomicBoolean();
++            harness.stream(sink -> {
++                harness.manager.resetToIdleIfExists("main", "running");
++                sink.emit(AgentEvents.TOKEN, "first");
++                sink.emit(AgentEvents.DONE, "idle");
++                sink.complete();
++            }).subscribe(event -> events.add(event.getName()), failure -> fail("Unexpected stream error", failure), () -> complete.set(true));
++            Thread worker = harness.startQueued();
++            try {
++                assertThat(gateEntered.await(3, TimeUnit.SECONDS)).isTrue();
++                assertThat(harness.current.get().status()).isEqualTo(AgentThreadStatus.IDLE);
++                assertThat(harness.permits.availablePermits()).isZero();
++                assertThat(complete).isFalse();
++            } finally {
++                gateRelease.countDown();
++            }
++            worker.join(Duration.ofSeconds(4));
++            assertThat(worker.isAlive()).isFalse();
++            harness.idleAndReleased();
++            assertThat(events).containsExactly(AgentEvents.TOKEN, AgentEvents.DONE);
++            assertThat(complete).isTrue();
++        }
++    }
++
++    private static final class Harness implements AutoCloseable {
++        final ControlledExecutor executor = new ControlledExecutor();
++        final AiThreadRepositoryInterface threads = mock(AiThreadRepositoryInterface.class);
++        final AtomicReference<AgentThread> current = new AtomicReference<>(AgentThread.builder()
++            .uid("running").tenant("main").mode(AgentMode.ASK).status(AgentThreadStatus.RUNNING).build());
++        final AiThreadManager manager = new AiThreadManager(threads, mock(AiMessageRepositoryInterface.class));
++        final AiAuthorization authorization = mock(AiAuthorization.class);
++        final AiAgentController controller;
++        final Semaphore permits;
++        final Method stream;
++
++        Harness() throws Exception {
++            when(threads.find("main", "running")).thenAnswer(invocation -> Optional.of(current.get()));
++            when(threads.save(any())).thenAnswer(invocation -> {
++                AgentThread thread = invocation.getArgument(0);
++                current.set(thread);
++                return thread;
++            });
++            when(authorization.enabled()).thenReturn(true);
++            when(authorization.entry(any(), any())).thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(1)).get());
++            doAnswer(invocation -> { ((Runnable) invocation.getArgument(1)).run(); return null; })
++                .when(authorization).work(any(), any());
++            ExecutorsUtils executors = mock(ExecutorsUtils.class);
++            when(executors.cachedVirtualThreadPool(anyString())).thenReturn(executor);
++            var configuration = new AgentConfiguration(Duration.ofSeconds(5), "http://localhost/unused", 25, 50, 1, 100_000, 10, Duration.ofHours(1), 50);
++            controller = new AiAgentController(new TenantService(), mock(AiServiceManager.class), threads,
++                mock(AiMessageRepositoryInterface.class), manager, mock(AgentOrchestrator.class),
++                mock(AgentPrincipalResolver.class), configuration, executors);
++            Field auth = AiAgentController.class.getDeclaredField("authorization");
++            auth.setAccessible(true);
++            auth.set(controller, authorization);
++            Field semaphore = AiAgentController.class.getDeclaredField("turnGate");
++            semaphore.setAccessible(true);
++            permits = (Semaphore) semaphore.get(controller);
++            assertThat(permits.tryAcquire()).isTrue();
++            stream = AiAgentController.class.getDeclaredMethod("stream", AgentPrincipal.class, AgentThread.class, Consumer.class);
++            stream.setAccessible(true);
++        }
++
++        @SuppressWarnings("unchecked")
++        Flux<Event<Object>> stream(Consumer<TurnEventSink> work) throws Exception {
++            return (Flux<Event<Object>>) stream.invoke(controller, null, current.get(), work);
++        }
++
++        void runQueued() throws Exception {
++            Thread worker = startQueued();
++            worker.join(Duration.ofSeconds(5));
++            assertThat(worker.isAlive()).isFalse();
++        }
++
++        Thread startQueued() throws Exception {
++            Runnable task = executor.pending.poll(3, TimeUnit.SECONDS);
++            assertThat(task).isNotNull();
++            return Thread.ofVirtual().start(task);
++        }
++
++        void idleAndReleased() {
++            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
++                assertThat(current.get().status()).isEqualTo(AgentThreadStatus.IDLE);
++                assertThat(permits.availablePermits()).isEqualTo(1);
++            });
++        }
++
++        @Override
++        public void close() { executor.shutdownNow(); }
++    }
++
++    private static final class ControlledExecutor extends AbstractExecutorService {
++        final LinkedBlockingQueue<Runnable> pending = new LinkedBlockingQueue<>();
++        volatile boolean reject;
++        volatile boolean shutdown;
++        @Override
++        public void execute(Runnable task) {
++            if (reject || shutdown) throw new java.util.concurrent.RejectedExecutionException("Test submission rejected");
++            pending.add(task);
++        }
++        @Override
++        public void shutdown() { shutdown = true; }
++        @Override
++        public List<Runnable> shutdownNow() {
++            shutdown = true;
++            var remaining = new java.util.ArrayList<Runnable>();
++            pending.drainTo(remaining);
++            return remaining;
++        }
++        @Override
++        public boolean isShutdown() { return shutdown; }
++        @Override
++        public boolean isTerminated() { return shutdown && pending.isEmpty(); }
++        @Override
++        public boolean awaitTermination(long timeout, TimeUnit unit) { return isTerminated(); }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java
+new file mode 100644
+index 0000000..7887f4b
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/AiThreadOwnershipTest.java
+@@ -0,0 +1,54 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.ai.agent.models.*;
++import io.kestra.core.ai.agent.repositories.*;
++import io.kestra.core.tenant.TenantService;
++import io.kestra.core.utils.ExecutorsUtils;
++import io.kestra.webserver.controllers.api.AiAgentController;
++import io.kestra.webserver.services.ai.AiServiceManager;
++import io.kestra.webserver.services.ai.agent.*;
++import io.kestra.webserver.services.ai.agent.data.*;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.context.ServerRequestContext;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.time.Duration;
++import java.util.Optional;
++import org.junit.jupiter.api.Test;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class AiThreadOwnershipTest {
++    @Test void authenticatedCreatorMustOwnItsThread() {
++        var threads=mock(AiThreadRepositoryInterface.class);
++        when(threads.create(any())).thenAnswer(invocation->invocation.getArgument(0));
++        var controller=controller(threads);
++        try {
++            var request=HttpRequest.GET("/api/v1/main/ai/threads").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++            ServerRequestContext.with(request,(java.util.function.Supplier<ApiThreadSummary>)()->controller.create(new ApiCreateThreadRequest(AgentMode.ASK,"owned")));
++            var saved=org.mockito.ArgumentCaptor.forClass(AgentThread.class);
++            verify(threads).create(saved.capture());
++            assertThat(saved.getValue().userId()).isEqualTo("alice");
++        } finally {controller.close();}
++    }
++    @Test void anotherAuthenticatedUserCannotReadAnOwnedThread() {
++        var threads=mock(AiThreadRepositoryInterface.class);
++        when(threads.find("main","owned")).thenReturn(Optional.of(AgentThread.builder().uid("owned").tenant("main").userId("alice").status(AgentThreadStatus.IDLE).mode(AgentMode.ASK).build()));
++        var controller=controller(threads);
++        try {
++            var request=HttpRequest.GET("/api/v1/main/ai/threads/owned").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("bob"));
++            assertThatThrownBy(()->ServerRequestContext.with(request,(java.util.function.Supplier<ApiThreadDetail>)()->controller.get("owned"))).isInstanceOf(io.kestra.core.exceptions.NotFoundException.class);
++        } finally {controller.close();}
++    }
++    private ExecutorsUtils executors() {
++        var executors=mock(ExecutorsUtils.class);
++        when(executors.cachedVirtualThreadPool(anyString())).thenAnswer(ignored->java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
++        return executors;
++    }
++    private AiAgentController controller(AiThreadRepositoryInterface threads) {
++        var tenant=mock(TenantService.class);when(tenant.resolveTenant()).thenReturn("main");
++        var services=mock(AiServiceManager.class);when(services.hasConfiguredProvider()).thenReturn(true);when(services.getAiService(any())).thenReturn(mock(io.kestra.webserver.services.ai.AiServiceInterface.class));
++        var config=new AgentConfiguration(Duration.ofSeconds(10),"http://localhost/disabled",25,50,32,100_000,10,Duration.ofHours(1),50);
++        return new AiAgentController(tenant,services,threads,mock(AiMessageRepositoryInterface.class),mock(AiThreadManager.class),mock(AgentOrchestrator.class),mock(AgentPrincipalResolver.class),config,executors());
++    }
++}

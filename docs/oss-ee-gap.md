@@ -42,6 +42,14 @@ CI、镜像、插件正式消费及根仓组合门见 r-ee-rbac.md REQ-0400。
 
 # OSS vs EE 架构能力差异表（kestra-overlay 立身依据）
 
+## v2.0.13 升级边界
+
+当前源码 BASE 为 v2.0.13 / `61da533e0754fcdd6c69cc2ae598dc9e72a0ccfe`。
+升级不接收新业务域，不把上游 AI、worker 或 Playground 自有修复重复实现为定制。
+现有 63 个需求补丁继续提供认证、协议、classpath、typed 授权和通用 UI 扩展契约；
+最小适配保留上游新增路由守卫与 AI 工具结果预算。完整语义与发布结论须对应最终
+输入的测试和正式发布报告，不能由可应用或本表历史计数推断。
+
 2026-11-15 R-EE-RBAC / REQ-0398 有限CSV正文授权候选（入口 C，本地完整门通过，CI/发布待执行）：
 消费 kestra-plugin-rbac 的 execution CSV export 在HTTP响应返回后延迟正文查询时丢失
 typed query domain，旧真实框架红例输出空CSV。候选新增独立 FiniteBodyAuthorization：

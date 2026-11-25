@@ -80,6 +80,14 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(len(report['patches'][0]['sha256']), 64)
         self.assertEqual(report['patches'][1]['semantic_validation'], 'NOT_VERIFIED')
 
+    def test_generated_prompt_requires_final_document_and_publication_gates(self):
+        self.run_assessment()
+        summary = (self.output / 'ai-summary.md').read_text()
+        for required in ['docs/upstream-upgrade-agent.md', '交付前文档时效性门',
+                         '先收敛文档再冻结发布提交', '精确部署 gitlink', '真实交互验证',
+                         '旧正式部署基线', '网络 EOF 不代表 CI 失败']:
+            self.assertIn(required, summary)
+
     def test_dirty_source(self):
         (self.source / 'untracked').write_text('keep')
         with self.assertRaisesRegex(MODULE.AssessmentError, 'dirty'):

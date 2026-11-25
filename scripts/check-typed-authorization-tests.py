@@ -75,7 +75,9 @@ for suite, expected in {
     "controllers.api.AiOutputLifecycleTest": 8,
     "controllers.api.AiTurnSchedulingTest": 5,
     "services.ai.agent.AiModeLifecycleTest": 8,
-    "services.ai.agent.tool.ToolCatalogTest": 8,
+    "services.ai.agent.tool.ToolCatalogTest": 9,
+    "services.ai.agent.tool.ToolResultBudgetTest": 4,
+    "services.ai.agent.internals.ToolResultLimitTest": 3,
 }.items():
     report = ET.parse(results / f"TEST-io.kestra.webserver.{suite}.xml").getroot()
     if int(report.attrib["tests"]) != expected or any(

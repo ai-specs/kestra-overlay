@@ -160,6 +160,7 @@ jobs:
             .work/verify/jdbc/build/reports/tests/test/
             .work/verify/jdbc-h2/build/test-results/test/*.xml
             .work/verify/jdbc-h2/build/reports/tests/test/
+            .work/verify/upgrade-security-tests/
           include-hidden-files: true
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4

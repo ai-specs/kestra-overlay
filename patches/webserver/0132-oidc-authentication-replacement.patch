@@ -84,7 +84,7 @@ index 0dc5c01..63a4a25 100644
                  await loadGeneralResources()
              } catch (error) {
 diff --git a/ui/src/main.ts b/ui/src/main.ts
-index 42941b4..7d69d87 100644
+index 6b468f3..93799ae 100644
 --- a/ui/src/main.ts
 +++ b/ui/src/main.ts
 @@ -6,6 +6,8 @@ import {setupPreloadErrorReloadHandler} from "./utils/preloadErrorReload"
@@ -99,7 +99,7 @@ index 42941b4..7d69d87 100644
 @@ -13,7 +15,7 @@ import {useClient} from "@kestra-io/kestra-sdk"
  import routes from "./routes/routes"
  import en from "./translations/en.json"
- import {setupTenantRouter} from "./composables/useTenant"
+ import {setupTenantRouter, tenantGuard} from "./composables/useTenant"
 -import * as BasicAuth from "./utils/basicAuth"
 +import * as Authentication from "./utils/authentication"
  import {getCsrfToken} from "./utils/csrf"
@@ -128,7 +128,7 @@ index 42941b4..7d69d87 100644
 +        Authentication.setAuthenticated(false)
      }
 
- 
+
 @@ -64,7 +70,7 @@ function setupAxios(router: Router) {
          coreStore,
          router,

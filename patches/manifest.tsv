@@ -1,4 +1,6 @@
 # patches/manifest.tsv — patch 总账（与 patches/*/*.patch 一一对应；check-patches.sh 强校验）
+# 当前源码 BASE：v2.0.13 / 61da533e0754fcdd6c69cc2ae598dc9e72a0ccfe；63需求保留。
+# 来源列的 v2.0.11 发布记录为历史；v2.0.13 须以最终提交自身成功 CI/推广报告核对，不继承旧绿色。
 # 0150–0190：owner/consent、MCP资源Bearer、能力门与MCP Authorizer SPI、OAuth-only、owner管理和DB限速。
 # 0200/0211：生产审计修复，client secret哈希与pending quota错误语义；交付以对应提交CI为准。
 # 历史说明：外部扩展与部署组合由所属仓验收；下方来源列保留历史，当前宿主发布状态优先。

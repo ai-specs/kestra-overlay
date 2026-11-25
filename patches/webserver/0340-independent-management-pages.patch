@@ -442,7 +442,7 @@ index 0000000..009d80f
 +    })
 +})
 diff --git a/ui/src/override/components/useLeftMenu.ts b/ui/src/override/components/useLeftMenu.ts
-index b375a5f..566d28c 100644
+index 0644337..2f5588e 100644
 --- a/ui/src/override/components/useLeftMenu.ts
 +++ b/ui/src/override/components/useLeftMenu.ts
 @@ -1,4 +1,5 @@
@@ -451,17 +451,17 @@ index b375a5f..566d28c 100644
 
  import {useRoute, useRouter} from "vue-router"
  import type {
-@@ -59,7 +60,8 @@ export function useLeftMenu() {
+@@ -60,7 +61,8 @@ export function useLeftMenu() {
      const $route = useRoute()
      const $router = useRouter()
 
 -    const {t} = useI18n({useScope: "global"})
 +    const {t, locale} = useI18n({useScope: "global"})
 +    const extensions = useUiExtensions()
+     const aiEnabled = useAiEnabled()
 
      /**
-      * Returns the names of all registered routes whose name starts with the given prefix.
-@@ -92,7 +94,7 @@ export function useLeftMenu() {
+@@ -94,7 +96,7 @@ export function useLeftMenu() {
      }
 
      const menu = computed<MenuItem[]>(() => {
@@ -470,7 +470,7 @@ index b375a5f..566d28c 100644
              {
                  id: "workspace",
                  title: "Workspace",
-@@ -414,6 +416,18 @@ export function useLeftMenu() {
+@@ -417,6 +419,18 @@ export function useLeftMenu() {
              },
          ]
 
@@ -489,7 +489,7 @@ index b375a5f..566d28c 100644
          flatten(generated).forEach((item: MenuItem) => {
              if (!item.id) {
                  item.id = item.title.toLowerCase().replaceAll(" ", "-")
-@@ -441,4 +455,4 @@ export function useLeftMenu() {
+@@ -444,4 +458,4 @@ export function useLeftMenu() {
      })
 
      return {menu}
@@ -497,19 +497,20 @@ index b375a5f..566d28c 100644
 \ No newline at end of file
 +}
 diff --git a/ui/src/routes/routes.ts b/ui/src/routes/routes.ts
-index 7b43436..b1cf79a 100644
+index 8edc904..610d963 100644
 --- a/ui/src/routes/routes.ts
 +++ b/ui/src/routes/routes.ts
-@@ -14,6 +14,7 @@ const routes: KestraRouteRecord[] = [
-     {name: "access-denied", path: "/access-denied", component: () => import("../components/errors/AccessDenied.vue"), meta: {anonymous: true, layout: FullScreenLayout}},
+@@ -16,6 +16,8 @@ const routes: KestraRouteRecord[] = [
      //Initial
      {name: "root", path: "/", redirect: {name: "home"}, meta: {layout: {template: "<div />"}, anonymous: true}},
+
 +    {name: "extensions/page", path: "/:tenant/extensions/:extensionId/:pathMatch(.*)*", component: () => import("../components/extensions/ExtensionPage.vue")},
++
+     {name: "ai",path: "/:tenant?/ai", component: () => import("../components/ai/copilot/CopilotPage.vue"), meta: {docId: "ai-copilot"}, beforeEnter: aiEnabledGuard},
 
-     {name: "ai",path: "/:tenant?/ai", component: () => import("../components/ai/copilot/CopilotPage.vue"), meta: {docId: "ai-copilot"}},
-
+     //Dashboards
 diff --git a/ui/src/translations/de.json b/ui/src/translations/de.json
-index 7115dfb..0e370ae 100644
+index 3ae6436..6449dc4 100644
 --- a/ui/src/translations/de.json
 +++ b/ui/src/translations/de.json
 @@ -1,5 +1,6 @@
@@ -520,7 +521,7 @@ index 7115dfb..0e370ae 100644
        "message": "Kestra wurde auf {version} aktualisiert und kann Breaking Changes enthalten, die Updates deiner Flows erfordern.",
        "cta": "Siehe, was sich geändert hat"
 diff --git a/ui/src/translations/en.json b/ui/src/translations/en.json
-index cdbc2c7..2ec2953 100644
+index 8348a4d..032ec28 100644
 --- a/ui/src/translations/en.json
 +++ b/ui/src/translations/en.json
 @@ -1,5 +1,6 @@
@@ -531,7 +532,7 @@ index cdbc2c7..2ec2953 100644
        "message": "Kestra was upgraded to {version} and it may include breaking changes that require updates to your flows.",
        "cta": "See what changed"
 diff --git a/ui/src/translations/es.json b/ui/src/translations/es.json
-index 02fdb40..4c051b6 100644
+index bc2d570..5c35331 100644
 --- a/ui/src/translations/es.json
 +++ b/ui/src/translations/es.json
 @@ -1,5 +1,6 @@
@@ -542,7 +543,7 @@ index 02fdb40..4c051b6 100644
        "message": "Kestra se actualizó a la versión {version} y puede incluir cambios importantes que requieren actualizaciones en tus Flows.",
        "cta": "Ver qué cambió"
 diff --git a/ui/src/translations/fr.json b/ui/src/translations/fr.json
-index 25494d5..e2adc78 100644
+index 34dc9e4..2f7eed6 100644
 --- a/ui/src/translations/fr.json
 +++ b/ui/src/translations/fr.json
 @@ -1,5 +1,6 @@
@@ -553,7 +554,7 @@ index 25494d5..e2adc78 100644
        "message": "Kestra a été mis à niveau vers la version {version} et cela peut inclure des changements majeurs qui nécessitent des mises à jour de vos Flows.",
        "cta": "Voir les modifications"
 diff --git a/ui/src/translations/hi.json b/ui/src/translations/hi.json
-index b04d55f..a45a98b 100644
+index b488b4c..8994d08 100644
 --- a/ui/src/translations/hi.json
 +++ b/ui/src/translations/hi.json
 @@ -1,5 +1,6 @@
@@ -564,7 +565,7 @@ index b04d55f..a45a98b 100644
        "message": "Kestra को {version} में अपग्रेड किया गया था और इसमें ऐसे ब्रेकिंग बदलाव शामिल हो सकते हैं जिनके लिए आपके Flows में अपडेट की आवश्यकता होती है।",
        "cta": "देखें क्या बदला"
 diff --git a/ui/src/translations/it.json b/ui/src/translations/it.json
-index eae4dae..31d220f 100644
+index 1ae174a..eedba10 100644
 --- a/ui/src/translations/it.json
 +++ b/ui/src/translations/it.json
 @@ -1,5 +1,6 @@
@@ -575,7 +576,7 @@ index eae4dae..31d220f 100644
        "message": "Kestra è stato aggiornato alla versione {version} e potrebbe includere modifiche che richiedono aggiornamenti ai tuoi Flow.",
        "cta": "Vedi cosa è cambiato"
 diff --git a/ui/src/translations/ja.json b/ui/src/translations/ja.json
-index 7199c0a..8a41a6e 100644
+index e9025d5..4d74011 100644
 --- a/ui/src/translations/ja.json
 +++ b/ui/src/translations/ja.json
 @@ -1,5 +1,6 @@
@@ -585,7 +586,7 @@ index 7199c0a..8a41a6e 100644
      "versionUpgradeNotice": {
        "message": "Kestraが{version}にアップグレードされました。これには、Flowの更新が必要となる破壊的変更が含まれている可能性があります。",
        "cta": "変更点を確認"
-@@ -2659,4 +2660,4 @@
+@@ -2663,4 +2664,4 @@
        "dismiss": "後で"
      }
    }
@@ -593,7 +594,7 @@ index 7199c0a..8a41a6e 100644
 \ No newline at end of file
 +}
 diff --git a/ui/src/translations/ko.json b/ui/src/translations/ko.json
-index 0405954..d7b42cf 100644
+index 3e88cc2..4e30cdb 100644
 --- a/ui/src/translations/ko.json
 +++ b/ui/src/translations/ko.json
 @@ -1,5 +1,6 @@
@@ -604,7 +605,7 @@ index 0405954..d7b42cf 100644
        "message": "Kestra가 {version}으로 업그레이드되었습니다. 이 버전에는 Flow 업데이트가 필요한 변경 사항이 포함될 수 있습니다.",
        "cta": "변경 사항 확인"
 diff --git a/ui/src/translations/pl.json b/ui/src/translations/pl.json
-index bf2c5fb..319a874 100644
+index 33c33b5..a9db3b7 100644
 --- a/ui/src/translations/pl.json
 +++ b/ui/src/translations/pl.json
 @@ -1,5 +1,6 @@
@@ -615,7 +616,7 @@ index bf2c5fb..319a874 100644
        "message": "Kestra został zaktualizowany do wersji {version} i może zawierać zmiany powodujące niezgodność, które wymagają aktualizacji Twoich Flowów.",
        "cta": "Zobacz, co się zmieniło"
 diff --git a/ui/src/translations/pt.json b/ui/src/translations/pt.json
-index 2ac1f31..c59e2d6 100644
+index 5a82eeb..1e0d003 100644
 --- a/ui/src/translations/pt.json
 +++ b/ui/src/translations/pt.json
 @@ -1,5 +1,6 @@
@@ -626,7 +627,7 @@ index 2ac1f31..c59e2d6 100644
        "message": "O Kestra foi atualizado para a versão {version} e pode incluir alterações que exigem atualizações nos seus Flows.",
        "cta": "Ver o que mudou"
 diff --git a/ui/src/translations/pt_BR.json b/ui/src/translations/pt_BR.json
-index 1b85ff6..e3cb171 100644
+index 5068bf8..5b92560 100644
 --- a/ui/src/translations/pt_BR.json
 +++ b/ui/src/translations/pt_BR.json
 @@ -1,5 +1,6 @@
@@ -637,7 +638,7 @@ index 1b85ff6..e3cb171 100644
        "message": "O Kestra foi atualizado para a versão {version} e pode incluir alterações que exigem atualizações nos seus Flows.",
        "cta": "Ver o que mudou"
 diff --git a/ui/src/translations/ru.json b/ui/src/translations/ru.json
-index 0cc47b9..1e8c15d 100644
+index 901d0f3..af33976 100644
 --- a/ui/src/translations/ru.json
 +++ b/ui/src/translations/ru.json
 @@ -1,5 +1,6 @@
@@ -647,7 +648,7 @@ index 0cc47b9..1e8c15d 100644
      "versionUpgradeNotice": {
        "message": "Kestra был обновлен до версии {version} и может включать критические изменения, требующие обновления ваших Flow.",
        "cta": "Посмотреть изменения"
-@@ -2659,4 +2660,4 @@
+@@ -2663,4 +2664,4 @@
        "dismiss": "Не сейчас"
      }
    }
@@ -655,7 +656,7 @@ index 0cc47b9..1e8c15d 100644
 \ No newline at end of file
 +}
 diff --git a/ui/src/translations/zh_CN.json b/ui/src/translations/zh_CN.json
-index f59b8c3..e5451db 100644
+index 62f4097..37ca1f3 100644
 --- a/ui/src/translations/zh_CN.json
 +++ b/ui/src/translations/zh_CN.json
 @@ -1,5 +1,6 @@

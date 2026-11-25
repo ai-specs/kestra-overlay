@@ -2,6 +2,10 @@
 
 ## 交付状态与结论
 
+v2.0.13 源码升级保留用户归属、scope、资源 audience、session 和后台上下文隔离契约。
+该版本必须独立执行真实 SDK、拒绝无副作用与身份生命周期门；下方发布链接是历史
+证据，不代表 v2.0.13 已发布。正式输入以 README 的条件式发布入口和最终产物为准。
+
 当前能力已通过生产镜像的协议、浏览器与真实 SDK 验收。发布流程固定候选 digest，
 全部验收通过后才晋级正式 tag；复现入口见 README，CI 见
 [生产审计修复验收](https://github.com/ai-specs/kestra-overlay/actions/runs/38238619410)。

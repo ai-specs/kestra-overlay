@@ -11,6 +11,8 @@ REQUIRED = {
     "tests/unit/stores/dashboardGeneration.spec.ts": 2,
     "src/extensions/monaco-inline-disposal.spec.ts": 2,
     "tests/unit/stores/executionsFollow.spec.ts": 11,
+    "tests/unit/stores/playgroundReadyToStart.spec.ts": 4,
+    "tests/unit/stores/playgroundReuse.spec.ts": 2,
     "src/utils/authentication-recovery.spec.ts": 6,
     "src/oidc-setup-wait.spec.ts": 4,
     "src/extensions/app-entry.spec.ts": 5,
