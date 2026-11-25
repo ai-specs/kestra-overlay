@@ -2,6 +2,7 @@
 # 0150–0190：owner/consent、MCP资源Bearer、能力门与MCP Authorizer SPI、OAuth-only、owner管理和DB限速。
 # 0200/0211：生产审计修复，client secret哈希与pending quota错误语义；交付以对应提交CI为准。
 # 历史说明：外部扩展与部署组合由所属仓验收；下方来源列保留历史，当前宿主发布状态优先。
+# 发布门：部署仓固定的 gitlink 必须对应成功的 push/main 发布 CI；仅文档提交不自动取得发布资格。
 # 列：id | patch文件 | status(core|transition|reserved) | 消费扩展仓 | 摘要 | 触达上游文件数 | 来源 | 移除条件
 0380	0380-oidc-account-lifecycle-v2.patch	core	ai-specs/kestra-plugin-rbac	同连接可信身份与账号删除事务参与者；V2安全拒绝/依赖故障分类与锁后复查	16	v2.0.11已发布：1d50c01 / CI45407070627；历史来源：历史基础已发布；新增普通授权明确依赖503候选，兼容与完整本地门及两模式真实cookie503镜像门通过；对应提交CI和新正式发布待验证	上游提供等价标准身份生命周期和借用连接公开机制
 0381	0381-oidc-initial-password-change.patch	core	ai-specs/kestra-plugin-rbac	宿主生成临时密码与生产首次受限改密；V2不编造空资料默认值	14	v2.0.11已发布：1d50c01 / CI45407070627；历史来源：64c4498基础已发布；新完整本地及两种首装空资料26项通过；消费须对应提交CI和正式镜像推广成功	上游提供等价临时凭据及首次改密完整流程
