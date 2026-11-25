@@ -1,0 +1,896 @@
+# 需求: REQ-0410 通用HTTP扩展入口与类型化授权
+# 消费扩展仓: ai-specs/kestra-plugin-amis-apps
+# 状态: core；消费须匹配成功CI与正式产物
+# 来源: 原0410通用HTTP通道；本次来源重分配承载lifecycle排序/错误传播衔接
+# 触达上游文件: 12 个
+# 移除条件: 上游提供等价认证后HTTP扩展入口、认证与书签机制
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
+index 7c42c58..b5cff5d 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcAuthorizationExceptionHandler.java
+@@ -42,6 +42,13 @@ public class OidcAuthorizationExceptionHandler {
+     @Error(global = true)
+     public HttpResponse<?> handle(final HttpRequest<?> request, final AuthorizationException exception) {
+         final String accept = request.getHeaders().get(HttpHeaders.ACCEPT);
++        if (accept != null && accept.contains("text/html") && !exception.isForbidden()
++            && priorToLoginPersistence instanceof io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence extensionPersistence
++            && !io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence.safe(request.getUri())) {
++            final var extensionResponse = HttpResponse.temporaryRedirect(URI.create(loginUrlWithFrom(request)));
++            extensionPersistence.onUnauthorized(request, extensionResponse);
++            return extensionResponse;
++        }
+         if (accept != null && accept.contains("text/html")) {
+             final var response = HttpResponse.temporaryRedirect(URI.create(loginUrlWithFrom(request)));
+             if (priorToLoginPersistence != null && !exception.isForbidden()
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+index 5420af5..efc7980 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
+@@ -20,6 +20,12 @@ import io.micronaut.security.filters.SecurityFilter;
+ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
+     @jakarta.inject.Inject
+     private io.kestra.webserver.rbac.PublicFavicon publicFavicon;
++    @jakarta.inject.Inject
++    private io.micronaut.context.BeanProvider<io.kestra.webserver.rbac.HttpExtensionRouteRegistry> extensionRoutes;
++    private boolean extensionDocument(HttpRequest<?> request) {
++        try { return extensionRoutes!=null && extensionRoutes.isUnique() && extensionRoutes.get().documentRequest(request); }
++        catch(RuntimeException failure){return false;}
++    }
+     private final OidcConfiguration configuration;
+     private final OidcIdentityLifecycle lifecycle
+ ;
+@@ -55,8 +61,17 @@ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
+ )
+             .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
+             .timeout(java.time.Duration.ofSeconds(5))
+-            .onErrorReturn(false)
+-            .flatMapMany(valid -> valid ? chain.proceed(request) : Mono.just(path.startsWith("/ui/")
+-                ? HttpResponse.temporaryRedirect(java.net.URI.create("/oidc/logout")) : HttpResponse.unauthorized()));
++            .onErrorResume(failure -> {
++                return failure instanceof io.kestra.webserver.rbac.AuthorizationUnavailableException unavailable
++                    ?Mono.error(unavailable):Mono.just(false);
++            })
++            .flatMapMany(valid -> valid ? chain.proceed(request) : Mono.just((path.startsWith("/ui/") || extensionDocument(request))
++                ? HttpResponse.temporaryRedirect(java.net.URI.create("/oidc/logout")) : HttpResponse.unauthorized()))
++            .onErrorResume(io.kestra.webserver.rbac.AuthorizationUnavailableException.class, failure -> Mono.just(
++                HttpResponse.status(io.micronaut.http.HttpStatus.SERVICE_UNAVAILABLE)
++                    .contentType(io.micronaut.http.MediaType.APPLICATION_JSON_PROBLEM_TYPE)
++                    .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL,"no-store")
++                    .body(java.util.Map.of("type","about:blank","title","Service Unavailable","status",503,
++                        "detail","Authorization dependency is unavailable"))));
+     }
+ }
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java
+index 7507100..16d94c5 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java
+@@ -11,6 +11,7 @@ import io.micronaut.http.MutableHttpResponse;
+ import io.micronaut.security.config.TokenCookieConfiguration;
+ import io.micronaut.security.errors.CookiePriorToLoginPersistence;
+ import jakarta.inject.Singleton;
++import io.kestra.webserver.rbac.HttpExtensionRouteProviderV1;
+
+ /** Framework cookie lifecycle with same-origin validation at both trust boundaries. */
+ @Singleton
+@@ -22,6 +23,9 @@ public class OidcPriorToLoginPersistence extends CookiePriorToLoginPersistence {
+         super(configuration);
+     }
+
++    @jakarta.inject.Inject
++    private io.micronaut.context.BeanProvider<io.kestra.webserver.rbac.HttpExtensionRouteRegistry> extensionRoutes;
++
+     public static boolean safe(URI uri) {
+         if (uri == null || uri.isAbsolute() || uri.getRawAuthority() != null || uri.getRawFragment() != null
+             || uri.toString().length() > 2048) return false;
+@@ -47,14 +51,27 @@ public class OidcPriorToLoginPersistence extends CookiePriorToLoginPersistence {
+
+     @Override
+     public void onUnauthorized(HttpRequest<?> request, MutableHttpResponse<?> response) {
+-        if (safe(request.getUri())) super.onUnauthorized(request, response);
++        if (safe(request.getUri()) || safeExtensionDocument(request)) super.onUnauthorized(request, response);
+     }
+
+     @Override
+     public Optional<URI> getOriginalUri(HttpRequest<?> request, MutableHttpResponse<?> response) {
+         // Consume even malformed cookies; framework only clears values it can parse as URI.
+         clear(request, response);
+-        return super.getOriginalUri(request, response).filter(OidcPriorToLoginPersistence::safe);
++        return super.getOriginalUri(request, response).filter(uri -> safe(uri) || safeExtensionDocument(uri));
++    }
++
++    private boolean safeExtensionDocument(HttpRequest<?> request) {
++        if (request.getMethod() != io.micronaut.http.HttpMethod.GET
++            || !request.getHeaders().getAll("Accept").stream().anyMatch(value -> value.toLowerCase(Locale.ROOT).contains("text/html"))) return false;
++        return safeExtensionDocument(request.getUri());
++    }
++
++    private boolean safeExtensionDocument(URI uri) {
++        try {
++            return extensionRoutes != null && extensionRoutes.isUnique()
++                && extensionRoutes.get().documentReturn(uri);
++        } catch (RuntimeException failure) { return false; }
+     }
+
+     public void clear(HttpRequest<?> request, MutableHttpResponse<?> response) {
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java
+new file mode 100644
+index 0000000..311ad49
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java
+@@ -0,0 +1,118 @@
++package io.kestra.webserver.rbac;
++
++import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.webserver.filter.CsrfTokenFilter;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.context.annotation.Value;
++import io.micronaut.core.async.propagation.ReactorPropagation;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.*;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.filter.*;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.MethodBasedRouteMatch;
++import io.micronaut.web.router.RouteAttributes;
++import io.micronaut.web.router.resource.StaticResourceResolver;
++import jakarta.inject.Singleton;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++/** Host implementation detail; the public extension contract is HttpExtensionRouteProviderV1. */
++@Singleton
++@Filter("/**")
++public final class HttpExtensionRouteFilter implements HttpServerFilter {
++    private static final Set<HttpMethod> SAFE = Set.of(HttpMethod.GET, HttpMethod.HEAD, HttpMethod.OPTIONS, HttpMethod.TRACE);
++    private final HttpExtensionRouteRegistry registry;
++    private final TypedAuthorizationGate gate;
++    private final BeanProvider<CsrfTokenFilter> csrf;
++    private final BeanProvider<StaticResourceResolver> staticResources;
++    private final RbacConfiguration configuration;
++    private final boolean typedEnabled;
++
++    public HttpExtensionRouteFilter(HttpExtensionRouteRegistry registry, TypedAuthorizationGate gate,
++        BeanProvider<CsrfTokenFilter> csrf, BeanProvider<StaticResourceResolver> staticResources,
++        RbacConfiguration configuration, @Value("${kestra.rbac.typed.enabled:false}") boolean typedEnabled) {
++        this.gate = gate;
++        this.csrf = csrf;
++        this.staticResources = staticResources;
++        this.configuration = configuration;
++        this.typedEnabled = typedEnabled;
++        this.registry = registry;
++    }
++
++    @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 2; }
++
++    @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++        if (!registry.active()) return chain.proceed(request);
++        return dispatch(request, chain);
++    }
++
++    private Publisher<MutableHttpResponse<?>> dispatch(HttpRequest<?> request, ServerFilterChain chain) {
++        // Native routes are authoritative even if they later reject or fail. Never retry them as extensions.
++        if (RouteAttributes.getRouteMatch(request).orElse(null) instanceof MethodBasedRouteMatch<?, ?>)
++            return chain.proceed(request);
++        String rawPath = request.getUri().getRawPath();
++        if (!HttpExtensionRouteRegistry.validRawPath(rawPath)) return response(HttpStatus.FORBIDDEN);
++        if (HttpExtensionRouteRegistry.reserved(rawPath)) return chain.proceed(request);
++        if (staticResources.isPresent() && staticResources.isUnique() && staticResources.get().resolve(rawPath).isPresent())
++            return chain.proceed(request);
++        final List<HttpExtensionRouteRegistry.Match> matches;
++        try { matches = registry.match(request.getMethod(), rawPath); }
++        catch (RuntimeException failure) { return response(HttpStatus.SERVICE_UNAVAILABLE); }
++        if (matches.isEmpty()) return chain.proceed(request);
++        if (matches.size() != 1) return response(HttpStatus.SERVICE_UNAVAILABLE);
++        var selected = matches.getFirst();
++        Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++        if (authentication == null || authentication.getName() == null || authentication.getName().isBlank())
++            return response(HttpStatus.UNAUTHORIZED);
++        if (!SAFE.contains(request.getMethod())) {
++            if (!csrf.isPresent() || !csrf.isUnique()) return response(HttpStatus.SERVICE_UNAVAILABLE);
++            try {
++                var rejected = csrf.get().csrfFilter(request);
++                if (rejected != null) return response(rejected.getStatus());
++            } catch (RuntimeException failure) { return response(HttpStatus.SERVICE_UNAVAILABLE); }
++        }
++        if (!configuration.enabled()) return Flux.defer(() -> selected.provider().handle(request, selected.target()))
++            .<MutableHttpResponse<?>>map(result -> documentResponse(request,selected.target(),result))
++            .onErrorResume(failure -> failureResponse(request, selected.target(), failure));
++        if (!typedEnabled || !gate.evaluationEnabled()) return response(HttpStatus.SERVICE_UNAVAILABLE);
++        var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++        var operation = new TypedAuthorization.Operation(TypedAuthorization.CONTRACT_VERSION,
++            TypedAuthorization.Source.REST, TypedAuthorization.Resource.EXTENSION_ROUTE, TypedAuthorization.Action.EXECUTE,
++            "main", selected.target().namespace(), selected.id(),
++            new TypedAuthorization.QueryDomain(List.of(selected.target().namespace()), List.of(), List.of(), true, false),
++            TypedAuthorization.Coverage.SINGLE, TypedAuthorization.Aggregate.NONE, TypedAuthorization.SideEffect.READ_ONLY);
++        return gate.boundary(principal, "main", () -> gate.authorize(principal, operation)
++            .flatMapMany(decision -> decision.allowed()
++                ? Flux.defer(() -> selected.provider().handle(request, selected.target()))
++                : response(HttpStatus.FORBIDDEN)))
++            .<MutableHttpResponse<?>>map(result -> documentResponse(request,selected.target(),result))
++            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context,
++                PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false))))
++            .onErrorResume(failure -> failureResponse(request, selected.target(), failure));
++    }
++
++    private MutableHttpResponse<?> documentResponse(HttpRequest<?> request, HttpExtensionRouteProviderV1.Target target, MutableHttpResponse<?> result) {
++        if (target.documentReturn() && request.getMethod() == HttpMethod.GET
++            && request.getHeaders().getAll(HttpHeaders.ACCEPT).stream().anyMatch(value -> value.toLowerCase(java.util.Locale.ROOT).contains("text/html"))
++            && (result.code()==401 || result.code()==403))
++            return HttpResponse.seeOther(java.net.URI.create(result.code()==401?"/oidc/logout":"/ui/access-denied"))
++                .header(HttpHeaders.CACHE_CONTROL,"no-store");
++        return result.header(HttpHeaders.CACHE_CONTROL,"no-store");
++    }
++    private Mono<MutableHttpResponse<?>> failureResponse(HttpRequest<?> request, HttpExtensionRouteProviderV1.Target target, Throwable failure) {
++        HttpStatus status = failure instanceof HttpStatusException exception && exception.getStatus().getCode() >= 400
++            && exception.getStatus().getCode() < 600 ? exception.getStatus() : HttpStatus.SERVICE_UNAVAILABLE;
++        return Mono.just(documentResponse(request, target, HttpResponse.status(status)));
++    }
++    private static Mono<MutableHttpResponse<?>> response(HttpStatus status) {
++        return Mono.just(HttpResponse.status(status).header(HttpHeaders.CACHE_CONTROL, "no-store"));
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteProviderV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteProviderV1.java
+new file mode 100644
+index 0000000..64eb5a8
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteProviderV1.java
+@@ -0,0 +1,28 @@
++package io.kestra.webserver.rbac;
++
++import java.util.Optional;
++import io.micronaut.http.HttpMethod;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.MutableHttpResponse;
++import org.reactivestreams.Publisher;
++
++/**
++ * Classpath bean for fallback HTTP routes. Register conditionally using the extension's own switch.
++ * Host routes and reserved/static paths always win. Duplicate IDs or overlapping matches fail closed.
++ * Metadata and match must be pure: no database, Flow lookup, schema reads, request body or authorization.
++ * The host calls handle only after authentication, applicable CSRF and EXTENSION_ROUTE/EXECUTE.
++ * Implementations must authorize concrete resources before lookup results, execution or side effects.
++ */
++public interface HttpExtensionRouteProviderV1 {
++    int CONTRACT_VERSION = 1;
++    String id();
++    Optional<Target> match(HttpMethod method, String rawPath);
++    Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request, Target target);
++    record Target(String namespace, boolean documentReturn) {
++        public Target {
++            if (namespace == null || !namespace.matches("[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*"))
++                throw new IllegalArgumentException("Invalid extension route namespace");
++        }
++        public Target(String namespace) { this(namespace, false); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteRegistry.java b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteRegistry.java
+new file mode 100644
+index 0000000..72fd3bb
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteRegistry.java
+@@ -0,0 +1,64 @@
++package io.kestra.webserver.rbac;
++
++import java.net.URI;
++import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++import io.micronaut.http.HttpMethod;
++import jakarta.inject.Singleton;
++
++/** Host implementation detail shared by dispatch and OIDC document-return validation. */
++@Singleton
++public final class HttpExtensionRouteRegistry {
++    private static final Set<String> RESERVED = Set.of("api", "ui", "ui-extensions", "oidc", ".well-known",
++        "ping", "swagger", "swagger-ui", "static", "assets", "oauth", "health", "metrics", "prometheus", "favicon.ico");
++    private final List<Registration> registrations;
++    private final boolean invalid;
++
++    public HttpExtensionRouteRegistry(List<HttpExtensionRouteProviderV1> providers) {
++        var entries=new ArrayList<Registration>();var ids=new HashSet<String>();boolean failure=false;
++        try {
++            for(var provider:providers) {
++                String id=provider.id();
++                if(id==null || !id.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}") || !ids.add(id))
++                    throw new IllegalArgumentException("Invalid or duplicate HTTP extension ID");
++                entries.add(new Registration(id,provider));
++            }
++        } catch(RuntimeException exception){failure=true;}
++        registrations=List.copyOf(entries);invalid=failure;
++    }
++    public boolean active(){return invalid || !registrations.isEmpty();}
++    public static boolean validRawPath(String path) {
++        if (path == null || !path.startsWith("/") || path.contains("%") || path.contains("\\")
++            || path.contains("//") || path.contains(";")) return false;
++        for (String segment : path.split("/", -1)) if (segment.equals(".") || segment.equals("..")) return false;
++        return path.chars().noneMatch(value->value<32 || value==127);
++    }
++    public static boolean reserved(String path){return path.equals("/") || RESERVED.contains(path.substring(1).split("/",2)[0]);}
++    public List<Match> match(HttpMethod method,String rawPath) {
++        if(!validRawPath(rawPath))throw new IllegalArgumentException("Unsafe extension route path");
++        if(reserved(rawPath))return List.of();
++        if(invalid)throw new IllegalStateException("Invalid extension route registry");
++        var matches=new ArrayList<Match>();
++        for(var registration:registrations)registration.provider().match(method,rawPath)
++            .ifPresent(target->matches.add(new Match(registration.id(),registration.provider(),target)));
++        return List.copyOf(matches);
++    }
++    public boolean documentRequest(io.micronaut.http.HttpRequest<?> request) {
++        return request.getMethod()==HttpMethod.GET
++            && request.getHeaders().getAll("Accept").stream().anyMatch(value->value.toLowerCase(java.util.Locale.ROOT).contains("text/html"))
++            && documentReturn(request.getUri());
++    }
++    public boolean documentReturn(URI uri) {
++        try {
++            if(uri==null || uri.isAbsolute() || uri.getRawAuthority()!=null || uri.getRawFragment()!=null || uri.toString().length()>2048
++                || !validRawPath(uri.getRawPath()) || uri.toString().chars().anyMatch(codePoint -> codePoint < 32 || codePoint == 127 || codePoint == '\\')
++                || uri.getQuery()!=null && uri.getQuery().chars().anyMatch(codePoint -> codePoint < 32 || codePoint == 127 || codePoint == '\\'))return false;
++            var matches=match(HttpMethod.GET,uri.getRawPath());
++            return matches.size()==1 && matches.getFirst().target().documentReturn();
++        }catch(RuntimeException failure){return false;}
++    }
++    private record Registration(String id,HttpExtensionRouteProviderV1 provider){}
++    public record Match(String id,HttpExtensionRouteProviderV1 provider,HttpExtensionRouteProviderV1.Target target){}
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+index a339a8c..ff2d25b 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/RestRbacFilter.java
+@@ -32,7 +32,7 @@ public class RestRbacFilter implements HttpServerFilter {
+         RbacGate gate, ProblemFactory problems) {
+         this.configuration = configuration; this.resolvers = resolvers; this.gate = gate; this.problems = problems;
+     }
+-    @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 1; }
++    @Override public int getOrder() { return ServerFilterPhase.SECURITY.order() + 3; }
+     @Override public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
+         if (!configuration.enabled() || protocol(request) || publicFavicon!=null && publicFavicon.matches(request)) return chain.proceed(request);
+         Authentication authentication = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+index c38cc4d..108da12 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedAuthorization.java
+@@ -12,7 +12,7 @@ public final class TypedAuthorization {
+     public enum Resource { AI, FLOW, EXECUTION, NAMESPACE, LOG, METRIC, TRIGGER, KVSTORE,
+         NAMESPACE_FILE, METADATA, SYSTEM, MCP_SERVER, DASHBOARD, BLUEPRINT
+ ,
+-        EXTENSION
++        EXTENSION, EXTENSION_ROUTE
+  }
+     public enum Action { READ, LIST, CREATE, UPDATE, DELETE, EXECUTE, ACCESS_OUTPUTS }
+     public enum Coverage { SINGLE, COMPLETE_QUERY, COMPLETE_BATCH }
+@@ -200,10 +200,13 @@ if (resourceDomains.stream().anyMatch(term -> term.resourceScope() == QueryDomai
+                 throw new IllegalArgumentException("Invalid namespace");
+             if (resourceId != null && resourceId.isBlank()) throw new IllegalArgumentException("Invalid resource ID");
+             if (
+-resource == Resource.EXTENSION
++(resource == Resource.EXTENSION || resource == Resource.EXTENSION_ROUTE)
+                     && (resourceId == null
+                             || !resourceId.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
+                 throw new IllegalArgumentException("Registered extension ID is required");
++            if (resource == Resource.EXTENSION_ROUTE && (namespace == null || action != Action.EXECUTE
++                || coverage != Coverage.SINGLE || aggregate != Aggregate.NONE || sideEffect != SideEffect.READ_ONLY))
++                throw new IllegalArgumentException("Extension route requires a namespace entry operation");
+             if (
+ namespace != null && !queryDomain.contains(namespace)) throw new IllegalArgumentException("Resource is outside query domain");
+             if (coverage == Coverage.COMPLETE_QUERY && !queryDomain.complete()) throw new IllegalArgumentException("Complete query required");
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+index 74b9a6e..6029506 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedRestRbacFilter.java
+@@ -39,7 +39,7 @@ public final class TypedRestRbacFilter implements HttpServerFilter {
+
+     @Override
+     public int getOrder() {
+-        return ServerFilterPhase.SECURITY.order() + 1;
++        return ServerFilterPhase.SECURITY.order() + 3;
+     }
+
+     @Override
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionBookmarkTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionBookmarkTest.java
+new file mode 100644
+index 0000000..067b32a
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionBookmarkTest.java
+@@ -0,0 +1,44 @@
++package io.kestra.webserver.rbac;
++
++import java.net.URI;
++import java.util.List;
++import java.util.Optional;
++import io.kestra.webserver.oidc.services.OidcPriorToLoginPersistence;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.*;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.*;
++
++class HttpExtensionBookmarkTest {
++    private HttpExtensionRouteProviderV1 provider(String id, boolean document) {
++        return new HttpExtensionRouteProviderV1(){
++            public String id(){return id;}
++            public Optional<Target> match(HttpMethod method,String path){return path.startsWith("/team.a/")?Optional.of(new Target("team.a",document)):Optional.empty();}
++            public org.reactivestreams.Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> r,Target t){throw new AssertionError("bookmark must not invoke handler");}
++        };
++    }
++    @Test void onlyUniqueRegisteredDocumentReturnsAndRoundTrips() throws Exception {
++        var registry=new HttpExtensionRouteRegistry(List.of(provider("document",true)));
++        assertThat(registry.documentReturn(URI.create("/team.a/a..b?key=value"))).isTrue();
++        assertThat(new HttpExtensionRouteRegistry(List.of(provider("api",false))).documentReturn(URI.create("/team.a/api"))).isFalse();
++        assertThat(new HttpExtensionRouteRegistry(List.of(provider("one",true),provider("two",false))).documentReturn(URI.create("/team.a/page"))).isFalse();
++        for(String value:List.of("https://evil/","//evil/x","/team.a/../page","/team.a/%2e/page","/team.a/page?x=%0a","/team.a/page#fragment","/api/v1/main/one"))
++            assertThat(registry.documentReturn(URI.create(value))).as(value).isFalse();
++        var persistence=new OidcPriorToLoginPersistence(null);
++        var bean=mock(BeanProvider.class);when(bean.isUnique()).thenReturn(true);when(bean.get()).thenReturn(registry);
++        var field=OidcPriorToLoginPersistence.class.getDeclaredField("extensionRoutes");field.setAccessible(true);field.set(persistence,bean);
++        var request=HttpRequest.GET("/team.a/page").accept(MediaType.TEXT_HTML_TYPE);var response=HttpResponse.ok();
++        persistence.onUnauthorized(request,response);
++        var cookie=response.getCookies().get("ORIGINAL_URI");assertThat(cookie).isNotNull();
++        var callback=new io.micronaut.http.simple.SimpleHttpRequestFactory().get("/oauth/callback/kestra").cookie(cookie);var consume=HttpResponse.ok();
++        assertThat(persistence.getOriginalUri(callback,consume)).contains(request.getUri());
++        assertThat(consume.getCookies().get("ORIGINAL_URI").getMaxAge()).isZero();
++        when(bean.get()).thenReturn(new HttpExtensionRouteRegistry(List.of()));
++        assertThat(persistence.getOriginalUri(callback,HttpResponse.ok())).isEmpty();
++        for(var notDocument:List.of(HttpRequest.POST("/team.a/page","").accept(MediaType.TEXT_HTML_TYPE),HttpRequest.GET("/team.a/page").accept(MediaType.APPLICATION_JSON_TYPE))) {
++            var rejected=HttpResponse.ok();persistence.onUnauthorized(notDocument,rejected);assertThat(rejected.getCookies().get("ORIGINAL_URI")).isNull();
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionRouteFilterTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionRouteFilterTest.java
+new file mode 100644
+index 0000000..addaac1
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionRouteFilterTest.java
+@@ -0,0 +1,248 @@
++package io.kestra.webserver.rbac;
++
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.atomic.AtomicInteger;
++import io.kestra.webserver.filter.CsrfTokenFilter;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import io.micronaut.web.router.resource.StaticResourceResolver;
++import org.junit.jupiter.api.Test;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Flux;
++import reactor.core.publisher.Mono;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++class HttpExtensionRouteFilterTest {
++    private static BeanProvider<CsrfTokenFilter> csrf(boolean present) {
++        var provider = mock(BeanProvider.class);
++        when(provider.isUnique()).thenReturn(present);
++        when(provider.isPresent()).thenReturn(present);
++        return provider;
++    }
++
++    private static BeanProvider<StaticResourceResolver> staticResources() {
++        var provider = mock(BeanProvider.class);
++        when(provider.isUnique()).thenReturn(false);
++        when(provider.isPresent()).thenReturn(false);
++        return provider;
++    }
++
++    private static HttpExtensionRouteProviderV1 provider(String id, AtomicInteger calls) {
++        return new HttpExtensionRouteProviderV1() {
++            public String id() { return id; }
++            public Optional<Target> match(io.micronaut.http.HttpMethod method, String rawPath) {
++                return rawPath.matches("/company\\.[^/]+/flow") ? Optional.of(new Target(rawPath.substring(1, rawPath.indexOf('/', 1)))) : Optional.empty();
++            }
++            public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request, Target target) {
++                calls.incrementAndGet();
++                return Mono.just(HttpResponse.ok());
++            }
++        };
++    }
++
++    private static HttpExtensionRouteFilter filter(List<HttpExtensionRouteProviderV1> providers) {
++        return new HttpExtensionRouteFilter(new HttpExtensionRouteRegistry(providers), mock(TypedAuthorizationGate.class), csrf(false), staticResources(),
++            new RbacConfiguration(false, false), false);
++    }
++
++    @Test
++    void nativeAndReservedPathsProceedBeforeProviders() {
++        var calls = new AtomicInteger();
++        var chainCalls = new AtomicInteger();
++        var filter = filter(List.of(provider("one", calls)));
++        var chain = (ServerFilterChain) request -> { chainCalls.incrementAndGet(); return Mono.just(HttpResponse.ok()); };
++        var response = Flux.from(filter.doFilter(HttpRequest.GET("/api/v1/main/configs"), chain)).single().block();
++        assertThat(response.code()).isEqualTo(200);
++        assertThat(chainCalls).hasValue(1);
++        assertThat(calls).hasValue(0);
++    }
++
++    @Test
++    void anonymousExtensionRequestIsRejectedWithoutHandler() {
++        var calls = new AtomicInteger();
++        var filter = filter(List.of(provider("one", calls)));
++        var response = Flux.from(filter.doFilter(HttpRequest.GET("/company.a/flow"), ignored -> Mono.just(HttpResponse.ok()))).single().block();
++        assertThat(response.code()).isEqualTo(401);
++        assertThat(calls).hasValue(0);
++    }
++
++    @Test
++    void overlappingProvidersFailClosedWithoutHandler() {
++        var first = new AtomicInteger();
++        var second = new AtomicInteger();
++        var filter = filter(List.of(provider("one", first), provider("two", second)));
++        var request = HttpRequest.GET("/company.a/flow").setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("alice", List.of("user")));
++        var response = Flux.from(filter.doFilter(request, ignored -> Mono.just(HttpResponse.ok()))).single().block();
++        assertThat(response.code()).isEqualTo(503);
++        assertThat(first).hasValue(0);
++        assertThat(second).hasValue(0);
++    }
++
++    @Test void noProviderPreservesUnknownResultAndMissingCsrf() {
++        var response=Flux.from(filter(List.of()).doFilter(HttpRequest.GET("/unknown/path"), ignored -> Mono.just(HttpResponse.notFound()))).single().block();
++        assertThat(response.code()).isEqualTo(404);
++    }
++
++    @Test void zeroMatchPreservesUnknownResult() {
++        var calls=new AtomicInteger();
++        var response=Flux.from(filter(List.of(provider("one",calls))).doFilter(HttpRequest.GET("/unmatched/path"), ignored -> Mono.just(HttpResponse.notFound()))).single().block();
++        assertThat(response.code()).isEqualTo(404);assertThat(calls).hasValue(0);
++    }
++
++    @Test void allReservedPrefixesAndMalformedRawPathsNeverMatch() {
++        var matches=new AtomicInteger();var handles=new AtomicInteger();
++        var provider=new HttpExtensionRouteProviderV1(){
++            public String id(){return "catchall";}
++            public Optional<Target> match(io.micronaut.http.HttpMethod method,String raw){matches.incrementAndGet();return Optional.of(new Target("company.a"));}
++            public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> req,Target target){handles.incrementAndGet();return Mono.just(HttpResponse.ok());}
++        };
++        var filter=filter(List.of(provider));
++        for(String prefix:List.of("api","ui","ui-extensions","oidc",".well-known","ping","swagger","static","oauth","favicon.ico","assets")){
++            assertThat(Flux.from(filter.doFilter(HttpRequest.GET("/"+prefix+"/x"),ignored->Mono.just(HttpResponse.notFound()))).single().block().code()).isEqualTo(404);
++        }
++        for(String path:List.of("/company%2Ea/flow","/company%2fa/flow","/company/../flow","/company//flow","/company;a/flow","/%75i/flow")){
++            assertThat(Flux.from(filter.doFilter(HttpRequest.GET(path),ignored->Mono.just(HttpResponse.ok()))).single().block().code()).isEqualTo(403);
++        }
++        assertThat(matches).hasValue(0);assertThat(handles).hasValue(0);
++    }
++
++    @Test void modeAStillRequiresCsrfComponentForWriteButNotRead() {
++        var calls=new AtomicInteger();var filter=filter(List.of(provider("one",calls)));
++        var get=HttpRequest.GET("/company.a/flow").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++        assertThat(Flux.from(filter.doFilter(get,ignored->Mono.just(HttpResponse.notFound()))).single().block().code()).isEqualTo(200);
++        var post=HttpRequest.POST("/company.a/flow","").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++        assertThat(Flux.from(filter.doFilter(post,ignored->Mono.just(HttpResponse.notFound()))).single().block().code()).isEqualTo(503);
++        assertThat(calls).hasValue(1);
++    }
++
++    @Test void modeBRequiresTypedAndEvaluationSwitches() {
++        var calls=new AtomicInteger();var request=HttpRequest.GET("/company.a/flow").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++        for(boolean typed:List.of(false,true)){
++            var filter=new HttpExtensionRouteFilter(new HttpExtensionRouteRegistry(List.of(provider("one",calls))),mock(TypedAuthorizationGate.class),csrf(false),staticResources(),new RbacConfiguration(true,false),typed);
++            assertThat(Flux.from(filter.doFilter(request,ignored->Mono.just(HttpResponse.ok()))).single().block().code()).isEqualTo(503);
++        }
++        assertThat(calls).hasValue(0);
++    }
++
++    @Test void duplicateAndFaultyMetadataNeverStartHandlersOrBreakNative() {
++        var calls=new AtomicInteger();
++        var duplicate=filter(List.of(provider("same",calls),provider("same",calls)));
++        assertThat(Flux.from(duplicate.doFilter(HttpRequest.GET("/company.a/flow"),ignored->Mono.just(HttpResponse.ok()))).single().block().code()).isEqualTo(503);
++        assertThat(Flux.from(duplicate.doFilter(HttpRequest.GET("/ui"),ignored->Mono.just(HttpResponse.ok()))).single().block().code()).isEqualTo(200);
++        assertThat(calls).hasValue(0);
++    }
++
++    @Test void snapshotClosesExactlyOnceOnCompletionErrorAndCancellation() throws Exception {
++        for(String mode:List.of("complete","error","cancel")){
++            var policy=new AuthorizationEvaluationTest.Policy();policy.grants.set(java.util.Set.of("company.a"));
++            var entered=new java.util.concurrent.CountDownLatch(1);var calls=new AtomicInteger();
++            var provider=new HttpExtensionRouteProviderV1(){
++                public String id(){return "test";}
++                public Optional<Target> match(io.micronaut.http.HttpMethod method,String path){return Optional.of(new Target("company.a"));}
++                public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> req,Target target){
++                    calls.incrementAndGet();entered.countDown();
++                    return mode.equals("cancel")?Mono.never():mode.equals("error")?Mono.error(new IllegalStateException("handler failed")):Mono.just(HttpResponse.ok());
++                }
++            };
++            var filter=new HttpExtensionRouteFilter(new HttpExtensionRouteRegistry(List.of(provider)),AuthorizationEvaluationTest.gate(policy),csrf(false),staticResources(),new RbacConfiguration(true,false),true);
++            var request=HttpRequest.GET("/company.a/flow").setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++            var result=Flux.from(filter.doFilter(request,ignored->Mono.just(HttpResponse.notFound())));
++            if(mode.equals("cancel")){
++                var subscription=result.subscribe();assertThat(entered.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();subscription.dispose();
++                org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5)).untilAsserted(()->assertThat(policy.closes).hasValue(1));
++            }else assertThat(result.single().block().code()).isEqualTo(mode.equals("error")?503:200);
++            assertThat(policy.begins).hasValue(1);assertThat(policy.closes).hasValue(1);assertThat(calls).hasValue(1);
++        }
++    }
++
++    @Test void actualStaticResolverWinsBeforeCatchAllProvider() throws Exception {
++        var resources=staticResources();var resolver=mock(StaticResourceResolver.class);
++        when(resources.isPresent()).thenReturn(true);when(resources.isUnique()).thenReturn(true);when(resources.get()).thenReturn(resolver);
++        when(resolver.resolve("/logo.svg")).thenReturn(Optional.of(new java.net.URI("https://example.test/logo.svg").toURL()));
++        var calls=new AtomicInteger();var filter=new HttpExtensionRouteFilter(new HttpExtensionRouteRegistry(List.of(provider("one",calls))),mock(TypedAuthorizationGate.class),csrf(false),resources,new RbacConfiguration(false,false),false);
++        assertThat(Flux.from(filter.doFilter(HttpRequest.GET("/logo.svg"),ignored->Mono.just(HttpResponse.ok()))).single().block().code()).isEqualTo(200);
++        assertThat(calls).hasValue(0);
++    }
++
++    @Test void ordinaryDottedFlowIdsAreAllowedButTraversalSegmentsAreRejected() {
++        for(String path:List.of("/company/a.b","/company/a..b"))assertThat(HttpExtensionRouteRegistry.validRawPath(path)).isTrue();
++        for(String path:List.of("/company/../flow","/company/./flow"))assertThat(HttpExtensionRouteRegistry.validRawPath(path)).isFalse();
++    }
++    @Test void nativeAndUnmatchedErrorsAreNotRewritten() {
++        var failure=new IllegalArgumentException("native failure");
++        for(String path:List.of("/ui/main/flows","/unmatched/path")){
++            org.assertj.core.api.Assertions.assertThatThrownBy(()->Flux.from(filter(List.of(provider("one",new AtomicInteger())))
++                .doFilter(HttpRequest.GET(path),ignored->Mono.error(failure))).blockLast()).isSameAs(failure);
++        }
++    }
++
++    @Test void revokedLifecyclePrecedesDispatcherInBothModes() {
++        var configuration=new io.kestra.webserver.oidc.OidcConfiguration();
++        var lifecycle=mock(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.class);
++        var identityFilter=new io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter(configuration,lifecycle);
++        var calls=new AtomicInteger();var dispatcher=filter(List.of(provider("one",calls)));
++        assertThat(identityFilter.getOrder()).isLessThan(dispatcher.getOrder());
++        assertThat(dispatcher.getOrder()).isLessThan(new TypedRestRbacFilter(new RbacConfiguration(true,false),null,null,null).getOrder());
++        assertThat(dispatcher.getOrder()).isLessThan(new RestRbacFilter(new RbacConfiguration(true,false),null,null,null).getOrder());
++        var request=HttpRequest.GET("/company.a/flow").setAttribute(SecurityFilter.AUTHENTICATION,
++            Authentication.build("alice",java.util.Map.of("iss",configuration.getIssuer())));
++        var response=Flux.from(identityFilter.doFilter(request, req->dispatcher.doFilter(req,ignored->Mono.just(HttpResponse.ok())))).single().block();
++        assertThat(response.code()).isEqualTo(401);assertThat(calls).hasValue(0);
++    }
++
++    @Test void selectedTargetIsUsedWithoutRematchingAfterHandler() {
++        for(boolean document:List.of(false,true)){
++            var matches=new AtomicInteger();var calls=new AtomicInteger();
++            var provider=new HttpExtensionRouteProviderV1(){
++                public String id(){return "selected";}
++                public Optional<Target> match(io.micronaut.http.HttpMethod method,String path){
++                    if(matches.incrementAndGet()!=1)throw new IllegalStateException("second match after side effect");
++                    return Optional.of(new Target("company.a",document));
++                }
++                public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request,Target target){calls.incrementAndGet();return Mono.just(HttpResponse.status(HttpStatus.FORBIDDEN));}
++            };
++            var request=HttpRequest.GET("/company.a/flow").accept(io.micronaut.http.MediaType.TEXT_HTML_TYPE)
++                .setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++            var response=Flux.from(filter(List.of(provider)).doFilter(request,ignored->Mono.just(HttpResponse.notFound()))).single().block();
++            assertThat(response.code()).isEqualTo(document?303:403);
++            assertThat(response.getHeaders().get("Cache-Control")).isEqualTo("no-store");
++            assertThat(matches).hasValue(1);assertThat(calls).hasValue(1);
++        }
++    }
++
++
++    @Test void standardHttpStatusExceptionsKeepCodeWithoutLeakingDetailsAndUnknownIs503() {
++        for(boolean rbac:List.of(false,true)) for(boolean document:List.of(false,true)) for(int code:List.of(401,403,404,409,502,0)) {
++            var policy=new AuthorizationEvaluationTest.Policy();policy.grants.set(java.util.Set.of("company.a"));
++            var provider=new HttpExtensionRouteProviderV1(){
++                public String id(){return "status-probe";}
++                public Optional<Target> match(io.micronaut.http.HttpMethod method,String path){return Optional.of(new Target("company.a",document));}
++                public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request,Target target){
++                    return Mono.error(code==0?new IllegalStateException("secret-unknown"):
++                        new io.micronaut.http.exceptions.HttpStatusException(HttpStatus.valueOf(code),"secret-status-message"));
++                }
++            };
++            var dispatcher=new HttpExtensionRouteFilter(new HttpExtensionRouteRegistry(List.of(provider)),AuthorizationEvaluationTest.gate(policy),csrf(false),staticResources(),new RbacConfiguration(rbac,false),rbac);
++            var request=HttpRequest.GET("/company.a/flow").accept(io.micronaut.http.MediaType.TEXT_HTML_TYPE).setAttribute(SecurityFilter.AUTHENTICATION,Authentication.build("alice"));
++            var result=Flux.from(dispatcher.doFilter(request,ignored->Mono.just(HttpResponse.ok()))).single().block();
++            int expected=document&&(code==401||code==403)?303:code==0?503:code;
++            assertThat(result.code()).as("rbac=%s document=%s code=%s",rbac,document,code).isEqualTo(expected);
++            assertThat(result.getHeaders().get("Cache-Control")).isEqualTo("no-store");
++            assertThat(result.getBody()).isEmpty();assertThat(result.toString()).doesNotContain("secret-");
++            if(expected==303)assertThat(result.getHeaders().get("Location")).isEqualTo(code==401?"/oidc/logout":"/ui/access-denied");
++            else assertThat(result.getHeaders().get("Location")).isNull();
++            assertThat(policy.closes).hasValue(rbac?1:0);
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionRouteHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionRouteHttpTest.java
+new file mode 100644
+index 0000000..c3bb446
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/HttpExtensionRouteHttpTest.java
+@@ -0,0 +1,190 @@
++package io.kestra.webserver.rbac;
++
++import java.net.http.HttpClient;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionStage;
++import java.util.concurrent.atomic.AtomicInteger;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.*;
++import io.micronaut.http.annotation.*;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import org.reactivestreams.Publisher;
++
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.assertThat;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "true")
++@Property(name = "kestra.rbac.typed.enabled", value = "true")
++@Property(name = "kestra.rbac.evaluation.enabled", value = "true")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "http.extension.probe", value = "true")
++class HttpExtensionRouteHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject Policy policy;
++    @Inject First first;
++    @Inject Second second;
++    private final HttpClient client = HttpClient.newHttpClient();
++
++    private int get(String path, String subject) throws Exception {
++        var builder = java.net.http.HttpRequest.newBuilder(server.getURI().resolve(path));
++        if (subject != null) builder.header("X-Extension-Probe", subject);
++        return client.send(builder.GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode();
++    }
++
++    @Test void realSecurityOrderScopesAndProviderIsolation() throws Exception {
++        first.calls.set(0); second.calls.set(0); policy.begins.set(0); policy.closes.set(0);
++        assertThat(get("/team.a/one", null)).isEqualTo(401);
++        assertThat(first.calls.get()).isZero();
++        assertThat(get("/team.a/one", "one")).isEqualTo(200);
++        assertThat(first.calls.get()).isEqualTo(1);
++        assertThat(get("/team.a/two", "one")).isEqualTo(403);
++        assertThat(second.calls.get()).isZero();
++        assertThat(get("/team.b/one", "one")).isEqualTo(403);
++        assertThat(first.calls.get()).isEqualTo(1);
++        assertThat(get("/team.a/two", "two")).isEqualTo(200);
++        assertThat(second.calls.get()).isEqualTo(1);
++        assertThat(policy.begins.get()).isEqualTo(policy.closes.get());
++        assertThat(policy.sawRequest).isTrue();
++        assertThat(get("/nobody/unknown", "one")).isEqualTo(403);
++        assertThat(get("/ping", "one")).isEqualTo(200);
++        assertThat(first.calls.get()).isEqualTo(1);
++    }
++
++
++    @Test void directBookmarkBootstrapProvidesCsrfWithoutPriorUiVisit() throws Exception {
++        int beforeMatches=first.matches.get();
++        var page=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/team.a/one"))
++            .header("X-Extension-Probe","one").GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(page.statusCode()).isEqualTo(200);assertThat(first.matches.get()).isEqualTo(beforeMatches+1);
++        String setCookie=page.headers().firstValue("set-cookie").orElseThrow();
++        assertThat(setCookie).containsIgnoringCase("httponly").contains("SameSite=Strict","Path=/");
++        String cookie=setCookie.split(";",2)[0];String token=page.body();
++        int before=first.calls.get();
++        for(String supplied:List.of("", "invalid",token)){
++            var builder=java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/team.a/one"))
++                .header("X-Extension-Probe","one").header("Cookie",cookie+"; JWT=test-ambient-session");
++            if(!supplied.isEmpty())builder.header("X-CSRF-TOKEN",supplied);
++            int status=client.send(builder.POST(java.net.http.HttpRequest.BodyPublishers.noBody()).build(),java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode();
++            assertThat(status).isEqualTo(supplied.equals(token)?200:403);
++        }
++        assertThat(first.calls.get()).isEqualTo(before+1);
++    }
++
++    @Test void actualNativeAliasRouteDoesNotInvokeProviderEvenOnNativeDenial() throws Exception {
++        int before=first.calls.get();
++        assertThat(get("/alias/one","one")).isEqualTo(403);
++        assertThat(first.calls.get()).isEqualTo(before);
++    }
++
++    @Controller("/alias") @Requires(property="http.extension.probe",value="true")
++    static class NativeAlias {
++        @Get("/{id}") String read(String id){return "native";}
++    }
++
++    @Test void realHttpRevokedSessionStopsBeforeDispatcher() throws Exception {
++        int before=first.calls.get();assertThat(get("/team.a/one","revoked")).isEqualTo(401);assertThat(first.calls.get()).isEqualTo(before);
++    }
++
++    @Test void invalidDocumentRecoversAndApiDoesNotRedirect() throws Exception {
++        int before=first.calls.get();
++        var invalid=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/team.a/one"))
++            .header("X-Extension-Probe","revoked").header("Accept","text/html").GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(invalid.statusCode()).isEqualTo(307);assertThat(invalid.headers().firstValue("location")).contains("/oidc/logout");
++        assertThat(first.calls.get()).isEqualTo(before);
++        var api=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/team.a/two"))
++            .header("X-Extension-Probe","revoked").header("Accept","text/html").GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(api.statusCode()).isEqualTo(401);assertThat(api.headers().firstValue("location")).isEmpty();
++    }
++    @Test void deniedDocumentUsesExistingExitPageAndApiKeeps403() throws Exception {
++        int before=first.calls.get();
++        var denied=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/team.b/one"))
++            .header("X-Extension-Probe","one").header("Accept","text/html").GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(denied.statusCode()).isEqualTo(303);assertThat(denied.headers().firstValue("location")).contains("/ui/access-denied");
++        assertThat(denied.headers().firstValue("cache-control")).contains("no-store");assertThat(first.calls.get()).isEqualTo(before);
++        var api=client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/team.a/two"))
++            .header("X-Extension-Probe","one").header("Accept","text/html").GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString());
++        assertThat(api.statusCode()).isEqualTo(403);assertThat(api.headers().firstValue("location")).isEmpty();
++    }
++    @Singleton @io.micronaut.http.annotation.Filter("/**") @Requires(property="http.extension.probe",value="true")
++    static class LifecycleProbe implements io.micronaut.http.filter.HttpServerFilter {
++        private final io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter delegate=
++            new io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter(new io.kestra.webserver.oidc.OidcConfiguration(),
++                org.mockito.Mockito.mock(io.kestra.webserver.oidc.services.OidcIdentityLifecycle.class));
++        @Inject void registry(HttpExtensionRouteRegistry registry) throws Exception {
++            var provider=org.mockito.Mockito.mock(io.micronaut.context.BeanProvider.class);
++            org.mockito.Mockito.when(provider.isUnique()).thenReturn(true);org.mockito.Mockito.when(provider.get()).thenReturn(registry);
++            var field=delegate.getClass().getDeclaredField("extensionRoutes");field.setAccessible(true);field.set(delegate,provider);
++        }
++        public int getOrder(){return delegate.getOrder();}
++        public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request,io.micronaut.http.filter.ServerFilterChain chain){return delegate.doFilter(request,chain);}
++    }
++    @Singleton @Requires(property="http.extension.probe",value="true")
++    static class Identity implements AuthenticationFetcher<HttpRequest<?>> {
++        public Publisher<Authentication> fetchAuthentication(HttpRequest<?> request) {
++            String name=request.getHeaders().get("X-Extension-Probe");
++            return name == null ? Mono.empty() : Mono.just(name.equals("revoked")
++                ? Authentication.build(name, List.of("test"),java.util.Map.of("iss","http://localhost:8080"))
++                : Authentication.build(name, List.of("test")));
++        }
++    }
++    @Singleton @Requires(property="http.extension.probe",value="true")
++    static class First implements HttpExtensionRouteProviderV1 {
++        final AtomicInteger calls=new AtomicInteger(), matches=new AtomicInteger();
++        @Inject io.micronaut.security.csrf.generator.CsrfTokenGenerator<HttpRequest<?>> generator;
++        @Inject io.micronaut.security.csrf.validator.CsrfTokenValidator<HttpRequest<?>> validator;
++        @Inject io.micronaut.security.csrf.CsrfConfiguration csrfConfiguration;
++        public String id(){ return "one"; }
++        public Optional<Target> match(HttpMethod method,String path){
++            matches.incrementAndGet();
++            return path.matches("/[A-Za-z0-9_.-]+/one") ? Optional.of(new Target(path.split("/")[1],method==HttpMethod.GET)) : Optional.empty();
++        }
++        public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request,Target target){ calls.incrementAndGet();
++            // Independent HTML bootstrap pattern: standard Micronaut beans, no UiIndexService or prior /ui visit.
++            String token=request.getCookies().findCookie(csrfConfiguration.getCookieName()).map(io.micronaut.http.cookie.Cookie::getValue)
++                .filter(value->validator.validateCsrfToken(request,value)).orElseGet(()->generator.generateCsrfToken(request));
++            return Mono.just(HttpResponse.ok(token).header("Cache-Control","no-store").cookie(io.micronaut.http.cookie.Cookie.of(csrfConfiguration.getCookieName(),token)
++                .path("/").httpOnly(true).secure(request.isSecure()).sameSite(io.micronaut.http.cookie.SameSite.Strict))); }
++    }
++    @Singleton @Requires(property="http.extension.probe",value="true")
++    static class Second implements HttpExtensionRouteProviderV1 {
++        final AtomicInteger calls=new AtomicInteger();
++        public String id(){ return "two"; }
++        public Optional<Target> match(HttpMethod method,String path){
++            return path.matches("/[A-Za-z0-9_.-]+/two") ? Optional.of(new Target(path.split("/")[1])) : Optional.empty();
++        }
++        public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request,Target target){calls.incrementAndGet();return Mono.just(HttpResponse.ok("two"));}
++    }
++    @Singleton @Requires(property="http.extension.probe",value="true")
++    static class Policy implements AuthorizationEvaluationProviderV1 {
++        final AtomicInteger begins=new AtomicInteger(),closes=new AtomicInteger();
++        volatile boolean sawRequest;
++        public CompletionStage<AuthorizationEvaluationV1> begin(RbacAuthorizer.Principal principal,String tenant){
++            begins.incrementAndGet();sawRequest=AuthorizationInvocationContext.current().isPresent();
++            return CompletableFuture.completedFuture(new AuthorizationEvaluationV1(){
++                public CompletionStage<Decision> authorize(Operation operation){
++                    return CompletableFuture.completedFuture(operation.resource()==Resource.EXTENSION_ROUTE
++                        && operation.resourceId().equals(principal.subject())
++                        ? Decision.allow(new QueryDomain(List.of("team.a"),List.of(),List.of(),true,false)) : Decision.deny("probe denied"));
++                }
++                public CompletionStage<Void> close(){closes.incrementAndGet();return CompletableFuture.completedFuture(null);}
++            });
++        }
++    }
++}

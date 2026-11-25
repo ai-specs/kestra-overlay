@@ -32,7 +32,7 @@
 | 独立管理页面 | 已装载扩展通过 `UiExtensionProviderV1` 描述资源，消费正式镜像内 UI SDK | 页面业务、存储、授权及自身浏览器验收归扩展仓 |
 | 独立进程或服务 | 自有仓发布镜像，由部署仓组合 | 不进入宿主镜像或 `extensions.tsv` |
 
-当前 classpath 注册表只有 `kestra-rbac-authorizer`，它是现有授权能力的约定文件名，
+classpath 注册表登记 `kestra-rbac-authorizer` 与 `kestra-amis-apps`；前者是授权能力的约定文件名，
 不是所有扩展必须共用的名称。其他 classpath 扩展必须先登记自己的条目并通过
 宿主发布门；不能只把新 jar 放进 `/app/libs` 就宣称应用 bean 已装载。普通插件
 和独立服务不得为了形式统一而加入 classpath。
@@ -42,6 +42,44 @@
 | 扩展功能集 | 约定文件名/通道 | 详细说明 |
 |---|---|---|
 | RBAC / 应用组授权 | `kestra-rbac-authorizer.jar` / `/app/libs` classpath | 见 `kestra-plugin-rbac` 的 README；应用组、scope、策略和管理页面不属于 overlay |
+
+### 通用 HTTP 扩展契约 V1（REQ-0410）
+
+该通道由正式发布的 overlay 镜像提供。消费方必须使用包含该契约并通过成功 CI 的精确镜像
+digest；源码、候选镜像或本地缓存标签不能作为编译输入。
+
+公开类型为 `io.kestra.webserver.rbac.HttpExtensionRouteProviderV1`：
+
+```java
+int CONTRACT_VERSION = 1;
+String id();
+Optional<Target> match(HttpMethod method, String rawPath);
+Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request, Target target);
+record Target(String namespace, boolean documentReturn) {}
+```
+
+`match` 必须是纯 metadata（元数据）匹配：不得读取请求体、Flow、schema、数据库、队列或
+授权状态。它必须使用原始路径，拒绝编码分隔符、反斜杠、双斜杠、分号和完整路径段 `.`/`..`；
+合法的 `a.b`、`a..b` 段必须保留。provider ID 是入口能力 ID，不是业务实体名。多个 provider
+同时匹配同一请求时宿主失败关闭；零匹配继续原生链。原生 `MethodBasedRouteMatch`、静态资源、
+`api`、`ui`、`ui-extensions`、`oidc`、`.well-known`、`ping`、`swagger`、`static`、`oauth`、
+健康检查、监控、根路径和 favicon 保留原生优先。
+
+匹配到扩展后，宿主先要求生产认证，再对写请求复用现有 `CsrfTokenFilter.csrfFilter`；缺少
+CSRF bean 或校验异常时失败关闭。独立 HTML 可以直接注入 Micronaut 标准
+`CsrfTokenGenerator`/`CsrfTokenValidator`，生成同源 cookie 和 `X-CSRF-TOKEN`，不得依赖先访问
+`/ui` 或调用 `UiIndexService` 拼宿主 HTML。模式 A 保留认证、CSRF 和原生路由；模式 B 还必须
+启用 typed/evaluation 且 provider 唯一，否则扩展请求拒绝。无 provider 时宿主原生行为不变。
+
+首门使用现有 `TypedAuthorization.Operation`：`Resource.EXTENSION_ROUTE`、`Action.EXECUTE`、
+provider ID 作为 `resourceId`，namespace 使用既有 `QueryDomain`。宿主通过现有
+`TypedAuthorizationGate.boundary/authorize` 管理开始、完成、异常和取消清理，并传递
+`AuthorizationInvocationContext`；拒绝发生在任何 Flow/schema/业务查询前。`documentReturn=true`
+只允许唯一 provider 匹配的同源安全 GET 文档参与 OIDC prior-login 书签；API、资产和错误 provider
+不保存书签。原有 `/ui` safe 规则、cookie 取回、范围验证、编码检查和撤销清理保持不变。
+
+Flow 查找、Flow 执行、AMIS schema、页面/API 声明和业务 trigger 不属于宿主契约。消费方必须先
+通过独立 CI 编译和测试，再使用正式镜像与正式 jar 进行部署组合验收。
 
 这是当前已发布输入的简要清单，不是未来扩展的预先注册。新扩展必须先完成宿主
 契约接收、独立 CI、正式产物和部署组合验收，再加入清单。
@@ -1060,3 +1098,32 @@ bash scripts/blackbox-oidc.sh '<fixed-image>'
 主机端口必须由部署方提供可用转发，脚本不修改原容器网络或启动 PG 内转发进程。
 不输出测试密码；本地凭据只存放临时私有环境文件。此模式不能把模拟测试或本地候选
 提升为正式发布证据。MCP/UI 门使用相同变量，并保留所有原业务、安全与副作用断言。
+
+### 执行服务的公开方法子集
+
+消费方必须从匹配成功 CI 的正式 digest 编译，下列同源现有方法是支持的最小子集，
+不新增执行引擎或 bridge：`RbacExecutionGate.checked/finishRequest/readResult`；
+`WebhookService.startExecution(Execution)`、`runContext(Flow,Execution)`；
+`FlowInputOutput.readExecutionInputs(FlowInterface,Execution,Map)`、`typedOutputs`；
+`Execution.newExecution(FlowInterface,List<Label>)`；`FlowService.getFailedChecks/validateForExecution`；
+`ConditionService.isValid(AbstractTrigger,Flow,RunContext)`；
+`LabelService.labelsExcludingSystem/withoutPinned/forExecution`；`ExecutionOutputService.getOutputs`；
+`AuthorizationInvocationContext.captureHostInvocation`、`AuthorizationEvaluationContext.call`。
+
+准备、输入、条件检查和提交必须全部位于已授权 supplier 内。长等待前必须 await 释放
+`finishRequest()`；结果访问必须建立新授权。READ 与 ACCESS_OUTPUTS 不可互代。
+`startExecution` 确认提交处理，不代表执行终态。禁止消费 `newExecution(AbstractWebhookTrigger)`
+及裸 queue。`FlowMetaStoreInterface`/`FlowMetaStores` 支持读取当前运行声明，但
+`findForRuntimeOrRaw` 有 raw fallback，不保证失败关闭；业务必须验证 tuple、revision、
+Flow disabled 与 trigger 状态。Flow/Execution repository 的 WithoutAcl 查询只能在首门后
+按精确请求 tuple 受限使用，完成具体授权前不得返回内容。签名编译探针只证明链接，
+实际执行由独立插件 CI 和根仓真实组合验证。
+
+### 独立文档的 UI SDK 偏好 descriptor
+
+从正式 SDK `contract.json.preferences` 获取 localStorage 存储键与默认语义。主题键为
+`theme`，缺失默认 `syncWithSystem`，支持 light/dark/dark-2；system 由声明的 media query
+解析。locale 键为 `lang`，缺失或空值默认 en；支持语言和别名由同一 descriptor 声明。
+刷新重新读取，跨文档监听 storage；写入文档必须更新自己的视图。不得用 navigator 推断
+宿主已保存偏好，也不得抓取私有 bundle 或导入 SPA。此追加字段向旧 SDK 消费者保持兼容。
+消费仍须匹配成功 CI 与精确正式 digest，原949/64门不减少。

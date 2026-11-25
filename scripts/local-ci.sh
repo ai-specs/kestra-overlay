@@ -73,6 +73,7 @@ echo "== scoped tests (filter: $TESTS) =="
   --tests io.kestra.webserver.services.ai.agent.tool.ToolResultBudgetTest \
   --tests io.kestra.webserver.services.ai.agent.internals.ToolResultLimitTest --console=plain)
 python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
+python3 "$REPO/scripts/check-http-extension-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --console=plain)
 (cd "$WORK" && ./gradlew :jdbc:test --tests io.kestra.jdbc.migration.V2_0_11PluginAutoInstallMigrationTest --console=plain)
@@ -83,6 +84,11 @@ python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/jdbc-h2/build/
 echo "== executable jar =="
 bash "$REPO/scripts/run-upgrade-security-tests.sh" "$WORK" "$WORK/upgrade-security-tests"
 (cd "$WORK/ui" && npm ci && npm run translations:check && npm run build)
+echo "== UI SDK preference descriptor Chromium gate =="
+UI_PREFERENCES_NODE_PATH="${UI_PREFERENCES_NODE_PATH:-$WORK/ui/node_modules}"
+"$WORK/ui/node_modules/.bin/playwright" install chromium
+NODE_PATH="$UI_PREFERENCES_NODE_PATH" node "$REPO/scripts/check-ui-preferences-browser.cjs" "$WORK" "$REPO/.work/ui-preferences-browser/report.json"
+python3 "$REPO/scripts/check-ui-preferences-report.py" "$REPO/.work/ui-preferences-browser/report.json"
 (cd "$WORK/ui" && npm run test:unit -- src/components/flows/useFlowListIdentity.spec.ts src/components/flows/useFlowExecutionCapabilities.spec.ts src/components/flows/useFlowDetailCapabilities.spec.ts tests/unit/stores/dashboardGeneration.spec.ts src/utils/authentication.spec.ts src/utils/authentication-recovery.spec.ts src/oidc-setup-wait.spec.ts src/extensions tests/unit/stores/executionsFollow.spec.ts tests/unit/stores/playgroundReadyToStart.spec.ts tests/unit/stores/playgroundReuse.spec.ts --reporter=default --reporter=json --outputFile.json=build/reports/ui-extension-tests.json)
 python3 "$REPO/scripts/check-ui-extension-tests.py" "$WORK/ui/build/reports/ui-extension-tests.json"
 test -s "$WORK/webserver/src/main/resources/ui/index.html"

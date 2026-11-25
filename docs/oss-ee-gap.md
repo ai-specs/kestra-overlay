@@ -484,3 +484,24 @@ REQ-0406（R-EE-RBAC，入口 C 已接收，候选未发布）：修复已发布
 正式宿主 84fe614 的模式 A/B 自然首屏均有 search total=1 而 UI 为空的失败证据。
 多来源 watch、同步清空、代次隔离与挂载后合并补偿只修既有宿主生命周期，不改变
 HTTP/Java 契约、插件策略或服务端授权。接收、兼容与回归门见 r-ee-rbac.md 的 REQ-0406。
+
+
+## R-HTTP-EXTENSION：通用 HTTP fallback 通道（REQ-0410）
+
+REQ-0412（入口 C）：原镜像 dependency503 门证实，0410 固定先行会话检查使投影SQL
+故障先被折叠为身份失效401，偏离已有安全503契约。只修 `OidcTrustedIdentity` 与
+lifecycle 的精确故障传播；真实失效仍拒绝，不新增业务授权。证据、最小面和验收门
+见机制文档 REQ-0412。消费方为既有RBAC及新HTTP扩展；发布与组合验收仍需分别通过。
+
+2026-11-25 主控接收该通用契约。消费方 `kestra-plugin-amis-apps`。正式 digest `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 的 CsrfTokenFilter 仅覆盖 `/api/.*`；未知 Controller 无公开通用授权激活点，manifest 仅 RBAC classpath 槽。F1/F2 能承载 bean，但不足以保证简化 URL 的原生优先、入口 typed 授权和 CSRF。
+
+接收范围：0410 通用 provider、认证后 fallback、EXTENSION_ROUTE/EXECUTE 与现有 boundary/CSRF 激活、AMIS classpath 文件元数据。业务 trigger/schema/Flow 查找执行不进入宿主。机制、异常与兼容说明见 extension-mechanisms.md F5。正式消费必须匹配成功 CI 与正式产物；独立扩展及部署仓分别负责自身与组合验收。
+
+0410 激活顺序补证（2026-11-25）：现有 OidcIdentityLifecycleFilter 在 SECURITY+1 复查会话撤销，dispatcher 必须在其后（+2），两个 REST RBAC filter 在 +3。现有 OidcPriorToLoginPersistence.safe 只接收 `/ui/`，扩展匿名书签会丢失目标。最小修正为复用同一纯 metadata registry：只有唯一 provider 匹配且 Target.documentReturn=true 的安全 GET 文档可以保存及重新取回；API/资产即使 Accept HTML 也不能保存。静态 safe(UI) 兼容、原有 cookie 清除和同源/编码防护保留。原生 chain 的错误不得被 dispatcher 改写为 503。
+
+0410 文档恢复补证：既有 lifecycle 对失效身份只为 `/ui/*` 返回 `/oidc/logout`，独立文档得到裸 401；扩展首门裸 403 也无法提供既有退出换号入口。复用统一 registry 的安全 GET+Accept HTML+唯一 documentReturn 分类，使失效扩展文档进入既有 logout，授权拒绝扩展文档进入 `/ui/access-denied`。API/JSON 保持 401/403 no-store；404 不改写，分类不查询 Flow。宿主定向测试不能代替根仓生产登录与退出验收。
+
+
+### REQ-0411：UI SDK 独立文档偏好数据桥（入口 B）
+
+消费方 `kestra-plugin-amis-apps` 独立 HTML。正式 digest `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 的 SDK contract 只有主题/语言列表与语言别名，没有偏好存取契约；native `ui/src/utils/utils.ts` 的 getSelectedTheme/getTheme/getLang 实际消费 localStorage.theme/lang。独立页猜测 system/navigator 会在首访、刷新和切换时偏离 native。2026-11-26 主控接收最小数据提案：现有 SDK contract.json 追加 preferences descriptor，锁定存储键、默认、系统模式与解析映射、locale aliases；原契约字段保持兼容。不得导入 SPA/Vue 私有实例、改变 native UI 或建立平行偏好表。归属既有 REQ-0340/0384 UI SDK 能力。消费必须匹配成功 CI 与正式产物；宿主真实 Chromium 对照 native 函数验证三主题/system、13语言/别名/默认、刷新与跨文档 storage，原949/64门不减少。

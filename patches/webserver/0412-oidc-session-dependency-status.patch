@@ -1,0 +1,181 @@
+# 需求: REQ-0412 会话先行校验保留依赖不可用状态
+# 消费扩展仓: ai-specs/kestra-plugin-rbac、ai-specs/kestra-plugin-amis-apps
+# 状态: core；消费须匹配成功CI与正式产物
+# 来源: dependency503镜像门有效签名cookie故障状态分类；保留session逻辑与新测试
+# 触达上游文件: 2 个
+# 移除条件: 上游提供等价会话校验与已分类授权依赖故障区分
+diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
+index c19be9b..b2dedc0 100644
+--- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
++++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
+@@ -90,7 +90,7 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+     }
+
+     public void validateSession(Authentication authentication) {
+-        if(authentication!=null && authentication.getAttributes().containsKey(CLAIM)) {validate(authentication);return;}
++        if(authentication!=null && authentication.getAttributes().containsKey(CLAIM)) {validateForAuthorization(authentication);return;}
+         if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")))throw denied();
+         var audiences=strings(authentication.getAttributes().get("aud"),true);
+         if(audiences.size()!=1)throw denied();
+@@ -119,7 +119,11 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+             }catch(SQLException|RuntimeException failure) {
+                 try{connection.rollback();}catch(SQLException rollback){failure.addSuppressed(rollback);}throw failure;
+             }
+-        }catch(SQLException|RuntimeException failure){throw denied();}
++        }catch(SQLException|RuntimeException failure){
++            if(failure instanceof io.kestra.webserver.rbac.AuthorizationUnavailableException unavailable)throw unavailable;
++            if(failure instanceof SQLException)throw new io.kestra.webserver.rbac.AuthorizationUnavailableException();
++            throw denied();
++        }
+     }
+
+     private Identity validateCurrent(Authentication authentication) {
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/SessionAuthorizationFailureTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/SessionAuthorizationFailureTest.java
+new file mode 100644
+index 0000000..9776207
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/SessionAuthorizationFailureTest.java
+@@ -0,0 +1,143 @@
++package io.kestra.webserver.oidc;
++
++import io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
++import io.kestra.webserver.rbac.AuthorizationUnavailableException;
++import io.kestra.webserver.rbac.HttpExtensionRouteRegistry;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.SecurityFilter;
++import java.sql.SQLException;
++import java.time.Duration;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class SessionAuthorizationFailureTest {
++    private final TrustedIdentityFailureClassificationTest fixture = new TrustedIdentityFailureClassificationTest();
++
++    private OidcTrustedIdentity service() throws Exception {
++        var service = fixture.service();
++        when(fixture.source.getConnection()).thenReturn(fixture.connection);
++        when(fixture.projections.isPresent()).thenReturn(true);
++        return service;
++    }
++
++    private Authentication standardIdentity() {
++        return Authentication.build("actor", List.of(), Map.of("iss", fixture.ISSUER,
++            "aud", List.of("ui"), OidcIdentityLifecycle.CLAIM, 3L));
++    }
++
++    @Test void groupProjectionSqlFailureIsUnavailableWithoutCommit() throws Exception {
++        var service = service();
++        when(fixture.projection.current(eq(fixture.connection), any())).thenThrow(new SQLException("sensitive-sql-marker"));
++        assertThrows(AuthorizationUnavailableException.class, () -> service.validateSession(fixture.authentication()));
++        verify(fixture.connection).rollback();
++        verify(fixture.connection, never()).commit();
++    }
++
++    @Test void healthyGroupSessionCommitsWithoutChangingItsIdentity() throws Exception {
++        var service = service();
++        assertDoesNotThrow(() -> service.validateSession(fixture.authentication()));
++        verify(fixture.connection).commit();
++        verify(fixture.connection, never()).rollback();
++    }
++
++    @Test void healthyStandardZeroGrantSessionStillWorks() throws Exception {
++        var service = service();
++        when(fixture.projection.current(eq(fixture.connection), any())).thenReturn(
++            new ApplicationGroupProtocolProjectionV1.Result(1, false, Optional.empty()));
++        assertDoesNotThrow(() -> service.validateSession(standardIdentity()));
++        verify(fixture.connection).commit();
++    }
++
++    @Test void standardSessionCannotGainAnActivatedGroupWithoutItsSignedClaim() throws Exception {
++        var service = service();
++        assertThrows(IllegalStateException.class, () -> service.validateSession(standardIdentity()));
++        verify(fixture.connection, never()).commit();
++    }
++
++    @Test void groupRevocationRemainsDeniedRatherThanUnavailable() throws Exception {
++        var service = service();
++        when(fixture.protocol.account(fixture.connection, fixture.ISSUER, "actor")).thenReturn(Optional.empty());
++        var failure = assertThrows(IllegalStateException.class, () -> service.validateSession(fixture.authentication()));
++        assertNotEquals(AuthorizationUnavailableException.class, failure.getClass());
++        verify(fixture.connection, never()).commit();
++    }
++
++    @Test void standardIdentityConnectionSqlFailureIsUnavailable() throws Exception {
++        var service = service();
++        when(fixture.source.getConnection()).thenThrow(new SQLException("sensitive-connection-marker"));
++        assertThrows(AuthorizationUnavailableException.class, () -> service.validateSession(standardIdentity()));
++    }
++
++    @Test void standardIdentityProjectionSqlFailureIsUnavailableWithoutCommit() throws Exception {
++        var service = service();
++        when(fixture.projection.current(eq(fixture.connection), any())).thenThrow(new SQLException("sensitive-projection-marker"));
++        assertThrows(AuthorizationUnavailableException.class, () -> service.validateSession(standardIdentity()));
++        verify(fixture.connection).rollback();
++        verify(fixture.connection, never()).commit();
++    }
++
++    @Test void standardIdentityInvalidAccountRemainsDenied() throws Exception {
++        var service = service();
++        when(fixture.protocol.account(fixture.connection, fixture.ISSUER, "actor")).thenReturn(Optional.empty());
++        var failure = assertThrows(IllegalStateException.class, () -> service.validateSession(standardIdentity()));
++        assertNotEquals(AuthorizationUnavailableException.class, failure.getClass());
++    }
++
++    @Test void lifecycleKeepsUnavailableCookieAndReturnsSafe503BeforeDownstream() throws Exception {
++        var identity = mock(OidcTrustedIdentity.class);
++        doThrow(new AuthorizationUnavailableException()).when(identity).validateSession(any());
++        var providers = mock(BeanProvider.class);
++        when(providers.isPresent()).thenReturn(true); when(providers.isUnique()).thenReturn(true); when(providers.get()).thenReturn(identity);
++        var configuration = new OidcConfiguration(); configuration.setIssuer(fixture.ISSUER);
++        var filter = new OidcIdentityLifecycleFilter(configuration, mock(OidcIdentityLifecycle.class));
++        inject(filter, "applicationGroupIdentities", providers);
++        var calls = new AtomicInteger();
++        var request = HttpRequest.GET("/api/v1/configs").setAttribute(SecurityFilter.AUTHENTICATION, fixture.authentication());
++        var response = Mono.from(filter.doFilter(request, ignored -> {calls.incrementAndGet();return Mono.just(HttpResponse.ok());}))
++            .block(Duration.ofSeconds(5));
++        assertNotNull(response); assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatus());
++        assertEquals("no-store", response.getHeaders().get("Cache-Control"));
++        assertTrue(response.getContentType().orElseThrow().toString().startsWith("application/problem+json"));
++        assertTrue(response.getHeaders().getAll("Set-Cookie").isEmpty()); assertEquals(0, calls.get());
++        assertFalse(response.getBody().orElseThrow().toString().contains("sensitive"));
++    }
++
++    @Test void lifecycleUnknownFailureRetainsApi401AndDocumentLogout() throws Exception {
++        var identity = mock(OidcTrustedIdentity.class);
++        doThrow(new IllegalStateException("sensitive-unknown-marker")).when(identity).validateSession(any());
++        var providers = mock(BeanProvider.class);
++        when(providers.isPresent()).thenReturn(true); when(providers.isUnique()).thenReturn(true); when(providers.get()).thenReturn(identity);
++        var configuration = new OidcConfiguration(); configuration.setIssuer(fixture.ISSUER);
++        var filter = new OidcIdentityLifecycleFilter(configuration, mock(OidcIdentityLifecycle.class));
++        inject(filter, "applicationGroupIdentities", providers);
++        var registry = mock(HttpExtensionRouteRegistry.class); when(registry.documentRequest(any())).thenReturn(true);
++        var registries = mock(BeanProvider.class); when(registries.isUnique()).thenReturn(true); when(registries.get()).thenReturn(registry);
++        inject(filter, "extensionRoutes", registries);
++        for (String path : List.of("/api/v1/configs", "/company/app/pages/home")) {
++            when(registry.documentRequest(any())).thenReturn(!path.startsWith("/api/"));
++            var request = HttpRequest.GET(path).setAttribute(SecurityFilter.AUTHENTICATION, fixture.authentication());
++            var response = Mono.from(filter.doFilter(request, ignored -> Mono.error(new AssertionError("downstream must not run"))))
++                .block(Duration.ofSeconds(5));
++            assertNotNull(response);
++            assertEquals(path.startsWith("/api/") ? HttpStatus.UNAUTHORIZED : HttpStatus.TEMPORARY_REDIRECT, response.getStatus());
++            if (!path.startsWith("/api/")) assertEquals("/oidc/logout", response.getHeaders().get("Location"));
++        }
++    }
++
++    private static void inject(Object target, String name, Object value) throws Exception {
++        var field = target.getClass().getDeclaredField(name); field.setAccessible(true); field.set(target, value);
++    }
++}

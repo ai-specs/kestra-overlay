@@ -12,6 +12,18 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AssessmentTests(unittest.TestCase):
+    def test_http_extension_contract_is_an_explicit_upgrade_consumer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            target=root/'patches/webserver/0410-http-extension-route.patch'
+            target.parent.mkdir(parents=True)
+            target.write_text('HttpExtensionRouteProviderV1 EXTENSION_ROUTE HttpExtensionRouteRegistry HttpExtensionRouteHttpTest HttpExtensionBookmarkTest')
+            result=MODULE.http_extension_contract(root)
+            self.assertEqual('REVIEW_REQUIRED',result['status'])
+            self.assertEqual([],result['missing'])
+            target.write_text('HttpExtensionRouteProviderV1')
+            self.assertIn('EXTENSION_ROUTE',MODULE.http_extension_contract(root)['missing'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

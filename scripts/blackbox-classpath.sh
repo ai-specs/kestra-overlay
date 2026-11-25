@@ -33,7 +33,8 @@ PROCESSORS="$(cat "$TASK_WORK/processor-path")"
 mkdir -p "$TASK_WORK/classes" "$TASK_WORK/libs"
 "$JAVA_HOME/bin/javac" -parameters -cp "$EXE:$PROCESSORS" -processorpath "$PROCESSORS" \
     -d "$TASK_WORK/classes" "$REPO/scripts/tests/classpath-probe/RbacProbe.java" \
-    "$REPO/scripts/tests/classpath-probe/UiPageProbe.java" "$REPO/scripts/tests/classpath-probe/Dependency503Probe.java"
+    "$REPO/scripts/tests/classpath-probe/UiPageProbe.java" "$REPO/scripts/tests/classpath-probe/Dependency503Probe.java" \
+    "$REPO/scripts/tests/classpath-probe/ExecutionContractProbe.java"
 cp -R "$REPO/scripts/tests/classpath-probe/ui-extensions" "$TASK_WORK/classes/"
 "$JAVA_HOME/bin/jar" --create --file "$TASK_WORK/libs/kestra-rbac-authorizer.jar" -C "$TASK_WORK/classes" .
 "$JAVA_HOME/bin/jar" tf "$TASK_WORK/libs/kestra-rbac-authorizer.jar" > "$TASK_WORK/entries"
@@ -87,6 +88,7 @@ for attempt in $(seq 1 60); do
 done
 docker logs "$CONTAINER" > "$TASK_WORK/startup.log" 2>&1
 grep -q 'RBAC-CLASSPATH-PROBE-DISCOVERED' "$TASK_WORK/startup.log"
+grep -q 'HTTP-EXTENSION-PROVIDER-PROBE-DISCOVERED' "$TASK_WORK/startup.log"
 STATUS="$(curl --silent --output "$TASK_WORK/error.json" --write-out '%{http_code}' "http://127.0.0.1:$PORT/api/v1/main/flows/search")"
 [ "$STATUS" = 401 ]
-echo 'PASS: annotation-processed external jar discovered via executable Class-Path; anonymous REST stays 401'
+echo 'PASS: annotation-processed external jar discovered via executable Class-Path; provider V1 BeanContext marker observed; anonymous REST stays 401'

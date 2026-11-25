@@ -761,3 +761,38 @@ r-ee-rbac.md 顶部接收段及当前独占目录的定向报告。正式发布�
 await页面evaluate且仅true成功；保留原21/37业务断言和异常分类。helper/test均进入两门
 SOURCE输入锁，正式入口实际运行6项离线反例。未改SDK和onboarding驱动：本轮只读核对
 未发现其使用同类async waitForFunction路径，不由此扩大其已验证范围。
+
+
+## F5 通用 HTTP 扩展入口（REQ-0410，通用公开契约）
+
+消费项目为独立 `kestra-plugin-amis-apps`；宿主只提供通用入口，不承载页面、API 声明、schema、Flow 查找或执行业务。2026-11-25 主控接收最小通用 HTTP 通道；消费必须匹配成功 CI 与正式镜像 digest。
+
+正式输入 `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 导出的 `/app/kestra` SHA-256 为 `58e3549afe5db2d4de6f16954bb67c487b0e72e456cd725cc128cdae94cca36c`。classfile 实证：CsrfTokenFilter 只注册 `/api/.*`，REST RBAC filters 在 SECURITY+1 对未知路由无通用扩展计划；manifest 仅登记 RBAC jar。已有 classpath、TypedAuthorizationGate.boundary/authorize 和 CSRF 校验方法可以复用，缺口是扩展请求的通用激活通道，不是 AMIS 专用 SPI。
+
+0410 增加 provider 元数据注册及生产认证后的 fallback dispatcher：实际原生 MethodBasedRouteMatch 优先；静态与保留首段优先；之后才按 provider 纯元数据匹配。provider ID 是入口能力 ID，target 仅 namespace，不查询业务存储。首门使用现有 Operation V2 的 EXTENSION_ROUTE/EXECUTE，resourceId 为 provider ID，范围沿用 QueryDomain。第二道精确 Flow 执行门归插件，消费 README 声明的既有执行方法子集；不新增第二执行引擎或裸 queue 接口。
+
+注册重复、未知范围、provider/授权故障均失败关闭；模式 A 仍必须认证。写请求直接复用 CsrfTokenFilter.csrfFilter，缺必需组件失败关闭，不扩张 `/api` 放行规则。授权采用既有 boundary 的完成/错误/取消清理。宿主测试须覆盖 HTTP/filter 顺序、原生与静态优先、两个 provider 隔离、匿名/允许/拒绝/503、CSRF、取消清理及零 handler/查询/副作用。插件 CI 与根仓正式组合验收仍各自负责。
+
+兼容性：新增 enum 值须消费方显式识别；旧插件未知资源应拒绝。新增 `kestra-amis-apps` classpath 元数据只声明文件名，宿主构建不得读取业务 jar。关闭或缺席扩展时保持原生路径；升级时重验 fallback 保留首段与原生路由顺序。Flow 查找/执行、AMIS schema 和 UI 变更不在 0410 范围。
+
+0410 激活顺序补证（2026-11-25）：现有 OidcIdentityLifecycleFilter 在 SECURITY+1 复查会话撤销，dispatcher 必须在其后（+2），两个 REST RBAC filter 在 +3。现有 OidcPriorToLoginPersistence.safe 只接收 `/ui/`，扩展匿名书签会丢失目标。最小修正为复用同一纯 metadata registry：只有唯一 provider 匹配且 Target.documentReturn=true 的安全 GET 文档可以保存及重新取回；API/资产即使 Accept HTML 也不能保存。静态 safe(UI) 兼容、原有 cookie 清除和同源/编码防护保留。原生 chain 的错误不得被 dispatcher 改写为 503。
+
+0410 文档恢复补证：既有 lifecycle 对失效身份只为 `/ui/*` 返回 `/oidc/logout`，独立文档得到裸 401；扩展首门裸 403 也无法提供既有退出换号入口。复用统一 registry 的安全 GET+Accept HTML+唯一 documentReturn 分类，使失效扩展文档进入既有 logout，授权拒绝扩展文档进入 `/ui/access-denied`。API/JSON 保持 401/403 no-store；404 不改写，分类不查询 Flow。宿主定向测试不能代替根仓生产登录与退出验收。
+
+
+### REQ-0412：会话先行校验的依赖故障分类（入口 C）
+
+0410 固定会话撤销检查先于业务授权后，原 dependency503 镜像门实际复现：有效签名
+cookie 的健康请求200；受控投影表暂时不可用时得到401，预期为既有安全503；此时
+不应把仍有效的身份判为注销。证据入口为原 `blackbox-dependency503.sh` 的具名
+`real-cookie-lifecycle-and-typed-chain-fault-status`，主控候选输入执行结果401。
+
+最小修复复用 `OidcTrustedIdentity` 已有授权故障分类，在会话先行校验中保留明确的
+SQL/受控投影依赖不可用信号；lifecycle 输出无敏感详情的 no-store ProblemDetail503，
+不清除 cookie。真实账号失效、scope 撤销和未知运行异常继续原拒绝/退出行为。
+不按异常消息或任意 cause 搜索，不放宽主体、签名、scope、审计或事务检查。
+本地定向门、原 dependency503 七项、两种首装镜像门及正式CI必须对应最终输入。
+
+### REQ-0411：UI SDK 独立文档偏好数据桥（入口 B）
+
+消费方 `kestra-plugin-amis-apps` 独立 HTML。正式 digest `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 的 SDK contract 只有主题/语言列表与语言别名，没有偏好存取契约；native `ui/src/utils/utils.ts` 的 getSelectedTheme/getTheme/getLang 实际消费 localStorage.theme/lang。独立页猜测 system/navigator 会在首访、刷新和切换时偏离 native。2026-11-26 主控接收最小数据提案：现有 SDK contract.json 追加 preferences descriptor，锁定存储键、默认、系统模式与解析映射、locale aliases；原契约字段保持兼容。不得导入 SPA/Vue 私有实例、改变 native UI 或建立平行偏好表。归属既有 REQ-0340/0384 UI SDK 能力。消费必须匹配成功 CI 与正式产物；宿主真实 Chromium 对照 native 函数验证三主题/system、13语言/别名/默认、刷新与跨文档 storage，原949/64门不减少。

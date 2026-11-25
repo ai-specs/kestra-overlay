@@ -1,8 +1,8 @@
 # 需求: REQ-0383 R19版本化资源audience与登录audience分离，资源空集不补clientId
 # 消费扩展仓: ai-specs/kestra-plugin-rbac
-# 状态: core；主控已接收，候选未发布
-# 来源: v2.0.11上下文适配（保留上游行为）； 新写；RFC6749、OIDC Core 1.0、RFC8707；保留已发布V1语义，新增V2及独立PG/HTTP探针
-# 触达上游文件: 7 个（公开资源投影、可信身份版本门、契约/PG/HTTP/MCP拒绝回归；协议钩子归0150/0160/0190）
+# 状态: core；消费须匹配成功CI与正式产物
+# 来源: v2.0.11上下文适配并保留上游行为；RFC6749、OIDC Core 1.0、RFC8707；保留已发布V1语义与V2独立探针；本次仅重分配既有授权helper与投影边界
+# 触达上游文件: 7 个
 # 移除条件: 上游提供等价版本化资源投影及签发与在线受众分离机制
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2.java b/webserver/src/main/java/io/kestra/webserver/oidc/ApplicationGroupProtocolProjectionV2.java
 new file mode 100644
@@ -123,10 +123,10 @@ index 0000000..bf151cb
 +    }
 +}
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-index 3d9ce96..8e33b26 100644
+index 3d9ce96..c19be9b 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcTrustedIdentity.java
-@@ -63,6 +63,28 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+@@ -63,6 +63,32 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
          catch(RuntimeException failure){throw denied();}
      }
 
@@ -134,6 +134,10 @@ index 3d9ce96..8e33b26 100644
 +        var request=AuthorizationInvocationContext.currentRequest().orElseThrow(OidcTrustedIdentity::denied);
 +        var authentication=request.getAttribute("io.kestra.mcp.authentication",Authentication.class)
 +            .or(()->request.getAttribute(SecurityFilter.AUTHENTICATION,Authentication.class)).orElseThrow(OidcTrustedIdentity::denied);
++        return validateForAuthorization(authentication);
++    }
++
++    private Identity validateForAuthorization(Authentication authentication) {
 +        if(!projections.isUnique())throw denied();
 +        try(var connection=source.getConnection()) {
 +            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
@@ -155,18 +159,22 @@ index 3d9ce96..8e33b26 100644
      public void validateSession(Authentication authentication) {
          if(authentication!=null && authentication.getAttributes().containsKey(CLAIM)) {validate(authentication);return;}
          if(authentication==null || !configuration.getIssuer().equals(authentication.getAttributes().get("iss")))throw denied();
-@@ -82,8 +104,8 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+@@ -82,8 +108,12 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
                  if(projections.isPresent()) {
                      if(!projections.isUnique())throw denied();
                      var target=new ApplicationGroupProtocolProjectionV1.Request(configuration.getIssuer(),"main",clientId,authentication.getName(),null);
 -                    var result=projections.get().current(connection,target);
 -                    if(result==null || result.contractVersion()!=1 || result.activated() || result.projection().isPresent())throw denied();
-+                    var result=OidcApplicationGroupProjection.current(projections.get(),connection,target);
++                    OidcApplicationGroupProjection.State result;
++                    try {result=OidcApplicationGroupProjection.current(projections.get(),connection,target);}
++                    catch(SQLException|RuntimeException failure) {
++                        throw new io.kestra.webserver.rbac.AuthorizationUnavailableException();
++                    }
 +                    if(result.activated() || result.projection().isPresent())throw denied();
                  }
                  connection.commit();
              }catch(SQLException|RuntimeException failure) {
-@@ -107,43 +129,85 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
+@@ -107,43 +137,85 @@ public final class OidcTrustedIdentity implements TrustedIdentityV2 {
      }
 
      private Identity validateCurrent(Authentication authentication,Connection connection,boolean borrowed)throws SQLException {

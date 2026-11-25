@@ -73,13 +73,28 @@ jobs:
         env:
           WORK: ${{ github.workspace }}/.work/verify
         run: ./scripts/build.sh
-      - name: Native Flow list finite capabilities through Chromium
+      - name: Require exact HTTP extension contract matrix
+        run: python3 scripts/check-http-extension-tests.py .work/verify/webserver/build/test-results/test
+      - name: Prepare shared Chromium for native host and preference gates
         run: |
           sudo python3 scripts/prepare-browser-apt.py
           cd .work/verify/ui
           npx playwright install --with-deps chromium
-          cd "$GITHUB_WORKSPACE"
-          bash scripts/run-flow-execution-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/flow-execution-browser"
+      - name: UI SDK preference descriptor through Chromium
+        run: |
+          mkdir -p .work/sdk-preferences
+          NODE_PATH="$GITHUB_WORKSPACE/.work/verify/ui/node_modules" node scripts/check-ui-preferences-browser.cjs "$GITHUB_WORKSPACE/.work/verify" .work/sdk-preferences/report.json
+          python3 scripts/check-ui-preferences-report.py .work/sdk-preferences/report.json
+      - name: Preserve UI SDK preference descriptor evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-sdk-preferences-browser
+          path: .work/sdk-preferences/
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Native Flow list finite capabilities through Chromium
+        run: bash scripts/run-flow-execution-browser.sh "$GITHUB_WORKSPACE/.work/verify" "$GITHUB_WORKSPACE/.work/flow-execution-browser"
       - name: Preserve native Flow list browser evidence
         if: always()
         uses: actions/upload-artifact@v4

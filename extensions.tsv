@@ -16,3 +16,4 @@
 #                jar 本体部署侧挂载 /app/libs；未落地前报 PENDING（占位先行）
 #   standalone → 独立进程/镜像（自有 CI 出仓，不进 kestra 镜像）——不入表（见登记规则）
 kestra-rbac-authorizer	classpath	公开授权SPI的部署文件契约：/app/libs/kestra-rbac-authorizer.jar；构建期只注入manifest Class-Path元数据，不读取或构建扩展jar。
+kestra-amis-apps	classpath	通用HTTP扩展消费方部署文件契约：/app/libs/kestra-amis-apps.jar；构建期只登记manifest元数据，不读取扩展jar。

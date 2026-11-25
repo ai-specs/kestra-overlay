@@ -64,10 +64,26 @@ def risks(paths):
     rules = {
         'migration': r'(?i)migrat|\.sql$',
         'dependency': r'(?i)(gradle|(^|/)pom\.xml$|package(-lock)?\.json$|yarn\.lock$|dockerfile)',
-        'public_contract': r'(?i)(rbac|oidc|/models/|/services/|/controllers/|ui.sdk|interface|accesscontrol)',
+        'public_contract': r'(?i)(rbac|oidc|/models/|/services/|/controllers/|ui.sdk|interface|accesscontrol|HttpExtensionRouteProviderV1|EXTENSION_ROUTE|0410-http-extension-route)',
         'test': r'(?i)(/test[s]?/|test\.|test\.java$|spec\.)',
     }
     return {name: [p for p in paths if re.search(pattern, p)] for name, pattern in rules.items()}
+
+
+def http_extension_contract(overlay):
+    """Explicit upgrade review inputs; presence is not runtime compatibility proof."""
+    patch = Path(overlay) / 'patches/webserver/0410-http-extension-route.patch'
+    if not patch.exists():
+        return {'status': 'NOT_REGISTERED', 'surfaces': []}
+    content = patch.read_text()
+    surfaces = ['HttpExtensionRouteProviderV1', 'EXTENSION_ROUTE', 'HttpExtensionRouteRegistry',
+                'HttpExtensionRouteHttpTest', 'HttpExtensionBookmarkTest']
+    return {'status': 'REVIEW_REQUIRED', 'surfaces': surfaces,
+            'missing': [name for name in surfaces if name not in content],
+            'checker': 'scripts/check-http-extension-contract.py',
+            'xml_gate': 'scripts/check-http-extension-tests.py',
+            'compile_consumer': 'scripts/tests/classpath-probe/ExecutionContractProbe.java',
+            'runtime_tests_required': ['HttpExtensionRouteFilterTest', 'HttpExtensionRouteHttpTest', 'HttpExtensionBookmarkTest']}
 
 
 def assess(overlay, source, target, output, target_commit=None):
@@ -103,6 +119,8 @@ def assess(overlay, source, target, output, target_commit=None):
               'base_tag_object': text(git(source, 'rev-parse', 'refs/tags/' + base_lines[0]).stdout).strip(),
               'target_object': text(git(source, 'rev-parse', '--verify', target).stdout).strip(),
               'semantic_validation': 'NOT_VERIFIED',
+              'http_extension_contract': http_extension_contract(overlay),
+              'ui_preferences_contract': {'patch': '0411-ui-preferences-descriptor.patch', 'browser_checker': 'scripts/check-ui-preferences-browser.cjs', 'native_semantics': ['getSelectedTheme', 'getTheme', 'getLang'], 'required_original_matrices': [949, 64]},
               'limitations': ['Clean application does not prove compatibility or upstream absorption.',
                              'Risk labels are path heuristics; inspect implementation and public contracts.',
                              'No compilation, tests, migration execution, CI or image validation performed.'],

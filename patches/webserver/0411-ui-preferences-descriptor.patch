@@ -1,0 +1,28 @@
+# 需求: REQ-0411 UI SDK独立文档偏好数据契约
+# 消费扩展仓: ai-specs/kestra-plugin-amis-apps
+# 状态: core；消费须匹配成功CI与正式镜像digest
+# 来源: 正式SDK缺偏好描述与native localStorage.theme/lang语义；2026-11-26主控入口B接收
+# 触达上游文件: 2 个
+# 移除条件: 上游公开等价独立文档偏好契约
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
+--- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/contract.json
+@@ -1,4 +1,5 @@
+ {
++  "preferences": {"contractVersion":1,"storage":"localStorage","theme":{"key":"theme","default":"syncWithSystem","defaultWhen":"missing","systemValue":"syncWithSystem","mediaQuery":"(prefers-color-scheme: dark)","values":["light","dark","dark-2","syncWithSystem"],"resolvedTheme":{"light":"light","dark":"dark","dark-2":"dark-2"},"colorScheme":{"light":"light","dark":"dark","dark-2":"dark"},"systemThemes":{"light":"light","dark":"dark"}},"locale":{"key":"lang","default":"en","defaultWhen":"missing-or-empty","supported":["en","de","es","fr","hi","it","ja","ko","pl","pt","pt_BR","ru","zh_CN"],"aliases":{"pt-BR":"pt_BR","zh-CN":"zh_CN"},"unsupportedFallback":"en"},"changeEvents":{"crossDocument":"storage","sameDocument":"writer-must-update-its-own-view"}},
+   "contractVersion": 1,
+   "fallbackLocale": "en",
+   "supportedLocales": ["en", "de", "es", "fr", "hi", "it", "ja", "ko", "pl", "pt", "pt_BR", "ru", "zh_CN"],
+diff --git a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
+--- a/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
++++ b/webserver/src/main/resources/META-INF/kestra/ui-sdk/v1/README.md
+@@ -120,3 +120,9 @@
+ so a host document filter cannot replace an extension anchor. No global DOM function is patched.
+
+ Mobile native filter sheets keep their own bar anchor. When lower viewport space is sufficient, the sheet remains 8px below the bar; otherwise placement flips above or clamps inside viewport safety margins with positive scrollable height, including offscreen layout changes. Placement is recalculated on owned-root/window scroll and resize; original modal/focus cleanup remains required. For this overlayCompatibility V1 implementation, the below-bar offset applies only when lower viewport space is sufficient; upward/clamped placement is its explicit boundary exception. Migrated mobile nodes are weak keys in the renderer logical-parent/anchor registry: the registry does not strongly retain its keys, remove deletes associations, and scope disposal releases modal registrations and viewport listeners. Foreign-root insertion remains rejected.
++
++## Independent document preferences
++
++`contract.json.preferences` is the data contract for same-origin independent documents. Read and write the declared localStorage keys. Theme missing defaults to `syncWithSystem`; resolve that value using the declared media query. Keep `dark-2` as the theme while using dark color scheme. Locale missing or empty defaults to `en`; use the published supported list and aliases, with `en` fallback for unsupported values. Native getLang returns stored text; SDK consumers normalize it through the aliases/list. Do not infer language from navigator or import host SPA modules.
++
++Read again on load/refresh and on cross-document `storage` events. The writing document must update its own view: browsers do not dispatch a storage event to that writer. Changes to system preference must re-resolve the system theme. This descriptor stores no user data elsewhere and grants no business permission. Consume it only from a successful CI and exact promoted image digest.
