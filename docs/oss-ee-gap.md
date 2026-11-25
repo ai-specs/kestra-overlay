@@ -505,3 +505,13 @@ lifecycle 的精确故障传播；真实失效仍拒绝，不新增业务授权�
 ### REQ-0411：UI SDK 独立文档偏好数据桥（入口 B）
 
 消费方 `kestra-plugin-amis-apps` 独立 HTML。正式 digest `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 的 SDK contract 只有主题/语言列表与语言别名，没有偏好存取契约；native `ui/src/utils/utils.ts` 的 getSelectedTheme/getTheme/getLang 实际消费 localStorage.theme/lang。独立页猜测 system/navigator 会在首访、刷新和切换时偏离 native。2026-11-26 主控接收最小数据提案：现有 SDK contract.json 追加 preferences descriptor，锁定存储键、默认、系统模式与解析映射、locale aliases；原契约字段保持兼容。不得导入 SPA/Vue 私有实例、改变 native UI 或建立平行偏好表。归属既有 REQ-0340/0384 UI SDK 能力。消费必须匹配成功 CI 与正式产物；宿主真实 Chromium 对照 native 函数验证三主题/system、13语言/别名/默认、刷新与跨文档 storage，原949/64门不减少。
+
+## R-HTTP-EXECUTION-STATE：执行状态传播（REQ-0413）
+
+消费方 `kestra-plugin-amis-apps`。实际失败：正式 host `WebhookService.startExecution` 构造
+`Create` 时丢失准备好的 `FAILED` 状态，而原生执行入口使用 `Create.withStateType(FAILED)`。
+最小 host 契约仅传播 `FAILED`，保留正常 CREATED 默认、waiter/queue/event/trace 顺序；非法
+预提交状态失败关闭。准备、BLOCK、输入和条件检查不进入 host 新业务模型。
+
+状态：已接收新 patch；host 4项具名定向测试通过，包含命令状态与包装层 subscription 取消。
+完整 local-ci 已通过；镜像门正在执行，CI 和根仓组合验收尚未通过，消费必须匹配成功 CI 和正式产物。

@@ -1,0 +1,123 @@
+# 需求: REQ-0413 Webhook执行状态传播
+# 消费扩展仓: ai-specs/kestra-plugin-amis-apps
+# 状态: core；消费须匹配成功CI与正式产物
+# 来源: 正式host startExecution丢失FAILED；host自身mock capture与真实subscription cancellation重现
+# 触达上游文件: 2 个
+# 移除条件: 上游WebhookService等价传递prepared execution state
+diff --git a/core/src/main/java/io/kestra/core/services/WebhookService.java b/core/src/main/java/io/kestra/core/services/WebhookService.java
+index ada102e..b9998bd 100644
+--- a/core/src/main/java/io/kestra/core/services/WebhookService.java
++++ b/core/src/main/java/io/kestra/core/services/WebhookService.java
+@@ -222,6 +222,7 @@ public class WebhookService {
+             });
+
+         Create command = Create.of(new ExecutionId(execution.getTenantId(), execution.getNamespace(), execution.getFlowId(), execution.getId(), execution.getFlowRevision()))
++            .withStateType(preparedStateType(execution))
+             .withKind(execution.getKind())
+             .withTrigger(execution.getTrigger())
+             .withLabels(execution.getLabels())
+@@ -245,6 +246,14 @@ public class WebhookService {
+         );
+     }
+
++    private static io.kestra.core.models.flows.State.Type preparedStateType(Execution execution) {
++        var state = execution.getState();
++        if (state == null || state.getCurrent() == null || state.getCurrent() == io.kestra.core.models.flows.State.Type.CREATED
++            || state.getCurrent() == io.kestra.core.models.flows.State.Type.RESTARTED) return null;
++        if (state.getCurrent() == io.kestra.core.models.flows.State.Type.FAILED) return state.getCurrent();
++        throw new IllegalArgumentException("Unsupported prepared execution state: " + state.getCurrent());
++    }
++
+     /**
+      * Follow the execution events as a Flux stream.
+      *
+@@ -336,4 +345,4 @@ public class WebhookService {
+     public URI url(Flow flow, AbstractWebhookTrigger trigger) {
+         return uriProvider.webhookUrl(flow, trigger);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/core/src/test/java/io/kestra/core/services/WebhookExecutionStatePropagationTest.java b/core/src/test/java/io/kestra/core/services/WebhookExecutionStatePropagationTest.java
+new file mode 100644
+index 0000000..742a083
+--- /dev/null
++++ b/core/src/test/java/io/kestra/core/services/WebhookExecutionStatePropagationTest.java
+@@ -0,0 +1,77 @@
++package io.kestra.core.services;
++
++import java.lang.reflect.Field;
++import java.time.Instant;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Consumer;
++import io.kestra.core.async.AsyncOperationProcessedEvent;
++import io.kestra.core.async.AsyncOperationsConfiguration;
++import io.kestra.core.events.CrudEvent;
++import io.kestra.core.executor.command.Create;
++import io.kestra.core.executor.command.ExecutionCommand;
++import io.kestra.core.models.executions.Execution;
++import io.kestra.core.models.executions.ExecutionKind;
++import io.kestra.core.models.executions.ExecutionTrigger;
++import io.kestra.core.models.Label;
++import io.kestra.core.models.flows.State;
++import io.kestra.core.queues.DispatchQueueInterface;
++import io.micronaut.context.event.ApplicationEventPublisher;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.*;
++
++class WebhookExecutionStatePropagationTest {
++    private static final String TENANT="main", NAMESPACE="company", FLOW="app", EXECUTION="exec-1";
++
++    @Test void failedPreparedStateReachesCreateAndNormalCreatedRemainsDefault() throws Exception {
++        for (State.Type state : List.of(State.Type.FAILED, State.Type.CREATED, State.Type.RESTARTED)) {
++            var queue=mock(DispatchQueueInterface.class);var events=mock(ApplicationEventPublisher.class);var waiter=mock(AsyncOperationWaiter.class);
++            when(waiter.submit(any(), any(), any())).thenAnswer(invocation -> { ((Consumer<String>) invocation.getArgument(1)).accept("op-1"); return Mono.just(done()); });
++            var service=service(waiter,queue,events);var execution=execution(state);
++            service.startExecution(execution).block();
++            var command=(Create) capture(queue);
++            assertThat(command.stateType()).isEqualTo(state==State.Type.FAILED?State.Type.FAILED:null);
++            assertThat(command.kind()).isEqualTo(execution.getKind());
++            assertThat(command.trigger()).isEqualTo(execution.getTrigger());
++            assertThat(command.labels()).isEqualTo(execution.getLabels());
++            assertThat(command.inputs()).isEqualTo(execution.getInputs());
++            var order=inOrder(queue,events);order.verify(queue).emit(any(ExecutionCommand.class));order.verify(events).publishEvent(any(CrudEvent.class));
++        }
++    }
++
++    @Test void nullStateKeepsDefaultCreated() throws Exception {
++        var queue=mock(DispatchQueueInterface.class);var events=mock(ApplicationEventPublisher.class);var waiter=mock(AsyncOperationWaiter.class);
++        when(waiter.submit(any(), any(), any())).thenAnswer(invocation -> { ((Consumer<String>) invocation.getArgument(1)).accept("op-1"); return Mono.just(done()); });
++        service(waiter,queue,events).startExecution(execution(null)).block();
++        assertThat(((Create) capture(queue)).stateType()).isNull();
++    }
++
++    @Test void unsupportedPreparedStateFailsBeforeWaiterOrQueue() throws Exception {
++        var queue=mock(DispatchQueueInterface.class);var waiter=mock(AsyncOperationWaiter.class);var service=service(waiter,queue,mock(ApplicationEventPublisher.class));
++        assertThatThrownBy(() -> service.startExecution(execution(State.Type.RUNNING)).block())
++            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("RUNNING");
++        verifyNoInteractions(waiter,queue);
++    }
++
++    @Test void waiterSubscriptionCancellationDisposesAndDoesNotEmitQueueOrEvent() throws Exception {
++        var queue=mock(DispatchQueueInterface.class);var events=mock(ApplicationEventPublisher.class);var waiter=mock(AsyncOperationWaiter.class);
++        var subscribed=new java.util.concurrent.CountDownLatch(1);var cancelled=new java.util.concurrent.CountDownLatch(1);
++        when(waiter.submit(any(), any(), any())).thenReturn(Mono.create(sink -> {subscribed.countDown();sink.onCancel(cancelled::countDown);}));
++        var subscription=service(waiter,queue,events).startExecution(execution(State.Type.FAILED)).subscribe();
++        assertThat(subscribed.await(2,java.util.concurrent.TimeUnit.SECONDS)).isTrue();subscription.dispose();
++        assertThat(cancelled.await(2,java.util.concurrent.TimeUnit.SECONDS)).isTrue();verifyNoInteractions(queue,events);
++    }
++
++    private static WebhookService service(AsyncOperationWaiter waiter, DispatchQueueInterface<ExecutionCommand> queue, ApplicationEventPublisher<?> events) throws Exception {
++        var service=new WebhookService();set(service,"asyncOperationWaiter",waiter);set(service,"executionCommandQueue",queue);set(service,"eventPublisher",events);set(service,"openTelemetry",java.util.Optional.empty());set(service,"asyncOperationsConfiguration",mock(AsyncOperationsConfiguration.class));return service;
++    }
++    private static Execution execution(State.Type state){return Execution.builder().id(EXECUTION).tenantId(TENANT).namespace(NAMESPACE).flowId(FLOW).flowRevision(1).state(state==null?null:new State(state)).kind(ExecutionKind.TEST).trigger(ExecutionTrigger.builder().id("trigger").type("Webhook").variables(java.util.Map.of("key","value")).build()).labels(List.of(new Label("probe","value"))).inputs(java.util.Map.of("input","value")).build();}
++    private static AsyncOperationProcessedEvent done(){return new AsyncOperationProcessedEvent("op-1",null,EXECUTION,AsyncOperationProcessedEvent.Outcome.SUCCEEDED,null,Instant.now());}
++    private static Object capture(DispatchQueueInterface<ExecutionCommand> queue) throws Exception {var captor=org.mockito.ArgumentCaptor.forClass(ExecutionCommand.class);verify(queue).emit(captor.capture());return captor.getValue();}
++    private static void set(Object target,String field,Object value) throws Exception {Field declared=WebhookService.class.getDeclaredField(field);declared.setAccessible(true);declared.set(target,value);}
++}

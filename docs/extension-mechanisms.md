@@ -796,3 +796,21 @@ SQL/受控投影依赖不可用信号；lifecycle 输出无敏感详情的 no-st
 ### REQ-0411：UI SDK 独立文档偏好数据桥（入口 B）
 
 消费方 `kestra-plugin-amis-apps` 独立 HTML。正式 digest `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 的 SDK contract 只有主题/语言列表与语言别名，没有偏好存取契约；native `ui/src/utils/utils.ts` 的 getSelectedTheme/getTheme/getLang 实际消费 localStorage.theme/lang。独立页猜测 system/navigator 会在首访、刷新和切换时偏离 native。2026-11-26 主控接收最小数据提案：现有 SDK contract.json 追加 preferences descriptor，锁定存储键、默认、系统模式与解析映射、locale aliases；原契约字段保持兼容。不得导入 SPA/Vue 私有实例、改变 native UI 或建立平行偏好表。归属既有 REQ-0340/0384 UI SDK 能力。消费必须匹配成功 CI 与正式产物；宿主真实 Chromium 对照 native 函数验证三主题/system、13语言/别名/默认、刷新与跨文档 storage，原949/64门不减少。
+
+### REQ-0413：Webhook 执行状态传播（入口 B，已接收）
+
+消费方为 `kestra-plugin-amis-apps`。正式 host 的 `WebhookService.startExecution(Execution)` 原本复制
+`kind`、`trigger`、`labels`、`inputs` 和 trace，但没有复制调用方准备的 `State.Type.FAILED`；原生
+Controller 的 `Create.withStateType(FAILED)` 语义因此不能由独立扩展保留。该失败不来自插件源码，
+host 通过独立 mock capture 重现。
+
+最小契约：`startExecution(Execution)` 保持现有入口；`FAILED` 传给 `Create.stateType`，
+`CREATED`、`RESTARTED` 或无 state 保持原有 CREATED 默认；其他预提交状态失败关闭，不进入
+waiter、queue 或 event。正常 waiter 注册、operationId、queue emit、event publish、trace 顺序不变。
+BLOCK/条件失败不创建 execution，仍由调用方在准备阶段负责。不得新增裸 queue、第二执行引擎或
+回移未归因上游代码。
+
+host 独立测试验证 FAILED、正常 CREATED/RESTARTED/无状态、非法状态、wrapper subscription
+取消和 queue/event capture；取消测试不证明 AsyncOperationWaiter 内部注册清理。测试只证明
+Create 命令和包装层互操作，不证明 AMIS 业务执行或生产组合通过。消费方必须先完成独立编译
+和真实组合验收。

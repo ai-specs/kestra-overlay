@@ -1127,3 +1127,11 @@ Flow disabled 与 trigger 状态。Flow/Execution repository 的 WithoutAcl 查�
 刷新重新读取，跨文档监听 storage；写入文档必须更新自己的视图。不得用 navigator 推断
 宿主已保存偏好，也不得抓取私有 bundle 或导入 SPA。此追加字段向旧 SDK 消费者保持兼容。
 消费仍须匹配成功 CI 与精确正式 digest，原949/64门不减少。
+
+### Webhook 执行状态传播 V1（REQ-0413）
+
+独立扩展调用现有 `WebhookService.startExecution(Execution)` 时，host 保留调用方已经准备的
+`FAILED` 状态并写入 `Create.stateType`；正常 `CREATED`、`RESTARTED` 或无 state 保持既有默认。
+其他预提交状态失败关闭。host 不执行 BLOCK 准备、不提供裸 queue、不创建第二执行引擎。waiter
+注册、operationId、queue、event 和 trace 顺序保持既有语义。该契约不证明业务执行成功；消费方
+必须用成功 CI 的正式 host 产物独立编译并由根仓完成真实组合验收。

@@ -69,7 +69,8 @@ python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/tes
   --tests io.kestra.webserver.services.ai.agent.internals.ToolResultLimitTest --console=plain)
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
-(cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --console=plain)
+(cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --tests io.kestra.core.services.WebhookExecutionStatePropagationTest --console=plain)
+python3 "$PWD/scripts/check-webhook-execution-state-tests.py" "$WORK/core/build/test-results/test"
 (cd "$WORK" && ./gradlew :jdbc:test --tests io.kestra.jdbc.migration.V2_0_11PluginAutoInstallMigrationTest --console=plain)
 python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/jdbc/build/test-results/test" --upstream-migration-only
 (cd "$WORK" && ./gradlew :jdbc-h2:test --tests io.kestra.repository.h2.H2McpSessionRepositoryTest --console=plain)
