@@ -1,5 +1,5 @@
 # patches/manifest.tsv — patch 总账（与 patches/*/*.patch 一一对应；check-patches.sh 强校验）
-# 当前源码 BASE：v2.0.13 / 61da533e0754fcdd6c69cc2ae598dc9e72a0ccfe；63需求保留。
+# 当前源码 BASE：v2.0.13 / 61da533e0754fcdd6c69cc2ae598dc9e72a0ccfe；69个patch（新增0415仅HTTP回归，生产修复归0410）。
 # 来源列的 v2.0.11 发布记录为历史；v2.0.13 须以最终提交自身成功 CI/推广报告核对，不继承旧绿色。
 # 0150–0190：owner/consent、MCP资源Bearer、能力门与MCP Authorizer SPI、OAuth-only、owner管理和DB限速。
 # 0200/0211：生产审计修复，client secret哈希与pending quota错误语义；交付以对应提交CI为准。
@@ -82,3 +82,4 @@ R-OIDC-SERVER	-	reserved	—（本仓预留扩展点,patch 路线,非外部仓 j
 0412	0412-oidc-session-dependency-status.patch	core	ai-specs/kestra-plugin-rbac	会话先行检查保留授权依赖不可用503，不将健康cookie误判为撤销401	2	原dependency503镜像门实际401失败；共享helper与投影边界归0383，lifecycle衔接归0410；消费必须匹配成功CI与正式产物，真实撤销仍拒绝	上游提供等价会话身份失效与已分类依赖故障区分
 0413	0413-http-execution-state.patch	core	ai-specs/kestra-plugin-amis-apps	Webhook startExecution传播调用方FAILED状态，保持正常CREATED、waiter、queue、event和trace顺序	2	入口B接收；正式host失败重现；4项具名门及完整local-ci通过；4ca66e90/CI45696257524正式发布；组合验收由部署仓核对	上游WebhookService传递prepared execution state，BLOCK仍由调用方负责
 0414	0414-flow-namespace-reader.patch	core	ai-specs/kestra-plugin-amis-apps	Flow READ/EXECUTE授权单文件只读服务、短Owner metadata域及ModeA真实HTTP身份传播	5	2026-11-26定向14具名测试通过；消费须匹配成功CI与正式artifact；完整构建及组合验收由主控执行	上游提供等价Flow运行文件读取与短生命周期metadata授权机制
+0415	0415-oidc-lifecycle-problem-detail.patch	core	ai-specs/kestra-plugin-rbac、ai-specs/kestra-plugin-amis-apps	会话依赖故障503复用ProblemFactory，恢复安全detail、instance与traceId及no-store	1	生产修复归0410原来源；HTTP六项及完整local-ci通过（699+35 Java、2镜像假设跳过、UI160/偏好31）；原classpath/OIDC35/MCP四XML零skip/form/env/SDK949/几何64通过；正式CI待执行，未发布	上游会话依赖错误统一复用ProblemFactory及相关HTTP回归

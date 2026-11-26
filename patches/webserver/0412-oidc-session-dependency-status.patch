@@ -32,10 +32,10 @@ index c19be9b..b2dedc0 100644
      private Identity validateCurrent(Authentication authentication) {
 diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/SessionAuthorizationFailureTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/SessionAuthorizationFailureTest.java
 new file mode 100644
-index 0000000..9776207
+index 0000000..a766919
 --- /dev/null
 +++ b/webserver/src/test/java/io/kestra/webserver/oidc/SessionAuthorizationFailureTest.java
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,153 @@
 +package io.kestra.webserver.oidc;
 +
 +import io.kestra.webserver.oidc.controllers.OidcIdentityLifecycleFilter;
@@ -142,6 +142,8 @@ index 0000000..9776207
 +        var configuration = new OidcConfiguration(); configuration.setIssuer(fixture.ISSUER);
 +        var filter = new OidcIdentityLifecycleFilter(configuration, mock(OidcIdentityLifecycle.class));
 +        inject(filter, "applicationGroupIdentities", providers);
++        inject(filter, "problems", new io.kestra.webserver.errors.ProblemFactory(
++            new io.kestra.webserver.errors.ProblemMapperRegistry(java.util.List.of()), new io.kestra.core.utils.EditionProvider()));
 +        var calls = new AtomicInteger();
 +        var request = HttpRequest.GET("/api/v1/configs").setAttribute(SecurityFilter.AUTHENTICATION, fixture.authentication());
 +        var response = Mono.from(filter.doFilter(request, ignored -> {calls.incrementAndGet();return Mono.just(HttpResponse.ok());}))
@@ -151,6 +153,14 @@ index 0000000..9776207
 +        assertTrue(response.getContentType().orElseThrow().toString().startsWith("application/problem+json"));
 +        assertTrue(response.getHeaders().getAll("Set-Cookie").isEmpty()); assertEquals(0, calls.get());
 +        assertFalse(response.getBody().orElseThrow().toString().contains("sensitive"));
++        var problem = (io.kestra.webserver.errors.ProblemDetail) response.getBody().orElseThrow();
++        assertEquals(503, problem.status());
++        assertEquals("https://kestra.io/docs/api-reference/problems/service-unavailable", problem.type().toString());
++        assertEquals("Service unavailable", problem.title());
++        assertEquals(request.getPath(), problem.instance());
++        assertNotNull(problem.traceId()); assertTrue(problem.traceId().matches("[A-Za-z0-9_-]{8,128}"));
++        assertEquals("An unexpected error occurred. Contact your administrator to review the logs associated to the trace ID.", problem.detail());
++
 +    }
 +
 +    @Test void lifecycleUnknownFailureRetainsApi401AndDocumentLogout() throws Exception {

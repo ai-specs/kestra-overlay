@@ -64,6 +64,7 @@ python3 "$REPO/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/te
 
 echo "== scoped tests (filter: $TESTS) =="
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
+  --tests io.kestra.webserver.oidc.controllers.OidcLifecycleProblemHttpTest \
   --tests io.kestra.mcp.McpToolScopeTest \
   --tests io.kestra.webserver.rbac.FlowNamespaceFileReaderV1Test --tests io.kestra.webserver.rbac.FlowNamespaceFileReaderHttpTest \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
@@ -79,6 +80,7 @@ python3 "$REPO/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/te
 python3 "$REPO/scripts/check-http-extension-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-flow-namespace-reader-tests.py" "$WORK/webserver/build/test-results/test"
+python3 "$REPO/scripts/check-lifecycle-problem-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --tests io.kestra.core.services.WebhookExecutionStatePropagationTest --console=plain)
 python3 "$REPO/scripts/check-webhook-execution-state-tests.py" "$WORK/core/build/test-results/test"
 (cd "$WORK" && ./gradlew :jdbc:test --tests io.kestra.jdbc.migration.V2_0_11PluginAutoInstallMigrationTest --console=plain)

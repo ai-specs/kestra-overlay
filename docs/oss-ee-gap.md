@@ -530,3 +530,19 @@ REQ-0414 实施记录（2026-11-26）：新增通用 V1 单文件服务和短 Ow
 定向 14 具名测试通过，精确 XML 门与负例回归进入 build/local-ci 原 scoped 同次调用。
 原生文件管理权限不变，存储使用 Flow persisted tenant，模式 A 保留真实 HTTP 来源。
 完整 local-ci、镜像及组合验收不在此定向记录内；消费须匹配成功 CI 和正式 artifact。
+
+
+## R-OIDC-SERVER 错误承载回归：REQ-0415（入口 B，已接收、未发布）
+
+消费方RBAC和AMIS在根CI45770770674的正式host8f组合中发现：lifecycle依赖错误503
+缺instance/traceId。归因0410手写Map绕过上游ProblemFactory，不是插件业务模型缺失。
+0410原来源仅复用已有ProblemFactory四参数response与SERVICE_UNAVAILABLE并保留no-store；
+不新建错误模型或授权例外，生产修复归0410原来源并重新发布。原生server error安全detail、关联日志和
+instance/traceId必须保留；部署仓六字段断言不得放宽。
+
+非PG宿主自有HTTP六项定向通过，精确XML门与parser负例接原scoped构建，原401/403、
+恢复200与零handler回归保留。完整local-ci02通过，webserver699通过/0失败/2既有镜像假设跳过，
+其余Java35、UI160及偏好Chromium31通过；跳过不计通过。原classpath、OIDC35、
+MCP四份XML各1项零跳过、form/env完整镜像门及dependency503各7项通过，
+SDK949与原生几何64通过。正式CI尚未运行，不宣称发布。机制与双方
+职责见extension-mechanisms.md REQ-0415。

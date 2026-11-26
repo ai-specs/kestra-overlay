@@ -23,15 +23,17 @@ index 7c42c58..b5cff5d 100644
              final var response = HttpResponse.temporaryRedirect(URI.create(loginUrlWithFrom(request)));
              if (priorToLoginPersistence != null && !exception.isForbidden()
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
-index 5420af5..efc7980 100644
+index 5420af5..cab4efe 100644
 --- a/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
 +++ b/webserver/src/main/java/io/kestra/webserver/oidc/controllers/OidcIdentityLifecycleFilter.java
-@@ -20,6 +20,12 @@ import io.micronaut.security.filters.SecurityFilter;
+@@ -20,6 +20,14 @@ import io.micronaut.security.filters.SecurityFilter;
  public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
      @jakarta.inject.Inject
      private io.kestra.webserver.rbac.PublicFavicon publicFavicon;
 +    @jakarta.inject.Inject
 +    private io.micronaut.context.BeanProvider<io.kestra.webserver.rbac.HttpExtensionRouteRegistry> extensionRoutes;
++    @jakarta.inject.Inject
++    private io.kestra.webserver.errors.ProblemFactory problems;
 +    private boolean extensionDocument(HttpRequest<?> request) {
 +        try { return extensionRoutes!=null && extensionRoutes.isUnique() && extensionRoutes.get().documentRequest(request); }
 +        catch(RuntimeException failure){return false;}
@@ -39,7 +41,7 @@ index 5420af5..efc7980 100644
      private final OidcConfiguration configuration;
      private final OidcIdentityLifecycle lifecycle
  ;
-@@ -55,8 +61,17 @@ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
+@@ -55,8 +63,14 @@ public final class OidcIdentityLifecycleFilter implements HttpServerFilter {
  )
              .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
              .timeout(java.time.Duration.ofSeconds(5))
@@ -53,11 +55,8 @@ index 5420af5..efc7980 100644
 +            .flatMapMany(valid -> valid ? chain.proceed(request) : Mono.just((path.startsWith("/ui/") || extensionDocument(request))
 +                ? HttpResponse.temporaryRedirect(java.net.URI.create("/oidc/logout")) : HttpResponse.unauthorized()))
 +            .onErrorResume(io.kestra.webserver.rbac.AuthorizationUnavailableException.class, failure -> Mono.just(
-+                HttpResponse.status(io.micronaut.http.HttpStatus.SERVICE_UNAVAILABLE)
-+                    .contentType(io.micronaut.http.MediaType.APPLICATION_JSON_PROBLEM_TYPE)
-+                    .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL,"no-store")
-+                    .body(java.util.Map.of("type","about:blank","title","Service Unavailable","status",503,
-+                        "detail","Authorization dependency is unavailable"))));
++                problems.response(request, failure, io.kestra.webserver.errors.ProblemTypes.SERVICE_UNAVAILABLE, java.util.List.of())
++                    .header(io.micronaut.http.HttpHeaders.CACHE_CONTROL,"no-store")));
      }
  }
 diff --git a/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java b/webserver/src/main/java/io/kestra/webserver/oidc/services/OidcPriorToLoginPersistence.java

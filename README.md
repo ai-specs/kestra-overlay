@@ -1165,3 +1165,14 @@ Mono<Optional<FlowNamespaceFileReaderV1.Content>> read(
 调用方负责声明选择、父级回溯、内容解释与业务验证；该 API 不接受业务模型或外部读取 callback。
 
 host 定向测试与精确 XML 门验证该公开机制；真实认证、存储和插件组合仍由部署仓以正式产物验收。
+
+
+### REQ-0415：会话依赖503的原生ProblemDetail回归（未发布）
+
+RBAC/HTTP扩展消费组合发现0410 lifecycle依赖故障503缺instance/traceId。0410原来源实施最小修复，0415仅追加HTTP回归，复用已有ProblemFactory，恢复固定安全detail、instance、traceId与关联日志，保留
+no-store及原401/403语义，不新建错误模型。非PG HTTP六项精确门及完整local-ci02已通过；
+webserver699通过、2既有镜像假设跳过（不计通过），其余Java35、UI160及偏好Chromium31通过。
+原classpath、OIDC35、MCP四份XML（各1项零跳过）、form/env完整镜像门已通过，
+其中dependency503各7项；同一冻结输入的SDK949与原生筛选几何64通过。
+正式CI尚未运行；此状态不是正式镜像交付或插件组合通过。
+契约、失败证据与职责见`docs/extension-mechanisms.md` REQ-0415及差异表对应项。

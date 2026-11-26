@@ -793,6 +793,30 @@ SQL/受控投影依赖不可用信号；lifecycle 输出无敏感详情的 no-st
 不按异常消息或任意 cause 搜索，不放宽主体、签名、scope、审计或事务检查。
 本地定向门、原 dependency503 七项、两种首装镜像门及正式CI必须对应最终输入。
 
+### REQ-0415：会话依赖错误复用原生 ProblemDetail（入口 B，已接收、未发布）
+
+消费方为 `kestra-plugin-rbac` 与 `kestra-plugin-amis-apps`。根仓正式组合 CI
+`45770770674`（root `99ae242`、host `8f7b7b8`）中，目录/策略依赖故障正确返回
+503，却缺少 `instance` 与 `traceId`。0410 lifecycle catch 手写 Map 绕过已有
+`ProblemFactory`；原生响应filter不补齐已声明problem MIME的对象。归属宿主错误承载
+回归，不是扩展业务缺口，不得降低部署仓六字段断言。
+
+新增HTTP回归归0415，生产修复归0410原来源，以新提交重新发布。catch调用已有
+`ProblemFactory.response(request, failure, ProblemTypes.SERVICE_UNAVAILABLE, List.of())`，
+保留503与no-store。复用原生固定安全detail、request path instance及真实或synthetic
+traceId和关联日志，不新增错误模型、业务码或路径例外。普通撤销401、权限403、
+文档退出路径及正常请求不变，异常cause不得出现在HTTP body中。
+
+宿主自有H2 embedded HTTP六项覆盖GET/POST/HTML依赖故障的最终六字段、无SQL/
+凭据详情、零handler，以及撤销401、普通403、正常/恢复200。精确XML门接原build/
+local-ci/CI，原组不减少。零handler不等同DB/queue/storage无副作用。当前非PG六项
+定向通过；完整local-ci02通过（webserver699通过/0失败/2既有镜像假设跳过，
+core7、jdbc7、jdbc-h2 14、升级安全7、UI160及偏好Chromium31通过）。跳过不计通过；
+原classpath、OIDC35、MCP四份XML各1项零跳过及form/env完整镜像门通过，
+dependency503各7项；同一冻结输入的SDK949与原生几何64通过。
+正式CI尚未运行，尚未发布。
+交付仍为宿主先发布、插件消费正式输入独立发布、根仓重验依赖故障/恢复。
+
 ### REQ-0411：UI SDK 独立文档偏好数据桥（入口 B）
 
 消费方 `kestra-plugin-amis-apps` 独立 HTML。正式 digest `91d6726df4d13535af22b16937e7e6ee21a5f5a4058534d31d3dfd64b6981c7e` 的 SDK contract 只有主题/语言列表与语言别名，没有偏好存取契约；native `ui/src/utils/utils.ts` 的 getSelectedTheme/getTheme/getLang 实际消费 localStorage.theme/lang。独立页猜测 system/navigator 会在首访、刷新和切换时偏离 native。2026-11-26 主控接收最小数据提案：现有 SDK contract.json 追加 preferences descriptor，锁定存储键、默认、系统模式与解析映射、locale aliases；原契约字段保持兼容。不得导入 SPA/Vue 私有实例、改变 native UI 或建立平行偏好表。归属既有 REQ-0340/0384 UI SDK 能力。消费必须匹配成功 CI 与正式产物；宿主真实 Chromium 对照 native 函数验证三主题/system、13语言/别名/默认、刷新与跨文档 storage，原949/64门不减少。

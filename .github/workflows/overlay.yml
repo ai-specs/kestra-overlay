@@ -75,6 +75,8 @@ jobs:
         run: ./scripts/build.sh
       - name: Require exact HTTP extension contract matrix
         run: python3 scripts/check-http-extension-tests.py .work/verify/webserver/build/test-results/test
+      - name: Exact lifecycle dependency ProblemDetail HTTP matrix
+        run: python3 scripts/check-lifecycle-problem-tests.py .work/verify/webserver/build/test-results/test
       - name: Prepare shared Chromium for native host and preference gates
         run: |
           sudo python3 scripts/prepare-browser-apt.py

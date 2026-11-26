@@ -1,0 +1,163 @@
+# 需求: REQ-0415 会话依赖故障复用原生ProblemFactory六字段503
+# 消费扩展仓: ai-specs/kestra-plugin-rbac、ai-specs/kestra-plugin-amis-apps
+# 状态: core；本地定向验证，未发布
+# 来源: 入口B根CI99依赖故障缺instance/traceId；生产修复归0410原来源；本补丁仅独立HTTP六项回归
+# 触达上游文件: 1 个
+# 移除条件: 上游会话依赖故障统一复用ProblemFactory并保证安全detail、instance和traceId
+diff --git a/webserver/src/test/java/io/kestra/webserver/oidc/controllers/OidcLifecycleProblemHttpTest.java b/webserver/src/test/java/io/kestra/webserver/oidc/controllers/OidcLifecycleProblemHttpTest.java
+new file mode 100644
+index 0000000..b27af45
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/oidc/controllers/OidcLifecycleProblemHttpTest.java
+@@ -0,0 +1,151 @@
++package io.kestra.webserver.oidc.controllers;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.webserver.errors.ProblemFactory;
++import io.kestra.webserver.oidc.OidcConfiguration;
++import io.kestra.webserver.oidc.services.OidcIdentityLifecycle;
++import io.kestra.webserver.oidc.services.OidcTrustedIdentity;
++import io.kestra.webserver.rbac.AuthorizationUnavailableException;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.http.HttpResponse;
++import io.micronaut.http.MutableHttpResponse;
++import io.micronaut.http.annotation.Controller;
++import io.micronaut.http.annotation.Filter;
++import io.micronaut.http.annotation.Get;
++import io.micronaut.http.annotation.Post;
++import io.micronaut.http.filter.HttpServerFilter;
++import io.micronaut.http.filter.ServerFilterChain;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import java.net.http.HttpClient;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.Test;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Mono;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "oidc.lifecycle.problem.probe", value = "true")
++class OidcLifecycleProblemHttpTest {
++    private static final String PATH = "/lifecycle-problem-probe/resource";
++    private static final String DETAIL = "An unexpected error occurred. Contact your administrator to review the logs associated to the trace ID.";
++    @Inject EmbeddedServer server;
++    @Inject Endpoint endpoint;
++    private final HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
++    private final ObjectMapper mapper = new ObjectMapper();
++
++    private java.net.http.HttpResponse<String> request(String mode, String method, String accept) throws Exception {
++        return client.send(java.net.http.HttpRequest.newBuilder(server.getURI().resolve(PATH))
++            .header("X-Lifecycle-Problem", mode).header("Accept", accept)
++            .method(method, java.net.http.HttpRequest.BodyPublishers.noBody()).build(),
++            java.net.http.HttpResponse.BodyHandlers.ofString());
++    }
++
++    private void unavailable(String method, String accept) throws Exception {
++        int before = endpoint.calls.get();
++        var response = request("unavailable", method, accept);
++        assertEquals(503, response.statusCode());
++        assertEquals("application/problem+json", response.headers().firstValue("content-type").orElseThrow());
++        assertTrue(response.headers().allValues("cache-control").stream().anyMatch(value -> value.contains("no-store")));
++        assertTrue(response.headers().firstValue("location").isEmpty());
++        JsonNode body = mapper.readTree(response.body());
++        var fields = new HashSet<String>();body.fieldNames().forEachRemaining(fields::add);
++        assertEquals(Set.of("type", "title", "status", "detail", "instance", "traceId"), fields);
++        assertEquals("https://kestra.io/docs/api-reference/problems/service-unavailable", body.path("type").asText());
++        assertEquals("Service unavailable", body.path("title").asText());
++        assertEquals(503, body.path("status").asInt());
++        assertEquals(DETAIL, body.path("detail").asText());
++        assertEquals(PATH, body.path("instance").asText());
++        assertTrue(body.path("traceId").isTextual());
++        assertTrue(body.path("traceId").asText().matches("[A-Za-z0-9_-]{8,128}"));
++        assertFalse(response.body().matches("(?s).*(SQLException|private-sql-marker|rbac_application_group_state|jdbc:|SELECT|password).*"));
++        assertEquals(before, endpoint.calls.get());
++    }
++
++    @Test void dependencyGetHasSixSafeProblemFieldsAndNoHandler() throws Exception { unavailable("GET", "application/json"); }
++    @Test void dependencyPostHasSixSafeProblemFieldsAndNoHandler() throws Exception { unavailable("POST", "application/json"); }
++    @Test void dependencyHtmlStill503WithoutLogoutRedirect() throws Exception { unavailable("GET", "text/html"); }
++    @Test void revokedSessionRemains401WithoutHandler() throws Exception {
++        int before = endpoint.calls.get();assertEquals(401, request("revoked", "GET", "application/json").statusCode());
++        assertEquals(before, endpoint.calls.get());
++    }
++    @Test void ordinaryForbiddenRemains403() throws Exception {
++        int before = endpoint.calls.get();assertEquals(403, request("forbidden", "GET", "application/json").statusCode());
++        assertEquals(before + 1, endpoint.calls.get());
++    }
++    @Test void healthyRequestAndRecoveryReachHandler() throws Exception {
++        int before = endpoint.calls.get();assertEquals(200, request("healthy", "GET", "application/json").statusCode());
++        unavailable("GET", "application/json");
++        assertEquals(200, request("healthy", "GET", "application/json").statusCode());
++        assertEquals(before + 2, endpoint.calls.get());
++    }
++
++    @Singleton @Requires(property = "oidc.lifecycle.problem.probe", value = "true")
++    static class Identity implements AuthenticationFetcher<HttpRequest<?>> {
++        public Publisher<Authentication> fetchAuthentication(HttpRequest<?> request) {
++            return request.getHeaders().contains("X-Lifecycle-Problem")
++                ? Mono.just(Authentication.build("actor", List.of(), Map.of("iss", "http://localhost:8080"))) : Mono.empty();
++        }
++    }
++
++    @Singleton @Filter("/lifecycle-problem-probe/**") @Requires(property = "oidc.lifecycle.problem.probe", value = "true")
++    static class Lifecycle implements HttpServerFilter {
++        private final OidcIdentityLifecycle lifecycle = mock(OidcIdentityLifecycle.class);
++        private final OidcTrustedIdentity identities = mock(OidcTrustedIdentity.class);
++        private final OidcIdentityLifecycleFilter delegate = new OidcIdentityLifecycleFilter(new OidcConfiguration(), lifecycle);
++        @Inject void configure(ProblemFactory problems) throws Exception {
++            when(lifecycle.matches(anyString(), any())).thenReturn(true);
++            BeanProvider<OidcTrustedIdentity> provider = mock(BeanProvider.class);
++            when(provider.isPresent()).thenReturn(true);when(provider.isUnique()).thenReturn(true);when(provider.get()).thenReturn(identities);
++            var identityField = OidcIdentityLifecycleFilter.class.getDeclaredField("applicationGroupIdentities");
++            identityField.setAccessible(true);identityField.set(delegate, provider);
++            var problemField = OidcIdentityLifecycleFilter.class.getDeclaredField("problems");
++            problemField.setAccessible(true);problemField.set(delegate, problems);
++            doAnswer(invocation -> {
++                String mode = Authentication.class.cast(invocation.getArgument(0)).getAttributes().get("mode").toString();
++                if (mode.equals("unavailable")) {
++                    var failure = new AuthorizationUnavailableException();
++                    failure.initCause(new java.sql.SQLException("private-sql-marker SELECT password FROM rbac_application_group_state jdbc:private"));
++                    throw failure;
++                }
++                if (mode.equals("revoked")) throw new IllegalStateException("revoked");
++                return null;
++            }).when(identities).validateSession(any());
++        }
++        public int getOrder() { return delegate.getOrder(); }
++        public Publisher<MutableHttpResponse<?>> doFilter(HttpRequest<?> request, ServerFilterChain chain) {
++            var authentication = Authentication.build("actor", List.of(), Map.of("iss", "http://localhost:8080", "mode", request.getHeaders().get("X-Lifecycle-Problem")));
++            request.setAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION, authentication);
++            return delegate.doFilter(request, chain);
++        }
++    }
++
++    @Controller("/lifecycle-problem-probe") @Requires(property = "oidc.lifecycle.problem.probe", value = "true")
++    static class Endpoint {
++        final AtomicInteger calls = new AtomicInteger();
++        @Get("/resource") HttpResponse<?> get(HttpRequest<?> request) { return handle(request); }
++        @Post("/resource") HttpResponse<?> post(HttpRequest<?> request) { return handle(request); }
++        private HttpResponse<?> handle(HttpRequest<?> request) {
++            calls.incrementAndGet();
++            return request.getHeaders().get("X-Lifecycle-Problem").equals("forbidden") ? HttpResponse.status(io.micronaut.http.HttpStatus.FORBIDDEN) : HttpResponse.ok(Map.of("ok", true));
++        }
++    }
++}
