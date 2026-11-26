@@ -58,6 +58,7 @@ echo "== scoped OIDC acceptance tests =="
   --tests io.kestra.mcp.McpToolScopeTest --console=plain)
 python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :webserver:test --tests 'io.kestra.webserver.oidc.*' \
+  --tests io.kestra.mcp.McpToolScopeTest \
   --tests io.kestra.webserver.rbac.FlowNamespaceFileReaderV1Test --tests io.kestra.webserver.rbac.FlowNamespaceFileReaderHttpTest \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpSessionLifecycleTest --tests io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest \
@@ -69,6 +70,7 @@ python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/tes
   --tests io.kestra.webserver.services.ai.agent.tool.ToolResultBudgetTest \
   --tests io.kestra.webserver.services.ai.agent.internals.ToolResultLimitTest --console=plain)
 python3 "$PWD/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
+python3 "$PWD/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$PWD/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$PWD/scripts/check-flow-namespace-reader-tests.py" "$WORK/webserver/build/test-results/test"
 (cd "$WORK" && ./gradlew :core:test --tests io.kestra.core.services.AuthorizationValidationBoundaryTest --tests io.kestra.core.services.WebhookExecutionStatePropagationTest --console=plain)

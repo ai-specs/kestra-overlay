@@ -64,6 +64,7 @@ python3 "$REPO/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/te
 
 echo "== scoped tests (filter: $TESTS) =="
 (cd "$WORK" && ./gradlew :webserver:test --tests "$TESTS" \
+  --tests io.kestra.mcp.McpToolScopeTest \
   --tests io.kestra.webserver.rbac.FlowNamespaceFileReaderV1Test --tests io.kestra.webserver.rbac.FlowNamespaceFileReaderHttpTest \
   --tests 'io.kestra.webserver.rbac.*' --tests io.kestra.mcp.McpExecutionGateTest --tests io.kestra.mcp.McpSessionIdentityTest \
   --tests io.kestra.mcp.McpSessionLifecycleTest --tests io.kestra.mcp.KestraFluxStreamableServerTransportProviderTest --tests io.kestra.mcp.McpServerHandlerTransportTest --tests io.kestra.mcp.McpEvaluationLifecycleTest --tests io.kestra.mcp.McpDynamicToolListTest \
@@ -74,6 +75,7 @@ echo "== scoped tests (filter: $TESTS) =="
   --tests io.kestra.webserver.services.ai.agent.tool.ToolResultBudgetTest \
   --tests io.kestra.webserver.services.ai.agent.internals.ToolResultLimitTest --console=plain)
 python3 "$REPO/scripts/check-typed-authorization-tests.py" "$WORK/webserver/build/test-results/test"
+python3 "$REPO/scripts/check-namespace-scope-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-http-extension-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-application-project-tests.py" "$WORK/webserver/build/test-results/test"
 python3 "$REPO/scripts/check-flow-namespace-reader-tests.py" "$WORK/webserver/build/test-results/test"
