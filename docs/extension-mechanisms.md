@@ -814,3 +814,49 @@ host 独立测试验证 FAILED、正常 CREATED/RESTARTED/无状态、非法状�
 取消和 queue/event capture；取消测试不证明 AsyncOperationWaiter 内部注册清理。测试只证明
 Create 命令和包装层互操作，不证明 AMIS 业务执行或生产组合通过。消费方必须先完成独立编译
 和真实组合验收。
+
+## Flow 授权的只读 namespace file 读取（REQ-0414，入口 B 已接收，未发布）
+
+消费方为 `kestra-plugin-amis-apps`，机制必须可被其他 Flow 扩展复用。正式宿主 `4ca66e9`
+与正式 AMIS `7d96fc7` 的真实模式 B 已复现：管理员读取父级 schema 为 200，只有入口及
+Flow READ/EXECUTE 的账号读取同一路径为 404；其原生文件管理读取为 403，Flow 原生读取为
+200。数据已通过生产 API 保存读回，探针确认已进入 Flow 和文件查找，不是缺少文件。
+
+实际链路为 `NamespaceFactory` → `InternalNamespace.exists/getFileContent` →
+`DefaultNamespaceFileMetadataStateStore.findByPath` → JDBC metadata repository 的
+`NAMESPACE_FILE_METADATA` ACL。现有公开工厂在 HTTP 上下文中仍要求文件权限；通用执行
+授权方法不改变此查询域。不能把它当作已支持“Flow 运行文件读取”。不得增加账号文件授予、
+伪造 `internalTask`、丢弃调用身份、读取私有表或按 AMIS URL 白名单放宽现有 ACL。
+
+主控接收最小公开契约 `io.kestra.webserver.rbac.FlowNamespaceFileReaderV1`：
+
+- 方法 `read(Authentication, String tenant, Flow, String targetNamespace, String path, int maxBytes)`
+  返回 `Mono<Optional<Content>>`；`Content` 只包含 namespace、规范 path 与防御性复制的字节。
+- 调用方必须先完成自身入口门，并传入从当前正式 Flow/runtime 查找得到且 tuple/revision
+  一致的声明；宿主不解析扩展声明。服务重新检查真实身份与该 Flow 的 READ/EXECUTE，
+  不要求 EXECUTION.CREATE，不创建 execution，也不代替扩展的首门。
+- 只允许当前 Flow namespace 或严格父级 namespace 的一个规范、绝对文件路径；拒绝
+  兄弟、子级、无关范围、穿越、编码别名及非法 tenant。当前支持既有单 tenant `main`。
+- 宿主在自己持有的授权边界中建立仅 metadata READ 可用的短生命周期查询域，读取并
+  关闭输入流后返回字节。查询域绑定当前 Owner，不能被外部构造或在服务返回后复用。
+  它不授予文件列表、元数据枚举、写入、删除或原生管理 API 权限。
+- `maxBytes` 必须为正并不超过 16 MiB；超限明确拒绝。只对实际不存在返回 empty，I/O、
+  身份、授权和依赖故障不得伪装文件不存在。调用保持阻塞 I/O 调度、取消与授权关闭规则。
+- 只读运行服务归宿主；声明路径选择、当前→父级回溯、JSON/AMIS 校验、页面/API、缓存
+  与编辑器归扩展。不得把 AMIS 类型、schema、路由或业务模型加入宿主。
+
+独立 host 门必须证明：READ/EXECUTE 任一缺少时零文件 I/O；当前/父级读取允许且不查询
+额外文件许可；兄弟/子级与穿越拒绝；原生文件 READ/LIST/写入仍拒绝；不同 Owner、服务
+返回、错误和取消后无查询域泄漏；大小上限、流关闭、缺少/重复依赖与模式 A 回归。
+宿主先完成本地门、完整 CI 与正式镜像发布，插件才可以编译消费新类型。根仓必须重新执行
+真实有权 Flow/无文件授予的父级页面读取与原生管理拒绝对照，不能以单元或探针替代。
+
+
+REQ-0414 实施记录（2026-11-26）：新增公开 `FlowNamespaceFileReaderV1`，0414 自有的
+`TypedNamespaceAccessControl` 入口包装在普通域缓存之前识别私有活跃 Owner metadata 域；
+原授权逻辑保留在私有 `ordinaryDomain`，历史 patch 的功能行不重写。模式 A 通用 HTTP 扩展
+补请求来源的 Reactor 传播。逻辑 tenant 与 Flow persisted storage tenant 分离，后者可为 null。
+定向 14 具名测试覆盖真实 NamespaceFactory、null/main、HTTP 线程移交与失去身份拒绝、
+正常/错误/取消/late-open 关闭及 ThreadLocal 恢复。精确 XML checker 与负例回归接入既有
+scoped webserver 同一次 test 调用，保留完整矩阵。消费必须匹配成功 CI 与正式 artifact；
+该定向记录不代替完整构建、镜像门或根仓组合验收。

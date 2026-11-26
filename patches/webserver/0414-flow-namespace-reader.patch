@@ -1,0 +1,493 @@
+# 需求: REQ-0414 Flow授权只读namespace file读取
+# 消费扩展仓: ai-specs/kestra-plugin-amis-apps
+# 状态: core；消费须匹配成功CI与正式artifact
+# 来源: 正式BASE顺序重放后的host源码；不读取插件源码作为构建输入
+# 触达上游文件: 5 个
+# 移除条件: 上游提供等价Flow READ/EXECUTE授权文件读取、身份传播、关闭语义与Typed namespace metadata激活
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderV1.java b/webserver/src/main/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderV1.java
+new file mode 100644
+index 0000000..f1ee975
+--- /dev/null
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderV1.java
+@@ -0,0 +1,151 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.models.flows.FlowWithException;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.storages.NamespaceFactory;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.core.propagation.PropagatedContext;
++import io.micronaut.http.HttpStatus;
++import io.micronaut.http.exceptions.HttpStatusException;
++import io.micronaut.security.authentication.Authentication;
++import jakarta.inject.Singleton;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.file.Path;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
++import reactor.core.publisher.Mono;
++import reactor.core.scheduler.Schedulers;
++
++@Singleton
++public final class FlowNamespaceFileReaderV1 {
++    public static final int CONTRACT_VERSION = 1;
++    private static final ThreadLocal<ReadScope> CURRENT = new ThreadLocal<>();
++    private final RbacConfiguration configuration;
++    private final RbacGate gate;
++    private final BeanProvider<NamespaceFactory> factories;
++
++    public FlowNamespaceFileReaderV1(RbacConfiguration configuration, RbacGate gate, BeanProvider<NamespaceFactory> factories) {
++        this.configuration = configuration;
++        this.gate = gate;
++        this.factories = factories;
++    }
++
++    public Mono<Optional<Content>> read(Authentication authentication, String tenant, Flow flow,
++        String targetNamespace, String path, int maxBytes) {
++        return AuthorizationEvaluationContext.call(() -> {
++            validate(authentication, tenant, flow, targetNamespace, path, maxBytes);
++            var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
++            if (!configuration.enabled()) return readFile(flow.getTenantId(), targetNamespace, path, maxBytes, null);
++            var resource = new RbacAuthorizer.Resource(RbacAuthorizer.Kind.FLOW, RbacAuthorizer.Scope.NAMESPACE,
++                tenant, flow.getNamespace(), flow.getId());
++            return gate.boundary(principal, tenant, () -> gate.authorize(principal, resource, RbacAuthorizer.Action.READ)
++                .defaultIfEmpty(false).flatMap(allowed -> allowed
++                    ? gate.authorize(principal, resource, RbacAuthorizer.Action.EXECUTE).defaultIfEmpty(false) : Mono.just(false))
++                .flatMap(allowed -> allowed ? Mono.deferContextual(context -> {
++                    var owner = AuthorizationEvaluations.current(context);
++                    if (owner == null || !owner.matches(principal, tenant)) return Mono.error(unavailable());
++                    return readFile(flow.getTenantId(), targetNamespace, path, maxBytes, owner);
++                }) : Mono.error(new HttpStatusException(HttpStatus.FORBIDDEN, "Flow execution permission required"))))
++                .singleOrEmpty();
++        }).flatMap(result -> result).subscribeOn(Schedulers.boundedElastic());
++    }
++
++    private Mono<Optional<Content>> readFile(String tenant, String namespace, String path, int maxBytes,
++        AuthorizationEvaluations.Owner owner) {
++        return Mono.deferContextual(context -> {
++            var origin = AuthorizationEvaluationContext.capture(context);
++            return Mono.create(sink -> {
++                var scope = new ReadScope(owner, namespace, path);
++                var stream = new AtomicReference<InputStream>();
++                sink.onCancel(() -> {
++                    scope.active.set(false);
++                    Schedulers.boundedElastic().schedule(() -> close(stream.getAndSet(null)));
++                });
++                Schedulers.boundedElastic().schedule(() -> {
++                    try (var propagation = origin.propagate()) {
++                        if (!scope.active.get()) return;
++                        if (!factories.isUnique()) throw unavailable();
++                        var previous = CURRENT.get();
++                        CURRENT.set(scope);
++                        Optional<Content> result;
++                        try {
++                            var file = factories.get().of(tenant, namespace);
++                            if (!file.exists(Path.of(path))) {
++                                result = Optional.empty();
++                            } else {
++                            if (!scope.active.get()) return;
++                            InputStream opened = file.getFileContent(Path.of(path));
++                            if (opened == null) throw new IOException("Namespace file content stream missing");
++                            stream.set(opened);
++                            if (!scope.active.get()) { close(stream.getAndSet(null)); return; }
++                            {
++                                byte[] bytes = opened.readNBytes(maxBytes + 1);
++                                if (bytes.length > maxBytes) throw new HttpStatusException(HttpStatus.REQUEST_ENTITY_TOO_LARGE, "Namespace file exceeds byte limit");
++                                result = Optional.of(new Content(namespace, path, bytes));
++                            }
++                            }
++                        } finally {
++                            if (previous == null) CURRENT.remove(); else CURRENT.set(previous);
++                            close(stream.getAndSet(null));
++                        }
++                        if (scope.active.compareAndSet(true, false)) sink.success(result);
++                    } catch (Throwable failure) {
++                        scope.active.set(false);
++                        sink.error(failure);
++                    }
++                });
++            });
++        });
++    }
++
++    static TypedAuthorization.QueryDomain metadataDomain(QueryFilter.Resource resource, AuthorizationEvaluations.Owner owner) {
++        var scope = CURRENT.get();
++        if (scope == null || resource != QueryFilter.Resource.NAMESPACE_FILE_METADATA || scope.owner != owner
++            || owner == null || !scope.active.get() || !owner.matches(owner.principal, owner.tenant)) return null;
++        return new TypedAuthorization.QueryDomain(List.of(scope.namespace), List.of(), List.of(), true, false);
++    }
++
++    private static void validate(Authentication authentication, String tenant, Flow flow, String namespace, String path, int maxBytes) {
++        if (authentication == null || authentication.getName() == null || authentication.getName().isBlank())
++            throw new HttpStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
++        if (!"main".equals(tenant) || flow == null || flow instanceof FlowWithException || flow.isDisabled() || flow.isDeleted()
++            || flow.getRevision() == null || flow.getRevision() <= 0 || flow.isDraft()
++            || flow.getTenantId() != null && !tenant.equals(flow.getTenantId()) || flow.getId() == null
++            || !flow.getId().matches("[A-Za-z0-9_.-]+") || !validNamespace(flow.getNamespace()) || !validNamespace(namespace)
++            || !flow.getNamespace().equals(namespace) && !flow.getNamespace().startsWith(namespace + "."))
++            throw new HttpStatusException(HttpStatus.FORBIDDEN, "Invalid Flow file target");
++        if (path == null || !path.startsWith("/") || path.equals("/") || path.endsWith("/") || path.length() > 4096
++            || path.contains("%") || path.contains("\\") || path.contains("//") || path.contains("?") || path.contains("#")
++            || path.codePoints().anyMatch(codePoint -> codePoint < 32 || codePoint == 127))
++            throw new HttpStatusException(HttpStatus.BAD_REQUEST, "Invalid namespace file path");
++        for (String segment : path.split("/")) if (segment.equals(".") || segment.equals(".."))
++            throw new HttpStatusException(HttpStatus.BAD_REQUEST, "Invalid namespace file path");
++        if (maxBytes < 1 || maxBytes > 16 * 1024 * 1024) throw new IllegalArgumentException("maxBytes must be within 1..16MiB");
++        var request = AuthorizationInvocationContext.currentRequest();
++        if (request.isPresent()) {
++            var actual = request.get().getAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION, Authentication.class).orElse(null);
++            if (actual == null || !actual.equals(authentication)) throw new HttpStatusException(HttpStatus.UNAUTHORIZED, "Identity mismatch");
++        }
++    }
++
++    private static boolean validNamespace(String value) { return value != null && value.matches("[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*"); }
++    private static AuthorizationUnavailableException unavailable() { return new AuthorizationUnavailableException(); }
++    private static void close(InputStream stream) { if (stream != null) try { stream.close(); } catch (IOException failure) { throw new IllegalStateException("Namespace file stream close failed", failure); } }
++    private static final class ReadScope {
++        private final AuthorizationEvaluations.Owner owner;
++        private final String namespace;
++        private final String path;
++        private final AtomicBoolean active = new AtomicBoolean(true);
++        private ReadScope(AuthorizationEvaluations.Owner owner, String namespace, String path) { this.owner = owner; this.namespace = namespace; this.path = path; }
++    }
++    public record Content(String namespace, String path, byte[] bytes) {
++        public Content { bytes = bytes.clone(); }
++        @Override public byte[] bytes() { return bytes.clone(); }
++    }
++}
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java
+index 311ad49..0c7fdcb 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/HttpExtensionRouteFilter.java
+@@ -81,6 +81,8 @@ public final class HttpExtensionRouteFilter implements HttpServerFilter {
+         }
+         if (!configuration.enabled()) return Flux.defer(() -> selected.provider().handle(request, selected.target()))
+             .<MutableHttpResponse<?>>map(result -> documentResponse(request,selected.target(),result))
++            .contextWrite(context -> ReactorPropagation.addPropagatedContext(context,
++                PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false))))
+             .onErrorResume(failure -> failureResponse(request, selected.target(), failure));
+         if (!typedEnabled || !gate.evaluationEnabled()) return response(HttpStatus.SERVICE_UNAVAILABLE);
+         var principal = new RbacAuthorizer.Principal(authentication.getName(), List.copyOf(authentication.getRoles()), null, null, List.of());
+diff --git a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+index 250f663..b47e29e 100644
+--- a/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
++++ b/webserver/src/main/java/io/kestra/webserver/rbac/TypedNamespaceAccessControl.java
+@@ -34,11 +34,16 @@ List
+ public final class TypedNamespaceAccessControl implements NamespaceAccessControl {
+     private final TypedAuthorizationGate gate;
+
++    public QueryDomain domain(QueryFilter.Resource resource) {
++        var fileRead = FlowNamespaceFileReaderV1.metadataDomain(resource, AuthorizationEvaluations.current());
++        return fileRead != null ? fileRead : ordinaryDomain(resource);
++    }
++
+     public TypedNamespaceAccessControl(TypedAuthorizationGate gate) {
+         this.gate = gate;
+     }
++    private QueryDomain ordinaryDomain(QueryFilter.Resource resource) {
+
+-    public QueryDomain domain(QueryFilter.Resource resource) {
+         if (resource == null) return QueryDomain.empty();
+         if (gate.evaluationEnabled()) {
+             var owner = AuthorizationEvaluations.current();
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderHttpTest.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderHttpTest.java
+new file mode 100644
+index 0000000..1a24345
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderHttpTest.java
+@@ -0,0 +1,84 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.junit.annotations.KestraTest;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.micronaut.context.annotation.Property;
++import io.micronaut.context.annotation.Requires;
++import io.micronaut.http.*;
++import io.micronaut.runtime.server.EmbeddedServer;
++import io.micronaut.security.authentication.Authentication;
++import io.micronaut.security.filters.AuthenticationFetcher;
++import io.micronaut.security.filters.SecurityFilter;
++import jakarta.inject.Inject;
++import jakarta.inject.Singleton;
++import java.net.http.HttpClient;
++import java.util.Optional;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.Test;
++import org.reactivestreams.Publisher;
++import reactor.core.publisher.Mono;
++import reactor.core.scheduler.Schedulers;
++import static org.assertj.core.api.Assertions.assertThat;
++
++@KestraTest(environments = "h2")
++@Property(name = "kestra.server-type", value = "WEBSERVER")
++@Property(name = "kestra.rbac.enabled", value = "false")
++@Property(name = "micronaut.security.enabled", value = "true")
++@Property(name = "micronaut.security.filter.enabled", value = "true")
++@Property(name = "micronaut.security.intercept-url-map[0].pattern", value = "/**")
++@Property(name = "micronaut.security.intercept-url-map[0].access[0]", value = "isAnonymous()")
++@Property(name = "mcp.http.security.fixture", value = "true")
++@Property(name = "flow.file.http.probe", value = "true")
++class FlowNamespaceFileReaderHttpTest {
++    @Inject EmbeddedServer server;
++    @Inject ReaderProvider provider;
++
++    @Test void authenticatedModeAOriginSurvivesRealHttpAndWorkerTransfer() throws Exception {
++        provider.lookups.set(0);
++        assertThat(get("ok", true)).isEqualTo(200);
++        assertThat(provider.lookups).hasValue(1);
++        assertThat(get("missing", true)).isEqualTo(401);
++        assertThat(get("wrong", true)).isEqualTo(401);
++        assertThat(get("ok", false)).isEqualTo(401);
++        assertThat(provider.lookups).hasValue(1);
++        assertThat(AuthorizationInvocationContext.current()).isEmpty();
++    }
++
++    private int get(String action, boolean authenticated) throws Exception {
++        var request = java.net.http.HttpRequest.newBuilder(server.getURI().resolve("/company.app/reader/" + action));
++        if (authenticated) request.header("X-File-Reader", "reader");
++        return HttpClient.newHttpClient().send(request.GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode();
++    }
++
++    @Singleton @Requires(property = "flow.file.http.probe", value = "true")
++    static class Identity implements AuthenticationFetcher<HttpRequest<?>> {
++        public Publisher<Authentication> fetchAuthentication(HttpRequest<?> request) {
++            String subject = request.getHeaders().get("X-File-Reader");
++            return subject == null ? Mono.empty() : Mono.just(Authentication.build(subject));
++        }
++    }
++
++    @Singleton @Requires(property = "flow.file.http.probe", value = "true")
++    static class ReaderProvider implements HttpExtensionRouteProviderV1 {
++        final AtomicInteger lookups = new AtomicInteger();
++        public String id() { return "host-file-reader-probe"; }
++        public Optional<Target> match(HttpMethod method, String path) {
++            return path.startsWith("/company.app/reader/") ? Optional.of(new Target("company.app")) : Optional.empty();
++        }
++        public Publisher<MutableHttpResponse<?>> handle(HttpRequest<?> request, Target target) {
++            Authentication supplied = request.getAttribute(SecurityFilter.AUTHENTICATION, Authentication.class).orElseThrow();
++            if (request.getPath().endsWith("missing")) request.removeAttribute(SecurityFilter.AUTHENTICATION, Authentication.class);
++            if (request.getPath().endsWith("wrong")) request.setAttribute(SecurityFilter.AUTHENTICATION, Authentication.build("other"));
++            return Mono.<MutableHttpResponse<?>>defer(() -> {
++                try {
++                    assertThat(AuthorizationInvocationContext.currentRequest()).contains(request);
++                    assertThat(Thread.currentThread().getName()).contains("boundedElastic");
++                    var harness = new FlowNamespaceFileReaderV1Test.Harness(false, Set.of());
++                    return harness.reader.read(supplied, "main", FlowNamespaceFileReaderV1Test.flow(), "company", "/schema.json", 20)
++                        .map(content -> { lookups.incrementAndGet(); return (MutableHttpResponse<?>) HttpResponse.ok(); });
++                } catch (Exception failure) { return Mono.error(failure); }
++            }).subscribeOn(Schedulers.boundedElastic());
++        }
++    }
++}
+diff --git a/webserver/src/test/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderV1Test.java b/webserver/src/test/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderV1Test.java
+new file mode 100644
+index 0000000..3ced2cb
+--- /dev/null
++++ b/webserver/src/test/java/io/kestra/webserver/rbac/FlowNamespaceFileReaderV1Test.java
+@@ -0,0 +1,199 @@
++package io.kestra.webserver.rbac;
++
++import io.kestra.core.models.QueryFilter;
++import io.kestra.core.models.flows.Flow;
++import io.kestra.core.namespace.NamespaceFileMetadataStateStore;
++import io.kestra.core.models.namespaces.files.NamespaceFileMetadata;
++import io.kestra.core.storages.*;
++import io.micronaut.context.BeanProvider;
++import io.micronaut.http.HttpRequest;
++import io.micronaut.security.authentication.Authentication;
++import io.kestra.core.repositories.AuthorizationInvocationContext;
++import io.kestra.core.repositories.AuthorizationEvaluationContext;
++import io.micronaut.core.propagation.PropagatedContext;
++import org.junit.jupiter.api.Test;
++import reactor.core.publisher.Mono;
++import java.io.*;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.*;
++import static io.kestra.webserver.rbac.TypedAuthorization.*;
++import static org.assertj.core.api.Assertions.*;
++import static org.mockito.Mockito.*;
++import static org.mockito.ArgumentMatchers.*;
++
++class FlowNamespaceFileReaderV1Test {
++    static final Authentication AUTH = Authentication.build("reader", List.of("flow-only"));
++    static Flow flow() { return Flow.builder().tenantId("main").namespace("company.app").id("one").revision(1).build(); }
++    @SuppressWarnings("unchecked") static <T> BeanProvider<T> bean(T value) {
++        var provider = (BeanProvider<T>) mock(BeanProvider.class);
++        when(provider.isUnique()).thenReturn(value != null);when(provider.isPresent()).thenReturn(value != null);when(provider.get()).thenReturn(value);return provider;
++    }
++    static class Harness {
++        final NamespaceFactory factory = mock(NamespaceFactory.class);
++        final Namespace namespace = mock(Namespace.class);
++        final AtomicInteger closes = new AtomicInteger(), begins = new AtomicInteger(), fileGrants = new AtomicInteger();
++        final Set<RbacAuthorizer.Action> actions = ConcurrentHashMap.newKeySet();
++        final TypedAuthorizationGate typed;
++        final RbacGate gate;
++        final TypedNamespaceAccessControl acl;
++        final FlowNamespaceFileReaderV1 reader;
++        Harness(boolean enabled, Set<Action> allowed) throws Exception {
++            AuthorizationEvaluationProviderV1 provider = (principal, tenant) -> {
++                begins.incrementAndGet();return CompletableFuture.completedFuture(new AuthorizationEvaluationV1() {
++                    public CompletionStage<Decision> authorize(Operation operation) {
++                        if(operation.resource()==Resource.NAMESPACE_FILE)fileGrants.incrementAndGet();
++                        actions.add(RbacAuthorizer.Action.valueOf(operation.action().name()));
++                        return CompletableFuture.completedFuture(operation.resource()==Resource.FLOW && allowed.contains(operation.action())
++                            ? Decision.allow(new QueryDomain(List.of("company.app"),List.of(),List.of(),true,false)) : Decision.deny("test denied"));
++                    }
++                    public CompletionStage<Void> close(){closes.incrementAndGet();return CompletableFuture.completedFuture(null);}
++                });
++            };
++            typed = new TypedAuthorizationGate(bean(null),new AuthorizationEvaluations(enabled,new RbacConfiguration(enabled,false),enabled,bean(provider)));
++            gate = new RbacGate(bean(null),typed,enabled);
++            acl = new TypedNamespaceAccessControl(typed);
++            reader = new FlowNamespaceFileReaderV1(new RbacConfiguration(enabled,false),gate,bean(factory));
++            when(factory.of("main", "company")).thenReturn(namespace);when(factory.of("main","company.app")).thenReturn(namespace);
++            when(namespace.exists(Path.of("/schema.json"))).thenReturn(true);
++            when(namespace.getFileContent(Path.of("/schema.json"))).thenAnswer(ignored -> new ByteArrayInputStream("content".getBytes()));
++        }
++        Mono<Optional<FlowNamespaceFileReaderV1.Content>> read(String namespace,String path,int limit){return reader.read(AUTH,"main",flow(),namespace,path,limit);}
++    }
++    @Test void flowReadAndExecuteAllowCurrentAndParentWithoutFileGrant() throws Exception {
++        var h=new Harness(true,Set.of(Action.READ,Action.EXECUTE));
++        for(String ns:List.of("company","company.app"))assertThat(h.read(ns,"/schema.json",20).block().orElseThrow().bytes()).isEqualTo("content".getBytes());
++        assertThat(h.fileGrants).hasValue(0);assertThat(h.actions).containsExactlyInAnyOrder(RbacAuthorizer.Action.READ,RbacAuthorizer.Action.EXECUTE);
++        assertThat(h.begins).hasValue(2);assertThat(h.closes).hasValue(2);
++    }
++    @Test void missingEitherPermissionPerformsZeroFileIo() throws Exception {
++        for(Set<Action> allowed:List.of(Set.of(Action.READ),Set.of(Action.EXECUTE),Set.<Action>of())){
++            var h=new Harness(true,allowed);assertThatThrownBy(()->h.read("company","/schema.json",20).block()).hasMessageContaining("permission");verifyNoInteractions(h.factory,h.namespace);
++        }
++    }
++    @Test void anonymousInactiveMalformedTenantAndPathFailBeforeIo() throws Exception {
++        var h=new Harness(true,Set.of(Action.READ,Action.EXECUTE));
++        assertThatThrownBy(()->h.reader.read(null,"main",flow(),"company","/schema.json",20).block()).isInstanceOf(RuntimeException.class);
++        for(String ns:List.of("company2","other","company.app.child","company.peer"))assertThatThrownBy(()->h.read(ns,"/schema.json",20).block()).isInstanceOf(RuntimeException.class);
++        for(String path:List.of("/../schema","/./schema","/%2e/schema","/a//b","/a\\b","relative","/","/dir/"))assertThatThrownBy(()->h.read("company",path,20).block()).isInstanceOf(RuntimeException.class);
++        assertThatThrownBy(()->h.reader.read(AUTH,"other",flow(),"company","/schema.json",20).block()).isInstanceOf(RuntimeException.class);
++        assertThatThrownBy(()->h.reader.read(AUTH,"main",Flow.builder().namespace("company.app").id("one").revision(1).disabled(true).build(),"company","/schema.json",20).block()).isInstanceOf(RuntimeException.class);
++        verifyNoInteractions(h.factory,h.namespace);
++    }
++    @Test void boundsAndDefensiveCopiesAndStreamClose() throws Exception {
++        var h=new Harness(true,Set.of(Action.READ,Action.EXECUTE));var closed=new AtomicInteger();
++        when(h.namespace.getFileContent(any(Path.class))).thenAnswer(ignored->new ByteArrayInputStream("content".getBytes()){@Override public void close(){closed.incrementAndGet();}});
++        var result=h.read("company","/schema.json",7).block().orElseThrow();assertThat(closed).hasValue(1);var copy=result.bytes();copy[0]=0;assertThat(result.bytes()[0]).isNotZero();
++        assertThatThrownBy(()->h.read("company","/schema.json",6).block()).isInstanceOf(RuntimeException.class);assertThat(closed).hasValue(2);
++        for(int limit:List.of(0,-1,16777217))assertThatThrownBy(()->h.read("company","/schema.json",limit).block()).isInstanceOf(IllegalArgumentException.class);
++        byte[] original={1};var content=new FlowNamespaceFileReaderV1.Content("company","/one",original);original[0]=0;assertThat(content.bytes()[0]).isEqualTo((byte)1);
++    }
++    @Test void onlyMissingIsEmptyAndIoFailuresRemainErrors() throws Exception {
++        var h=new Harness(true,Set.of(Action.READ,Action.EXECUTE));when(h.namespace.exists(any())).thenReturn(false);assertThat(h.read("company","/schema.json",20).block()).isEmpty();
++        when(h.namespace.exists(any())).thenThrow(new IOException("metadata unavailable"));assertThatThrownBy(()->h.read("company","/schema.json",20).block()).hasRootCauseMessage("metadata unavailable");
++        doReturn(true).when(h.namespace).exists(any());when(h.namespace.getFileContent(any(Path.class))).thenThrow(new FileNotFoundException("content missing after metadata"));assertThatThrownBy(()->h.read("company","/schema.json",20).block()).hasRootCauseMessage("content missing after metadata");
++    }
++    @Test void modeAStillAuthenticatesButDoesNotRequirePolicy() throws Exception {
++        var h=new Harness(false,Set.of());assertThat(h.read("company","/schema.json",20).block()).isPresent();assertThat(h.begins).hasValue(0);
++        assertThatThrownBy(()->h.reader.read(null,"main",flow(),"company","/schema.json",20).block()).isInstanceOf(RuntimeException.class);
++    }
++    @Test void metadataDomainIsOwnerBoundAndAbsentAfterReturn() throws Exception {
++        var h=new Harness(true,Set.of(Action.READ,Action.EXECUTE));var checked=new AtomicInteger();
++        when(h.namespace.exists(any())).thenAnswer(ignored->{
++            var owner=AuthorizationEvaluations.current();assertThat(owner).isNotNull();
++            assertThat(FlowNamespaceFileReaderV1.metadataDomain(QueryFilter.Resource.NAMESPACE_FILE_METADATA,owner).exactNamespaces()).containsExactly("company");
++            assertThat(FlowNamespaceFileReaderV1.metadataDomain(QueryFilter.Resource.FLOW,owner)).isNull();
++            assertThat(FlowNamespaceFileReaderV1.metadataDomain(QueryFilter.Resource.NAMESPACE_FILE_METADATA,new AuthorizationEvaluations.Owner(owner.principal,owner.tenant))).isNull();
++            checked.incrementAndGet();return true;
++        });
++        h.read("company","/schema.json",20).block();assertThat(checked).hasValue(1);assertThat(FlowNamespaceFileReaderV1.metadataDomain(QueryFilter.Resource.NAMESPACE_FILE_METADATA,null)).isNull();
++        assertThat(h.acl.domain(QueryFilter.Resource.NAMESPACE_FILE_METADATA).effectiveDomain().terms()).isEmpty();
++    }
++    @Test void cancellingClosesInterruptIgnoringStreamAndRevokesDomain() throws Exception {
++        var h=new Harness(true,Set.of(Action.READ,Action.EXECUTE));var started=new CountDownLatch(1);var closed=new CountDownLatch(1);var closeCount=new AtomicInteger();
++        InputStream stream=new InputStream(){volatile boolean ended;public int read(){started.countDown();synchronized(this){while(!ended)try{wait();}catch(InterruptedException ignored){}}return -1;}public void close(){ended=true;closeCount.incrementAndGet();closed.countDown();synchronized(this){notifyAll();}}};
++        when(h.namespace.getFileContent(any(Path.class))).thenReturn(stream);
++        var subscription=h.read("company","/schema.json",20).subscribe();assertThat(started.await(5,TimeUnit.SECONDS)).isTrue();subscription.dispose();assertThat(closed.await(5,TimeUnit.SECONDS)).isTrue();
++        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(()->assertThat(h.closes).hasValue(1));assertThat(closeCount).hasValue(1);
++    }
++    @Test void realFactoryUsesPersistedFlowTenantNotLogicalTenant() throws Exception {
++        for (String storedTenant : new String[] {null, "main"}) {
++            var h = new Harness(true, Set.of(Action.READ, Action.EXECUTE));
++            var store = mock(NamespaceFileMetadataStateStore.class);
++            var backend = mock(NamespaceFileBackend.class);
++            var metadata = NamespaceFileMetadata.builder().namespace("company").path("/schema.json").revision(1).build();
++            when(store.findByPath(storedTenant, "company", "/schema.json", null, false)).thenAnswer(call -> {
++                assertThat(h.acl.domain(QueryFilter.Resource.NAMESPACE_FILE_METADATA).exactNamespaces()).containsExactly("company");
++                return Optional.of(metadata);
++            });
++            when(backend.exists(eq(storedTenant), any(NamespaceFile.class))).thenReturn(true);
++            when(backend.get(eq(storedTenant), any(NamespaceFile.class))).thenReturn(new ByteArrayInputStream(new byte[] {1}));
++            var reader = new FlowNamespaceFileReaderV1(new RbacConfiguration(true, false), h.gate, bean(new NamespaceFactory(store, backend)));
++            assertThat(reader.read(AUTH, "main", flow().toBuilder().tenantId(storedTenant).build(), "company", "/schema.json", 1).block().orElseThrow().bytes()).containsExactly((byte) 1);
++            verify(backend).get(eq(storedTenant), any(NamespaceFile.class));
++            verify(store, never()).findAll(any(), any(), any());
++            verify(backend, never()).put(any(), any(), any());
++            assertThat(h.acl.domain(QueryFilter.Resource.NAMESPACE_FILE_METADATA).effectiveDomain().terms()).isEmpty();
++        }
++    }
++    @Test void httpOriginMissingOrDifferentAuthenticationFailsBeforeIoAcrossWorker() throws Exception {
++        for (Authentication actual : new Authentication[] {null, Authentication.build("other"), AUTH}) {
++            var h = new Harness(false, Set.of());
++            var request = HttpRequest.GET("/company.app/document");
++            if (actual != null) request.setAttribute(io.micronaut.security.filters.SecurityFilter.AUTHENTICATION, actual);
++            var invocation = PropagatedContext.empty().plus(new AuthorizationInvocationContext(request, false));
++            var result = h.read("company", "/schema.json", 20).contextWrite(context -> io.micronaut.core.async.propagation.ReactorPropagation.addPropagatedContext(context, invocation));
++            if (actual == AUTH) assertThat(result.block()).isPresent();
++            else { assertThatThrownBy(result::block).isInstanceOf(io.micronaut.http.exceptions.HttpStatusException.class); verifyNoInteractions(h.factory); }
++        }
++    }
++    @Test void cancellationBeforeOpenReturnsClosesLateStreamExactlyOnce() throws Exception {
++        var h = new Harness(true, Set.of(Action.READ, Action.EXECUTE));
++        var opening = new CountDownLatch(1); var release = new CountDownLatch(1); var closed = new AtomicInteger();
++        when(h.namespace.getFileContent(any(Path.class))).thenAnswer(call -> {
++            opening.countDown();
++            while (release.getCount() > 0) try { release.await(); } catch (InterruptedException ignored) { }
++            return new ByteArrayInputStream(new byte[] {1}) { public void close() { closed.incrementAndGet(); } };
++        });
++        var subscription = h.read("company", "/schema.json", 20).subscribe();
++        assertThat(opening.await(5, TimeUnit.SECONDS)).isTrue(); subscription.dispose(); release.countDown();
++        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(closed).hasValue(1));
++        assertThat(h.closes).hasValue(1);
++    }
++    @Test void nestedThreadLocalRestoredOnSuccessAndFailureWithoutWorkerLeak() throws Exception {
++        var field = FlowNamespaceFileReaderV1.class.getDeclaredField("CURRENT"); field.setAccessible(true);
++        @SuppressWarnings("unchecked") var local = (ThreadLocal<Object>) field.get(null);
++        var constructor = Class.forName(FlowNamespaceFileReaderV1.class.getName() + "$ReadScope")
++            .getDeclaredConstructor(AuthorizationEvaluations.Owner.class, String.class, String.class);
++        constructor.setAccessible(true);
++        Object previous = constructor.newInstance(null, "original", "/original");
++        var failures = new ConcurrentLinkedQueue<String>(); var checked = new AtomicInteger();
++        reactor.core.scheduler.Schedulers.onScheduleHook("flow-file-scope-test", task -> () -> {
++            Object original = local.get(); local.set(previous);
++            try { task.run(); } finally {
++                if (local.get() != previous) failures.add("nested scope not restored");
++                if (original == null) local.remove(); else local.set(original);
++                checked.incrementAndGet();
++            }
++        });
++        try {
++            var h = new Harness(true, Set.of(Action.READ, Action.EXECUTE));
++            assertThat(h.read("company", "/schema.json", 20).block()).isPresent();
++            doThrow(new IOException("read failed")).when(h.namespace).exists(any());
++            assertThatThrownBy(() -> h.read("company", "/schema.json", 20).block()).hasRootCauseMessage("read failed");
++            org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(checked.get()).isGreaterThan(1));
++            assertThat(failures).isEmpty(); assertThat(local.get()).isNull();
++        } finally { reactor.core.scheduler.Schedulers.resetOnScheduleHook("flow-file-scope-test"); }
++    }
++    @Test void missingFactoryAndMissingEvaluationFailClosedBeforeIo() throws Exception {
++        var h = new Harness(true, Set.of(Action.READ, Action.EXECUTE));
++        var absentFactory = new FlowNamespaceFileReaderV1(new RbacConfiguration(true, false), h.gate, bean(null));
++        assertThatThrownBy(() -> absentFactory.read(AUTH, "main", flow(), "company", "/schema.json", 20).block()).isInstanceOf(AuthorizationUnavailableException.class);
++        var legacyGate = new RbacGate(bean(null));
++        var noEvaluation = new FlowNamespaceFileReaderV1(new RbacConfiguration(true, false), legacyGate, bean(h.factory));
++        assertThatThrownBy(() -> noEvaluation.read(AUTH, "main", flow(), "company", "/schema.json", 20).block()).isInstanceOf(RuntimeException.class);
++        verifyNoInteractions(h.factory);
++    }
++}

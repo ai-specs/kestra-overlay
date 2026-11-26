@@ -514,4 +514,19 @@ lifecycle 的精确故障传播；真实失效仍拒绝，不新增业务授权�
 预提交状态失败关闭。准备、BLOCK、输入和条件检查不进入 host 新业务模型。
 
 状态：已接收新 patch；host 4项具名定向测试通过，包含命令状态与包装层 subscription 取消。
-完整 local-ci 已通过；镜像门正在执行，CI 和根仓组合验收尚未通过，消费必须匹配成功 CI 和正式产物。
+完整 local-ci 与镜像门已由主控核对；0413 正式提交 4ca66e90、CI45696257524。消费必须匹配成功 CI 和正式产物；根仓组合验收由部署仓记录。
+
+## R-FLOW-NAMESPACE-READ：Flow 运行的只读文件读取（REQ-0414）
+
+入口 B 消费方 `kestra-plugin-amis-apps`。正式组合的实际证据为模式 B 普通账号有入口及
+Flow 权限仍得到父级 schema 404，而管理员同一路径 200、普通账号原生文件 API 403。
+`InternalNamespace` metadata 查询仍受 `NAMESPACE_FILE_METADATA` ACL，现有公开机制不足。
+接收通用、重新验证 Flow READ/EXECUTE、只读且仅当前/父级单路径的服务；不增加账号文件
+权限，不使用 internalTask，不变更原生文件管理门。契约与测试边界见机制文档 REQ-0414。
+状态为已接收、未发布；消费必须匹配包含该契约且通过成功 CI 的正式镜像。
+
+
+REQ-0414 实施记录（2026-11-26）：新增通用 V1 单文件服务和短 Owner metadata 域激活；
+定向 14 具名测试通过，精确 XML 门与负例回归进入 build/local-ci 原 scoped 同次调用。
+原生文件管理权限不变，存储使用 Flow persisted tenant，模式 A 保留真实 HTTP 来源。
+完整 local-ci、镜像及组合验收不在此定向记录内；消费须匹配成功 CI 和正式 artifact。

@@ -1135,3 +1135,33 @@ Flow disabled 与 trigger 状态。Flow/Execution repository 的 WithoutAcl 查�
 其他预提交状态失败关闭。host 不执行 BLOCK 准备、不提供裸 queue、不创建第二执行引擎。waiter
 注册、operationId、queue、event 和 trace 顺序保持既有语义。该契约不证明业务执行成功；消费方
 必须用成功 CI 的正式 host 产物独立编译并由根仓完成真实组合验收。
+
+
+### Flow 授权的单文件只读 API V1（REQ-0414）
+
+消费须匹配成功 CI 与正式 artifact。公开类型为
+`io.kestra.webserver.rbac.FlowNamespaceFileReaderV1`，方法为：
+
+```java
+Mono<Optional<FlowNamespaceFileReaderV1.Content>> read(
+    Authentication authentication, String tenant, Flow flow,
+    String targetNamespace, String path, int maxBytes);
+```
+
+调用方必须先通过自己的入口授权，再提供已核对 tuple/revision 的正式运行 Flow 声明。
+服务校验身份、活动声明和目标，并在自己的授权边界重新验证该 Flow 的 READ 与 EXECUTE；
+不要求 EXECUTION.CREATE，不创建执行。HTTP 调用的 Authentication 必须等于真实当前请求身份；
+身份缺失或不一致失败关闭。模式 A 仍需真实认证；通用 HTTP 扩展在模式 A 保留请求来源并跨工作线程传播。
+
+逻辑 tenant 只接受 `main`。存储 tuple 使用 Flow 的实际 `getTenantId()`，包括 OSS 默认存储的
+`null`，不得直接把逻辑 `main` 当成存储 tenant。仅允许 Flow 自身或严格父级 namespace 的一个
+规范绝对文件 path；拒绝兄弟、子级、穿越、编码别名。`maxBytes` 为 1..16 MiB，超限拒绝。
+`Content(namespace, path, bytes)` 对输入和输出字节均作防御复制。
+
+服务在 boundedElastic 工作线程读取，私有 metadata 查询域只在当前活跃 Owner 内有效，
+先于普通域缓存检查，结束、失败或取消后不得复用。它不授予文件列表、写入、删除或原生管理 API 权限。
+只有实际元数据不存在返回 Optional.empty；I/O、内容缺失、身份、授权或依赖异常均保持错误。
+服务拥有输入流关闭责任；正常、异常、取消及取消后才返回的流通过同一原子持有者关闭一次。
+调用方负责声明选择、父级回溯、内容解释与业务验证；该 API 不接受业务模型或外部读取 callback。
+
+host 定向测试与精确 XML 门验证该公开机制；真实认证、存储和插件组合仍由部署仓以正式产物验收。
